@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+
+import argparse
+from os import path, makedirs, walk, listdir, remove
+from shutil import copy, rmtree
+from subprocess import run
+
+
+def folder(default_search, user_input):
+    if path.sep in user_input:
+        return user_input
+    else:
+        the_path = path.dirname(path.dirname(path.abspath(__file__)))
+        the_path = path.join(the_path, default_search, user_input)
+        return the_path
+
+
+parser = argparse.ArgumentParser(description='''
+    Expand a patchset into a git repository (based on git-am)
+''')
+
+parser.add_argument('patchset', metavar='PATCHSET', action='store', type=lambda x: folder('patchset', x), help='Patchset (assumed in ../patchset/)')
+parser.add_argument('worktree', metavar='WORKTREE', action='store', type=lambda x: folder('worktree', x), help='Destination worktree (assumed in ../worktree/)')
+group = parser.add_mutually_exclusive_group()
+group.add_argument('--base', metavar='SRC', action='store', default='SuperMarioProj.1994-02-09', type=lambda x: folder('base', x), help='Base source tree (default=SuperMarioProj.1994-02-09, assumed in ../base/)')
+group.add_argument('--base-commit', metavar='REV', action='store', help='Base commit')
+parser.add_argument('--branch', metavar='BRANCH', action='store', default='master', help='Destination branch')
+
+args = parser.parse_args()
+
+
+assert path.exists(args.patchset)
+assert not path.exists(path.join(args.patchset, '.git')) # protect against argument swap
+
+
+
+makedirs(args.worktree, exist_ok=True)
+run(['git', 'init'], cwd=args.worktree, check=True)
+run(['git', 'checkout', '--orphan', args.branch], cwd=args.worktree, check=True)
+
+# This cleans the working directory, because the manpage's suggestion `git rm -rf .` does not work
+run(['git', 'reset'], cwd=args.worktree, check=True)
+for do_delete in listdir(args.worktree):
+    if do_delete != '.git':
+        do_delete = path.join(args.worktree, do_delete)
+        try:
+            rmtree(do_delete)
+        except NotADirectoryError:
+            remove(do_delete)
+
+if args.base_commit is not None:
+    run(['git', 'reset', '--hard', args.base_commit], cwd=args.worktree, check=True)
+else:
+    for walk_base, walk_dirs, walk_files in walk(args.base):
+        walk_dirs[:] = [x for x in walk_dirs if not x.startswith('.')]
+        walk_files[:] = [x for x in walk_files if not x.startswith('.')]
+
+        other_dir = path.join(args.worktree, path.relpath(walk_base, args.base))
+
+        makedirs(other_dir, exist_ok=True)
+
+        for this_file in walk_files:
+            copy(path.join(walk_base, this_file), other_dir)
+
+    run(['git', 'add', '.'], cwd=args.worktree, check=True)
+    run(['git', 'commit', '-m', path.basename(args.base)], cwd=args.worktree, check=True)
+
+run(['git', 'tag', args.branch+'-patchset-base'], cwd=args.worktree, check=True)
+
+patchfiles = [path.join(args.patchset, x) for x in sorted(listdir(args.patchset)) if path.splitext(x)[1].lower() == '.patch']
+run(['git', 'am', *patchfiles], cwd=args.worktree, check=True)
