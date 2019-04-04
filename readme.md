@@ -16,6 +16,10 @@ Two Python scripts are provided to help use and modify the patchsets:
 files to a branch in a git repository, and the second does the opposite.
 Detailed help is available by running each with the `-h` switch.
 
+By default, worktrees will be placed in `worktree/` (Git-ignored). I
+suggest naming worktrees in lowercase to help avoid confusion with
+patchset names, which are capitalised.
+
 # Building
 
 To build the sources, check out BuildCubeE (soon to be renamed).
