@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
-from os import path, getcwd, makedirs, listdir, remove
-from subprocess import run
+from os import path, getcwd, makedirs, listdir, remove, rename
+from subprocess import run, DEVNULL
 
 
 def folder(default_search, user_input):
@@ -39,4 +39,52 @@ for do_delete in listdir(args.patchset):
         remove(do_delete)
 
 
-run(['git', 'format-patch', '-o', args.patchset, '--anchored=;', 'master-patchset-base..HEAD'], cwd=args.worktree, check=True)
+run(['git', 'format-patch', '-o', args.patchset, '--anchored=;', 'master-patchset-base'], stdout=DEVNULL, cwd=args.worktree, check=True)
+
+
+# Edit the patches to look a bit better (and be more reproducible)
+patchnames = [x for x in sorted(listdir(args.patchset)) if path.splitext(x)[1].lower() == '.patch']
+strip_chars = min(len(x) - len(x.lstrip('0')) for x in patchnames)
+
+for do_edit in patchnames:
+    real_file = path.join(args.patchset, do_edit)
+    fake_file = path.join(args.patchset, do_edit + '~')
+    new_file = path.join(args.patchset, do_edit[strip_chars:].lower())
+
+    print(path.basename(new_file))
+
+    rename(real_file, fake_file)
+
+    with open(new_file, 'w') as o, open(fake_file, 'r') as i:
+        for hdr_line in i:
+            if hdr_line == '\n':
+                o.write(hdr_line)
+                break
+            elif hdr_line.startswith('Subject:'):
+                if '[' in hdr_line:
+                    o.write('Subject:' + hdr_line.rpartition(']')[2])
+                else:
+                    o.write(hdr_line)
+            elif hdr_line.startswith('From:'):
+                o.write('From: Horst Beepmanh <>\n')
+
+        for msg_line in i:
+            o.write(msg_line)
+            if msg_line == '---\n': break
+
+        for stat_line in i:
+            if stat_line.startswith('---'):
+                o.write(stat_line)
+                break
+
+        is_separated = False
+
+        for diff_line in i:
+            if diff_line[0].isalpha():
+                if not is_separated: o.write('\n')
+                is_separated = True
+            else:
+                o.write(diff_line)
+                is_separated = False
+
+    remove(fake_file)
