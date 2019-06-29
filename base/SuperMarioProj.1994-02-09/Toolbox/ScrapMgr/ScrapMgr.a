@@ -1,0 +1,653 @@
+;
+;	File:		ScrapMgr.a
+;
+;	Contains:	Scrap Manager for Macintosh Operating System
+;
+;	Copyright:	© 1983-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM5>	 5/12/93	PN		Roll in Dean's changes. Cleaned up and shorten PutScrap patch
+;									roll in
+;	   <SM4>	12/21/92	PN		Radar#1048596 Fix the return address on the stack of DoPut
+;									routine depending on _PtrAndHandl call
+;	   <SM3>	10/22/92	CSS		Change some branch short instructions to word branches.
+;	   <SM2>	  4/9/92	PN		Roll in FixputScrap and F2PutScrap from ScrapMgrPatches.s
+;		 <2>	 2/10/92	JSM		Moved this file to ScrapMgr folder, keeping all the old
+;									revisions; cleaned up header.
+;	   <1.1>	11/10/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	  <•1.1>	 9/23/88	CCH		Got rid of inc.sum.d and empty nFiles
+;	   <1.0>	 2/11/88	BBM		Adding file for the first time into EASE…
+;	  <C716>	 1/28/87	bbm		Fixed obscure error in unloadseg (now exits correctly.)
+;	  <C206>	 10/9/86	bbm		Modified to mpw aincludes.
+;				 2/19/86	BBM		Made some modifications to work under MPW
+;				 6/15/85	SC		ZeroScrap will never let scrap count go negative.
+;				 6/15/85	SC		InfoScrap will zero scrap if uninited too.
+;				 4/27/85	SC		GetScrap and PutScrap will never return noScrap error. If the
+;									scrap hasn't been inited, it will call zero scrap for caller.
+;									New routine FailSafe used for this.
+;				 4/27/85	SC		Set Type, Creator and system file bit in IOUsrWds for finder.
+;				 4/27/85	SC		Scrap File moved to bootdrive, not default.
+;				 1/25/85	LAK		Added patch in LoadScrap (pass D0=bytecount to SetUpRW2).
+;				 1/23/85	LAK		Adapted for new equate files.
+;				  9/7/83			SC Added scrapCount
+;				  9/5/83			SC Andy found a bug...
+;				 8/29/83			SC Changed scrap info interface
+;				 8/21/83			SC Crunched eight bytes out
+;
+;
+
+;---------------------------------------------------------------
+;
+;			Mac Scrap Manager
+;
+;			This is a set of simple routines to help the applications
+;			manipulate the scrap for inter-application cutting and pasting.
+;
+;			The scrap is simply a collection of typed data objects(Hi Bruce).
+;			in a handle that is maintained through application launches.
+;			There are two "Universal types," TEXT, for vanilla text, and PICT,
+;			for QuickDraw pictures.  However, the application is free to
+;			add private types like SYLK.
+;
+;			The general rules of thumb are: applications MUST be able to
+;			read both universal types and write at least one.  This should
+;			insure that all applications can minimally exchange information
+;			through at least one level.  If applications choose to write more
+;			than one type, the order is important; one should write the types
+;			in order of importance to that application.  eg. a word processor
+;			should write out its private format first, then text, then a picture
+;			if desired.  This implicitly states which type has the highest
+;			information content coming from that particular application.  When
+;			reading the scrap one should scan for the types in the same order
+;			in an attempt to recover the highest information content.
+;
+;			There are user-defined "fields" in both the TEXT and PICT types so
+;			the applications are encouraged to place custom data there in an
+;			effort to reduce the size of the scrap.  As in the example above, a
+;			word processor might hide its formatting information in the TEXT
+;			comments so that only two types are written into the scrap.
+;
+;			The script for using the scrap is:	The application starts up.	It
+;			inquires as early as possible about the scrap to determine if there
+;			will be enough room for the application and scrap to coexist in the
+;			heap.  If not, it calls an unload procedure to save the scrap to disk.
+;			If that fails, or is deemed impossible, an alert should be raised to
+;			inform the user and ask for guidance.  The user might just want to
+;			abort the application at this point.
+;
+;			Then the application must remember that the universal scrap is
+;			pregnant with data when a paste command is executed.  At that point
+;			it should dissect the scrap to find the most logical type and
+;			paste that into its data.  An alternative is to automatically
+;			convert the scrap to the applications internal format so that the
+;			paste code can be dumb and not have to serve two masters.  It is
+;			important to realize that the scrap data cannot be dumped until a
+;			cut/copy-like command is executed.	While the applications runs
+;			there is, of course, no need to maintain or otherwise diddle with
+;			the universal scrap.
+;
+;			When the application terminates, it should make every attempt to
+;			dump its scrap into the universal one.	Obviously, if the application
+;			has a disk based scrap, it may be impossible to copy into memory.
+;			Or even with a memory based scrap, there might not be enough room
+;			for a "second" copy in the heap.  In either case an alert should
+;			be raised telling the user of the applications dilemma.  The user
+;			might at this point stay in the application and prune the scrap.
+;
+;			When the user activates or deactivates an ornament, a similar course
+;			should be followed by the application.	The activate and deactivate
+;			events contain some additional bits in the modifiers field which will
+;			indicate whether the transition is between a system or application
+;			window.  If this case is true and the event is a deactivate, the
+;			application should call the same code as the termination sequence
+;			above.	Of course, activate events should then parallel the startup
+;			scenario.
+;
+;
+;			The routines are:
+;
+;			ScrapStuff = RECORD
+;			   scrapSize: LONGINT;
+;			   scrapHandle: Handle;
+;			   scrapCount: INTEGER;
+;			   scrapState: INTEGER;
+;			   scrapName: StringPtr;
+;		   END;
+;		   pScrapStuff: ^ ScrapStuff;
+
+;			FUNCTION InfoScrap: pScrapStuff;
+;						returns a pointer to the scrap info
+;
+;			FUNCTION  UnloadScrap: LONGINT;
+;						Unloads the scrap from memory
+;
+;			FUNCTION  LoadScrap: LONGINT;
+;						Loads the scrap from scrap file into memory
+;
+;			FUNCTION  GetScrap( hDest: Handle; what: ResType;
+;								VAR offset: LONGINT ): LONGINT;
+;						hDest = the destination handle in which to copy the object.
+;								If handle is NIL, then doesn't get it.
+;						what = the type of object to copy
+;						offset returned as offset in scrap of this object
+;						result is -1 if it couldn't be found or a negative system
+;						error; set >= 0 (to size) if OK
+;
+;			FUNCTION ZeroScrap: LONGINT;
+;						Cuts back the scrap to empty.
+;
+;			FUNCTION PutScrap( length: LONGINT; what: ResType; source: Ptr ): LONGINT;
+;						what = the type of object to copy
+;						source = pointer from which to copy the object
+;						length = length of object at source
+;
+
+			BLANKS		ON
+			STRING		ASIS
+
+			LOAD		'StandardEqu.d'
+
+
+; 3 States of scrap (In scrapState): negative uninitialized, positive on disk,
+; zero in memory
+
+
+; Defs for a scrap entry
+
+scrType 	EQU 		0
+scrLength	EQU 		scrType+4
+scrData 	EQU 		scrLength+4
+
+; Std frame off A6
+
+scrapIO 	EQU 		-IOFQElSize 			; io cmd
+dLength 	EQU 		scrapIO-4				; disk object length
+dType		EQU 		dLength-4				; disk object type
+
+stdLink 	EQU 		dType					; std frame size
+
+
+ScrapMgr	PROC		EXPORT	
+
+			EXPORT InfoScrap
+			EXPORT LoadScrap
+			EXPORT UnloadScrap
+			EXPORT GetScrap
+			EXPORT ZeroScrap
+			EXPORT PutScrap
+
+;-----------------------------------Scrap-----------------------------------
+;
+;			FUNCTION InfoScrap: pScrapStuff;
+;
+;-----------------------------------Scrap-----------------------------------
+;
+
+InfoScrap
+			TST 		scrapState				; <15Jun85>
+			BGE.S		@0						; <15Jun85>
+			SUBQ		#4,SP					; <15Jun85>
+			_ZeroScrap							; <15Jun85>
+			ADDQ		#4,SP					; <15Jun85>
+@0												; <15Jun85>
+
+			MOVE.L		(SP)+,A0				; RTS
+			LEA 		scrapVars,A1
+			MOVE.L		A1,(SP)
+			JMP 		(A0)
+
+
+
+;-----------------------------------Scrap-----------------------------------
+;
+;			StdEntry
+;
+;			This routine sets up the standard frame and builds the
+;			io command block for an open.  Then it tries to create and then open
+;			the file
+;
+;
+;	   Exit:
+;			A0 - io command block
+;			A3 - io command block
+;			D0 - IO error
+;			D4 - scrapInfo
+;			D5 - scrapHandle
+;			D6 - scrapState
+;			CC's - set according to Open or create result (e.g. IO error)
+;
+;-----------------------------------Scrap-----------------------------------
+;
+StdEntry
+			MOVE.L		(SP)+,A1				; save local return address
+			LINK		A6,#stdLink 			; set up frame
+			MOVEM.L 	D2-D7/A2-A4,-(SP)		; save the regs
+			MOVE.L		A1,-(SP)				; push back on return
+StdSetup
+			MOVEM.L 	scrapVars,D4/D5/D6/A2	; preload scrapInfo,handle,state and name
+			LEA 		scrapHandle,A4			; convenient pointer
+
+			LEA 		scrapIO(A6),A0			; set up io command block
+			MOVE.L		A0,A3					; Save I/O ptr in A3
+			MOVE.L		A2,IOFileName(A0)		; set file name ptr
+;			 CLR.W		 IODrvNum(A0)			 ; use default drive
+			MOVE.W		BootDrive,IODrvNum(A0)	; use boot drive <27 Apr>
+			CLR.W		IOFileType(A0)			; clear type, permissions
+			CLR.L		IOOwnBuf(A0)			; use system buffer
+
+			TST 		D6						; scrapState = disk
+			BNE 		goHome0 				; skip open if not on disk <SM3> CSS 
+
+; Now try to open; if that fails, create and open the file
+
+StdOpen
+			_Open								; try an open first
+			BEQ.S		goHome					; and escape if good
+			CMP 		#OpWrErr,D0 			; if open already, pretend it's ok
+			BEQ.S		goHome0
+			CMP 		#FNFErr,D0				; create if not there
+			BNE.S		goHome
+
+			_Create 							; io cmd set up
+			BNE.S		goHome
+
+			_GetFileInfo						; set the finder shit <27 Apr>
+			MOVE.L		#'CLIP',IOFlUsrWds(A0)	; set type <27 Apr>
+			MOVE.L		#'MACS',IOFlUsrWds+4(A0); set creator <27 Apr>
+			BSET		#4,IOFlUsrWds+8(A0) 	; set system bit <27 Apr>
+			_SetFileInfo						; <27 Apr>
+			BNE.S		goHome					; <27 Apr>
+
+			BRA 		StdOpen 				; go open now
+
+;-----------------------------------Scrap-----------------------------------
+;
+;			FUNCTION  UnloadScrap: LONGINT;
+;			FUNCTION  LoadScrap: LONGINT;
+;
+;	   Reminder:
+;			D4 = scrapLength from StdEntry
+;			D5 = scrapHandle
+;			D6 = scrapState
+;			A4^ scrapHandle
+;
+;-----------------------------------Scrap-----------------------------------
+;
+
+UnloadScrap
+			BSR 		StdEntry				; go set up local world
+			BNE.S		err0Exit				; escape if IO error
+
+			TST 		D6						; escape if on disk or un-inited
+			BLE.S		ok0Exit 				; scrapState is <=0'
+
+			BSR 		StdOpen 				; go open it
+			BNE.S		err0Exit				; more robust error checking				<C716>
+
+			MOVE.L		D4,D0					; pass the length
+			BSR.S		SetupRW 				; set up IO cmd
+
+			_Write								; write it out
+			BNE.S		err0Exit
+
+			MOVE.L		D5,A0					; get rid of the handle
+			_DisposHandle						; ignore errors from dispose
+
+			CLR.L		(A4)+					; indicate on disk(scrapHandle)
+			CLR.L		(A4)+					; indicate on disk(scrapState)
+
+ok0Exit
+			MOVEQ		#0,D0					; no error
+err0Exit
+			EXT.L		D0
+			MOVE.L		D0,8(A6)				; return result code (link+0 param)
+
+			MOVEQ		#0,D0					; see you later
+StdExit
+			MOVEM.L 	(SP)+,D2-D7/A2-A4		; see you later
+StdUNLK
+			UNLK		A6
+stdRTS
+			MOVE.L		(SP)+,A0
+			ADD 		D0,SP
+			JMP 		(A0)
+
+
+goHome0
+			MOVEQ		#0,D0					; jam no error
+goHome
+			RTS 								; return
+
+LoadScrap
+			BSR 		StdEntry				; go set up the world
+			BNE 		err0Exit
+
+			TST 		D6						; check scrap state
+			BNE.S		ok0Exit 				; escape if in memory
+
+			MOVE.L		D4,D0					; get scrap length
+			_NewHandle
+			BNE 		err0Exit
+
+			MOVE.L		A0,(A4)+				; save the new handle(scrapHandle)
+			ADDQ.L		#1,(A4)+				; 0 disk => 1 memory(scrapState)
+
+			MOVE.L		D4,D0					; pass the length
+			BSR.S		SetupRW2				; set up IO cmd for read
+			_Read								; read it in
+			BRA 		err0Exit
+
+
+
+;-----------------------------------Scrap-----------------------------------
+;
+; Set up Read/Write for IO in command block off A6
+; Absolute pos mode at beginning
+;
+; Entry:
+;			A0 - (SetupRW2) handle for scrap
+;			A3 - io cmd block
+;			D0 - length to read or write
+;			D5 - scrap handle from stdEntry
+; Exit:
+;			A0 - iocommand block
+;
+;-----------------------------------Scrap-----------------------------------
+
+SetupRW
+			MOVE.L		D5,A0					; set up buffer address
+SetupRW2
+			MOVE.L		(A0),IOBuffer(A3)		; to scrap handle
+			MOVE.L		D0,IOByteCount(A3)		; set up the buffer count
+			MOVE		#1,IOPosMode(A3)		; absolute position
+			CLR.L		IOPosOffset(A3) 		; position to beginning
+			MOVE.L		A3,A0					; set up for I/O
+
+			RTS 								; return for read or write
+
+
+;-----------------------------------Scrap-----------------------------------
+;
+;			FUNCTION ZeroScrap: LONGINT;
+;
+;	   Reminder:
+;			D4 = scrapLength from StdEntry
+;			D5 = scrapHandle
+;			D6 = scrapState
+;
+;-----------------------------------Scrap-----------------------------------
+;
+ZeroScrap
+			BSR 		StdEntry				; D0 set to 0 by above
+			BNE 		err0Exit
+
+			MOVE.L		D0,scrapInfo			; zero out info
+			ADDQ		#8,4(A4)				; increment validation word
+			BPL.S		@0
+			NEG 		4(A4)					; force it positive
+@0
+			TST 		D6
+			BEQ.S		zeroDisk				; see if on disk
+			BGT.S		zeroMem 				; see if in memory
+
+; allocate a new scrap
+
+			_NewHandle							; create the handle if the location
+			BRA.S		zsExit					; was negative
+
+zeroMem
+			MOVE.L		D5,A0					; get the existing handle
+			_SetHandleSize
+zsExit
+			MOVE.L		A0,(A4)+				; save the handle(scrapHandle)
+			MOVE		(A4)+,(A4)				; positive => 1 memory(scrapState)
+			BRA 		err0Exit
+
+zeroDisk
+			CLR.L		IOLEOF(A0)				; set to zero
+			_SetEOF
+			BRA 		err0Exit
+
+;-----------------------------------Scrap-----------------------------------
+;
+;			FUNCTION GetScrap( hDest: Handle; what: ResType;
+;							   VAR offset: LONGINT ): LONGINT;
+;
+;	   Reminder:
+;			D4 = scrapLength from StdEntry
+;			D5 = scrapHandle
+;			D6 = scrapState
+;
+;-----------------------------------Scrap-----------------------------------
+;
+gsOffset	EQU 		8						; VAR offset
+gsType		EQU 		gsOffset+4				; type
+gsHDest 	EQU 		gsType+4				; destination handle
+gsResult	EQU 		gsHDest+4				; result longint
+
+; Utility to "get" bytes from the scrap on disk or in memeory
+;
+;	 Entry:
+;			D3 contains byte offset in scrap
+;			D0 contains amount to read
+;			A1 points to receiving buffer
+DoGet
+			TST 		D6						; see if on disk
+			BEQ.S		getDisk
+
+; Get the data from the scrap handle in memeory
+			MOVE.L		D5,A2					; get scrapHandle
+			MOVE.L		(A2),A0 				; set up source for move
+			ADD.L		D3,A0					; add in offset
+			_BlockMove
+			BRA 		goHome0 				; return zero
+
+; Get the data from the file
+getDisk
+			BSR 		SetupRW 				; fill out I/O command blk
+			MOVE.L		D3,IOPosOffset(A0)		; absolute read @ D3
+			MOVE.L		A1,IOBuffer(A0) 		; point to dest buffer
+			_Read
+			RTS
+
+
+
+GetScrap
+			BSR 		StdEntry				; Open things up
+			BNE.S		err12Exit				; escape if file error
+
+; Make sure scrap exists <27 Apr>
+;			 MOVEQ		 #noScrapErr,D0 		 ; scrap don't exist <27 Apr>
+;			 TST		 D6 					 ; check scrap state <27 Apr>
+;			 BMI.S		 err12Exit				 ; escape if not zeroed <27 Apr>
+
+			BSR 		FailSafe				; <27 Apr>
+			BMI.S		err12Exit				; escape if error on init <27 Apr>
+
+; Start looking through the scrap
+;
+; D0 is used for read lengths
+; D3 is the offset @ which to read
+; A1 points to dest buffer
+
+			MOVEQ		#0,D3					; start offset
+readNext
+			CMP.L		D4,D3					; see if done with list
+			BGE.S		notFound
+
+			MOVEQ		#scrData,D0 			; read object header(8)
+			LEA 		dType(A6),A1			; buffer to place stuff
+			BSR.S		DoGet					; go get it
+			BNE.S		err12Exit
+
+okRead
+			ADDQ.L		#scrData,D3 			; point to next entry(more below)
+
+			MOVE.L		(A1)+,D7				; get type from file
+			CMP.L		gsType(A6),D7			; and compare
+			BEQ.S		foundIt
+
+			ADD.L		(A1)+,D3				; by adding 8 plus length
+			ADDQ.L		#1,D3					; round up to even
+			BCLR		D0,D3					; assume D0 = 0
+			BRA 		readNext
+
+; We now have D3 offset to correct entry, A1 points to object's length
+; If the dest handle is nil, escape after passing back offset and D0
+; contains the length
+
+notFound
+			MOVEQ		#noTypeErr,D0			; couldn't find type
+			BRA.S		err12LExit
+
+; We now have D3 offset to correct entry, A1 points to object's length
+; If the dest handle is nil, escape after passing back offset and D0
+; contains the length
+
+foundIt
+			MOVE.L		gsOffset(A6),A2 		; set up var address
+			MOVE.L		D3,(A2) 				; return the offset to caller
+			MOVE.L		(A1),D0 				; Get object's length for return in D0
+			MOVE.L		D0,20(A6)				; and return length for now
+
+			MOVE.L		gsHDest(A6),D1			; set up destination
+			BEQ.S		go12Exit				; return length if no handle
+
+			MOVE.L		D1,A0					; set it's size
+			_SetHandleSize
+			BNE.S		err12Exit
+
+; Do the actual fetch of the object
+			MOVE.L		(A1),D0 				; and read it's length
+			MOVE.L		(A0),A1 				; and read into dereferenced handle
+			BSR.S		DoGet
+
+			BEQ.S		go12Exit				; if no error(the length is stuffed above)
+
+err12Exit										; see you later
+			EXT.L		D0						; turn OS error into a long
+err12LExit
+			MOVE.L		D0,20(A6)				; and return error code
+go12Exit										; link(8) + params(12)
+			MOVEQ		#12,D0
+			BRA 		StdExit
+
+
+; Called by get and put to insure the scrap is zeroed if it hasn't been inited
+; yet.	This removes the noScrapErr error and makes it easier to use.
+
+; Entered with cc's set according to D6 (just after StdEntry)
+
+FailSafe										;  <27 Apr>
+			TST 		D6						; what's the scoop? <27 Apr>
+			BGE.S		@0						; is scrap inited? <27 Apr>
+
+			SUBQ		#4,SP					; zero the scrap <27 Apr>
+			_ZeroScrap
+			MOVE.L		(SP)+,D0
+			BMI.S		err12Exit				; pass error along if there <27 Apr>
+			BSR 		StdSetup
+@0
+			RTS
+
+
+;-----------------------------------Scrap-----------------------------------
+;
+;			FUNCTION PutScrap( length: LONGINT; what: ResType; pSource: Ptr ): LONGINT;
+;
+;			Doesn't check for existing object of that type because caller
+;			will have always zeroed scrap prior to this.
+;
+;	   Reminder:
+;			D4 = scrapLength from StdEntry
+;			D5 = scrapHandle
+;			D6 = scrapState
+;
+;-----------------------------------Scrap-----------------------------------
+;
+psSource	EQU 		8						; source ptr
+psType		EQU 		psSource+4				; type
+psLength	EQU 		psType+4				; source length
+
+psResult	EQU 		psLength+4				; result
+
+PutScrap
+			BSR 		StdEntry				; set up frame
+
+;			 MOVEQ		 #noScrapErr,D0 		 ; assume the worst <27 Apr>
+;			 TST		 D6 					 ; see if on disk <27 Apr>
+;			 BMI.S		 err12Exit				 ; <27 Apr>
+
+			BSR 		FailSafe				; make sure it's inited <27 Apr>
+			BMI.S		err12Exit				; escape if error on init <27 Apr>
+
+			BSR 		SetupRW 				; get ready for a write <27 Apr, moved>
+
+			MOVEQ		#scrData,D0 			; length of type
+			LEA 		psType(A6),A0			; save type and length
+			BSR.S		DoPut					; ignore error, catch it below
+
+			MOVE.L		psSource(A6),A0 		; get source ptr
+			MOVE.L		psLength(A6),D0 		; save the length's worth
+			MOVEQ		#-2,D1					; evenizer mask
+			ADDQ.L		#1,D0					; round up to even
+			AND.L		D1,D0
+			BSR.S		DoPut					; errors handled on exit
+
+			MOVE.L		D4,-(A4)				; and save new scrap length(ScrapInfo)
+
+			BRA.S		err12Exit				; see you later D0 set from above
+
+DoPut
+			MOVE.L		D4,IOPosOffset(A3)		; set file position to old size
+			ADD.L		D0,D4					; add this length to get new size
+
+			TST 		D6						; see if on disk
+			BEQ.S		putDisk
+
+			MOVE.L		D5,A1					; get scrap handle
+			_PtrAndHand 						; add on to handle
+
+;roll in FixPutScrap from ScrapMgrPatches.a.  If _PtrAndHand returns an error
+; (in D0), then we skip over the updating of low-mem scrapSize and cut back the
+; scrap handle to the last scrapSize <SM2> <PN>
+
+			bz.s		@exitDoPut				; <SM4+> Exit if PtrAndHand succeeded
+			move.w		d0,-(sp)			; save orginal error code <SM2> <PN>
+			move.l		scrapSize,d0		; resize handle to last good size, to delete last 'next entry' <SM2> <PN>
+			_SetHandleSize					; <SM2> <PN>
+			move.w		(sp)+,d0			; return with original error code <SM2> <PN>
+			addq		#4,sp					; <SM4+> Pop DoPut caller’s return address
+			bra			err12Exit				; <SM4+> And exit immediately.
+			
+@exitDoPut
+			rts									; <SM2> <PN>
+
+putDisk
+			MOVE.L		A0,IOBuffer(A3) 		; stuff ptr to data
+			MOVE.L		D0,IOByteCount(A3)		; 8 bytes of I/O
+			MOVE.L		A3,A0					; restore I/O command
+
+			_Write
+
+;roll in F2PutScrap from ScrapMgrPatches.a.  If _Write returns an error
+; (in D0), then we skip over the updating of low-mem scrapSize and cut back the
+; scrap handle to the last scrapSize <SM2> <PN>
+
+			bz.s		@exitPutDisk			; <SM4+> Exit if Write succeeded
+			move.w		d0,-(sp)			; save orginal error code <SM2> <PN>
+			move.l		scrapSize,ioMix(a0)	; resize file to last good size, to delete last 'next entry' <SM2> <PN>
+			_SetEOF							; <SM2> <PN>
+			move.w		(sp)+,d0			; return with original error code <SM2> <PN>
+			addq		#4,sp					; <SM4+> Pop PutDisk caller’s return address
+			bra			err12Exit				; <SM4+> And exit immediately
+
+@exitPutDisk		
+			RTS									; <SM2> <PN>
+
+
+		   END
+
+

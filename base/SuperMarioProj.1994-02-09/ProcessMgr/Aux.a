@@ -1,0 +1,153 @@
+;
+;	File:			Aux.a
+;
+;	Contains:		Routines which support A/UX that could not be coded in C.
+;	Written by:		David Harrison
+;
+;	Copyright:		© 1990-1991 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <0>	 12/4/90	DFH		New Today.
+;
+;--------------------------------------------------------------------
+
+				CASE		OBJ
+				LOAD		'ProcessMgrIncludes.D'
+				
+				SEG			'AUX_SEGMENT'
+
+__exit			EQU			1
+__kill			EQU			37
+__signal		EQU			48
+__sigsetmask	EQU			131
+
+aux_errno		DCB.L		1,0
+
+__cerror		PROC	EXPORT
+				lea		aux_errno,a0
+				move.l	d0,(a0)
+				move.l	#-1,d0
+				move.l	d0,a0
+				rts
+				ENDPROC
+		
+aux_kill		PROC	EXPORT
+				move.l	#__kill,d0
+				trap	#0
+				bcs.b	__cerror
+				move.l	#0,d0
+				rts
+				ENDPROC
+
+aux_sigsetmask	PROC	EXPORT
+				move.l	4(sp),a0
+				move.l	#__sigsetmask,d0
+				trap	#15
+				bcs.b	__cerror
+				rts
+				ENDPROC
+
+aux_signal		PROC	EXPORT
+				move.l	#__signal,d0
+				trap	#0
+				bcs.b	__cerror
+				rts
+				ENDPROC
+
+aux_exit		PROC	EXPORT
+				move.l	#__exit,d0
+				trap	#0
+				bcs.b	__cerror
+				rts
+				ENDPROC
+				
+;
+; void aux_ctxsw(Registers **optr, Registers *nptr, long nextTask)
+;
+	
+aux_ctxsw		PROC	EXPORT
+
+SaveRegs		REG		d2-d7/a2-a6
+
+				IMPORT	AUX_SwitchGlue:CODE
+				EXPORT	aux_restore_ctx:CODE
+				
+	; save away the current context in the indicated region
+				move	sr,-(sp)
+				lea		aux_nextctx,a0
+				move.l	14(sp),d0
+				move.l	10(sp),(a0)
+				move.l	6(sp),a0
+				movem.l	SaveRegs,-(sp)
+				cmpa	#0,a0							; have place to save resulting sp?
+				beq.s	noSave							; jump if not
+				move.l	sp,(a0)							; save old sp into PEntry
+noSave
+		
+	; swap the a/ux context state if necessary
+	;	nextTask == 0 means don't switch
+				tst.l	d0
+				beq.s	@0
+				move.w	sr,-(sp)						; make sure interrupts
+				and.w	#$f8ff,sr						;	are enabled
+				move.l	d0,-(sp)
+				jsr		AUX_SwitchGlue
+				lea		4(sp),sp
+				move.w	(sp)+,sr						; put interupts back how
+														;	we found 'em
+@0
+	; restore the new context from the indicated region
+				move.l	aux_nextctx,sp
+				movem.l	(sp)+,SaveRegs
+				move	(sp)+,sr
+				rts
+				
+aux_restore_ctx
+				move.l	4(sp),sp
+				movem.l	(sp)+,SaveRegs
+				move	(sp)+,sr
+				rts
+
+aux_nextctx		DCB.L	1,0
+				
+				ENDPROC
+
+
+aux_fpxsw		PROC	EXPORT
+
+				MC68881
+				
+				IMPORT	aux_ctxsw:CODE
+				
+	; save away current floating point state
+				lea		4(sp),a0
+				fsave	-(sp)
+				tst.b	(sp)
+				beq.s	@1			
+				fmovem	fp0-fp7,-(sp)
+				fmovem	fpcr/fpsr/fpiar,-(sp)
+				st		-(sp)
+@1
+
+	; do a regular context switch
+				move.l	8(a0),-(sp)
+				move.l	4(a0),-(sp)
+				move.l	(a0),-(sp)
+				bsr.s	aux_ctxsw
+				lea		12(sp),sp
+	
+	; restore the saved floating point context
+				tst.b	(sp)
+				beq.s	@2
+				lea		2(sp),sp
+				fmovem	(sp)+,fpcr/fpsr/fpiar
+				fmovem	(sp)+,fp0-fp7
+@2				frestore	(sp)+
+				
+				rts
+				
+				ENDPROC
+				
+				END
+				

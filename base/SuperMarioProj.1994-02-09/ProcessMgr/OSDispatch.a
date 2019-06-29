@@ -1,0 +1,208 @@
+;
+;	File:			OSDispatch.a
+;
+;	Contains:		Assembler code which receives control when OSDispatch is called.
+;					Kernel data addressing is established, and the requested routine is
+;					called.  The kernel routine returns here, and we restore user data
+;					addressing and return to him.
+;
+;	Written by:		Erich Ringewald
+;
+;	Copyright:		© 1986-1991 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <2>	12/14/90	DFH		BeginKernelStack switches to user mode if that was mode we
+;									started up in.
+;		 <0>	 x/xx/86	ELR		New Today.
+;
+;--------------------------------------------------------------------
+
+				LOAD	'ProcessMgrIncludes.D'
+				INCLUDE	'data.a'
+
+				CASE	OBJECT
+
+;-------------------------------------------------------------------------------
+; BeginKernelStack.  Utility routine to switch the stack pointer to the Process Mgr
+; stack.  This is most useful when creating or destroying applications.  EndKernelStack
+; is the antidote.
+; NOTE: QuickDraw assumes abutment of the stack and heap.  Older QDs look at HeapEnd,
+; newer ones look at HiHeapMark, so we manage both.
+; WARNING: This routine changes HiHeapMark and HeapEnd.  Beware of traps!  Some will
+; work *because* we change them… others may break because we change them.
+; NOTE: Assumes A5 == ProcessMgrGlobals
+; 
+; Eats:			d0, a0-a1
+; Returns:		a0 = original stack frame pointer
+;
+BeginKernelStack	PROC	EXPORT
+				IMPORT	(kernelMode, kernelbusy, kernelstack, kernelstackbase):DATA
+				
+				addq.w	#1,kernelbusy					; mark us in			
+				move.l	StkLowPt,d0						; temporary holder
+				clr.l	StkLowPt						; disable stack sniffing
+				movea.l	(sp)+,a1						; get return address
+				move.l	sp,a0							; get frame pointer
+				tst.l	kernelstack						; do we want use a new stack?
+				beq.s	@usestack						; if not, branch
+			
+; Switch to user mode, if that was what we were in when we started, to keep us
+; from setting the supervisor stack pointer up into our stack area.  Only an issue
+; under VM (currently), since VM is the only way there is a user/supervisor
+; dichotomy.
+; NOTE: EndKernelStack does not restore supervisor mode.  The general solution is
+; quite thorny.  However, since the only time we'll be switching to user mode here is
+; on an ExitToShell made in supervisor mode, we're never going to call EndKernelStack
+; anyway.  This means that an ExitToShell in supervisor mode orphans the current depth
+; of the supervisor stack.  This could be remedied (e.g. set ISP back to its stackbase?).
+				tst.w	kernelMode						; were we started in supervisor mode?
+				bne.s	@modeOK							; if so, we can keep current mode
+				andi.w	#$DFFF,sr						; otherwise, switch to user mode
+@modeOK
+				move.l	kernelstack,sp					; switch to kernel stack
+
+; save stack and heap info on kernel stack
+@usestack
+				move.l	a0,-(sp)						; save frame pointer
+				move.l	HiHeapMark,-(sp)				; save HiHeapMark
+				move.l	d0,-(sp)						; save StkLowPt
+
+; Set heap info that we can deal with.  StackSpace, InitZone, et al memory mgr routines
+; are wont to compare the stack pointer to HiHeapMark or HeapEnd, which would give very
+; inappropriate answers given our new value of SP.  We hack their values to prevent
+; confusion.  Cross your fingers!
+				move.l	kernelstackbase,HeapEnd			; should be called STACKLIMIT
+				move.l	kernelstackbase,HiHeapMark		; higher than any APPLZONE
+				jmp		(a1)							; return to caller (a0 == frame)
+				
+				ENDPROC									; BeginKernelStack
+
+;-------------------------------------------------------------------------------
+; EndKernelStack.  Switch back to stack saved by BeginKernelStack.
+; NOTE: Assumes A5 == ProcessMgrGlobals
+;
+; Eats:		a0, d0
+; Returns:	a7 = original stack pointer
+;
+EndKernelStack	PROC	EXPORT
+				IMPORT	(kernelbusy, kernelstack, kernelstackbase):DATA
+				
+				move.l	ApplZone,a0						; get application zone so we can…
+				move.l	bkLim(a0),HeapEnd				; restore HeapEnd
+				
+				movea.l	(sp)+,a0						; get return address
+				move.l	(sp)+,d0						; get StkLowPt
+				move.l	(sp)+,HiHeapMark				; restore HiHeapMark
+				move.l	(sp)+,sp						; restore user's stack
+				move.l	d0,StkLowPt						; restore stack sniffing
+				
+				subq.w	#1,kernelbusy					; count me out!
+				jmp		(a0)							; return to caller
+				
+				ENDPROC									; EndKernelStack
+
+;-------------------------------------------------------------------------------
+; a_osdispatch.  Wherein we implement the _OSDispatch trap.  Mostly just locate the
+; correct routine for the particular selector.  In the case of _KernelLaunch, switch to the
+; kernel stack to avoid problems with the stack sniffer and QuickDraw.
+a_osdispatch	PROC	EXPORT
+
+				IMPORT	kernelbusy:DATA
+				IMPORT	OSDispatchTable:DATA
+Selector		EQU		4								; bytes from caller's stack top to selector
+ParamStart		EQU		6								; bytes from caller's stack top to params
+
+SaveRegs		REG		d1/a2-a3						; registers we save
+
+				WITH	OSDispatchEntry		
+				move.l	a5,d1							; save old a5
+				move.l	ProcessMgrGlobals,a5			; establish data seg
+
+; only this one selector needs "kernel addressing"				
+				cmpi.w	#KERNELLAUNCHID,4(sp)				; look at selector word.
+				bne.s	@UseCallersSpace				; mostly never switch stacks (except launch)
+				tst.w	kernelbusy						; are we here already?
+				bne.s	@UseCallersSpace				; don't switch
+
+; switch to the kernel stack							
+				bsr.s	BeginKernelStack				; switch to Process Mgr's stack area
+				movem.l	SaveRegs,-(sp)					; save some registers
+				movea.l	a0,a3							; copy frame ptr to usable register
+				
+; allocate output parameter storage on kernel stack
+				move.w	Selector(a3),d0					; get selector
+				mulu.w	#SizeOfElem,d0					; calc offset of entry in table
+				lea		OSDispatchTable,a1				; table address
+				lea		(a1,d0.w),a2					; OSDispatchEntry address
+				move.w	dispatchRetSize(a2),d0			; get return value byte size
+				lsr		#1,d0							; get word size
+				bra.s	@endMakeSpaceLoop				; jump into loop at its end
+
+@makeSpaceLoop
+				clr.w	-(sp)							; allocate and clear another word
+@endMakeSpaceLoop
+				dbra	d0,@makeSpaceLoop				; loop for next, or fall through
+
+; copy input parameters from caller's stack to kernel stack
+				move.w	dispatchDepth(a2),d0			; get stack depth
+				lea		ParamStart(a3,d0.w),a1			; here is top of parameters
+				lsr.w	#1,d0							; turn size into words
+				bra.s	@copyInLoopEnd					; and dbra
+
+@copyInLoop
+				move.w	-(a1),-(sp)						; copy another word
+@copyInLoopEnd
+				dbra	d0,@copyInLoop					; do 'em all
+
+; fetch the dispatch address, and call it with a JSR			
+				move.l	dispatchAddr(a2),d0				; fetch routine address
+				beq.s	@fncdone						; if none, branch (should check for out of bounds descr)
+				move.l	d0,a0							; put in addr reg
+				jsr		(a0)							; call the routine
+				
+; Kernel routine has completed.  Copy output parameters back to caller's stack.
+@fncdone
+				move.w	dispatchDepth(a2),d0			; get stack depth of caller
+				lea		ParamStart(a3,d0.w),a0			; address of output storage
+				move.w	dispatchRetSize(a2),d0			; size of output storage
+				lsr		#1,d0							; (convert to word count)
+				bra.s	@endCopyOutLoop					; jump into loop end
+
+@copyOutLoop
+				move.w	(sp)+,(a0)+						; copy another return value
+@endCopyOutLoop
+				dbra	d0,@copyOutLoop					; loop for next, or fall through
+
+; switch back to the caller's stack
+				move.l	a2,a1							; use a1 for OSDispatchEntry later
+				movem.l	(sp)+,SaveRegs					; restore registers
+				bsr		EndKernelStack					; switch back to caller's stack area
+				movea.l	d1,a5							; restore caller's a5
+
+; clean up and return to the caller				
+				move.l	(sp)+,a0						; fetch return address
+				moveq.l	#2,d0							; calculate sizeof(selector) …
+				add.w	dispatchDepth(a1),d0			; … plus stack depth
+				add.w	d0,sp							; skip parameters
+				jmp		(a0)							; return to caller
+
+; No need to switch stacks, just extract the selector and RTS to the handler
+@UseCallersSpace
+				move.l	(sp)+,a0						; get return address
+				move.w	(sp)+,d0						; routine selector
+				move.l	a0,-(sp)						; replace return address
+				
+				lea		OSDispatchTable,a0				; point at array top
+				mulu.w	#SizeOfElem,d0					; multiply array index
+				move.l	dispatchAddr(a0,d0.w),-(sp)		; put routine address on stack
+				
+				move.l	d1,a5							; restore old a5			
+				rts										; jmp over to routine
+				
+				ENDWITH									; OSDispatchEntry template
+
+				ENDPROC									; a_osdispatch
+				
+				END
+				

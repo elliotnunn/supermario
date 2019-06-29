@@ -1,0 +1,675 @@
+;
+;	File:		PictButtonCDEF.a
+;
+;	Contains:	This file contains the control definition procedure (CDEF) for the  
+;			 	"Pict Button control".  It is like the standard button control, except
+;				it draws a picture instead of text for the contents of the button.  
+;
+;	Written by:	Nick Kledzik
+;
+;	Copyright:	© 1982-1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds: BigBang
+;
+;	Change History (most recent first):
+;
+;		 <2>	 11/8/90	ngk		<VL> Changed dimmed state to draw in true gray unless version of
+;									picb is 2.
+;		 <1>	 6/18/90	ngk		first checked in
+;		 <0+>	  6/16/90	ngk		Submitted for the first time.
+;
+;
+;				The parameters for the button are read from a 'picb' resource.  It 
+;				currently contains the PICT resource ID of the picture to draw and
+;				the offset from the top left corner of the control rect to begin
+;				drawing the picture.  The picture is never scaled.  It is clipped 
+;				to fit inside the control rect.  
+;				
+;				Before drawing the picture, the foreground and background colors are
+;				set up based on the hilite state of the control.  Your PICT should 
+;				have the opcodes which change the fore or back-ground colors last. This  
+;				way in the "inverted state", the beginning items will draw with fore- 
+;				and back-ground colors swapped and hard colored items will remain the same.
+;				This disabled state is drawn using gray (average of fore- and back-ground
+;				color) if version = 1 and color machine with color graphport and enough
+;				depth, otherwise the picture is drawn and then 50% gray is BICed over it.
+;				(Forcing dithering to disable might be desired for a solid colored pict.
+;				For instance, a red record button would look more disabled if it had 
+;				half its pixels off, as opposed to a dimmed red.)
+;
+;		type 'picb' {
+;				integer			= 1;		/* version 			*/
+;				integer;					/* PICT resource ID */
+;				integer;					/* delta v			*/
+;				integer;					/* delta h 			*/
+;				fill long;					/* space for handle	*/
+;		};
+;	
+;		resource 'picb' (200) {
+;			300, 	/* PICT resource ID */
+;			0, 		/* dv */
+;			0		/* dh */
+;		};
+;
+;	To Do:
+;
+
+			PRINT		PUSH,OFF
+			LOAD		'StandardEqu.d'
+			INCLUDE		'ColorEqu.a'
+			PRINT		POP
+
+;----------------------------------------------------------------------------------------------------
+
+CDEF2		PROC		EXPORT
+
+; FUNCTION PushButProc( selector:	INTEGER;		
+;			theControl: ControlHandle;				
+;			message:	INTEGER;					
+;			param:		LongInt): LongInt;		
+;
+;  stack frame definition
+StackFrame	RECORD	{A6Link},DECR
+result			DS.L	1			; LongInt
+paramSize   	EQU     *-8         ; prameters to remove on return
+; parameters
+selector     	DS.W	1	    	; INTEGER
+theControl	    DS.L	1	  		; ControlHandle
+message  		DS.W	1	        ; INTEGER
+param	  		DS.L	1	        ; LongInt
+ReturnAddr		DS.L	1
+A6Link			DS.L	1
+; locals variables
+				ALIGN
+isDimmed		DS.B	1			; Boolean
+isInverted		DS.B	1			; Boolean
+theControlRect	DS.W	4			; Rect
+tempRect		DS.W	4			; Rect
+savedPen		DS.B	psRec
+savedFgColor	DS.B	rgbColor
+savedBkColor	DS.B	rgbColor
+frameColor		DS.B	rgbColor
+bodyColor		DS.B	rgbColor
+textColor		DS.B	rgbColor
+theQDprocs		DS.B	cqdProcsRec
+oldQDprocsPtr	DS.L	1
+oldCommentProc	DS.L	1
+savedClip		DS.L	1
+frameSize   	EQU     *          ; size of link
+			ENDR
+
+
+picb		RECORD	0
+version			DS.W	1			; 1 => dim with true gray, 2=> dim by dithering
+pictResID		DS.W	1			; resource ID of PICT to use
+dv				DS.W	1			; vertical offset from topLeft of button to draw picture
+dh				DS.W	1			; horizontial offset from topLeft of button to draw picture
+pictHandle		DS.L	1			; handle to copy of PICT resource
+			ENDR
+
+	
+			BRA.S	@0					; skip header
+
+; standard header
+
+			DC.W	0					; flags
+			DC.L	('CDEF')
+			DC.W	61					; resource ID
+			DC.W	2					; version #
+
+@0
+			WITH 	StackFrame
+			LINK	A6,#frameSize 		; set up a stack frame to address parameters <C59/30Jun86> DAF
+			MOVEM.L D3-D7/A1-A4,-(SP)	; save work registers
+;
+; buttons only handle messages 0,1,2,3,4,10,11										
+;
+			MOVE.W	selector(A6),D0
+			CMP.W 	#dispCtlMsg,D0		; inspect message value							<1.2>
+			BLS.S	@MsgOK				; if < 4, it’s OK								<1.2>
+			CMP.W	#calcWholeCtlMsg,D0	;												<1.2>
+			BEQ.S	@MsgOK				; 10 is OK too									<1.2>
+			CMP.W	#calcThumbCtlMsg,D0	;												<1.2>
+			bne.s	@done				; And 11										<1.2>
+@MsgOK
+
+
+;
+; fetch the parameters into registers
+;
+			LEA 	8(A6),A0			; get ptr to first parameter
+			MOVE.L	(A0)+,D3			; get param in D3
+			MOVE.W	(A0)+,D0			; get message
+			MOVE.L	(A0)+,A3			; get the control handle
+			MOVE.W	(A0)+,D7			; get selection index
+			CLR.L	(A0)				; clear out function result
+			move.l	(a3),a0				; get control pointer in A0
+			tst.b	contrlHilite(A0)
+			smi		isDimmed(a6)		; set up whether it is dimmed
+			sgt		isInverted(a6)		; set up whether it is inverted
+			move.l	contrlRect(a0),theControlRect(a6)		; make local copy of rect
+			move.l	contrlRect+4(a0),theControlRect+4(a6)
+			
+; Determine type of system.  We need to know if we have color QuickDraw 
+;	and a color window.
+			CMP.W	#$3FFF,ROM85		; do we have color QD?
+			SLS		D6					; set boolean depending on color or B&W system
+			bhi.s	@haveD6
+			move.l	contrlOwner(A0),a1	; get window it is in
+			move.w	portVersion(A1),d1	;									
+			and.w	#$C000,d1			; are we using a color grafport?	
+			sne		d6					; if so set d6 to true
+@haveD6
+
+			
+;
+; case out on the message number
+;
+			CMP.W	#dispCtlMsg, D0						; Does message need adjusting?					<1.2>
+			BLS.S	@loMsg								; Don’t adjust if not.							<1.2>
+			SUBQ.W	#calcWholeCtlMsg-dispCtlMsg-1, D0	; Adjust message for address calculation		<1.2>
+@loMsg
+			ADD 	D0,D0				; double for word index
+			LEA 	GoPushBut,A1		; get table address
+			ADD 	0(A1,D0),A1 		; compute dispatch address
+			JSR 	(A1)				; dispatch to appropriate routine
+			
+;
+; we’re done -- restore registers and return to caller
+;
+@done
+			MOVEM.L (SP)+,D3-D7/A1-A4	; restore work registers
+			UNLK	A6					; unlink stack frame
+			MOVE.L	(SP)+,A0			; get return address
+			ADD 	#paramSize,SP		; strip parameters
+			JMP 	(A0)				; return to caller
+;
+; PushButProc dispatch table -- entries must be long branches!
+;
+GoPushBut
+			DC.W	DrawPBut-GoPushBut		; draw is message 0
+			DC.W	HitPBut-GoPushBut		; hit test is message 1
+			DC.W	CalcPBut-GoPushBut		; calc regions is message 2
+			DC.W	InitBut-GoPushBut		; new button is message 3
+			DC.W	DispBut-GoPushBut		; dispose button is message 4
+			DC.W	CalcWholePBut-GoPushBut	; calc whole regions is message 10			<1.2>
+			DC.W	CalcThumbPBut-GoPushBut	; calc thumb regions is message 11			<1.2>
+
+
+
+
+MyComment	DC.B	$00					; nop / pad
+			DC.B	$A1					; longComment
+			DC.W	$0000				; kind
+			DC.W	8					; size of following data
+			DC.L	('nick')			; my marker
+MyA6Offset	EQU		*-MyComment			; offset to place to store A6
+			DC.L	$0					; A6 will go here
+MyCommentLen EQU	*-MyComment				; size of the comment inserted
+
+;
+;		
+;
+InitBut		move.l	theControl(A6),A3	; get the control handle 
+			move.l	(A3),A0 			; get control pointer
+			subq	#4,sp				; room for result
+			move.l	#'picb',-(sp)
+			move.w	ContrlRfCon+2(A0),-(sp)	; low word of refcon is 'picb' res ID
+			_GetResource
+			move.l	(sp)+,a0			; duplicate picb, cause we will be modifying it
+			_HandToHand
+			move.l	a0,a2
+			move.l	(a3),a0 			; get control pointer
+			move.l	a2,contrlData(A0)	; set handle to copied 'picb'
+			beq.s	@done				; if no handle then skip out
+
+			subq	#4,sp				; room for result
+			move.l	#'PICT',-(sp)
+			move.l	(a2),a0 					; get control pointer
+			move.w	picb.pictResID(a0),-(sp)	; get res ID of PICT to load
+			_GetResource
+			move.l	(sp)+,a0				; duplicate picture, cause we will munge it
+			_HandToHand
+			move.l	(A2),A1 				; get picb pointer
+			move.l	a0,picb.pictHandle(A1)	; set handle to copied PICT
+			beq.s	@done
+			
+			subq	#4,sp				; result
+			move.l	a0,-(sp)			; handle to munge
+			moveq	#10,d0
+			move.l	d0,-(sp)			; offset
+			moveq	#0,d0
+			move.l	d0,-(sp)			; ptr1
+			move.l	d0,-(sp)			; len1
+			pea		MyComment			; ptr2
+			moveq	#MyCommentLen,d0	
+			move.l	d0,-(sp)			; len2
+			_Munger
+			addq	#4,sp
+@done		rts
+
+;			
+;
+;
+DispBut		move.l	theControl(A6),A0		; get the control handle 
+			move.l	(A0),A0 				
+			move.l	ContrlData(A0),d0		; get handle to 'picb'
+			beq.s	@done
+			move.l	d0,a2
+			move.l	(a2),a0					 
+			move.l	picb.pictHandle(a0),a0	; get handle to copied 'PICT'
+			_DisposeHandle					; dump 'picb'
+			move.l	a2,a0
+			_DisposeHandle					; dump 'PICT'
+@done		rts
+
+
+;
+; saves off StdComment for current port and installs MyCommentProc
+; only called on Color QD systems
+InstallMyCommentHandler		
+			move.l	grafGlobals(A5),A2	; get GrafGlobals base
+			move.l	thePort(A2),A2		; get current port
+			move.l	grafProcs(a2),d0
+			move.l	d0,oldQDprocsPtr(a6)		; save off current StdProcs
+			move.l	d0,a0
+			bne.s	@hasProcs					; if currently not NIL then use it
+			pea		theQDprocs(a6)
+			_SetStdCProcs						; else allocate my own procs record
+			lea		theQDprocs(a6),a0
+			move.l	a0,grafProcs(a2)			; stuff pointer to my own procs
+@hasProcs	move.l	commentProc(a0),oldCommentProc(a6)	; save off current comment handler
+			lea		MyCommentProc,a1
+			move.l	a1,commentProc(a0)			; override comment handle to be me
+			rts
+			
+;
+; Restores old StdComment
+;
+RemoveMyCommentHandler
+			move.l	grafGlobals(A5),A2	; get GrafGlobals base
+			move.l	thePort(A2),A2		; get current port
+			move.l	oldQDprocsPtr(a6),d0
+			move.l	d0,grafProcs(a2)						; restore old StdProcs
+			beq.s	@done									; if it was NIL then done
+			move.l	d0,a0									
+			move.l	oldCommentProc(a6),commentProc(a0)		; else also restore old commentProc
+@done		rts
+
+
+;
+; PROCEDURE StdComment(kind,dataSize: INTEGER; dataHandle: Handle);
+;
+MyCommentProc
+			move.l	4(sp),d0		; get dataHandle
+			beq.s	@notMyComment	; NIL handle can't be my comment
+			move.l	d0,a0
+			move.l	(a0),a0
+			cmp.l	#'nick',(a0)
+			bne.s	@notMyComment
+			move.l	a6,-(sp)		; save off a6
+			move.l	4(a0),a6		; retrieve my a6
+			
+			pea		textColor(A6)	; set foreColor
+			_RGBForeColor		
+			pea		bodyColor(A6)	; set backColor 
+			_RGBBackColor				
+			
+			move.l	(sp)+,a6		; restore QD's a6
+			bra.s	@done
+			
+@notMyComment
+			; want to call old StdComment, but can't find it without a6
+			nop
+			
+			
+@done		move.l	(sp)+,a0
+			add		#8,sp
+			jmp		(a0)
+
+		
+			
+
+;
+;
+; in: d0.w = part identifier
+;	  a0  = pointer to place to store found RGB color
+;	  a1 = pointer to AuxCntlRec
+;
+; trashes a1,d1
+GetColor
+			move.l	a1,-(sp)
+			MOVE.W	ctSize(A1),D1		; get the color table size
+			ASL		#3,D1				; convert to color table index
+@loop		CMP.W	ctTable+value(A1,D1),D0	; is this the one?
+			BEQ.S	@FoundIt				; if equal, then done
+			SUB.W	#8,D1				; try the previous one
+			BGE.S	@loop				; loop while index positive
+			MOVEQ	#0,D1				; OK, use the first one
+@FoundIt
+			lea		ctTable+rgb(A1,D1),A1 	; get the address of the color to use
+			move.l	(A1)+,(A0)				; copy RGB value 
+			move.w	(A1),4(a0)
+			move.l	(sp)+,a1			; restore a1
+			rts
+
+
+
+			
+;
+;  DrawPBut draws the pushButton
+;
+DrawPBut
+			tst.b	contrlVis(A0)		; is it visible?
+			beq		@done	 			; if not, we’re done
+			
+;
+; save the penState and set it our way
+;
+			pea 	savedPen(A6) 		; push pointer to savedPenState
+			_GetPenState				; remember current penState
+			_PenNormal					; set the pen the way we want it
+
+			tst.b	d6
+			beq		@noColor			; no, this system has B&W QD
+
+; save the current port’s colors 			
+
+			PEA		savedFgColor(A6)	; save foreColor
+			_GetForeColor				;
+			PEA		savedBkColor(A6)	; save backColor too
+			_GetBackColor				;
+
+;
+; get the CtlAuxRec for this guy and lock its colortable			<C59/30Jun86> DAF
+;
+			CLR.L	-(SP)				; return the handle here
+			CLR.B	-(SP)				; space for boolean func return
+			MOVE.L	theControl(A6),-(SP)	; push the control handle
+			PEA		6(SP)				; push a pointer to placeholder
+			_GetAuxCtl					; get its auxRec
+			ADDQ	#2,SP				; don’t need boolean result
+			MOVE.L	(SP)+,A0			; get auxCtl handle
+			MOVE.L	(A0),A0				; a pointer to the auxCtlRec
+			MOVE.L	acCTable(A0),A0		; get colortable’s handle		
+			move.l	(A0),a1				; set up a1 to point to auxCntrlRec
+
+			moveq	#cFrameColor,d0		; get frame color for this control
+			lea		frameColor(a6),a0
+			bsr.s	GetColor	
+
+			moveq	#cBodyColor,d0		; assume body color is cBodyColor
+			moveq	#cTextColor,d2		; assume text color is cTextColor
+			tst.b	isInverted(a6)
+			beq.s	@1
+			exg		d0,d2				; oops, it is inverted so swap
+@1			lea		bodyColor(a6),a0
+			bsr.s	GetColor		
+			move.w	d2,d0
+			lea		textColor(a6),a0
+			bsr.s	GetColor		
+			
+			tst.b	isDimmed(a6)
+			beq.s	@noColor
+			
+			move.l	(a3),a0								; get control pointer in A0
+			move.l	contrlData(a0),a0					; get picb handle
+			move.l	(a0),a0								; get picb ptr
+			cmp.w	#2,picb.version(a0)					; what version of picb is it
+			beq.s	@noColor							; version 2 => dim button by dithering
+			
+			move.l	theControlRect+botRight(a6),-(sp)	; create a temp rect
+			move.l	theControlRect+topLeft(a6),-(sp)	; that is a copy of boundary
+			pea		(sp)								
+			_LocalToGlobal								; change topleft to global coordinates
+			pea		4(sp)								
+			_LocalToGlobal								; change botright to global coordinates
+			subq	#4,sp								; GDevice from GetMaxDevice
+			pea		4(sp)								
+			_GetMaxDevice								; get device for it
+			move.l	(sp)+,d0
+		; ### really want GetMinDevice.  But GetMaxDevice works as long as the button
+		; is completely on one monitor.  Currently, the only place that uses this
+		; CDEF is StandardFile, which is always on one monitor.
+			addq	#8,sp								; deallocate temp rect
+			subq	#2,sp								; room for boolean
+			move.l	d0,-(sp)							; device handle
+			pea		bodyColor(A6)	
+			pea		textColor(a6)
+			_GetGray									; change textColor to gray
+			tst.b	(sp)+
+			beq.s	@noColor							; if no true gray possible, then done
+			sf		isDimmed(a6)						; else, forget that it is dimmed
+@noColor
+
+; save old clip region and clip to the bounding rectangle sected with oldClip
+			subq	#4,sp				; make space for region handle
+			_NewRgn 					; allocate a region
+			move.l	(SP),A2 			; remember region but leave on stack
+			move.l	a2,savedClip(a6)	; save off old clip
+			_GetClip					; remember the current clipRgn
+			pea 	theControlRect(A6)	; push pointer to its bounding rect
+			_ClipRect					; make that the clipping region
+
+			move.l	grafGlobals(A5),A0	; get GrafGlobals base
+			move.l	thePort(A0),A0		; get current port
+			move.l	clipRgn(A0),-(SP)	; push the current clipRgn 
+			move.l	A2,-(SP)			; push the old ClipRgn
+			move.l	clipRgn(A0),-(SP)	; the answer goes into current clip
+			_SectRgn					; intersect new and old
+
+
+;
+; calculate roundness as function of rectangle size
+;
+			BSR 	RoundCalc			; compute roundNess factor in D4
+
+;
+; erase the background before drawing the picture
+;
+			tst.b	D6					; are we on a color system?
+			beq.s	@NoColor2			; if on B&W, then skip
+			pea		bodyColor(a6)
+			_RGBBackColor				; set it
+@NoColor2								
+			pea		theControlRect(a6)	; push rect
+			move.l	D4,-(SP)			; push rounding factor
+			_EraseRoundRect 			; paint it the background color
+			
+;
+; Draw the picture
+;
+			move.l	theControl(A6),A0		; get the control handle 	
+			move.l	(A0),A0 				
+			move.l	contrlData(A0),d0		; get handle to 'picb'
+			beq.s	@doneDraw				; bail out if no 'picb'
+			move.l	d0,a1
+			move.l	(a1),a1
+			move.l	picb.pictHandle(a1),d0				; get handle to PICT
+			beq.s	@doneDraw							; if NIL then don't draw
+			move.l	d0,a0
+			move.l	(a0),a0
+			move.l	a6,10+MyA6Offset(a0)				; stuff my current a6 into pict comment
+			move.l	d0,-(sp)							; pict handle parameter to DrawPicture
+			pea		tempRect(a6)						; rect parameter to DrawPicture
+		; calculate bounding rect for drawPicture
+			move.l	2+botRight(a0),tempRect+botRight(a6); create a temp rect from picture bounds
+			move.l	2+topLeft(a0),tempRect+topLeft(a6)	
+			move.w	theControlRect+top(a6),d0			; calc desired vertical movement
+			sub.w	tempRect+top(a6),d0					 
+			add.w	picb.dv(a1),d0
+			swap	d0									; put vertical in high word
+			move.w	theControlRect+left(a6),d0			; calc desired horizontal movement
+			sub.w	tempRect+left(a6),d0				 
+			add.w	picb.dh(a1),d0
+			pea		tempRect(a6)						; VAR Rect
+			move.l	d0,-(sp)							; dh, dv: INTEGER
+			_OffsetRect
+
+			tst.b	D6					; are we on a color system?
+			beq.s	@NoColor4			; if on B&W, then skip
+			bsr		InstallMyCommentHandler
+@NoColor4
+
+			_DrawPicture
+			tst.b	D6					; are we on a color system?
+			beq.s	@NoColor5			; if on B&W, then skip
+			bsr		RemoveMyCommentHandler
+@NoColor5
+
+@doneDraw	
+
+;
+; draw the frame around the button			
+;
+			tst.b	D6					; are we on a color system?
+			beq.s	@NoColor9			; if on B&W, then skip
+			pea		frameColor(a6)
+			_RGBForeColor				
+@NoColor9								
+			pea		theControlRect(a6)	; push rect
+			move.l	D4,-(SP)			; push rounding factor
+			_FrameRoundRect 			; frame the button
+
+;
+; perform Hilite if necessary
+;
+			tst.b	isDimmed(a6)
+			beq.s	@PotentialInvert
+			
+			tst.b	D6					; are we on a color system?
+			beq.s	@NoColor6			; if on B&W, then skip
+			pea		textColor(a6)
+			_RGBForeColor				
+			pea		bodyColor(a6)
+			_RGBBackColor				
+@NoColor6	
+
+			move.l	(A5),A0
+			pea 	Gray(A0)
+			_PenPat
+			move.w	#patBIC,-(SP)
+			_PenMode
+
+			move.l	theControlRect+botRight(a6),-(sp)	; create a temp rect
+			move.l	theControlRect+topLeft(a6),-(sp)	
+			pea		(sp)
+			move.l	#$00010001,-(sp)
+			_InsetRect									; that is inset by one
+			
+			pea		(sp)				; push inset rect
+			move.l	D4,-(SP)			; push rounding factor
+			_PaintRoundRect				; gray it out
+			add		#8,sp				; dispose of temp rect
+			_PenNormal
+			bra.s	@DoneDrwBut			; and continue...
+
+@PotentialInvert
+			tst.b	isInverted(a6)			; only invert if needed
+			beq.s	@DoneDrwBut
+			tst.b	d6
+			bne.s	@DoneDrwBut			; only invert on non-CQD systems
+			pea		theControlRect(a6)
+			move.l	D4,-(SP)			; push rounding factor
+			_InverRoundRect 			; hilite by inverting
+
+@DoneDrwBut	
+
+;
+; restore original pen state
+;
+			pea 	savedPen(A6) 		; push savedPenState
+			_SetPenState				; restore original pen state
+			move.l savedClip(a6),a2		; retreive orginal clip
+			move.l	a2,-(sp)			; push old clip region
+			_SetClip					; restore it
+			move.l	a2,-(sp)			; dispose of temporary region
+			_DisposRgn					; de-allocate it
+;
+; clean up color stuff
+
+			tst.b	D6					; are we on a color system?
+			beq.s	@done				; if on B&W, then skip
+
+			pea		savedFgColor(A6)	; restore the port colors
+			_RGBForeColor				;
+			pea		savedBkColor(A6)	;
+			_RGBBackColor				;
+
+@done		rts 						; all done!
+
+
+
+
+;
+; RoundCalc calculates the rounding factor in D4 based on the control’s rect
+;
+RoundCalc
+			moveq	#0,d4
+			btst	#0,d7				; a 1 in bit-0 of variation code means square corners
+			bne.s	@done				; otherwise round corners like normal buttons
+			MOVE.W	theControlRect+Bottom(A6),D4	; get bottom coordinate
+			SUB.W	theControlRect+Top(A6),D4		; figure out vertical height
+			LSR 	#1,D4				; scale it down by a factor of 2
+			MOVE	D4,D0				; fill both halves with it
+			SWAP	D4					; get in	high part
+			MOVE	D0,D4				; and in	low part
+@done		RTS
+			
+			
+;
+; HitPBut handles the button hit-test
+;
+HitPBut		tst.b	isDimmed(a6)		; is button dimmed ?
+			bne.s	@done				; if so, skip
+			subq	#2,sp				; make room for function result
+			move.l	D3,-(SP)			; push the point
+			pea 	theControlRect(A6)	; push address of rect
+			_PtInRect					; in the rectangle?
+			tst.b	(SP)+				; examine result
+			beq.s	@done				; if not, we’re done
+			move.w	#inButton,result+2(A6); return that it was
+@done		rts
+
+
+
+
+CalcWholePBut
+CalcThumbPBut
+			move.w	#1,result(A6)		; return 1 to show that we respond		
+;
+; CalcPBut returns the bounding region of the button
+;
+CalcPBut
+			BSR.S	RoundCalc			; calculate rounding factor
+			_HidePen					; dont draw anything
+			_OpenRgn
+
+			MOVE.L	A3,A0				; copy to A0 for HLock			<C424/18Nov86> DAF
+			_HLock						; lock it down					<C424/18Nov86> DAF
+
+			pea 	theControlRect(A6)	; push address of rect
+			MOVE.L	D4,-(SP)			; push rounding factor
+			_FrameRoundRect 			; frame the button
+
+			MOVE.L	D3,-(SP)			; push the region
+			_CloseRgn					; make the rounded rectangular region
+			_ShowPen
+
+			MOVE.L	A3,A0				; copy to A0 for HLock			<C424/18Nov86> DAF
+			_HUnlock					; unlock the control			<C424/18Nov86> DAF
+;
+; set the pattern for indicator dragging  ????
+;
+			MOVE.L	(A5),A0 			; get qDraw globals
+			LEA 	Gray(A0),A0 		; point to gray pattern
+			MOVE.L	(A0)+,DragPattern	; move in the 1st half
+			MOVE.L	(A0),DragPattern+4	; move in the 2nd half
+			RTS 						; all done!
+			
+
+			ENDWITH
+
+			END	; of file
+			
+

@@ -1,0 +1,408 @@
+;
+;	File:		MaskAsm.a
+;
+;	Contains:	xxx put contents here (or delete the whole line) xxx
+;
+;	Written by:	xxx put name of writer here (or delete the whole line) xxx
+;
+;	Copyright:	© 1987-1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <3>	 7/24/90	gbm		fix more of those darned warnings
+;		 <2>	  2/1/90	BAL		Exported the seedCFill labels: mySProc and myCProc.
+;	  <•1.2>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;	  <•1.1>	 4/12/89	BAL		Blasting in 32-Bit QuickDraw 1.0B1
+;				 1/15/89	BAL		Altered GetTmpDevice to unlock the gdevice to keep master ptr 32
+;									bit clean.
+;				  3/3/87	EHB		New today
+;
+;	To Do:
+;
+
+;EASE$$$ READ ONLY COPY of file “MaskAsmPatch.a”
+;•1.2	BAL 05/29/1989 Blasting in 32-Bit QuickDraw version 1.0 Final
+;•1.1	BAL 04/12/1989 Blasting in 32-Bit QuickDraw 1.0B1
+; File MaskAsmPatch.a
+;
+; Copyright Apple Computer, Inc.  1987
+; All Rights Reserved
+;
+;
+; This file contains the CalcCMask and SeedCFill Routines.
+
+; MODIFICATION HISTORY
+;
+;  3 Mar 87 EHB		New today
+; 10 Sep 88 BAL/MCF	Forced calculation of "words" to round up to multiple of 16.
+; 15 Jan 89 BAL		Altered GetTmpDevice to unlock the gdevice to keep master ptr 32 bit clean.
+
+
+
+		BLANKS	ON
+		STRING	ASIS
+
+		MACHINE MC68020
+		
+SeedCFill	PROC	EXPORT
+			EXPORT	CalcCMask,MySProc,MyCProc
+			IMPORT	GetTempDevice
+;---------------------------------------------------------------
+;
+;  PROCEDURE SeedCFill(srcBits, dstBits: BitMap;
+;			 		   srcRect, dstRect: Rect;
+;			 		   seedH, seedV:	 INTEGER;		{note shared field w/calcCMask}
+;					   matchProc: 		 Ptr;
+;					   matchData:		 LongInt);		{caller-defined data}
+;
+;					Fix File	Date		Patch#	Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	MaskAsmPatch.a	01Jan1904	#??? 	(SeedCFill) 		(SeedCFill)
+;
+;  Given a source bitMap or pixMap in srcBits, and a dst bitMap
+;  in dstBits, SeedCFill computes a destination bit image with 1's
+;  only in the pixels where paint can leak from the starting seed point.
+;
+;  This is done in a two-stage process.  First, a one bit mask of the
+;  source is made, in which 0's represent the pixels that match the one at
+;  the seed point.  All other pixel values are replaced by 1's.  Next, a 
+;  normal seedFill call is performed on this image.
+;
+;  The caller can provide a custom searchProc (matchProc) which will get called
+;  to translate from source RGB values to mask values.  When the proc is called
+;  theGDevice^^.gdRefCon contains a pointer to a record whose fields are:
+;
+;		matchRec = Record
+;			red: 	INTEGER;
+;			green:	INTEGER;
+;			blue:	INTEGER;
+;			matchData: LongInt;					{caller-defined data}
+;		end;
+;
+;  Since the caller both supplies and uses the matchData, it can be a handle
+;  or a pointer or simply data.  It is copied directly from matchData passed to
+;  SeedCFill to the matchData in the matchRec.
+;
+;  The matchProc should return 0's for colors that should be filled, and 1's for
+;  colors that shouldn't be added to the mask.
+
+PARAMSIZE	EQU		28
+srcBits		EQU		paramSize+8-4				;source bitmap
+dstBits		EQU		srcBits-4					;dst bitmap
+srcRect		EQU		dstBits-4					;source rectangle
+dstRect		EQU		srcRect-4					;dest rectangle
+seedH		EQU		dstRect-2					;horizontal seed
+seedV		EQU		seedH-2						;vertical seed
+calcSeed	EQU		seedV						;seed RGB for calcMask
+matchProc	EQU		seedV-4						;proc for filtering colors
+matchingData	EQU		matchProc-4					;data for matchProc
+
+myData		EQU		-4							;copy of user's handle/ptr
+seedRGB		EQU		myData-6					;RGB of seed (MUST PRECEDE myData)
+myHandle	EQU		seedRGB-4					;place to save handle
+saveGD		EQU		myHandle-4					;save grafDevice
+saveFG		EQU		saveGD-6					;save fgColor
+saveBK		EQU		saveFG-6					;save bkColor
+VARSIZE		EQU		saveBK						;size of locals
+
+			LINK	A6,#VARSIZE					;allocate stack frame
+			MOVE.L	seedV(A6),-(SP)				;push horizontal, vertical
+			PEA		seedRGB(A6)					;push VAR myColor
+			_GetCPixel							;get pixel at h,v
+			LEA		mySProc,A0					;get default search proc
+			MOVEQ	#-1,D0						;calcFlag := -1				<BAL 24Feb89>
+			BRA.S	SHARE						;=>jump to common code
+			
+CalcCMask
+;---------------------------------------------------------------
+;
+;  PROCEDURE CalcCMask(srcBits, dstBits: BitMap;
+;			 		   srcRect, dstRect: Rect;
+;			 		   seedRGB:	 		 Ptr;		{note shared field w/seedCFill}
+;					   matchProc: 		 Ptr;
+;					   matchData:		 LongInt);
+;
+;					Fix File	Date		Patch#	Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	MaskAsmPatch.a	01Jan1904	#??? 	(CalcCMask) 		(CalcCMask)
+;
+;  Given a source bitMap or pixMap in srcBits, and a dst bitMap
+;  in dstBits, CalcCMask computes a destination bit image with 1's
+;  only in the pixels where paint cannot leak from outside the srcRect.
+;
+;  By default the color that defines the outside of the mask is passed in
+;  in the seedRGB.  If the caller supplies a matchProc and matchData, then
+;  the proc is called to determine which colors make up the mask's boundary
+;  and which do not.  Such a proc should return a value of 1 for colors that
+;  are to be considered edges, and 0 for all other colors.
+;
+			LINK	A6,#VARSIZE					;allocate stack frame
+			MOVE.L	calcSeed(A6),A0				;point to seed RGB
+			LEA		seedRGB(A6),A1				;point to local copy
+			MOVE.L	(A0)+,(A1)+					;copy red, green
+			MOVE	(A0)+,(A1)+					;copy blue
+			LEA		myCProc,A0					;get default search proc
+			MOVEQ	#0,D0						;calcFlag := 0				<BAL 24Feb89>
+			
+SHARE		MOVEM.L	D3-D5/A2-A4,-(SP)			;save work registers
+			MOVE.L	D0,D5						;keep calcFlag in D5
+
+; set up the matchProc.  The default is in A0.
+			
+			MOVE.L	matchProc(A6),D0			;is user supplying one?
+			BNE.S	@ProcOK						;=>yes, all set
+			MOVE.L	A0,matchProc(A6)			;else stuff default proc
+
+; save the fg and bk colors, and set to black and white
+
+@ProcOK		PEA		saveFg(A6)					;point to save area
+			_GetForeColor						;save the forground
+			MOVE.L	#blackColor,-(SP)			;push black
+			_ForeColor							;and set forecolor
+
+			PEA		saveBk(A6)					;point to the save area
+			_GetBackColor						;save the background
+			MOVE.L	#whiteColor,-(SP)			;push white
+			_BackColor							;and set the backcolor
+			
+; now allocate a gDevice for the one bit copy, and set gDevice 
+
+@IsCM		CLR.L	-(SP)						;make room for long result
+			JSR		GetTempDevice				;go allocate a gDevice
+			MOVE.L	(SP)+,A4					;A4 = GDevice
+			
+			MOVE.L	theGDevice,saveGD(A6)		;save theGDevice
+			MOVE.L	A4,theGDevice				;and set our new one
+			
+; get device's pixMap into A3 and lock it down
+
+			MOVE.L	(A4),A0						;POINT TO GDEVICE
+			MOVE.L	GDPMAP(A0),A0				;GET HANDLE TO PIXMAP
+			_HLOCK
+			MOVE.L	(A0),A3						;POINT TO PIXMAP
+			
+; put pointer to seed color into GDRefCon
+			
+			MOVE.L	(A4),A1						;point to gdevice
+			LEA		seedRGB(A6),A0				;point to seed color
+			MOVE.L	A0,GDRefCon(A1)				;and set up pointer
+			MOVE.L	matchingData(A6),myData(A6)	;pass user's data
+			
+; install search proc
+						
+			MOVE.L	matchProc(A6),-(SP)			;push searchProc
+			_AddSearch							;and install it
+
+; set bounds, rowbytes of pixmap, and allocate bits for image
+
+			MOVE.L	SRCRECT(A6),A0				;POINT AT SRC RECTANGLE
+			MOVE.L	(A0)+,D1					;GET TOPLEFT
+			MOVE.L	(A0)+,D0					;GET BOTRIGHT
+	
+			MOVE	D0,D4						;GET A COPY OF RIGHT
+			SUB		D1,D4						;GET WIDTH IN PIXELS
+			EXT.L	D4							;MAKE IT LONG
+
+			MOVEQ	#15,D2						;GET 15
+			ADD.L	D2,D4						;ROUND UP TO NEAREST WORD BOUNDARY
+			ASR.L	#4,D4						;DIV BY 16
+			BLE 	NoBits						;IGNORE IF NEWROW <= 0
+			ADD		D4,D4						;DOUBLE FOR NEW ROWBYTES
+
+			LEA		ROWBYTES(A3),A0				;POINT TO ROWBYTES
+			MOVE	D4,(A0)				 		;COPY ROWBYTES
+			OR		#$8000,(A0)+				;SET FLAG FOR NEW PIXMAP
+			MOVE.L	D1,(A0)+					;COPY BOUNDS.TOPLEFT
+			MOVE.L	D0,(A0)+					;COPY BOUNDS.BOTRIGHT
+			
+; ALLOCATE MEMORY FOR BIT IMAGE
+
+			SWAP	D1							;GET LEFTTOP
+			SWAP	D0							;GET RIGHTBOT
+			SUB		D1,D0						;GET HEIGHT
+			MULU	D0,D4						;GET DATA SIZE IN BYTES
+			MOVE.L	D4,D0						;make a copy							<BAL 24Feb89>
+			moveq	#15,d1						;get a constant							<BAL 24Feb89>
+			add.l	d1,d0						;round up to quad long boundary			<BAL 24Feb89>
+			_NEWHANDLE							;ALLOCATE MEMORY FOR BITMAP
+			BNE		NoBits						;=>ERROR, JUST RETURN
+			
+			move.l	(a0),a1						;point at memory						<BAL 24Feb89>
+			lsr.l	#4,d4						;compute number of quad longs to init	<BAL 24Feb89>
+			move.l	d4,d0						;										<BAL 24Feb89>
+			swap	d0							;get high word of count					<BAL 24Feb89>
+@nxt8		move.l	d5,(a1)+					;init to 1's for seedFill and 0's for calcMask
+			move.l	d5,(a1)+					;init to 1's for seedFill and 0's for calcMask
+			move.l	d5,(a1)+					;init to 1's for seedFill and 0's for calcMask
+			move.l	d5,(a1)+					;init to 1's for seedFill and 0's for calcMask
+			dbra	d4,@nxt8					;										<BAL 24Feb89>
+			dbra	d0,@nxt8					;										<BAL 24Feb89>
+			
+@doneFill	MOVE.L	A0,MYHANDLE(A6)				;SAVE FOR DISPOSE
+			_HLOCK								;LOCK THE HANDLE
+			MOVE.L	(A0),BASEADDR(A3)			;AND SET BASE ADDRESS OF TEMP
+
+; COPY TO OUR ONE-BIT IMAGE
+
+			MOVE.L	SRCBITS(A6),-(SP)			;PUSH SRC PIXMAP
+			MOVE.L	A3,-(SP)					;PUSH DST PIXMAP
+			MOVE.L	SRCRECT(A6),-(SP)			;PUSH SRCRECT
+			MOVE.L	(SP),-(SP)					;DSTRECT = SRCRECT
+			CLR		-(SP)						;MODE = SRC COPY
+			CLR.L	-(SP)						;NO MASKRGN
+			_COPYBITS							;COPY THE PIXMAP
+			
+; CALCULATE ALL THE PARAMETERS FOR SEEDFILL/CALCMASK
+
+			MOVE.L	DSTBITS(A6),A0				;GET DST BITMAP
+			MOVE.L	(A0)+,D0					;GET BASEADDR
+			_STRIPADDRESS						;CLEAR FLAG BITS
+			MOVE.L	D0,A1						;AND SAVE IN A1
+			MOVE	(A0)+,D0					;GET ROWBYTES
+			MOVE.L	(A0)+,D1					;GET BOUNDS.TOPLEFT
+
+			MOVE.L	DSTRECT(A6),A0				;GET DSTRECT
+			MOVE.L	(A0)+,D2					;GET DSTRECT.TOPLEFT
+			MOVE.L	(A0),D3						;GET DSTRECT.BOTRIGHT
+			
+; NOTE: Following operations on SeedV, SeedH are meaningless for CalcCMask, 
+; 		but not harmful.
+
+			MOVE.L	SEEDV(A6),D4				;GET SEED V,H
+			
+			SUB		D2,D3						;WIDTH := DSTRECT(RIGHT-LEFT)
+			add.w	#15,d3						;round up to multiple of 16		<BAL/MCF 10Sep88>
+			ASR		#4,D3						;WORDS := WIDTH/16
+			BLE.S	@DoneSeed					;=>IF INVALID WIDTH, THEN RETURN
+			
+			SUB		D1,D4						;CONVERT SEED.H TO GLOBAL
+			SUB		D1,D2						;CONVERT DSTRECT.LEFT TO GLOBAL
+			ADD		D2,D4						;MAKE SEED.H RELATIVE TO DSTRECT
+			ASR		#3,D2						;LEFT INDENT := LEFT OFFSET / 8
+			ADD		D2,A1						;ADD LEFT INDENT TO BASEADDR
+			
+			SWAP	D1							;GET BOUNDS.TOP
+			SWAP	D2							;GET DSTRECT.TOP
+			SWAP	D3							;GET DSTRECT.BOTTOM
+			SWAP	D4							;GET SEED V
+			SUB		D2,D3						;GET HEIGHT
+			BLE.S	@DoneSeed					;=>IF INVALID THEN RETURN
+			SUB		D1,D4						;CONVERT SEED.H TO GLOBAL
+			SUB		D1,D2						;CONVERT DSTRECT.TOP TO GLOBAL
+			ADD		D2,D4						;MAKE SEED.V RELATIVE TO DSTRECT
+			SWAP	D4							;GET SEED V,H
+			
+			MULS	D0,D2						;VERTICAL OFFSET := DSTROW * TOP
+			ADD.L	D2,A1						;ADD VERTICAL OFFSET TO BASEADDR
+			
+; now use SeedFill or CalcMask to generate the final mask
+
+			MOVE.L	BASEADDR(A3),-(SP)			;PUSH POINTER TO SRC BITS
+			MOVE.L	A1,-(SP)					;PUSH DST POINTER
+			MOVE	ROWBYTES(A3),D1				;GET SRCROW
+			AND		#nuRBMask,D1					;CLEAR MASK BITS
+			MOVE	D1,-(SP)					;PUSH SRCROW
+			MOVE	D0,-(SP)					;PUSH DSTROW
+			MOVE.L	D3,-(SP)					;PUSH HEIGHT, WORDS
+			TST		D5							;IS IT CALCMASK?
+			BEQ.S	@DoCalc						;=>YES, DO CALCMASK				<BAL 24Feb89>
+			MOVE.L	D4,-(SP)					;PUSH SEED H, V
+			_SEEDFILL							;AND GENERATE FINAL MASK
+			BRA.S	@DoneSeed					;=>SKIP OVER CALCMASK
+
+@DoCalc		_CALCMASK							;AND GENERATE FINAL MASK
+
+@DoneSeed	MOVE.L	myHandle(A6),A0				;GET TEMP HANDLE
+			_DISPOSHANDLE						;AND RELEASE IT
+			
+NoBits		MOVE.L	matchProc(A6),-(SP)			;was one provided?
+			_DelSearch							;and remove it
+			MOVE.L	saveGD(A6),theGDevice		;restore theGDevice
+			MOVE.L	A4,-(SP)					;push temp GDevice
+			_DisposGDevice						;and release it
+			PEA		saveFg(A6)					;point to saved fgColor
+			_RGBForeColor						;and restore it
+			PEA		saveBk(A6)					;point to saved bkColor
+			_RGBBackColor						;and restore it
+			MOVEM.L	(SP)+,D3-D5/A2-A4			;restore work registers
+			UNLK	A6							;deallocate stack frame
+			RTD		#ParamSize					;strip params and return
+
+			
+MySProc
+;----------------------------------------------------
+; MYSEARCH IS A CUSTOM SEARCHPROC THAT RETURNS 0 IF IT MATCHES
+; THE COLOR POINTED TO BY THE GDREFCON FIELD, OTHERWISE RETURNS 1.
+			
+myRes		EQU		4							;result
+myRGB		EQU		8							;desired rgb
+myRet		EQU		12							;returned boolean
+			
+			MOVEQ	#0,D1						;value if colors match
+			MOVEQ	#1,D0						;value if colors don't match
+ProcShare	MOVE	#$0100,myRet(SP)			;return TRUE
+			MOVE.L	myRGB(SP),A0				;point to specified RGB
+			MOVE.L	theGDevice,A1				;get handle to the gDevice
+			MOVE.L	(A1),A1						;point to theGDevice
+			MOVE.L	GDRefCon(A1),A1				;point to seed RGB
+			CMP.L	(A0)+,(A1)+					;compare red, green
+			BNE.S	@NoMatch					;=>no match, just return
+			CMP		(A0)+,(A1)+					;compare blue
+			BNE.S	@NoMatch					;=>no match, just return
+			EXG		D0,D1						;if match, then return white
+@NoMatch	MOVE.L	myRes(SP),A0				;pointer to result
+			MOVE.L	D0,(A0)						;return result
+			RTD		#8							;strip params and return
+			
+			
+MyCProc
+;----------------------------------------------------
+; MyCProc IS A CUSTOM SEARCHPROC THAT RETURNS 1 IF IT MATCHES
+; THE COLOR POINTED TO BY THE GDREFCON FIELD, OTHERWISE RETURNS 0.
+			
+			MOVEQ	#1,D1						;value if colors match
+			MOVEQ	#0,D0						;value if colors don't match
+			BRA.S	ProcShare					;and use common code
+			
+			
+GetTempDevice	FUNC	EXPORT
+				EXPORT 	MASKEND
+;-------------------------------------------------------------------------
+; GetTempDevice: GDHANDLE;
+;
+;					Fix File	Date		Patch#	Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	MaskAsmPatch.a	01Jan1904	#??? 	(GetTempDevice) 	(GetTempDevice)
+;
+; THIS ROUTINE ALLOCATES A GRAFDEVICE, SETS IT TO ONE BIT PER PIXEL,
+; GIVES IT A UNIQUE SEED SO THAT PIXEL TRANSLATIONS WILL BE DONE.
+;
+			MOVE.L	A4,-(SP)				; SAVE WORK REGISTER
+
+			CLR.L	-(SP)					; MAKE ROOM FOR LONG RESULT
+			CLR		-(SP)					; NO REFNUM
+			MOVE.L	MINUSONE,-(SP)			; INDICATE THAT THERE'S NO DRIVER
+			_NEWGDEVICE						; ALLOCATE THE GRAFDEVICE
+			MOVE.L	(SP)+,A4				; GET GRAFDEVICE HANDLE
+			move.l	a4,a0					; get GDHandle
+			_HUnlock						; remove nasty bits in master ptr	<BAL 15Jan89>
+			
+			MOVE.L	(A4),A0					; GET GDEVICE
+			MOVE.L	GDPMAP(A0),A0			; GET DEVICE'S PIXMAP HANDLE
+			MOVE.L	(A0),A0					; POINT AT PIXMAP
+			CLR		PIXELType(A0)			; SET PIXEL Type					<BAL 24Feb89>
+			MOVE	#1,PIXELSIZE(A0)		; SET PIXEL DEPTH
+			MOVE	#1,CMPSIZE(A0)			; AND SIZE OF EACH COMPONENT
+
+			MOVE.L	PMTABLE(A0),A0			; GET DEVICE'S COLOR TABLE HANDLE
+			MOVE.L	(A0),A0					; MAKE IT A POINTER
+			CLR.L	-(SP)					; MAKE ROOM FOR SEED
+			_GETCTSEED						; GET UNIQUE SEED
+			MOVE.L	(SP),CTSEED(A0)			; AND INSTALL IT
+			
+			MOVE.L	(A4),A0					; GET GDEVICE PTR
+			MOVE.L	([GDITable,A0]),A0		; get the Itable's master pointer
+			MOVE.L	(SP)+,ITabSeed(A0)		; make it look up to date
+			
+			MOVE.L	A4,8(SP)				; RETURN GDEVICE
+			MOVE.L	(SP)+,A4				; RESTORE WORK REGISTER
+			RTS								; AND RETURN
+			
+MASKEND

@@ -1,0 +1,1465 @@
+;
+;	File:		ELEMS020_1.a
+;
+;	Contains:	xxx put contents here xxx
+;
+;	Written by:	The Apple Numerics Group
+;
+;	Copyright:	© 1990-1993 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:   Mac32
+;
+;	Change History (most recent first):
+;
+;		<SM2>	  2/3/93	CSS		Update from Horror:
+;		<H2>	 9/29/92	BG		Rolling in Jon Okada's latest fixes.
+;		 <1>	11/14/90	BG		Added to BBS for the time.
+;
+
+;-----------------------------------------------------------
+; CHANGE HISTORY, kept for historical purposes:
+;
+; 26 MAR 90  Modified to support 96-bit extended type (JPO).
+; 18 MAY 90  Raise inexact for finite, nonzero results of
+;	     LOG and LN1 [see LOGFINI below] (JPO).
+; 10 OCT 90  Changed SANETrapAddr equate to $15AC
+; 28 APR 92  Removed MACRO ELFLOGBX and subroutine ELLOGBX.  In-lined LOGB
+;		functionality in LOG2R code sequence (JPO).
+;	     Removed MACRO ELFCLASSX and subroutine ELCLASSX.  In-lined
+;		classification code in subroutine CLASSIFY, which also
+;		normalizes unnormalized input (JPO).
+;	     Simplified subroutine SCALBXX in light of pre-filtering of small
+;		magnitude inputs in exponential function implementations (JPO).	     
+;	     Improved code flow for logarithms by filtering out small magnitude
+;		input for LN1 and LOG21 (JPO).
+;	     Added trailing stub routines TINYX, P0XSTUFF, P1XSTUFF, M1XSTUFF,
+;		and PINFXSTUFF (JPO).  
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; There are four logarithm functions:	LN(x), LOG2(x), LN(1+x), and LOG2(1+x).
+; They share much of the same code, but are distinguished by two bits.
+; In the same way, EXP(x), EXP2(x), EXP(x)-1, EXP2(x)-1 share the same
+; startup code.
+;-----------------------------------------------------------
+
+	BLANKS	ON
+	STRING	ASIS
+
+BTLOGBASE2	EQU	1	; SET IF EITHER LOG2(X) OR LOG2(1+X)
+ 				; SET IF EITHER	EXP2(X) OR EXP2(X)-1
+BTLOG1PLUSX	EQU	2	; SET IF EITHER LN(1+X) OR LOG2(1+X)
+ 				; SET IF EITHER	EXP(X)-1 OR EXP2(X)-1
+
+;-----------------------------------------------------------
+; When ELEMS68 is entered the stack has the form:
+;	 ret adrs  <  opcode word  <  dst adrs	<  src adrs  <	src2 adrs
+; with a second source address only in the case of the financial functions
+; Compound and Annuity.  A LINK is made through A6 (leaving A5 intact for
+; the debugger people) and the following stack frame is set up:
+;
+;	......
+;	source2 address	 -- only if Compound or Annuity
+;	source  address	 -- for Comp., Ann., X^I, X^Y
+;	destination address
+;	opcode word
+;	return address 	-- top of stack on entry to ELEMS68
+;	saved A6	-- for LINK, pntd to by A6 throughout ELEMS68
+;	environment word-- slot to save user's env across ELEMS68
+;	I		-- word for integer temporary
+;	J		-- word...
+;	W		-- 5 words for extended temporary
+;	X		-- 5 words...
+;	Y		-- 5 words...
+;	Z		-- 5 words...
+;	SRCCOPY		-- 5 words for 80-bit copy of 96-bit SRC
+;	SRC2COPY	-- 5 words for 80-bit copy of 96-bit SRC2
+;	saved D0-D7/A0-A4-- done with MOVEM.L after LINK
+;
+; After the operand addresses are fetched, the return address is written
+; onto the deepest operand address, and the high word of the return address
+; (the top of stack after the UNLK) is set to the number of bytes down to
+; the relocated return address.  To see how simple the subsequent exit
+; procedure is, look at the code below label RESULTDELIVERED.
+;
+; The following constants index the stack frame off of A6:
+;-----------------------------------------------------------
+
+STSRC2		EQU	18 	; SOURCE2
+STSRC		EQU 	14 	; SOURCE
+STDST		EQU 	10 	; DESTINATION
+STOPCODE	EQU 	 8	; OPCODE WORD
+STRET		EQU 	 4	; RETURN ADDRESS
+STA5		EQU 	 0	; SAVED A6
+STENV		EQU 	 -2 	; ENVIRONMENT SLOT
+STI 		EQU 	 -4 	; I
+STJ 		EQU 	 -6 	; J
+STW 		EQU 	 -16	; W
+STX 		EQU 	 -26	; X
+STY 		EQU 	 -36	; Y
+STZ 		EQU 	 -46	; Z
+SCOPY		EQU	 -56	; SRC copy
+S2COPY		EQU	 -66	; SRC2 copy
+STLOCK		EQU 	 -68	; HIGH WORD OF HANDLE
+
+STSIZE		EQU 	 -68	; SIZE OR FRAME FROM LINK
+
+;-----------------------------------------------------------
+; The following constants give the number of stack bytes to pop before exit.
+;-----------------------------------------------------------
+KI1ADRS 	EQU 	 6	; OLD RET AND OPCODE
+KI2ADRS 	EQU 	 10 	; OLD RET, OPCODE, DST
+KI3ADRS 	EQU 	 14 	; OLD RET, OPCODE, DST, SRC
+
+
+;-----------------------------------------------------------
+; The opword is defined as:
+;	 XY00 0000 Z0NN NNN0
+; where X=1 for 2- or 3-address functions, Y=1 for 3-address functions,
+; Z = 1 for 96-bit extended operands, and <NN NNN0> is the index
+; into the jump table for the specific instruction.
+;-----------------------------------------------------------
+OP2ADRS 	EQU 	 15 	; SET IF 2-ADRS
+OP3ADRS 	EQU 	 14 	; SET IF 3-ADRS
+OPMASK		EQU 	 $003E	; MASK FOR JUMP TABLE INDEX
+
+
+;-----------------------------------------------------------
+; For scaling via FSCALBX, integer argument must be kept less than the
+; maximum magnitude in a 16-bit integer.  When outlandish scaling is
+; required below, FSCALBX is called in units of MAXINT.
+;-----------------------------------------------------------
+
+;MAXINT		EQU 	 32767	; 2^15 - 1			DELETED <4/28/92, JPO>
+
+;-----------------------------------------------------------
+; When raising extended to an integer power, do explicit multiplies when
+; the exponent is smaller than some threshold.  It's 255 for now.
+; When the exponent exceeds this threshold, computation is done with
+; log and exp.
+;-----------------------------------------------------------
+
+SMALLEXP	EQU 	 255
+
+;-----------------------------------------------------------
+; The environment word is maintained at low memory addr FPSTATE.
+;-----------------------------------------------------------
+
+FPSTATE		EQU	$0A4A
+
+;-----------------------------------------------------------
+; The PACK4 (SANE FP) entry point is in low memory addr SANETrapAddr.
+;-----------------------------------------------------------
+
+SANETrapAddr	EQU	$15ac
+
+;-----------------------------------------------------------
+; Here are the poor man's macros for getting at the arithmetic:
+;-----------------------------------------------------------
+			
+	MACRO
+	ELFADDX
+	MOVE	#0,-(SP)
+	JSR	(A3)
+	ENDM
+
+	MACRO
+	ELFSUBX
+	MOVE	#2,-(SP)
+	JSR	(A3)
+	ENDM
+
+	MACRO
+	ELFMULX
+	MOVE	#4,-(SP)
+	JSR	(A3)
+	ENDM
+
+	MACRO
+	ELFDIVX
+	MOVE	#6,-(SP)
+	JSR	(A3)
+	ENDM
+
+	MACRO
+	ELFCMPX
+	MOVE	#8,-(SP)
+	JSR	(A3)
+	ENDM
+
+	MACRO
+	ELFREMX
+	MOVE	#$C,-(SP)
+	JSR	(A3)
+	ENDM
+			
+	MACRO
+	ELFI2X
+	BSR	ELI2X
+	ENDM
+
+	MACRO
+	ELFX2X
+	MOVE	#$0E,-(SP)
+	JSR	(A3)
+	ENDM
+
+	MACRO
+	ELFX2I
+	MOVE	#$2010,-(SP)
+	JSR	(A3)
+	ENDM
+			
+	MACRO
+	ELFRINTX
+	MOVE	#$14,-(SP)
+	JSR	(A3)
+	ENDM
+
+	MACRO
+	ELFSCALBX
+	MOVE	#$18,-(SP)
+	JSR	(A3)
+	ENDM
+
+	MACRO
+	ELFPROCEXIT
+	BSR	ELPROCEXIT
+	ENDM
+
+;	MACRO				; MACRO DELETED <4/28/92, JPO>
+;	ELFLOGBX
+;	BSR	ELLOGBX
+;	ENDM
+
+;	MACRO				; MACRO DELETED <4/28/92, JPO>
+;	ELFCLASSX
+;	BSR	ELCLASSX
+;	ENDM
+			
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; ELEMS020---sole entry point to package
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+ELEMS020	PROC	EXPORT
+
+	LINK	A6,#STSIZE		; ALLOCATE TEMP CELLS
+	MOVEM.L D0-D7/A0-A4,-(SP)	; PRESERVE WORKING REGS
+	MOVEQ	#0,D3			; ERROR BITS AND OPCODE
+
+;-----------------------------------------------------------
+; Load the registers as follows:
+;	 A3  <--  PACK4 (SANE FP) entry point stored 
+;		    in low memory global SANETrapAddr
+;	 A4  <--  dst adrs
+;	 D4  <--  src adrs, if any
+;	 D5  <--  src2 adrs, if any, dst if there is none
+;	 D3  <--  opcode word
+;	 D2  <--  src class, if any
+;	 D1  <--  dst/src2 class
+;
+;	 D6  <--  scratch
+;	 D7  <--  scratch
+;
+; Nuisance: must avoid trying to classify the integer src to the X^I operation.
+;
+; Note: the assembly language class function FCLASSX returns a nonzero value
+; with the sign of the input argument; the magnitude of the value is 1
+; greater than the value of the Pascal enumerated type in the Elems interface.
+;
+; Note after the operand addresses are fetched the stack is set up for later
+; exit, that is the return address is moved to the deepest available long
+; word and the number of other bytes to kill is stored in the high word of
+; the former return address.  See the stack notes in the EQU section above
+; and the exit sequence at label RESULTDELIVERED.
+;-----------------------------------------------------------
+
+	MOVEA.L	(SANETrapAddr).W,A3	; A3 <- PACK4 entry point for duration
+	LEA 	STRET(A6),A2	; POINT TO RET ADRS
+	LEA 	STOPCODE(A6),A0	; POINT INTO STACK ARGS
+	MOVE.W	(A0)+,D3	; GET OPCODE
+;	BPL	DSTONLY 	; QUICK TEST OF #OP2ADRS BIT 		; DELETED <4/28/92, JPO> 
+	BPL.B	DSTONLY		; Unary op (short branch)		<4/28/92, JPO>
+
+	MOVEA.L (A0)+,A4	; DST ADRS, ANOTHER ADRS COMING
+	MOVE.L	(A0),D4 	; SRC TOO, BUT NO INCREMENT
+	BTST	#OP3ADRS,D3
+	BNE.S	HAVESRC2
+
+;-----------------------------------------------------------
+; Get here if have src and dst operands only.
+;-----------------------------------------------------------
+	TST.B	D3		; 96-bit extended?
+	BPL.S	@1		; no. 80-bit
+
+	MOVE.W	(A4),2(A4)	; yes. convert DST to 80-bit and bump pointer
+	ADDQ.L	#2,A4
+
+@1:
+	MOVE.L	(A2),(A0)	; RET ADRS ON SRC ADRS
+	MOVE.W	#KI2ADRS,(A2)	; STACK KILL COUNT
+	MOVE.L	A4,D5		; PRETEND THERE'S A SRC2
+
+	MOVEQ	#15,D2		; PRESET SRC CLASS IN CASE X^I
+	MOVEQ	#OPMASK,D0	; SPECIAL CASE WITH INTEGER OP
+	AND.W	D3,D0
+	CMPI.B	#$10,D0
+	BEQ.S	CLASSDSTORSRC2
+
+CLASSCOM:
+	TST.B	D3		; 96-bit extended?
+	BPL.S	CLCOM2		; no.  80-bit
+CLCOM1:
+	MOVE.L	D4,A0		; yes. copy 96-bit SRC to 80-bit SRCCOPY
+	LEA	SCOPY(A6),A1
+	MOVE.L	A1,D4		; D4 points to SRCCOPY
+	MOVE.W	(A0),(A1)+
+	MOVE.L	4(A0),(A1)+
+	MOVE.L	8(A0),(A1)
+CLCOM2:
+	MOVEA.L D4,A0		; CLASSIFY SRC OPERAND
+;	BSR.S	CLASSIFY	;				DELETED <4/28/92, JPO>
+	BSR	CLASSIFY	; word branch			<4/28/92, JPO>
+	MOVE.W	D0,D2		; SRC CLASS CODE
+CLASSSKIP:
+	BRA.S	CLASSDSTORSRC2
+
+;-----------------------------------------------------------
+; Get here if src, src2, and dst operands.  Get src2 adrs and classify.
+; Only Compound and Annuity have a src2.
+;-----------------------------------------------------------
+HAVESRC2:
+	ADDQ.L	#4,A0		; SKIP OVER SRC ADRS
+	MOVE.L	(A0),D5 	; SRC2 addr
+	MOVE.L	(A2),(A0)	; RET ADRS ON SRC ADRS
+	MOVE.W	#KI3ADRS,(A2)	; STACK KILL COUNT
+	TST.B	D3		; 96-bit extended operands?
+	BPL.S	CLCOM2		; no. 80-bit extended
+
+	ADDQ	#2,A4		; yes. bump DST pointer for 80-bit interim result
+	MOVE.L	D5,A0		; copy 96-bit SRC2 to 80-bit SRC2COPY
+	LEA	S2COPY(A6),A1
+	MOVE.L	A1,D5
+	MOVE.W	(A0),(A1)+
+	MOVE.L	4(A0),(A1)+
+	MOVE.L	8(A0),(A1)	
+	BRA.S	CLCOM1		; copy 96-bit SRC to 80-bit SRCCOPY
+
+;-----------------------------------------------------------
+; Handy place to stick the following routine. 		DELETED <4/28/92, JPO>
+; Input: A0 = operand address
+; Output: D0 = class code
+; Uses: stack cell I to receive class
+; D0.B has value 1-6 according to SNAN, QNAN, INF, ZERO, NORMAL, DENORMAL
+; and the high bit D0.W (i.e. #$8000) is set according to the op's sign.
+;-----------------------------------------------------------
+;CLASSIFY:			; 			old implementation DELETED <4/28/92, JPO>
+;	PEA 	(A0)		; EXTENDED SOURCE
+;	PEA 	STI(A6) 	; INTEGER DST FOR CLASS
+;	ELFCLASSX 		; RETURNS SIGNED 1-6
+;	MOVE.W	STI(A6),D0
+;	BPL.S	@1
+;	NEG.W	D0
+;	ORI.W	#$8000,D0	; ISOLATE SIGN IN HIGH BIT
+;@1
+;	RTS
+
+
+;-----------------------------------------------------------
+; Get here in usual case of unary operator.
+;-----------------------------------------------------------
+DSTONLY:
+	MOVEQ	#15,D2		; FAKE A NON-NAN CLASS CODE
+	MOVE.L	(A0),A4 	; DST ADRS
+	TST.B	D3		; 96-bit extended?
+	BPL.S	@1		; no. 80-bit
+
+	MOVE.W	(A4),2(A4)	; yes. convert to 80-bit and bump pointer
+	ADDQ.L	#2,A4
+
+@1:
+	MOVE.L	(A2),(A0)	; RET ADRS
+	MOVE.W	#KI1ADRS,(A2)	; KILL COUNT
+	MOVE.L	A4,D5		; PRETEND DST IS SRC2
+
+CLASSDSTORSRC2:
+	MOVEA.L D5,A0		; SRC2 OR DST ADRS
+	BSR.S	CLASSIFY
+	MOVE.W	D0,D1
+
+;-----------------------------------------------------------
+; Now save the user's environment and set all flags and halts off and rounding
+; to nearest.
+; Output: Environment cell.
+; Uses: cell I to hold default environment
+;-----------------------------------------------------------
+	MOVE.W	(FPSTATE).W,STENV(A6)	; save environment in cell
+	CLR.W	(FPSTATE).W	; set default environment
+
+;-----------------------------------------------------------
+; Check for NANs, either D1 (dst/src2) or D2 (src) equal to 1 or 2.
+; If the src is a NAN, there might be two NANs so let floating add
+; determine precedence, or propagate the one NAN.	If just the dst
+; (or possibly src2) is a NAN, do a simple move, in order to touch
+; any signaling NAN that may have appeared.
+;-----------------------------------------------------------
+	SUBQ.B	#FCINF,D2	; IS < 0 FOR SRC NANS
+	BGE.S	NOT2NANS
+
+	MOVEA.L D5,A0		; MIGHT BE DST OR SRC2
+	MOVEA.L A4,A1		; ALWAYS DST ADRS
+	BSR.S	A0TOA1		; JUST BIT COPY
+	MOVE.L	D4,-(SP)	; SRC ADRS
+	PEA 	(A4)		; ALWAYS DST ADRS
+	ELFADDX
+	BRA.S	NANEXIT
+NOT2NANS:
+	SUBQ.B	#FCINF,D1	; CHECK SRC2 OR DST
+	BGE.S	NONANS
+
+	MOVE.L	D5,-(SP)	; SRC2 OR DST ADRS
+	PEA 	(A4)		; DST ADRS
+	ELFX2X
+NANEXIT:
+	BRA 	RESULTDELIVERED
+NONANS:
+
+;-----------------------------------------------------------
+; Fall through to here in typical case of no NANs.
+; Have dst address in A4, src address in D4, dst or src2 address in D5.
+; D1 and D2 contain the dst/src2 and src class codes, decremented by
+; #FCINF.
+; Jump to specific routine based on opword in D3.W.
+;-----------------------------------------------------------
+LIFTOFF:
+	MOVE.W	D3,D0
+	ANDI.W	#OPMASK,D0
+	MOVE.W	ELEMSTAB(D0),D0
+	JMP 	LIFTOFF(D0)
+
+
+ELEMSTAB:
+	DC.W	 LOGTOP-LIFTOFF 	; LNX
+	DC.W	 LOGTOP-LIFTOFF 	; LOG2X
+	DC.W	 LOGTOP-LIFTOFF 	; LN1X
+	DC.W	 LOGTOP-LIFTOFF 	; LOG21X
+
+	DC.W	 EXPTOP-LIFTOFF 	; EXPX
+	DC.W	 EXPTOP-LIFTOFF 	; EXP2X
+	DC.W	 EXP1TOP-LIFTOFF	; EXPX - 1
+	DC.W	 EXP1TOP-LIFTOFF	; EXP2X - 1
+
+	DC.W	 XPWRITOP-LIFTOFF
+	DC.W	 XPWRYTOP-LIFTOFF
+	DC.W	 COMPOUNDTOP-LIFTOFF
+	DC.W	 ANNUITYTOP-LIFTOFF
+
+	DC.W	 SINTOP-LIFTOFF
+	DC.W	 COSTOP-LIFTOFF
+	DC.W	 TANTOP-LIFTOFF
+	DC.W	 ATANTOP-LIFTOFF
+
+	DC.W	 RANDTOP-LIFTOFF
+
+;-----------------------------------------------------------
+; Utility to copy an extended operand from (A0) to (A1), resetting
+; A1 to point to the head.  Turns out not to be useful to reset A0,
+; since it is always thrown away.
+;-----------------------------------------------------------
+A0TOA1:
+	MOVE.L	(A0)+,(A1)+
+	MOVE.L	(A0)+,(A1)+
+	MOVE.W	(A0),(A1)
+	SUBQ.L	#8,A1
+	RTS
+
+
+;-----------------------------------------------------------
+; Subroutine CLASSIFY modified with in-line code - <4/28/92, JPO>
+;
+; Input: A0 = operand address
+; Output: D0 = class code
+; STACK:  &ret
+;
+; D0.B has value 1-6 according to SNAN, QNAN, INF, ZERO, NORMAL, DENORMAL
+; and the high bit D0.W (i.e. #$8000) is set according to the op's sign.
+; This algorithm will normalize unnormalized zero and finite values.
+;-----------------------------------------------------------
+CLASSIFY:			;		 NEW in-line implementation <4/28/92, JPO>
+	MOVE.L	D1,-(SP)	; save D1
+	MOVE.W	(A0),D0		; D0.W <- exponent
+	ANDI.W	#$7FFF,D0
+	CMPI.W	#$7FFF,D0	; max exponent?
+	BNE.B	@clfinite	; no, finite class
+
+	MOVEQ	#3,D0		; yes.  assume infinite class
+	BFEXTU	2(A0){1:31},D1	; any significand bits set other
+	OR.L	6(A0),D1	;   than explicit bit?
+	BEQ.B	@clsign		; no.  INF class
+
+	SUBQ	#1,D0		; yes, assume QNaN
+	BTST.B	#6,2(A0)	; QNaN bit set?
+	BNE.B	@clsign		; yes
+
+	SUBQ	#1,D0		; no, SNaN class
+	BRA.B	@clsign
+
+@clfinite:
+	TST.W	2(A0)		; normalized?
+	BPL.B	@abnorm		; no
+@clnorm:
+	MOVEQ	#5,D0		; yes, normal class
+@clsign:
+	TST.W	(A0)		; set bit 15 of D0 if sign bit is set
+	BPL.B	@restore
+
+	ORI.W	#$8000,D0
+@restore:
+	MOVE.L	(SP)+,D1	; restore D1
+	RTS			; return
+
+@abnorm:
+	MOVE.L	2(A0),D1	; any low significand bits set?
+	OR.L	6(A0),D1
+	BEQ.B	@clzero		; no, zero value
+
+	TST.W	D0		; yes, is it denorm?
+	BNE.B	@donorm		;      no, normalize unnormalized number
+
+@cldenorm:			; denormal
+	MOVEQ	#6,D0
+	BRA.B	@clsign
+
+@donorm:
+	MOVE.L	D2,-(SP)	; save D2
+	MOVE.L	2(A0),D1	; significand in D1/D2
+	MOVE.L	6(A0),D2
+@loop:				; normalization loop
+	SUBQ.W	#1,D0		; decrement exponent
+	ADD.L	D2,D2		; shift significand
+	ADDX.L	D1,D1
+	BMI.B	@done		; done if explicit bit is set
+	TST.W	D0		;   or exponent is zero
+	BNE.B	@loop
+@done:
+	BFINS	D0,(A0){1:15}	; write normalized value back to (A0)
+	MOVE.L	D1,2(A0)
+	MOVE.L	D2,6(A0)
+	MOVE.L	(SP)+,D2	; restore D2
+	TST.L	D1		; explicit bit set?
+	BMI.B	@clnorm		; yes, normal value
+	BRA.B	@cldenorm	; no, denormal
+
+@clzero:
+	ANDI.W	#$8000,(A0)	; normalize the zero
+	MOVEQ	#4,D0		; zero class
+	BRA.B	@clsign
+	
+
+;-----------------------------------------------------------
+; Utility to evaluate a polynomial using Horner's recurrence.
+; Input:  A0 pts to result field (preserved).
+;	  A1 pts to coefficient table (advanced beyond table).
+;	  A2 pts to function value (preserved).
+; Uses:   D0
+; All operands are extended.  The polynomial table consists of
+; a leading word N, a positive integer giving the degree of the
+; polynomial, and then (N+1) extended coefficients, starting with
+; that of the leading term.
+; RESULT  <--	C0	initially.
+; RESULT  <--	(RESULT * X) + CJ	 for J = 1 to DEGREE
+; Since A1 is advanced beyond the end of the given coefficient table,
+; POLEVAL may be used successively with consecutive tables, after setting
+; A1 just once.
+;-----------------------------------------------------------
+POLYEVAL:
+	MOVE.W	(A1)+,D0	; GET LOOP INDEX
+	MOVE.L 	(A1),(A0)	; transfer leading coefficient to
+	MOVE.L	4(A1),4(A0)	;   result field
+	MOVE.W	8(A1),8(A0)
+
+POLYLOOP:
+	PEA 	(A2)
+	PEA 	(A0)
+	ELFMULX			; ACCUM <-- ACCUM * X
+	ADDQ.L	#8,A1		; SKIP 10 BYTES TO NEXT
+	ADDQ.L	#2,A1		; ...COEFFICIENT
+	PEA 	(A1)
+	PEA 	(A0)
+	ELFADDX			; ACCUM <-- ACCUM + CJ
+	SUBQ.W	#1,D0
+	BGT.S	POLYLOOP
+
+	ADDQ.L	#8,A1		; SKIP BEYOND END OF TABLE
+	ADDQ.L	#2,A1
+	RTS
+
+
+;-----------------------------------------------------------
+; Clear the exception flag.
+; Uses:  D0.
+;-----------------------------------------------------------
+CLEARUFLOW:
+	MOVEQ	#FBUFLOW,D0
+	BRA.S	CLEARX
+
+CLEAROFLOW:
+	MOVEQ	#FBOFLOW,D0
+	BRA.S	CLEARX
+
+CLEARINVALID:
+	MOVEQ	#FBINVALID,D0
+	BRA.S	CLEARX
+
+CLEARINEXACT:
+	MOVEQ	#FBINEXACT,D0
+
+CLEARX:
+	BCLR	D0,(FPSTATE).W	; exception bit in high byte
+	RTS
+
+
+;-----------------------------------------------------------
+; Utility to force an exception flag.  No halts are enabled in
+; environment due to PROCENTRY, so simply turn on appropriate
+; exception bit in environment global.
+; Uses:  D0.
+;-----------------------------------------------------------
+FORCEOFLOW:
+	MOVEQ	#FBOFLOW,D0
+	BRA.S	FORCEX
+
+FORCEUFLOW:
+	MOVEQ	#FBUFLOW,D0
+	BRA.S	FORCEX
+
+FORCEDIVZER:
+	MOVEQ	#FBDIVZER,D0
+	BRA.S	FORCEX
+
+FORCEINVALID:
+	MOVEQ	#FBINVALID,D0
+	BRA.S	FORCEX
+
+FORCEINEXACT:
+	MOVEQ	#FBINEXACT,D0
+
+FORCEX:
+	BSET	D0,(FPSTATE).W	; exception bit in high byte
+	RTS
+
+;-----------------------------------------------------------
+; Utility to test an exception flag.
+; Output:	Z flag in CCR is true if flag is off, Z is false if flag is set.
+;-----------------------------------------------------------
+TESTDIVZER:
+	MOVEQ	#FBDIVZER,D0
+	BRA.S	TESTX
+TESTUFLOW:
+	MOVEQ	#FBUFLOW,D0
+	BRA.S	TESTX
+TESTOFLOW:
+	MOVEQ	#FBOFLOW,D0
+	BRA.S	TESTX
+TESTINVALID:
+	MOVEQ	#FBINVALID,D0
+	BRA.S	TESTX
+TESTINEXACT:
+	MOVEQ	#FBINEXACT,D0
+TESTX:				; test exception bit in high byte
+	BTST	D0,(FPSTATE).W	;   of environment word
+	RTS
+
+			
+;-----------------------------------------------------------
+; Floating scalb function computes  (A0)  <--	(A0) * 2^(A1)
+; Because of the 15-bit exponent range, just two invocations
+; of FSCALBX are required if an over/underflow is to be stimulated.
+; A0, A1, and (A1) are not modified.
+; Uses: cells J and Y, A2		old implementation DELETED <4/29/92, JPO>
+;-----------------------------------------------------------
+;SCALBXX:						Implementation DELETED <4/29/92, JPO>
+;	MOVE.W	#MAXINT,STJ(A6) ; SEEDED INTEGER SLOT
+;	LEA 	STY+10(A6),A2	; BEYOND CELL Y
+;	MOVE.L	6(A1),-(A2) 	; COPY OF (A1)
+;	MOVE.L	2(A1),-(A2)
+;	MOVE.W	(A1),-(A2)
+;
+;	BCLR	#7,(A2) 	; ABS (A1) COPY
+;
+;-----------------------------------------------------------
+; If ABS(A1) is larger than MAXINT then do one step of scaling by MAXINT.
+;-----------------------------------------------------------
+;	BSR.S	VSMAXINT
+;	FBGES	At1		; FLOATING >=
+;
+;-----------------------------------------------------------
+; Must diminish (A2) by FPKMAXINT.
+;-----------------------------------------------------------
+;	PEA 	FPKMAXINT
+;	PEA 	(A2)
+;	ELFSUBX
+;
+;	TST.B	(A1)		; CHECK OPERAND SIGN
+;	BPL.S	@1
+;	NEG.W	STJ(A6) 	; -MAXINT IN INTEGER CELL
+;@1:
+;	BSR.S	SCALEINT	; SCALE BY STJ(A6)
+;
+;-----------------------------------------------------------
+; If (SP) exceeds FPKMAXINT at this step, just force signed FPMAXINT.
+;-----------------------------------------------------------
+;	BSR.S	VSMAXINT	; (A2) VS FPMAXINT
+;	FBGES	At1 		; FLOATING >=
+;
+;	PEA 	FPKMAXINT
+;	BRA.S	At3
+;			
+;At1:
+;	PEA 	(A2)		; USE REDUCED VALUE
+;			
+;At3:
+;	PEA 	STJ(A6) 	; ADDRESS OF INT SLOT
+;	ELFX2I
+;
+;	TST.B	(A1)
+;	BPL.S	@5
+;
+;	NEG.W	STJ(A6) 	; FORCE SIGN OF INTEGER
+;@5:
+;-----------------------------------------------------------
+; FALL THROUGH AND EXIT
+;
+; Scale (A0) by integer at STJ(A6).
+;-----------------------------------------------------------
+;SCALEINT:
+;	PEA 	STJ(A6)
+;	PEA 	(A0)
+;	ELFSCALBX
+;	RTS
+;
+;-----------------------------------------------------------
+; Compare STY(A6) with FPMAXINT.     DELETED <4/28/92, JPO>
+;-----------------------------------------------------------
+;VSMAXINT:
+;	PEA 	STY(A6)
+;	PEA 	FPKMAXINT
+;	ELFCMPX
+;	RTS
+
+;-----------------------------------------------------------
+; New floating scalb function computes  (A0) <- (A0) * 2^(A1)
+; Because of data pre-filtering, just one invocation of FSCALBX
+; is required [(A1) is normalized and integral in range -32768
+; <= (A1) <= 32767. A0, A1, and (A1) are not modified.
+; Uses: cells J and Y, register D0		 <4/28/92, JPO>
+;-----------------------------------------------------------
+SCALBXX:			; 		  	NEW implementation <4/28/92, JPO>
+	MOVE.L	D1,-(SP)	; save D1
+	BFEXTU	(A1){1:15},D0	; D0 <- exponent of (A1)
+	MOVE.W	#$400E,D1	; D1 <- exponent of 2^15
+	SUB.W	D0,D1		; D1 <- right shift count
+	MOVE.W	2(A1),D0	; D0.W <- normalized sig.HI of (A1)
+	BEQ.B	@done		; shift parameter is zero
+	LSR.W	D1,D0		; D0.W <- abs value of shift parameter
+	TST.W	(A1)		; negate if (A1) < 0.0
+	BPL.B	@1
+
+	NEG.W	D0
+@1:
+	MOVE.W	D0,STJ(A6)	; write shift parameter to cell J
+	PEA 	STJ(A6)		; do single scaling
+	PEA 	(A0)
+	ELFSCALBX
+@done:
+	MOVE.L	(SP)+,D1	; restore D1
+	RTS			; return
+
+
+;-----------------------------------------------------------
+; ELLOGBX---fast LOGB routine expects finite, nonzero extended
+; input, and so is nonexceptional.  Interface is the same as
+; that of the SANE ROM routine except for the absence of
+; OPWORD on stack.  Upon entry,
+;   STACK:  &ret < &DST (input extended addr).
+; Upon exit, integral exponent value is written in extended
+; format to DST addr and stack is popped.
+;-----------------------------------------------------------
+;ELLOGBX:			;			subroutine DELETED <4/28/92, JPO>
+;	MOVEM.L	A0/D0-D2,-(SP)	; save small # of registers
+;	MOVEQ	#0,D1		; zero D1
+;	MOVEA.L	20(SP),A0	; A0 <- &DST
+;	MOVE.W	(A0),D1		; D1.W <- sign/exp
+;	BCLR	#15,D1		; sign of operand irrelevant
+;	MOVE.L	2(A0),D0	; sig.HI into D0
+;	BMI.S	@3		; already normalized
+;
+;	BFFFO	D0{0:0},D2	; find first set bit in sig.HI
+;	BNE.S	@1		; sig.HI is nonzero
+;
+;	SUB.W	D2,D1		; adjust exp (D2 must contain 32)
+;	MOVE.L	6(A0),D0	; D0 <- sig.LO (must be nonzero)
+;	BFFFO	D0{0:0},D2	; find first set bit in sig.LO
+;@1:
+;	SUB.W	D2,D1		; adjust exp to normalized value
+;@3:
+;	MOVE.W	#$401E,D0	; tentative exp for LOGB
+;	SUB.W	#$3FFF,D1	; unbias exp of input
+;	BGT.S	@7		; result > 0
+;	BLT.S	@5		; result < 0
+;
+;	MOVE.L	D1,D0		; zero result
+;	BRA.S	@9		; deliver it
+;@5:
+;	BSET	#15,D0		; negative result; set sign bit
+;	NEG.W	D1		; negate integer
+;@7:
+;	BFFFO	D1{0:0},D2	; find first one to normalize
+;	LSL.L	D2,D1		; shift left
+;	SUB.W	D2,D0		; adjust result exponent
+;@9:
+;	MOVE.W	D0,(A0)+	; deliver exp of result
+;	MOVE.L	D1,(A0)+	; deliver sig.HI
+;	CLR.L	(A0)		; sig.LO is zero
+;
+;	MOVEM.L	(SP)+,A0/D0-D2	; restore registers
+;	RTD	#4		; return
+
+
+
+
+;-----------------------------------------------------------
+; ELCLASSX---fast CLASSX routine simulates the SANE ROM			DELETED <4/28/92, JPO>
+; routine except for absence of OPWORD on stack.  Upon entry,
+;   STACK:  &ret < &DST < &SRC.
+; Upon exit, classify code (integer) is written to &DST and
+; stack is popped.
+;-----------------------------------------------------------
+;ELCLASSX:			;					DELETED <4/28/92, JPO>
+;	MOVEM.L	A0/D0-D1,-(SP)	; save small # of registers
+;	MOVEA.L	20(SP),A0	; SRC addr
+;	MOVE.W	(A0)+,D0	; get sign/exp in D0.W
+;	ADD.L	D0,D0		; sign in D0 bit 16
+;	LSR.W	#1,D0		; positive exp in D0.W
+;
+;	CMPI.W	#$7FFF,D0	; max exp?
+;	BEQ.S	@5		; yes, NAN or INF class
+;	
+;	MOVE.L	(A0)+,D1	; normalized?
+;	BPL.S	@8		; zero or unnormalized
+;
+;@2:
+;	MOVEQ	#5,D1		; NORMAL
+;
+;@3:
+;	BTST	#16,D0		; negate class code if 
+;	BEQ.S	@4		;   sign bit is set
+;	NEG.W	D1
+;@4:
+;	MOVEA.L	16(SP),A0	; DST addr
+;	MOVE.W	D1,(A0)		; deliver classify result
+;	MOVEM.L	(SP)+,A0/D0-D1	; restore registers
+;	RTD	#8		; done
+;
+;
+;@5:				; INF or NAN class
+;	MOVE.L	(A0)+,D1	; read high half of significand
+;	ADD.L	D1,D1		; clr explicit bit of sig
+;	LSR.L	#1,D1
+;	BEQ.S	@7		; INF or SNAN class since sig high is zero
+;
+;	BTST	#30,D1		; QNAN or SNAN
+;	BEQ.S	@6		; 
+;
+;	MOVEQ	#2,D1		; QNAN
+;	BRA.S	@3
+;@6:
+;	MOVEQ	#1,D1		; SNAN
+;	BRA.S	@3
+;
+;@7:
+;	MOVE.L	(A0),D1		; INF or SNAN?
+;	BNE.S	@6		; SNAN
+;
+;	MOVEQ	#3,D1		; INF
+;	BRA.S	@3
+;
+;@8:
+;	BEQ.S	@11		; ZERO or SUBNORM
+;
+;@9:
+;	SUBQ.W	#1,D0		; normalization loop
+;	ADD.L	D1,D1
+;	BPL.S	@9
+;
+;@10:
+;	TST.W	D0		; negative exponent means SUBNORM
+;	BPL.S	@2		; nonnegative means NORMAL
+;
+;	MOVEQ	#6,D1		; SUBNORM
+;	BRA.S	@3
+;
+;@11:				; high significand is zero
+;	SUB.W	#32,D0		; decrease exponent
+;	MOVE.L	(A0),D1		; D1 <- low significand
+;	BEQ.S	@12		; ZERO
+;	BPL.S	@9		; still unnormalized
+;	BRA.S	@10		; check exponent
+;
+;@12:
+;	MOVEQ	#4,D1		; ZERO
+;	BRA.S	@3
+	
+
+;-----------------------------------------------------------
+; ELI2X---Fast INT2X conversion routine uses SANE ROM interface
+; except for absence of OPWORD on stack.  Upon entry:
+;   STACK:  &ret < &DST < &SRC, where &SRC contains a 16-bit
+;	    integer value and &DST will store the 80-bit 
+;	    extended result of the conversion.
+; Upon exit, the stack is popped.
+;-----------------------------------------------------------
+ELI2X:
+	MOVEM.L	A0/D0-D1,-(SP)	; save 3 registers
+	MOVEA.L	20(SP),A0	; A0 <- SRC addr
+	MOVE.W	#$400E,D0	; set exponent for integer in D0.HI
+	SWAP	D0
+	MOVE.W	(A0),D0		; SRC integer into D0.LO
+	BEQ.S	@5		; zero
+	BPL.S	@1		; positive; normalize
+
+	BSET	#31,D0		; negative; set sign bit
+	NEG.W	D0		; negate D0.L0
+	BMI.S	@3		; already normalized
+
+@1:
+	SWAP	D0		; swap exp and first 16 sig bits
+	BFFFO	D0{0:16},D1	; find first one bit in sig
+	SUB.W	D1,D0		; adjust exponent
+	SWAP	D0		; swap exp and sig bits back
+	LSL.W	D1,D0		; shift significand to normalize
+
+@3:
+	MOVEA.L	16(SP),A0	; DST addr
+	MOVE.L	D0,(A0)+	; write extended result
+	CLR.L	(A0)+		;   with trailing zeros
+	CLR.W	(A0)
+
+	MOVEM.L	(SP)+,A0/D0-D1	; pop registers
+	RTD	#8		; return
+
+@5:
+	MOVEQ	#0,D0		; zero result
+	BRA.S	@3		; output it
+	
+	
+;-----------------------------------------------------------
+; ELPROCEXIT---Fast PROCEXIT routine uses SANE ROM interface
+; except for absence of OPWORD on stack.  Upon entry:
+;   STACK:  &ret < &DST, where &DST contains an environment
+;	    word to be restored.
+; Upon exit, the current exceptions are ORed into the environment
+; at &DST, the result becomes the new environment, a halt is
+; taken if any of the current exceptions were halt-enabled in
+; the restored environment, and the stack is popped.
+;-----------------------------------------------------------
+ELPROCEXIT:
+	MOVEM.L	D0/D6/A0,-(SP)	; Use 3 registers
+	MOVEA.L	16(SP),A0	; old environment addr
+	MOVE.W	#$0019,D6	; opword into D6.HI
+	SWAP	D6
+	MOVE.W	#$1F00,D6	; exception mask in D6.W
+	AND.W	(FPSTATE).W,D6 	; current exceptions in D6.W
+	MOVE.W	(A0),D0		; old environment into D0.W for restoration
+
+;FASTFIN:			;				label DELETED <4/28/92, JPO>
+	OR.W	D6,D0		; OR new exceptions with old environment
+	MOVE.W	D0,($0A4A).W	; store resulting environment
+	LSR.W	#8,D6		; check for halt
+	AND.W	D6,D0
+	BNE.S	FASTHALT	; handle halt
+			
+FASTEX:
+	MOVE	D0,CCR		; zero CCR
+	MOVEM.L	(SP)+,D0/D6/A0	; restore registers
+	RTD	#4		; done
+	
+;-----------------------------------------------------------
+; Fast halt vectoring routine for PROCEXIT
+;-----------------------------------------------------------
+FASTHALT:
+	LEA	16(SP),A0	; A0 points to DST addr on stack
+	CLR.W	-(SP)		; push CCR = 0 below D0 save
+	MOVE.W	D0,-(SP)	; push HALT exceptions
+	PEA	(SP)		; push MISCHALTINFO record pointer
+	MOVE.L	8(A0),-(SP)	; push bogus SRC2 addr
+	MOVE.L	4(A0),-(SP)	; push bogus SRC addr
+	MOVE.L	(A0),-(SP)	; push DST addr
+	SWAP	D6		; push opword
+	MOVE.W	D6,-(SP)
+	MOVEA.L	($0A4C).W,A0	; call user halt handler
+	JSR	(A0)
+			
+	MOVE.L	(SP)+,D0	; pop HALT exception/CCR off stack
+	BRA.S	FASTEX		; exit
+
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; Logarithm functions.
+; All four functions  LN(x), LOG2(x), LN(1+x), and LOG2(1+x)
+; are launched by common error-checking code.	In the usual case
+; that arithmetic is required, the computation is cast in the form
+; log2(1+z).	The only difference between LN and LOG2 is that the
+; former requires a final multiplication by LN(2).
+;
+; The four functions are distinguished by the BTLOGBASE2 and
+; BDLOG1PLUSX bits as described in the EQUATES section above.
+;
+; Since the only operand is the destination, the relevant class code
+; (already diminished by FCINF in the NAN check) is in D1.
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+LOGTOP:
+	SUBQ.B	#1,D1
+	BPL.S	LOGFINITE	; -1 FOR INF, NONNEG FOR FINITE
+
+	TST.W	D1		; CHECK SIGN BIT
+;	BPL 	PINFSTUFF	; LOG(+INF) IS +INF		DELETED <4/28/92, JPO>
+	BPL	RESULTDELIVERED	; arg is exact result (+INF)	<4/28/92, JPO>
+LOGERROR:
+	MOVEQ	#NANLOG,D0	; ERROR CODE
+	BRA 	ERRORNAN	; LOG(-INF) IS AN ERROR
+LOGFINITE:
+	BTST	#BTLOG1PLUSX,D3
+	BNE.S	LOG1PLUSX
+
+	TST.B	D1		; 0 IF OPERAND IS 0
+	BEQ.S	LOG0		; -INF, WITH DIVIDE BY 0
+
+	TST.W	D1		; CHECK SIGN
+	BMI.S	LOGERROR
+	BRA.S	LOG2R		; COMPUTE LOG(X)
+LOG1PLUSX:
+	TST.B	D1
+	BEQ 	RESULTDELIVERED ; LOG(+-0) IS +-0
+
+	BFEXTU	(A4){1:15},D0	; is |arg| < 2^(-64)?		<4/28/92, JPO>
+	CMPI.W	#$3FBF,D0	;				<4/28/92, JPO>
+	BGE.B	@m1chk		; yes, check if < -1.0		<4/28/92, JPO>
+
+; Small magnitude input (< 2.0^(-64)) for ln(1+x) and log2(1+x) yield fast results <4/28/92, JPO>
+	BTST	#BTLOGBASE2,D3	; base 2 logarithm?		<4/28/92, JPO>
+	BEQ.B	@gottiny	; no. return input value	<4/28/92, JPO>
+
+	PEA	FPKLOGE2	; base 2:  divide by ln(2.0)	<4/28/92, JPO>
+	PEA	(A4)		;				<4/28/92, JPO>
+	ELFDIVX			;				<4/28/92, JPO>
+@gottiny:			; 				label ADDED <4/28/92, JPO>
+	BRA	TINYX		; done				RESULTDELIVERED
+
+@m1chk:				;				label ADDED <4/28/92, JPO> 
+	PEA 	(A4)
+	PEA 	FPKM1
+	ELFCMPX
+;	FBUGTS	LOGERROR	; -1 > OPERAND --> ERROR	MOVED below <4/28/92, JPO>
+	FBLTS	LOG12R		; FIND LOG(1+X)
+	FBUGTS	LOGERROR	; -1 > OPERAND --> ERROR	<4/28/92, JPO>
+; FALL THROUGH WHEN = -1
+LOG0:
+	BRA 	DIVM0STUFF
+;-----------------------------------------------------------
+; END OF SPECIAL CASES
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; Compute LOG2(1+T) for some positive, finite T.
+; If 1+T falls outside the range SQRT(1/2) to SQRT(2) then
+; just go to the code for LOG2(S) below.  Else use LOGAPPROX
+; on T itself, IGNORING the sum 1+T.
+;-----------------------------------------------------------
+LOG12R:
+
+;-----------------------------------------------------------
+; First compute 1+T, saving the input T in cell W.
+;-----------------------------------------------------------
+	MOVEA.L A4,A0		; INPUT PTR
+	LEA 	STW(A6),A1	; PTR TO W CELL
+	BSR 	A0TOA1		; COPY OF INPUT IN W
+
+	PEA 	FPK1
+	PEA 	(A4)
+	ELFADDX			; T <-- 1+T
+
+;-----------------------------------------------------------
+; Now compare with bounds SQRT(1/2) and SQRT(2).
+;-----------------------------------------------------------
+	PEA 	FPKSQRTHALF
+	PEA 	(A4)
+	ELFCMPX
+	FBULES	LOG2R
+
+	PEA 	(A4)
+	PEA 	FPKSQRT2
+	ELFCMPX
+	FBLES	LOG2R
+
+;-----------------------------------------------------------
+; Input T is within the required range so restore input value and
+; just LOGAPPROX and finish up.
+;-----------------------------------------------------------
+	MOVEA.L A1,A0	; STW(A6) LEFT FROM BEFORE
+	MOVEA.L A4,A1
+	BSR 	A0TOA1
+
+	BSR 	LOGAPPROX
+;	BRA.S	LOGFINI		;			DELETED <4/28/92, JPO>
+	BRA	LOGFINI		; word branch		<4/28/92, JPO>
+
+;-----------------------------------------------------------
+; Compute	LOG2(T) for some positive, finite T at (A4).
+; Represent T as  2^L * Q	for  SQRT(1/2) <= Q <= SQRT(2).
+; Then LOG2(T) is	L + LOG2(Q).
+; LOG2(Q) for that restricted range is computed at LOGAPPROX below.
+;-----------------------------------------------------------
+LOG2R:
+
+;-----------------------------------------------------------
+; Compute LOGB(T), i.e. L, in W.
+;-----------------------------------------------------------
+;	MOVEA.L A4,A0		;			DELETED <4/28/92, JPO>
+	LEA 	STW(A6),A1
+;	BSR 	A0TOA1		; COPY X TO W		DELETED <4/28/92, JPO>
+
+;	PEA 	(A1)		; 			DELETED <4/28/92, JPO>
+;	ELFLOGBX		;			DELETED <4/28/92, JPO>
+
+;-----------------------------------------------------------
+; Compute LOGB(T) in-line, putting result L in W (extended format)
+; and -L in cell J (16-bit integer format).  D0 is used as
+; a scratch register.   						<4/28/92, JPO>
+;-----------------------------------------------------------
+	BFEXTU	(A4){1:15},D0	; D0 <- exponent of T
+	MOVE.L	D1,-(SP)	; save D1
+	TST.W	2(A4)		; is T normalized?
+	BMI.B	@tnorm		; yes
+
+	BFFFO	2(A4){0:32},D1	; no, adjust exponent for leading zero bits
+	BNE.B	@1		; got leading zero count
+
+	SUB.W	D1,D0		; adjust exponent (D1 contains 32)
+	BFFFO	6(A4){0:32},D1
+@1:
+	SUB.W	D1,D0		; final adjustment
+@tnorm:
+	MOVE.W	#$400E,D1	; D1.HI <- tentative exponent for L
+	SUB.W	#$3FFF,D0	; D0 <- unbiased L
+	SWAP	D1
+	MOVE.W	D0,D1		; D1.W <- L
+	BPL.B	@2		; L >= 0
+
+	NEG.W	D1		; L < 0, negate in D1.W
+	BSET.L	#31,D1		; set sign bit in D1.HI
+
+@2:
+	NEG.W	D0		; write -L (integer) to cell J
+	SWAP	D1		; swap exp and high sig bits
+	MOVE.W	D0,STJ(A6)
+	BFFFO	D1{0:16},D0
+	BNE.B	@3		; normalize significand
+
+	MOVEQ	#0,D1		; zero result
+	BRA.B	@4
+
+@3:
+	SUB.W	D0,D1		; adjust exponent
+	SWAP	D1		; swap exp and sig bits back
+	LSL.W	D0,D1		; shift to normalize
+@4:
+	MOVE.L	D1,(A1)		; write extended L to cell W
+	CLR.L	4(A1)
+	CLR.W	8(A1)
+	MOVE.L	(SP)+,D1	; restore D1
+
+;-----------------------------------------------------------
+; Then scale T down to range 1 to 2.  A single scaling step suffices
+; since the logb result ranges between -16446 and +16383
+;-----------------------------------------------------------
+;	BCHG	#7,(A1) 	; -L IN W			DELETED <4/28/92, JPO>
+;	PEA	(A1)		; CONVERT LOGB RESULT TO INTEGER  DELETED <4/28/92, JPO>
+;	PEA	STJ(A6)		; USE CELL J			DELETED <4/28/92, JPO>
+;	ELFX2I			;				DELETED <4/28/92, JPO>
+	PEA	STJ(A6)
+	PEA	(A4)
+	ELFSCALBX		; (A4) <-- (A4) * 2^(A1)
+;	BCHG	#7,(A1) 	; BACK TO L IN W		DELETED <4/28/92, JPO>
+
+;-----------------------------------------------------------
+; If scaled value exceeds SQRT(2), then halve T and increment L.
+;-----------------------------------------------------------
+	PEA 	FPKSQRT2
+	PEA 	(A4)
+	ELFCMPX
+	FBULES	At11
+
+	PEA 	FPK1
+	PEA 	STW(A6)
+	ELFADDX			; INCREMENT L
+
+	SUB.W	#1,(A4)		; HALVE T BY DECREMENTING ITS EXPONENT
+			
+At11:
+;-----------------------------------------------------------
+; Now must subtract 1 from (A4) in order to use LOGAPPROX,
+; which approximates LOG2(1+S).
+;-----------------------------------------------------------
+	PEA 	FPK1
+	PEA 	(A4)
+	ELFSUBX
+
+	BSR.S 	LOGAPPROX
+
+;-----------------------------------------------------------
+; Add L in.  Exit via check to see whether to multiply by LN(2).
+;-----------------------------------------------------------
+	PEA 	STW(A6)
+	PEA 	(A4)
+	ELFADDX
+
+
+;-----------------------------------------------------------
+; Finish up with a multiply by LN(2) if a natural log was requested.
+;-----------------------------------------------------------
+LOGFINI:
+	BTST	#BTLOGBASE2,D3
+	BNE.S	@1
+
+	PEA 	FPKLOGE2
+	PEA 	(A4)
+	ELFMULX			; LOG2(X) * LN(2)
+
+	MOVE.L	2(A4),D0	; nonzero result is inexact <18 May 90, JPO>
+	OR.L	6(A4),D0
+	BEQ.S	@1
+
+	BSR	FORCEINEXACT
+
+@1:
+	BRA 	RESULTDELIVERED
+
+
+;-----------------------------------------------------------
+; Compute LOG2(1+S) for S between SQRT(1/2) and SQRT(2).
+; Assume all special cases have been filtered out and that
+; number (A4) is indeed within range.
+; Let	R  :=  S / (2 + S).
+; Then LOGAPPROX  :=  R * P(R*R) / Q(R*R),
+; where the coefficients are taken from LOG21P and LOG21Q.
+;
+; Leave cell W alone, for use by LOG2R.
+; Use cell Y for R, X for R*R.
+; Use (A4) for R * P(R*R); then Y for Q(R*R).
+; Registers A0-A2 are used by the POLYEVAL.
+;
+; To avoid spurious inexact, filter out 0.
+; To keep accuracy, filter out denorms.
+;-----------------------------------------------------------
+LOGAPPROX:
+;	PEA 	(A4)		; INPUT OPERAND X		DELETED <4/28/92, JPO>
+;	PEA 	STJ(A6) 	; CELL J FOR CLASS		DELETED <4/28/92, JPO>
+;	ELFCLASSX 		; LEAVES -6, ..., 6 IN CELL J	DELETED <4/28/92, JPO>
+;	MOVE.W	STJ(A6),D0	;				DELETED <4/28/92, JPO>
+;	BPL.S	@1		;				DELETED <4/28/92, JPO>
+;	NEG.W	D0		;				DELETED <4/28/92, JPO>
+;@1				;				label DELETED  <4/28/92, JPO>
+;	SUBQ.W	#FCZERO,D0	; QUICK EXIT IF ZERO, #FCZERO=4	DELETED <4/28/92, JPO>
+
+	MOVE.L	2(A4),D0	; Filter out 0 to avoid spurious inexact <4/28/92, JPO>
+	OR.L	6(A4),D0	;				<4/28/92, JPO>
+;	BNE.S	LANONZERO	;				DELETED <4/28/92, JPO>
+	BNE.B	LANORMAL	;				 <4/28/92, JPO>
+	RTS
+
+; At this point, only normal values with magnitude >= 2^-64 are allowed <4/28/92, JPO>
+;LANONZERO:			;				label DELETED <4/28/92, JPO>
+;	SUBQ.W	#1,D0		; #FCNORM=5, #FCDENORM=6	DELETED <4/28/92, JPO>
+;	BEQ.S	LANORMAL	;				DELETED <4/28/92, JPO>
+
+;-----------------------------------------------------------
+; Since log2(1 + tiny) = ln(1 + tiny) / ln(2)	and ln(1 + tiny)  is tiny + ...
+; just divide denorm by ln(2) and return.	Share exit code with main computation.
+;-----------------------------------------------------------
+;	PEA 	FPKLOGE2
+;	BSR 	FORCEUFLOW
+;	BRA.S	LAFINI
+
+LANORMAL:
+	MOVEA.L A4,A0
+	LEA 	STX(A6),A1
+	BSR 	A0TOA1		; COPY ARGUMENT TO X
+
+	PEA 	FPK2
+	PEA 	(A4)
+	ELFADDX			; S := S + 2
+
+	PEA 	(A4)
+	PEA 	(A1)		; ADRS OF CELL X
+	ELFDIVX			; X := S / S + 2
+
+	MOVEA.L A1,A0		; ADRS OF CELL X
+	PEA 	(A1)		; TWO COPIES FOR SQUARE
+	PEA 	(A1)
+	LEA 	STY(A6),A1	; ADRS OF CELL Y
+	BSR 	A0TOA1		; Y := R
+
+	ELFMULX			; X := R * R
+
+;-----------------------------------------------------------
+; Evaluate P(R*R) into (A4).
+;-----------------------------------------------------------
+	MOVEA.L A4,A0		; RESULT SLOT
+	LEA 	LOG21P,A1	; COEFFICIENTS OF P
+	LEA 	STX(A6),A2	; R*R
+	BSR 	POLYEVAL	; P(R*R)
+
+;-----------------------------------------------------------
+; Evaluate   R * P(R*R)   into (A4); then finished with R in Y.
+;-----------------------------------------------------------
+	PEA 	STY(A6) 	; R
+	PEA 	(A4)		; P(R*R)
+	ELFMULX			; R * P(R*R)
+
+;-----------------------------------------------------------
+; Evaluate Q(R*R) into cell Y.
+;-----------------------------------------------------------
+	LEA 	STY(A6),A0	; RESULT SLOT
+	LEA 	LOG21Q,A1	; COEFFICIENTS OF Q
+	LEA 	STX(A6),A2	; R*R
+	BSR 	POLYEVAL	; Q(R*R)
+
+;-----------------------------------------------------------
+; Be sure inexact is set (isn't it set in the course of things?) and clear
+; all underflows up to the last step.
+; Finally, divide	(R* P(R*R)) in (A4) by Q(R*R) in cell Y.
+;-----------------------------------------------------------
+;	BSR 	CLEARUFLOW	; 			DELETED <4/28/92, JPO>
+
+	PEA 	STY(A6)
+;LAFINI:						label DELETED <4/28/92, JPO>
+	PEA 	(A4)
+	ELFDIVX			; (R * P(R*R)) / Q(R*R)
+
+	BSR 	FORCEINEXACT
+	RTS 			; EXIT LOGAPPROX
+
+;-----------------------------------------------------------
+; Trailing stubs to deal with special values to be delivered.
+; It is less efficient to use a BSR.S at every label and compute the
+; value's address from the return address on the stack.
+;-----------------------------------------------------------
+TINYX:				; small result already at (A4)	label ADDED <4/28/92, JPO>
+	TST.W	2(A0)		; is value denormal?		<4/28/92, JPO>
+	BMI.B	@1		; no, normal			<4/28/92, JPO>
+
+	BSR	FORCEUFLOW	; yes, signal UNDERFLOW		<4/28/92, JPO>
+@1:				;				label ADDED <4/28/92, JPO>
+	BSR	FORCEINEXACT	; result is always INEXACT	<4/28/92, JPO>
+	BRA.B	RESULTDELIVERED	; done				<4/28/92, JPO>
+
+P0XSTUFF:			;				label ADDED <4/28/92, JPO>
+	BSR	FORCEINEXACT	; deliver +0.0 with INEXACT	<4/28/92, JPO>
+	BSR	FORCEUFLOW	;   and UNDERFLOW signaled	<4/28/92, JPO>	
+P0STUFF:
+	LEA 	FPK0,A0
+	BRA.S	STUFFVAL
+M0STUFF:
+	LEA 	FPKM0,A0
+	BRA.S	STUFFVAL
+P1XSTUFF:			;				label ADDED <4/28/92, JPO>
+	BSR	FORCEINEXACT	; deliver +1.0 with INEXACT	<4/28/92, JPO>
+P1STUFF:
+	LEA 	FPK1,A0
+	BRA.S	STUFFVAL
+M1XSTUFF:			;				label ADDED <4/28/92, JPO>
+	BSR	FORCEINEXACT	; deliver -1.0 with INEXACT	<4/29/92, JPO>
+M1STUFF:
+	LEA 	FPKM1,A0
+	BRA.S	STUFFVAL
+PINFXSTUFF:			;				label ADDED <4/28/92, JPO>
+	BSR	FORCEINEXACT	; deliver +INF with INEXACT	<4/28/92, JPO>
+	BSR	FORCEOFLOW	;   and OVERFLOW signaled	<4/28/92, JPO>
+	BRA.B	PINFSTUFF	;				<4/28/92, JPO>
+DIVP0STUFF:
+	BSR 	FORCEDIVZER
+PINFSTUFF:
+	LEA 	FPKINF,A0
+	BRA.S	STUFFVAL
+DIVM0STUFF:
+	BSR 	FORCEDIVZER
+MINFSTUFF:
+	LEA 	FPKMINF,A0	; AND FALL THROUGH...
+
+
+STUFFVAL:
+	MOVEA.L A4,A1		; DST ADRS
+	BSR 	A0TOA1		; STUFF THE VAL
+STUFFEXIT:
+	BRA.S	RESULTDELIVERED
+
+
+;-----------------------------------------------------------
+; Fabricate a silent NAN, set Invalid, and deliver to destination.
+; D0.B should be a nonzero byte code.
+;-----------------------------------------------------------
+ERRORNAN:
+	ORI.L	#$7FFF4000,D0		; MAX EXP AND QNANBIT SET!				<01APR85>
+	MOVE.L	D0,(A4)+
+	CLR.L	(A4)+
+	CLR.W	(A4)
+	SUBQ.L	#8,A4
+	BSR 	FORCEINVALID
+
+;-----------------------------------------------------------
+; FALL THROUGH TO...
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; Finally, a result has been placed in (A4).  Restore the environment,
+; signaling any required exceptions, restore the registers,
+; clean up the stack, and go.	The return address has been written onto the
+; deepest operand address, and the high word of the old return address is
+; an integer count of the amount of stack to kill to get to the true return
+; address.
+;-----------------------------------------------------------
+RESULTDELIVERED:
+;-----------------------------------------------------------
+; The first step is to expand the 80-bit result to 96 bits if
+; the operation is for the latter format.  In this case, A4
+; contains &DST + 2, and the sign/exponent must simply be
+; copied from (A4) to -2(A4).
+;-----------------------------------------------------------
+	TST.B	D3		; 96-bit result required?
+	BPL.S	@1		; no. 80-bit OK
+
+	MOVE.W	(A4),-2(A4)	; yes. copy sign/exp to lead word
+
+;-----------------------------------------------------------
+; Restore from environment word
+;-----------------------------------------------------------
+@1:
+	PEA 	STENV(A6)
+	ELFPROCEXIT
+;-----------------------------------------------------------
+; Clean up the regs and exit.
+;-----------------------------------------------------------
+
+	MOVEM.L (SP)+,D0-D7/A0-A4	; RESTORE ALL REGS
+	UNLK	A6
+	ADDA.W	(SP),SP
+	RTS
+

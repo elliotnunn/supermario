@@ -1,0 +1,335 @@
+;EASE$$$ READ ONLY COPY of file “DEC2STR.a”
+; 1.1	CCH 11/11/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.0	BBM 2/12/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: Dec2Str.TEXT
+;; 68000 number formatter -- implements Pascal _dec2str
+;; Status: BETA
+;; Copyright Apple Computer, Inc. 1985
+;;   All Rights Reserved
+;; Written by Kenton Hanson, Apple Numerics Group, 15 Jan 85
+;;
+;; Modification History:
+;;			26/2/85 	KLH 		To correct string '012' -> 0 case.
+;;			13/8/85 	KLH 		Altered DecForm to be passed by address
+;;			19/8/85 	KLH 		changed dec2str to _dec2str
+;;			13/9/85 	KLH 		switched order of movem & link/unlnk
+;;									 to fix a register trashing bug
+;;
+;; Const
+;;	  DECSTRLEN = 80;
+;;	  SigDigLen = 20;
+;; type
+;;	  DecStr   = string [DecStrLen];
+;;	  Decimal  = record
+;;					sgn : 0..1;
+;;					exp : integer;
+;;					sig : string [SigDigLen]
+;;				 end;
+;;	  DecForm = record
+;;					style  : (FloatDecimal, FixedDecimal);
+;;					digits : integer
+;;				 end;
+;;
+;; Procedure _dec2str (f : DecForm; d : Decimal; var s : DecStr) ;
+;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; The register conventions used throughout this code are:
+;; A0	 = address of output string, s.
+;; A1	 = address of decimal record, DR.,(sometimes used for powers of tens)
+;; D0	 = scratch
+;; D1	 = intialized to length of DR.sig
+;; D2	 = current length of output string - #wmax
+;; D3	 = scratch
+;; D4	 = contains DR sgn & exp
+;; D5	 = contains DecForm
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; On entry to _dec2str the stack should look like:
+;;
+;;		 _______________________________________
+;;		|										|
+;;		|	 f				(decform), input	|
+;;		|_______________________________________|
+;;		|										|
+;;		|	 address of d	(Decimal), output	|
+;;		|_______________________________________|
+;;		|										|
+;;		|	 address of s	(decstr), output	|
+;;		|_______________________________________|
+;;		|										|
+;;		|		 return address 				|
+;;		|_______________________________________|
+;;
+;;
+;; D2-D5 saved & restored
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Procedure _dec2str (var f : DecForm; d : Decimal; var s : DecStr) ;
+
+
+			BLANKS		ON
+			STRING		ASIS
+
+_dec2str	PROC		EXPORT	
+
+S			EQU 		24		   ; 24(a6) contains the address of DecStr
+DR			EQU 		28		   ; 28(a6) contains the address of Decimal Record
+DF			EQU 		32		   ; 32(a6) contains DecForm
+wmax		EQU 		80		   ; decstrlen (max string length for output)
+
+			movem.l 	d2-d5,-(sp) 			; save registers		<13/8/85>
+			link		a6,#0					;						<13/8/85>
+
+			move.l		DF(a6),a0				; get address of DecForm
+			move.l		(a0),d5 				; save DecForm in local register
+			move.l		S(a6),a0				; save address of DecStr
+			move.l		DR(a6),a1				; save address of Decimal Rec.
+			move.l		(a1)+,d4				; save DR sgn & exp
+
+			addq		#1,a0					; initialize a0 to 1st char of DS
+			move.l		#-wmax,d2				; initialize s length
+			moveq		#0,d1
+			move.b		(a1)+,d1				; get length of DR.sig
+			beq.s		ItsAPass				; ErrXit, null DR.sig
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; leading blank and sign logic
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;signStuff
+			btst		#24,d4					; test sgn bit in DR
+			beq.s		HeyItsPos
+			move.b		#'-',(a0)+				; put '-' in output string
+			bra.s		d2inc
+HeyItsPos	btst		#24,d5					; test style bit in DF
+			bne.s		HeyItsFxd
+			move.b		#' ',(a0)+				; put ' ' in output string
+d2inc		addq		#1,d2
+HeyItsFxd	move.b		(a1),d0;				; get 1st chr of input string
+			cmpi.b		#'?',d0
+ItsAPass	beq 		ErrXit
+			ori.b		#$20,d0 				; change 'N' & 'I' -> 'n' & 'i'
+			cmpi.b		#'i',d0
+			beq 		INFfound
+			cmpi.b		#'n',d0
+			bne.s		ItsANumber
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Construct NaN(XXX) string where XXX is the decimal NaN code
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;NaNfound
+			move.b		#'N',(a0)+
+			move.b		#'A',(a0)+
+			move.b		#'N',(a0)+				; append 'NAN(   )'
+			move.b		#'(',(a0)+
+			move.b		#')',3(a0)
+			addq		#5,d2
+
+			moveq		#0,d3					; intialize binary NaN code
+			cmpi.b		#5,d1
+			ble.s		lngthOK 				; 4 or less NaN code digits
+			moveq		#5,d1
+lngthOK 	bsr.s		Hex2Bin
+			move.l		d3,d0
+			bsr.s		Hex2Bin
+			asl.b		#4,d3
+			or.l		d0,d3
+FinNaN		moveq		#4,d0					; set Bin2ASCII to 3 digit display
+			bra.s		FromNaN
+
+Hex2Bin 	subq		#1,d1
+			ble.s		FinNaN					; No NaN digits remaining
+			move.b		0(a1,d1),d3 			; get hex digit
+			cmpi.b		#'9',d3
+			ble.s		DecmlFnd				; its a decimal number
+			subq.b		#7,d3					; adjust for hex
+DecmlFnd	andi.b		#15,d3					; mask low order nibble
+			rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Set undefined Zero Exponent
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+ItsANumber
+			cmpi.b		#'0',(a1)
+			bne.s		NotAZero
+			moveq		#1,d1					; length of DR.sig<-1  (26/2/85)
+			moveq		#0,d4					; initialize undefined exponent
+												; sign zapped, but don't need it
+NotAZero	btst		#24,d5					; test style bit in DF
+			bne 		ItsFixed
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Floating Format
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;ItsAFloat
+			tst.w		d5						; DF.digits - 1
+			bgt.s		DigitsOK				; if digits < 1 then digits := 1
+			moveq		#1,d5
+DigitsOK	moveq		#1,d0
+			bsr.s		AddDigits				; put first digit in output string
+			move.w		d1,d3
+			ext.l		d3
+			subq.l		#1,d3					; length(DR.sig) -1
+			bgt.s		NeedPoint
+			cmpi.w		#1,d5					; DF.digits - 1
+			ble.s		NoPoint
+NeedPoint	bsr.s		AddPoint
+			move.w		d3,d0
+			bsr.s		AddDigits
+			move		d5,d0
+			sub.w		d1,d0					; DF.digits - length (DR.sig)
+			bsr.s		AddZeros
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Construct Exponent (also used for displaying NAN code)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+NoPoint
+			addq.w		#2,d2
+			bgt.s		ErrXit					; output string too long
+			move.b		#'e',(a0)+				; append 'e'
+									; CPU Sickness, can't append 'e+' by move
+									; word, if destination is not on word boundary
+			ext.l		d4						; DR.exp
+			add.l		d4,d3					; DR.exp + (length(DR.sig) -1)
+			blt.s		NegExp
+			move.b		#'+',(a0)+				; append '+' to output string
+			bra.s		GetExpDigs
+NegExp		move.b		#'-',(a0)+				; append '-' to output string
+			neg.l		d3
+GetExpDigs
+			moveq		#0,d0
+FromNaN 	lea 		tens,a1 				; overwrite input (a1)
+NextCmp 	addq		#2,d0
+			cmp.w		-2(a1,d0),d3
+			bcs.s		GetInLoop
+			cmpi.b		#8,d0
+			blt.s		NextCmp
+
+NextDig 	divu		-2(a1,d0),d3
+LastDig 	addq.w		#1,d2					; increment output string length
+			bgt.s		ErrXit					; output string too long
+			addi		#$30,d3 				; encode binary digit to ASCII code
+			move.b		d3,(a0)+
+			swap		d3
+			ext.l		d3						; clear hi word
+
+GetInLoop	subq		#2,d0
+			bgt.s		NextDig
+			beq.s		LastDig
+			bra.s		SetLength
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Append digits, '.' & zero stuff.  Also Error Exit
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+AddDigits	ble.s		EndDigits				; append no digits
+			add.w		d0,d2					; add d0 digits, d2 := new length
+			bgt.s		ErrXit					; output string too long
+loopd		move.b		(a1)+,(a0)+ 			; append d0 '0' to output string
+			subq.w		#1,d0					; decrement d0
+			bgt.s		loopd
+EndDigits	rts
+
+AddPoint	addq.w		#1,d2
+			bgt.s		ErrXit					; output string too long
+			move.b		#'.',(a0)+				; append '.' to output string
+			rts
+
+loopz		addq.w		#1,d2
+			bgt.s		ErrXit					; output string too long
+			move.b		#'0',(a0)+				; append d0 '0' to output string
+AddZeros	subq.w		#1,d0					; decrement d0
+			bge.s		loopz
+EndZeros	rts
+
+ErrXit		move.l		S(a6),a0				; restore address of DecStr in a0
+			move.w		#$013F,(a0) 			; put '?' in output string
+			bra.s		done
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Fixed Format
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+ItsFixed	move.w		d1,d3					; copy length (DR.sig)
+			add.w		d4,d3					; DR.exp + length (DR.sig)
+			ble.s		AllAfter				; all digits after
+
+			tst.w		d4						; DR.exp
+			bge.s		AllBefore
+
+			move.w		d3,d0
+			bsr.s		AddDigits
+			bsr.s		AddPoint
+			moveq		#0,d0
+			sub.w		d4,d0					; 0 - DR.exp
+			bra.s		FromMid
+
+AllBefore	move.w		d1,d0
+			bsr.s		AddDigits
+			move.w		d4,d0
+			bsr.s		AddZeros
+			move.w		d5,d0
+			ble.s		SetLength				; no digits after decimal point
+			bsr.s		AddPoint
+			bsr.s		AddZeros
+			bra.s		SetLength
+
+AllAfter	moveq		#1,d0
+			bsr.s		AddZeros
+			bsr.s		AddPoint
+			moveq		#0,d0
+			sub.w		d3,d0					; 0 - (DR.exp + length (DR.sig))
+			bsr.s		AddZeros
+			move.w		d1,d0					; length (DR.sig)
+FromMid 	bsr.s		AddDigits
+			move.w		d4,d0					; DR.exp
+			add.w		d5,d0					; DF.digits + DR.exp
+			bsr.s		AddZeros
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; end of routine
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+SetLength	move.l		S(a6),a0				; restore address of DecStr in a0
+			addi.w		#wmax,d2
+			move.b		d2,(a0) 				; set length of s
+
+done		unlk		a6						; <13/9/85>
+			movem.l 	(sp)+,d2-d5/a0			; restore registers & return address
+			adda.w		#12,sp					; clean up stack
+			jmp 		(a0)					; return
+ IF  FSymOK THEN
+			DC.B		'_dec2str'
+ ENDIF
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Infinity & tens table
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+INFfound
+			move.b		#'I',(a0)+
+			move.b		#'N',(a0)+				; append 'INF'
+			move.b		#'F',(a0)
+			addq		#3,d2
+			bra.s		SetLength
+
+tens		DC.W		10
+			DC.W		100
+			DC.W		1000
+			DC.W		10000
+
+
+

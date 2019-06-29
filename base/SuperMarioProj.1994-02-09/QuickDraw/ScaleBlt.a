@@ -1,0 +1,2621 @@
+;
+;	File:		ScaleBlt.a
+;
+;	Copyright:	© 1989-1990, 1992-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM9>	  7/6/93	kc		Roll in Ludwig.
+;	   <SM8>	  7/6/93	kc		Roll in bug fix from Shannon Holland.
+;	   <SM7>	01/19/93	HI		#1060484:Fixed bug in scIndToInd where it was not
+;									properly offseting while masking. Fixes bugs where
+;									>1 bit images are clipped and some garbage is drawn
+;									as a result. For a detailed information of the bug
+;									fix, read the header of scIndToInd. (Hoon Im)
+;	   <SM6>	 12/4/92	CSS		Revert SM5 as SM4 already fixed this bug.
+;	   <SM5>	 12/2/92	kc		Roll in <R22> from QuickDrawPatches in Reality.
+;		<R22>	 8/13/92	SAH		#1039892: Fixed a bug in the ScaleBlt 1->16 non-colorizing loop
+;									(scIndexedTo16) where the bit offset into the source would be
+;									trashed in certain cases.
+;	   <SM4>	 8/14/92	CSS		Update from Reality:
+;									 <8> 8/13/92 SAH	#1039892: Fixed a bug in the 1->16 non-colorizing loop
+;														(scIndexedTo16) where the bit offset into the source was being
+;														trashed.
+;	   <SM3>	 7/16/92	CSS		Update from Reality:
+;		 							<7> 6/8/92 SAH		#1031825: Added indexed to 16, 1 to 16 (no colorizing), indexed
+;														to 32 1 to 32 (no colorizing) and indexed to indexed loops. Also
+;														pass the real XLateFlag to MakeScaleTbl so that it colorizies.
+;	   <SM2>	 6/11/92	stb		<sm 6/9/92>stb Synch with QDciPatchROM.a; added comments to
+;									NXTMASKDither.
+;		 <6>	 11/6/90	SMC		Fixed alignment problem in scInd1ToInd8.  With KON.
+;		 <5>	 9/18/90	BG		Removed <2>. 040s are behaving more reliably now.
+;		 <4>	 9/14/90	SMC		Added five scaling blit loops, w/ or w/o region clipping. 1to2,
+;									1to4, 1to8, 8to8, and 8to1. The latter three are replacements
+;									for the QuickerDraw routines in Stretch which give the same or
+;									worse performance of the new, smaller routines.
+;		 <3>	 7/20/90	gbm		Change a few identifiers to eliminate warnings
+;		 <2>	 6/28/90	BG		Added EclipseNOPs to deal with flakey 040s.
+;	   <1.5>	 12/9/89	BAL		Fixed bug in error propagation in DitherCore8
+;	   <1.4>	 7/15/89	GGD		GGD for the vacationing BAL, fixed the scIndexedto32 blit loop,
+;									also disabled the Mask loop, since BAL says it cannot occur.
+;	  <•1.3>	 7/14/89	BAL		For Aurora: Final CQD
+;	   <1.2>	 6/30/89	BAL		Now uses equate for qdStackXtra
+;	  <•1.1>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;				 5/26/89	BAL		Fixed bug in call to MakeITable if seed mismatch during direct
+;									to indexed copy.
+;	   <1.0>	 4/12/89	BAL		Blasting in 32-Bit QuickDraw 1.0B1
+
+
+
+scaleBlt PROC  EXPORT	
+		IMPORT RSect
+		IMPORT GetSeek,OneBitProc
+		IMPORT TRIMRECT,MAKESCALETBL,SHFTTBL
+		EXPORT scIndTab1,scIndTab2,scIndTab4,scIndTab8,scIndTab16,scIndTab32
+		EXPORT scDirTab1,scDirTab2,scDirTab4,scDirTab8,scDirTab16,scDirTab32
+;--------------------------------------------------------------
+;
+;  Transfer a rectangle of bits from srcBits to dstBits.
+;  SrcBits and dstBits are of different depth or color table.
+;  The transfer is clipped to the intersection of rgnA, rgnB, and rgnC.
+;  No stretching, shrinking, colorizing, or bitmap masking is performed.
+;  Only srcCopy and ditherCopy modes are supported.
+;
+;  Custom search procs are not supported if the src is direct.
+;
+;
+;
+;  COPYRIGHT APPLE COMPUTER INC. 1989
+;  CUT AND PASTED BY BRUCE LEAK
+;
+
+
+;----------------------------------------------------
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	44					;SIZE OF PARAMETERS
+SRCBITS 		EQU 	PARAMSIZE+8-4		;LONG, ADDR OF BITMAP
+MASKBITS 		EQU 	SRCBITS-4			;LONG, ADDR OF BITMAP
+DSTBITS 		EQU 	MASKBITS-4			;LONG, ADDR OF BITMAP
+SRCRECT 		EQU 	DSTBITS-4			;LONG, ADDR OF RECT
+MASKRECT 		EQU 	SRCRECT-4			;LONG, ADDR OF RECT
+DSTRECT 		EQU 	MASKRECT-4			;LONG, ADDR OF RECT
+MODE			EQU 	DSTRECT-2			;WORD
+PAT 			EQU 	MODE-4				;LONG, ADDR OF PATTERN
+RGNA			EQU 	PAT-4				;LONG, RGNHANDLE
+RGNB			EQU 	RGNA-4				;LONG, RGNHANDLE
+RGNC			EQU 	RGNB-4				;LONG, RGNHANDLE
+multColor		EQU		RGNC-2				;byte, set if source contains nonblack/white colors
+
+;----------------------------------------------------
+;
+;  A6 OFFSETS OF LOCAL VARIABLES AFTER LINK:
+;
+;  STACKFRAME LINKED AND LOCALS INITIALIZED BY STRETCHBITS.
+;
+&CurFile	SETC	'STRETCH'
+			
+			INCLUDE	'DrawingVars.a'
+
+;-----------------------------------
+;  REGISTER USE:
+;
+;		A2:	SRCRECT (24 bit addr)
+;		A3:	DSTRECT (24 bit addr)
+;		A4: SRCPIX
+;		A5: DSTPIX
+;
+;		D3:	SRCSHIFT
+;		D4:	DSTSHIFT
+;		D7: INVERTFLAG
+
+
+;-----------------------------------
+;
+;  SAVE STACK FOR NOW, BECAUSE WE'RE STILL ALLOCATING SCANLINE BUFFERS
+;
+		MOVE.L	SP,SAVESTK2(A6)				;PRESERVE STACK POINTER
+
+
+		MOVE.L	D0,NUMER(A6)				;NUMER := DST SIZE
+		MOVE.L	D1,DENOM(A6)				;DENOM := SRC SIZE
+
+;----------------------------------------------------------------
+;
+;  DETERMINE AMOUNT OF STACK SPACE WE CAN USE
+;
+		_StackAvail 						;GET STACK AVAIL IN D0.L
+		LSR.L	#2,D0						;CONVERT BYTES TO LONGS
+		SUB.L	#qdStackXtra,D0				;SUBTRACT SLOP FACTOR		<1.2> BAL
+		MOVE.L	D0,STACKFREE(A6)			;AND SAVE FREE LONGS ON STACK
+		bpl.s	@stkOK
+		_stNoStack							;=>NOT ENOUGH STACK, QUIT
+@stkOK	
+
+;----------------------------------------------------------------
+;
+; IF THE SRC AND DST ARE DIFFERENT DEPTHS, THEN MUST DO PIXEL SCALING
+; IF THEY ARE THE SAME DEPTH, BUT DIFFERENT COLOR TABLES, DO PIXEL SCALING
+;
+
+		MOVE.W	SRCPIX+pixelType(A6),D0		;IS PIXELTYPE DIRECT?			%%%
+		BEQ		HasClut						;NO, IT HAS A CLUT				%%%
+		cmp		#16,d0						;is it RGBDirect?
+		bne		done						;unknown pixeltype -> go home
+				
+					;@@@@ should also check cmpCount, cmpSize
+					
+;----------------------------------------------------------------
+;
+; The src is direct data (16 or 32 bits/pixel).
+; Compute D5 as index into direct mode table based on
+;
+;   D5  =   zero[15-6]   dstShift[5:3]   src32[2]   gray[1]   dither[0]
+;
+;	D3=srcShift	D4=dstShift
+; 
+
+		clr.l	ErrBuf(a6)					; init for no dithering
+		move 	d4,d5						; init scaleRtn with dstShift
+		lsl.w	#3,d5						; put into position
+		cmp.w	#4,d3						; is src 16 bits/pixel?
+		beq.s	@src16
+		bset	#2,d5						; flag src is 32 bits/pixel
+@src16		
+		MOVE.L	([theGDevice]),A2			; get the current device (trash A2)
+		cmp		#16,DSTPIX+pixelType(A6)	;IS PIXELTYPE DIRECT?			%%%
+		beq		DirectSrc					;don't makeItable on direct device
+
+		MOVE.L	([GDPMap,A2]),A1			; get pixMap's handle			
+		MOVE.L	PMTable(A1),A0				; get the device colorTable's handle
+		MOVE.L	([A0],CTSeed),D1			; get the device colorTable's ctSeed
+		MOVE.L	([GDITable,A2]),A0			; get the Itable's master pointer
+		CMP.L	ITabSeed(A0),D1				; has the colortable changed?
+		BEQ.S	@1							; if equal, then the iTable is OK
+
+; if table is not up to date, build a new one
+
+		MOVE.L		PMTable(A1),-(SP)		; push theGDevice's color table handle	<BAL 26May89>
+		MOVE.L		GDITable(A2),-(SP)		; push theGDevice's current iTabHandle
+		MOVE.W		GDResPref(A2),-(SP)		; push the preferred iTableResolution
+		_MakeITable 						; make a new table
+		TST.W		QDErr					; was this sucessful?
+		BEQ.S		@noErr					; nope, so quit
+		ADDQ		#4,SP					; flush saved register
+		BRA			Done					;
+@noErr	MOVE.L		([theGDevice]),A2		; redereference in case it moved		<BAL 31Mar89>
+		MOVE.L		([GDITable,A2]),A0		; get the iTable's master pointer
+@1
+		ADD.w	#ITTable,A0					; point directly at data
+		MOVE.L	A0,stITabPtr(A6)			; save in stack frame
+		SUB.w	#ITTable,A0					; get the iTable's master pointer
+		MOVE.W	ITabRes(A0),stITabRes(A6)	; get the iTable resolution
+		MOVE.L	([GDPMap,A2]),A1			; get pixMap's handle			
+		MOVE.L	([PMTable,A1]),stCLUTPtr(A6) ; get the device colorTable's ptr
+
+	;	MOVE.L	gdSearchProc(A2),D0			; get the search proc head
+	;	bne.s	@search						; go use search routines
+
+
+;	Here we know that the dst is indexed and no search proc is present,
+;	so determine if the dst clut is all grays and/or we are dithering.
+
+;	the iTable's master pointer is in A0
+
+		MOVEQ	#1,D0						; prime the register again
+		MOVE	ITabRes(A0),D2				; get the inverse table resolution (and Bit-field width)
+		LSL.L	D2,D0						; calculate 2^^res
+		LSL.L	D2,D0						; square it
+		LSL.L	D2,D0						; cube it
+		LEA		ITTable(A0,D0.L),A1			; point us at the ITabInfo
+		tst.w	iTabFlags(a1)				; is this a grayITab?
+		bpl.s	@chkDither					; no, go see if dithering
+		add.w	#ITabInfo,a1				; point past header
+		move.l	a1,stITabInfo(a6)			; save for later
+		addq	#2,d5						; remember to use gray routines
+		
+		moveq	#40,d0
+		cmp.l	ITabSeed(a0),d0				; is dst the standard 8-bit gray clut?
+		beq.s	DirectSrc					; yes, ignore dithering for speeed!
+
+@chkDither		
+
+		tst.b	useDither(a6)				; should we dither?
+		beq.s	DirectSrc					; no, we're set
+		addq	#1,d5						; remember to use dither routines
+
+;
+;	Compute and allocate scanline buffer for dither error from previous scan	<BAL 29Aug88>
+;
+
+		MOVEQ	#0,D0						;CLEAR HIGH WORD OF D0
+		MOVE	NUMER+H(A6),D0				;GET WIDTH OF DST
+		lsl.l	d4,d0						;get bit width
+		add.l	#128,d0						;round to double long boundary
+		lsr.l	d4,d0						;get adjusted pixel width
+		btst	#1,d5						;is dst a grayscale clut?
+		bne.s	@gray						;only need 2 bytes per pixel for gray error <BAL 18Mar89>
+
+		move	d0,d1						;make a copy
+		ADD		D0,D0						;6 bytes (R.w,G.w,B.w) per pixel
+		add		d1,d0						;d0 is byte cnt/2 of ErrBuf
+@gray	LSR 	#1,D0						;AND DIV BY 2 FOR LONGS
+		
+		SUB.L	D0,STACKFREE(A6)			;IS THERE ENOUGH STACK?
+		bpl.s	@stkOK2
+		_stNoStack							;=>NOT ENOUGH STACK, QUIT
+@stkOK2	
+
+		CLR.L	-(SP)						;CLEAR ANOTHER LONG OF SLOP
+@ClearB	CLR.L	-(SP)						;ALLOCATE AND CLEAR A LONG
+		DBRA	D0,@ClearB					;LOOP ENTIRE BUFFER
+		MOVE.L	SP,ErrBUF(A6) 				;REMEMBER WHERE ErrBuf IS
+		clr.b	ErrDir(a6)					;init to carry error to right
+		
+		
+DirectSrc	
+		
+;	We 	have the scaleCase routine selector in D5 so compute address
+;	of routine and stuff it in scaleCase for later
+
+;   D5  =   zero[15-6]   dstShift[5:3]   src32[2]   gray[1]   dither[0]
+	
+		move.w	d5,d0						;copy selector
+		lsr.w	#3,d0						;determine table to use
+		lea 	(scDirTab1Ptr,ZA0,d0*4),A0	;POINT TO MODE TABLE
+		move.l	(a0),a0						;get table
+		and.w	#7,d5						;get position in this table
+		add.l	0(A0,D5*4),A0				;GET CASE JUMP ADDRESS
+		MOVE.L	A0,scaleCase(A6)			; put depth scaling routine in stack frame
+		BRA		gotScaleCase				;=>ALREADY GOT ROUTINE
+
+
+;----------------------------------------------------------------
+;
+; The src is indexed data (1,2,4,8 bits/pixel).
+; If seeds don't match or depths are different then make a scale table.
+;
+; Compute D5 as index into Indexed mode table based on
+;
+;   D5  =   zero[15-5]   dstShift[4:2]   srcShift[1:0]
+;
+;	D3=srcShift	D4=dstShift
+; 
+
+HasClut
+		move.w	d4,d5						;prime mode table index with dstShift
+		lsl.w	#2,d5						;make room for srcShift (0-3)
+		or.w	d3,d5						;compose desired index
+
+DOXLATE	MOVE	SRCPIX+PIXELSIZE(A6),D1		;GET SRC BITS PER PIXEL
+		MOVEQ	#1,D0						;# ENTRIES = 2^ PIXELSIZE
+		LSL		D1,D0						;CALC # ENTRIES
+		SUB.L	D0,STACKFREE(A6)			;IS THERE ENOUGH STACK?
+		bpl.s	@stkOK
+		_stNoStack							;=>NOT ENOUGH STACK, QUIT
+@stkOK	
+
+; IF THE DST IS AN OLD GRAFPORT AND IS ONE BIT PER PIXEL, THEN OVERRIDE THE 
+; SEARCH PROC FOR PROPER MAPPING
+
+		MOVEQ	#0,D7						;ASSUME NO PROC INSTALLED
+		CMP		#1,DSTPIX+PIXELSIZE(A6)		;ONE BIT PER PIXEL?
+		BNE.S	@PROCOK						;=>NO, PROC IS OK
+		MOVE.L	DSTBITS(A6),A1				;GET DST BITMAP
+		TST		ROWBYTES(A1)				;IS IT OLD?
+		BMI.S	@PROCOK						;=>NO, PROC IS OK
+		
+		MOVEQ	#1,D7						;FLAG PROC INSTALLED
+		PEA		ONEBITPROC					;POINT TO OUR PROC
+		_ADDSEARCH							;AND INSTALL IT
+		
+@PROCOK	MOVE.L	SAVEA5(A6),A5				;GET A5 FOR MAKESCALETBL	
+		MOVE.L	A4,-(SP)					;PUSH SRCPIX POINTER
+		move.w	XlateFlag(a6),-(sp)			;pass translation flags				<5JUNE92 SAH>
+		_MakeScaleTbl						;AND MAKE PIXEL TRANSLATION TABLE
+		
+	
+ScaleColorBit	EQU		3
+
+;------------------------------------------------------------------------------------------
+;
+; <C947> 08Nov87 BAL  begins here:
+;
+;------------------------------------------------------------------------------------------
+;
+;		MakeScaleTbl is called whenever the src and dst pixmaps have different
+;		pixel depths or different color table seeds.  MakeScaleTbl returns a
+;		pixel translation table used to map each src pixel to a dst pixel.
+;
+;		Here I check to see if the translation table returned by MakeScaleTbl is in
+;		actuality an identity mapping--in which case no mapping at all is required!
+;		In order for an identity mapping to result the src and dst pixMaps must be of the same
+;		depth.
+;
+;		If an identity mapping is detected, I must decide whether a stretch blit loop is
+;		really required (ie src rect ≠ dst rect or maskBits ≠ nil) or whether a much faster
+;		region blit or bit blit loop would suffice.
+;
+;------------------------------------------------------------------------------------------
+
+		move	SRCPIX+PIXELSIZE(A6),d1		;get src bits/pixel
+		cmp		DSTPIX+PIXELSIZE(A6),d1		;is it the same as dst bits/pixel?
+		bne.s	@ScaleOK					;no, have to do pixel scaling
+					
+											;inspect scale table for equality
+@chkTbl	MOVEQ	#1,D0						;# ENTRIES = 2^ PIXELSIZE
+		LSL		D1,D0						;CALC # ENTRIES in d0
+		move	d0,d1						;make a copy of long count
+		lsl		#2,d1						;get size of table
+		subq	#1,d0						;make counter zero based for dbra
+		move.l	sp,a0						;point to scale tbl
+		add		d1,a0						;point past end of table
+		
+@1		cmp.l	-(a0),d0					;compare with dst pixel value
+		dbne	d0,@1
+		bne.s	@ScaleOK					;tables are not equal so perform pixel scaling
+
+		Bclr	#ScaleColorBit,XlateFlag+1(a6)	; •••  We are not scaling and it's an idendity map,
+												; •••  so set this bit for the callee
+
+;if we installed a proc get rid of it before short circuiting stretch
+	
+		TST		D7							;DID WE INSTALL A PROC
+		BEQ.S	@NOPRC						;=>NO, DON'T NEED TO REMOVE
+		PEA		ONEBITPROC					;ELSE PUSH OUR PROC
+		_DELSEARCH							;AND DELETE IT
+		
+@NOPRC	LEA		DSTPIX(A6),A5				;RESTORE DSTPIX POINTER
+
+;----------------------------------------------------------------
+;
+;  CALC NUMER AND DENOM BASED ON DSTRECT AND SRCRECT.
+;  IF NUMER = DENOM AND SRC DEPTH = DST DEPTH THEN JUST CALL RGNBLT.
+;
+		MOVE.L	INVERTFLAG(A6),D7			;restore invert flag			<<C983>>
+		moveq	#0,d0						;tell stretch we didn't really want it.
+		bra		GoBack						;jump back and decide between bitblt and rgnblt
+											;don't really have to use stretch at all!
+
+;------------------------------------------------------------------------------------------
+;
+; <C947> 08Nov87 BAL  ends here.
+;
+;------------------------------------------------------------------------------------------
+@ScaleOK
+		MOVE.L	SP,ScaleTbl(A6)				;SAVE POINTER TO TRANSLATION TABLE
+		LEA		DSTPIX(A6),A5				;RESTORE DSTPIX POINTER
+		
+		TST		D7							;DID WE INSTALL A PROC
+		BEQ.S	IndexedSrc					;=>NO, DON'T NEED TO REMOVE
+		PEA		ONEBITPROC					;ELSE PUSH OUR PROC
+		_DELSEARCH							;AND DELETE IT
+		
+		
+IndexedSrc	
+;------------------------------------------------------------------------------------------
+;	We 	have the scaleCase routine selector in D5 so compute address
+;	of routine and stuff it in scaleCase for later
+;
+;   D5  =   zero[15-5]   dstShift[4:2]   srcShift[1:0]
+;
+	
+		move.w	d5,d0						;copy selector
+		lsr.w	#2,d0						;determine table to use
+		lea 	(scIndTab1Ptr,ZA0,d0*4),A0	;POINT TO MODE TABLE
+		move.l	(a0),a0						;get table
+		and.w	#3,d5						;get position in this table
+		add.l	0(A0,D5*4),A0				;GET CASE JUMP ADDRESS
+		MOVE.L	A0,scaleCase(A6)			; put depth scaling routine in stack frame
+
+gotScaleCase		
+;-----------------------------------------------------------------------
+;
+;  We've got our ScaleCase.
+;
+;
+;  ARE ALL THREE REGIONS RECTANGULAR ?
+;
+;  If the visRgn or the clipRgn is non-rectangular then call TrimRect
+;  to see if the intersection of the region and MinRect is rectangular,
+;  empty, or regional. 						<C951> 08Nov87 BAL
+;
+
+		MOVEQ	#10,D0						;GET SIZE OF RECT RGN
+		MOVE.L	RGNC(A6),A0 				;GET RGNHANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE IT
+		CMP 	RGNSIZE(A0),D0				;IS RGNC RECTANGULAR ?
+		BEQ		@chkVis	 					;=>yes, ignore it
+
+		MOVE.L	RGNC(A6),-(SP)				;PUSH maskRgn HANDLE					<C951>
+		PEA 	MINRECT(A6) 				;PUSH ADDR OF MINRECT
+		MOVE.W	#-1,-(SP)					;pass Trim = True
+		_TRIMRECT							;CALL TRIMRECT		
+		BLT 	DONE						;=>INTERSECTION EMPTY, QUIT & SHOW CURSOR
+		BGT.S	@chkVis						;=>non-rect
+
+		MOVE.L	SAVEA5(A6),A1				;Get global ptr						<BAL 26Sep88>
+		MOVE.L	GRAFGLOBALS(A1),A1			;point to QD globals				<BAL 26Sep88>
+		MOVE.L	WIDEOPEN(A1),RGNC(A6)		;replace maskRgn with wideOpen		<BAL 26Sep88>
+		
+
+@chkVis	MOVE.L	RGNB(A6),A0 				;GET RGNHANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE IT
+		CMP 	RGNSIZE(A0),D0 				;IS visRgn RECTANGULAR ?			<C951>
+		BEQ.S	@chkClip 					;=>yes, go check clipRgn			<C951>
+		
+		MOVE.L	RGNB(A6),-(SP)				;PUSH visRgn HANDLE					<C951>
+		PEA 	MINRECT(A6) 				;PUSH ADDR OF MINRECT
+		MOVE.W	#-1,-(SP)					;pass Trim = True
+		_TRIMRECT							;CALL TRIMRECT		
+		BLT 	DONE						;=>INTERSECTION EMPTY, QUIT & SHOW CURSOR
+		BGT		@chkClip					;=>non-rect
+		
+		MOVE.L	SAVEA5(A6),A1				;Get global ptr						<BAL 26Sep88>
+		MOVE.L	GRAFGLOBALS(A1),A1			;point to QD globals				<BAL 26Sep88>
+		MOVE.L	WIDEOPEN(A1),RGNB(A6)		;replace visRgn with wideOpen		<BAL 26Sep88>
+		
+@chkClip
+		MOVE.L	RGNA(A6),A0 				;GET RGNHANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE IT
+		CMP 	RGNSIZE(A0),D0 				;IS clipRgn RECTANGULAR ?
+		BEQ.S	@skipClip	 				;=>YES, ignore it
+
+		MOVE.L	RGNA(A6),-(SP)				;PUSH clipRgn HANDLE				<C951>
+		PEA 	MINRECT(A6) 				;PUSH ADDR OF MINRECT				<C951>
+		MOVE.W	#-1,-(SP)					;pass Trim = True
+		_TRIMRECT							;CALL TRIMRECT						<C951>
+		BLT 	DONE						;=>INTERSECTION EMPTY, QUIT & SHOW CURSOR
+		BGT.S	@skipClip					;=>non-rect
+		
+		MOVE.L	SAVEA5(A6),A1				;Get global ptr						<BAL 26Sep88>
+		MOVE.L	GRAFGLOBALS(A1),A1			;point to QD globals				<BAL 26Sep88>
+		MOVE.L	WIDEOPEN(A1),RGNA(A6)		;replace clipRgn with wideOpen		<BAL 26Sep88>
+		
+
+@skipClip
+;_________________________________________________________________________________________
+;
+;  Compute 	BUFSIZE = (# destination longs)-1
+;  Only need 1-Bit deep version since we are using run clipping only
+;
+
+		MOVE	MINRECT+LEFT(A6),D1 		;GET MINRECT LEFT
+		SUB 	BOUNDS+LEFT(A5),D1			;CONVERT TO GLOBAL COORDS
+		EXT.L	D1							;CLEAR HI WORD
+		LSL.L	D4,D1						;CONVERT DST PIXELS TO BITS
+		AND		#$FFE0,D1					;TRUNC TO MULT OF 32
+		ASR.L	D4,D1						;CONVERT DST BITS TO PIXELS
+		ADD 	BOUNDS+LEFT(A5),D1			;CONVERT BACK TO LOCAL
+		MOVE	D1,BUFLEFT(A6)				;SAVE AS BUFLEFT
+		MOVEQ	#0,D0						;CLEAR HIGH WORD OF D0
+		MOVE	MINRECT+RIGHT(A6),D0		;GET MINRECT RIGHT
+		SUB 	D1,D0						;CALC WIDTH IN DOTS
+		move.l	d0,d1						;save for expansion scanline buffer
+		
+		lsl.l	d4,d1						;convert to bits at dest depth
+		subq.l	#1,d1						;force downward round
+		LSR.l	#5,D1						;GET NUMBER OF LONGS IN SCANBUF - 1
+		MOVE	D1,BUFSIZE(A6)				;BUFSIZE = # LONGS -1 in destination
+		
+		LSR.l	#5,D0						;GET NUMBER OF 1-bit mask LONGS
+		ADDQ.l	#1,D0						;MAKE IT ONE BASED
+
+		SUB.L	D0,STACKFREE(A6)			;IS THERE ENOUGH STACK?
+		bpl.s	@stkOK
+		_stNoStack							;=>NOT ENOUGH STACK, QUIT
+@stkOK	
+
+;-----------------------------------------------------------------------
+;
+;  ALLOCATE AND CLEAR A SCANLINE BUFFER FOR THE COMPOSITE MASK.
+;
+		CLR.L	-(SP)						;TWO FOR SLOP
+		CLR.L	-(SP)						;ONE FOR SLOP
+CLRMASK CLR.L	-(SP)						;ALLOCATE AND CLEAR
+		DBRA	D0,CLRMASK					;LOOP TILL DONE
+		MOVE.L	SP,RGNBUFFER(A6) 			;REMEMBER WHERE RGNBUFFER IS
+
+
+;--------------------------------------------------------------------
+;
+;  ALLOCATE BUFFERS AND INIT STATE RECORDS FOR EACH NON-RECT REGION
+;  GET SEEK ROUTINE INTO SEEKMASK(A6)
+;  GET EXPAND ROUTINE INTO EXRTN(A6) FOR SEEK ROUTINE
+;  Clobbers: A0-A3, D0-D4
+;
+;		lea		NoStack,a0					;set up by stretch
+;		move.l	a0,goShow(a6)				;pass to getSeek		<BAL 21Mar89>
+
+		moveq	#-1,d0
+		move.l	d0,runBuf(a6)				;set non-zero for run clipping 	<1.5> BAL
+		MOVE.L	RGNC(A6),-(SP)				;PUSH USER RGNHANDLE (never TrimRect'ed)
+		MOVE.L	RGNB(A6),-(SP)				;PUSH VIS RGNHANDLE
+		MOVE.L	RGNA(A6),-(SP)				;PUSH CLIP RGNHANDLE
+		MOVE.L	#2,-(SP)					;PUSH HANDLE COUNT - 1
+		_GETSEEK							;GET EXPAND ROUTINE INTO EXRTN(A6)
+											;AND SEEK ROUTINE INTO SEEKMASK(A6)
+
+		tst.l	errBuf(a6)					;are we dithering?
+		beq.s	@noDither
+		_AllocRunBuf						;allocate a second run mask buffer
+		move.l	a0,runBuf2(a6)				;save for dither routines
+
+@noDither		
+;----------------------------------------------------------
+;
+;  Jump into 32 bit addressing mode for blitting.
+;
+
+		moveq	#true32b,d0					;switch to 32 bit addressing
+		_rSwapMMUMode			;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+		move.b	d0,MMUsave(a6)				;save previous state for later
+	
+
+;------------------------------------------------
+;
+;  SET UP SRCROW, SRCSCANS, SRCSHIFT, AND SRCADDR
+;
+		MOVE	SRCSHIFT(A6),D3				;GET SRCSHIFT
+		MOVE.L	srcRect(A6),A2				;POINT TO srcRect
+		MOVE.L	dstRect(A6),A3				;POINT TO dstRect
+		MOVE.L	SRCROW(A6),D2				;GET SRC ROWBYTES
+
+		MOVE	MINRECT+LEFT(A6),D1			;GET MINRECT LEFT
+		SUB 	LEFT(A3),D1					;SUBTRACT DSTRECT LEFT
+		ADD 	LEFT(A2),D1					;ADD SRCRECT LEFT
+		SUB 	BOUNDS+LEFT+SrcPix(A6),D1	;CONVERT TO SRC GLOBAL
+		EXT.L	D1							;MAKE LONG FOR BIG PIXELS
+		LSL.L	D3,D1						;CONVERT SRC PIXELS TO BITS
+		MOVEQ	#$1F,D5						;TREAT MOD 32 FOR SRCSHIFT
+		AND.L	D1,D5						;MAKE A COPY
+		MOVE.L	D5,SRCALIGN(A6)				;SAVE ALIGNMENT OF SOURCE
+		
+		MOVE	MINRECT+TOP(A6),D0			;GET MINRECT TOP
+		SUB 	TOP(A3),D0					;SUBTRACT DSTRECT TOP
+		ADD 	TOP(A2),D0					;ADD SRCRECT TOP
+		SUB 	BOUNDS+TOP+srcPix(A6),D0	;CONVERT TO SRC GLOBAL
+		MULS	D2,D0 						;MULT BY SRC ROWBYTES
+		ADD.L	BASEADDR+srcPix(A6),D0 		;GET START OF SRC BITMAP
+
+		SUB.L	D5,D1						;ADJUST SRCLEFT FOR SRCSHIFT
+		ASR.L	#3,D1						;CONVERT BITS TO BYTES
+		ADD.L	D1,D0						;ADD BYTES TO SRCADDR
+		MOVE.L	D0,SRCADDR(A6)				;SAVE AS SRCADDR
+
+;----------------------------------------------------
+;
+;  CALC STARTING DSTROW, DSTSHIFT, AND DSTADDR
+;
+		MOVE	DSTSHIFT(A6),D4				;GET DST SHIFT
+		MOVE.L	DSTROW(A6),D2				;GET DST ROWBYTES
+		
+		MOVE	MINRECT+LEFT(A6),D1			;GET DSTRECT LEFT
+		SUB 	BOUNDS+LEFT(A5),D1			;CONVERT TO GLOBAL COORDS
+		EXT.L	D1							;MAKE LONG FOR BIG PIXELS
+		LSL.L	D4,D1						;CONVERT DST PIXELS TO BITS
+		MOVEQ	#$1F,D6
+		AND.L	D1,D6						;TREAT MOD 32 FOR SHIFTCNT
+		NEG.L	D6							;AND NEGATE IT
+		MOVE.L	D6,DSTALIGN(A6)				;SAVE FOR LATER
+
+		MOVE	MINRECT+TOP(A6),D0			;GET MINRECT TOP
+		MOVE	D0,VERT(A6)					;INIT CURRENT VERTICAL
+		SUB 	BOUNDS+TOP(A5),D0			;CONVERT TO GLOBAL COORDS
+		MULS	D2,D0 						;MULT BY DST ROWBYTES			BAL 02Dec88
+		ADD.L	BASEADDR(A5),D0 			;GET START OF DST BITMAP
+
+		ASR.L	#5,D1						;CONVERT BITS TO LONGS
+		LSL.L	#2,D1						;AND BACK TO BYTES (MOD 4)
+		ADD.L	D1,D0						;ADD BYTES TO DSTADDR
+		MOVE.L	D0,DSTADDR(A6)				;SAVE AS DSTADDR
+
+		
+;-------------------------------------------------------
+;
+;  MAKE REGION BUFFER CURRENT FOR THIS VERTICAL.
+;  THEN SET UP AND DRAW CURRENT SCANLINE.
+;
+		MOVE.L	DSTADDR(A6),A5				;INIT DSTPTR
+		MOVE.L	SRCADDR(A6),A4				;reload SRCPTR
+		move.w	#4,RUNBUMP(a6)				;set transfer direction for seekmask
+		MOVE	SRCPIX+PIXELSIZE(A6),D4		;GET SOURCE PIXEL SIZE
+		MOVE	DSTPIX+PIXELSIZE(A6),D5		;GET DST PIXEL SIZE
+
+NXTMASK
+		move	MinRect+bottom(a6),d2		;get bottom vertical position
+		sub		vert(a6),d2					;compute scans remaining, prime d2
+		ble.s	Done
+		move	d2,d3						;save scans remaining
+		JSR 	([SEEKMASK,A6])				;MAKE MASK BUFFER CURRENT
+		move	d2,d1						;get scan count in d1
+		cmp		d3,d1						;scan count > scans remaining?
+		ble.s	@go							;no, call the blit loop
+		move	d3,d1						;yes, pin to scans remaining
+@go		JSR 	([RUNRTN,A6])				;MAKE RUN BUFFER CURRENT
+		move.l	scaleBltA3(a6),A3			;reload A3 for scan loops
+		MOVE.L	ScaleCase(A6),A2 			;GET MODE CASE JUMP
+		JMP 	(A2)						;TAKE MODE JUMP
+
+
+
+;-----------------------------------------------------------------
+;
+;  ENTIRE STRETCHBITS COMPLETE. RESTORE REGS AND STACK AND GO HOME.
+;
+Done	MoveQ	#1,d0						;return success
+GoBack	MOVE.L	SAVESTK2(A6),SP				;RESTORE STACK POINTER
+		RTS									;AND RETURN TO STRETCHBITS
+
+
+;-----------------------------------------------------------------
+;
+;  Scaling routines.
+;
+
+
+;-------------------------------------------------------
+;
+;  scale and clip indexed source to 32-bit dst
+;	<SAH 060292>
+;		brought in Sean Callahan's new fast loop for 1
+;		to 32
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert/scratch
+;		a1 = tmpmask		d1 = scanCount
+;		a2 = tmpdst			d2 = scratch
+;		a3 = scaleTbl		d3 = run cnt
+;		a4 = srcPtr/patPtr	d4 = src pixel size
+;		a5 = dstPtr			d5 = scratch
+;		a6 = locals			d6 = bit offset in src
+;		a7 = 				d7 = src shift
+;-------------------------------------------------------
+scNonBWto32
+		move	srcShift(a6),d7		;set this up once
+		move.l	scaleTbl(a6),a3		;set this up once
+
+		lea		@first,a0			;go here from now on
+		move.l	A3,scaleBltA3(a6)	;save for reload after seekMask
+		move.l	a0,ScaleCase(a6)	;remember for later
+		bra.s	@first				;go to it
+
+@nxtScan
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a4	;BUMP src TO NEXT ROW
+		addq.w	#1,vert(a6)		;BUMP DOWN A SCAN LINE
+		subq	#1,d1
+		ble.s	NXTMASK
+
+@first	move.l	srcAlign(a6),d6	;start with initial src offset
+		move.l	a4,a0			;init tmp src ptr
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	runBuf(a6),a1	;point to run encoded mask buffer
+		
+@inst	move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		lsr.w	#2,d3			;make byte skip into pixel skip
+		lsl.w	d7,d3			;make into bit skip
+		add.w	d3,d6			;bump src offset
+		move	d6,d3			;make a copy
+		lsr.w	#5,d3			;make into long cnt
+		lea		(a0,d3.w*4),a0	;bump src ptr
+		swap	d3				;get mask/blit cnt and check done flag
+
+@blit	MOVE.L	(A0)+,D5		;GET FIRST LONG OF SRC
+@NXPXL	BFEXTU	D5{D6:D4},D0	;GET A PIXEL OF SRC
+		move.l	0(A3,D0*4),(a2)+ ;TRANSLATE IT
+		ADD		D4,D6			;ADVANCE TO NEXT SRC PIXEL
+		AND		#$1f,D6			;TIME FOR NEXT SRC LONG?
+		DBEQ	D3,@NXPXL		;LOOP ALL PIXELS THIS LONG
+		DBNE	D3,@blit		;LOOP ALL PIXELS THIS RUN
+		beq.s 	@inst 			;LOOP BACK FOR more runs
+		subq.w	#4,a0			;point back to remaining pixels
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+		
+
+scIndexedto32
+		MOVE.L	scaleTbl(A6),A3		;set this up once
+;	btst	#1,$17b
+;	bne.s	scNonBWto32
+		CMP.W	#1,D4				;is src one bit?
+		BNE.S	scNonBWto32
+		TST.L	4(A3)				;is second color black?
+		BNE.S	scNonBWto32
+		MOVE.L	#$00FFFFFF,D0
+		CMP.L	(A3),D0				;is first color white?
+		BNE.S	scNonBWto32
+		
+		MOVE.L	D0,D4				;move white mask to better register
+		LEA		@first,A0			;go here from now on
+		MOVE.L	A0,ScaleCase(A6)	;remember for later
+		BRA.S	@first				;go to it
+		
+
+@next	ADD.L	dstRow(A6),A5	;BUMP DST TO NEXT ROW
+		ADD.L	srcRow(A6),A4	;BUMP src TO NEXT ROW
+		ADDQ.W	#1,vert(A6)		;BUMP DOWN A SCAN LINE
+		SUBQ	#1,D1
+		BLE.S	NXTMASK
+
+@first	MOVE.L	srcAlign(A6),D6	;start with initial src offset
+		MOVE.L	A4,A0			;init tmp src ptr
+		MOVE.L	A5,A2			;init tmp dst ptr
+		MOVE.L	runBuf(A6),A1	;point to run encoded mask buffer
+
+@inst	MOVE.L	(A1)+,D3		;pick up next instruction long
+		BMI.S	@next			;if high bit set then done with scan
+		ADD.W	D3,A2			;bump destptr by skip amount
+		LSR.W	#2,D3			;byte skip to pixel skip
+		ADD.W	D6,D3			;add current skip to bit skip
+		MOVEQ	#$0F,D6			;get mod 16 mask
+		AND.W	D3,D6			;get shift mod 16
+		LSR.W	#4,D3			;get short skip
+		ADD.W	D3,A0			;bump src
+		ADD.W	D3,A0
+		SWAP	D3				;get mask/blit cnt and check done flag
+
+@blit	MOVEQ	#$0F,D2
+		ADDQ.W	#1,D3
+		AND.W	D3,D2
+		LSR.W	#4,D3
+		SUBQ.W	#1,D3
+		BMI.S	@no16
+		
+@reblit	BFEXTS	(A0){D6:16},D0
+		ADDQ.W	#2,A0
+		BEQ.S	@white
+		NOT.L	D0
+		BEQ.S	@black
+
+		MOVEQ	#3,D5
+@pixel	ADD.W	D0,D0
+		SUBX.L	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		DBRA	D5,@pixel
+		DBRA	D3,@reblit
+		SUBQ.W	#1,D2
+		BMI.S	@inst
+		BRA.S	@last15
+
+@white	MOVE.L	D4,D0
+@black	MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		DBRA	D3,@reblit
+
+@no16	SUBQ.W	#1,D2
+		BMI.S	@inst
+@last15	BFEXTS	(A0){D6:16},D0
+		NOT.W	D0
+		ADD.W	D2,D6
+		ADDQ.W	#1,D6
+@sloop	ADD.W	D0,D0
+		SUBX.L	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		DBRA	D2,@sloop
+		BRA.S	@inst
+		
+
+
+;-------------------------------------------------------
+;
+;  scale and clip 32-bit src to 8-bit color dst
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert/scratch
+;		a1 = tmpmask		d1 = scanCount/pixel cnt
+;		a2 = tmpdst			d2 = scratch
+;		a3 = ITable			d3 = run cnt
+;		a4 = srcPtr			d4 = scratch
+;		a5 = dstPtr			d5 = src pixel
+;		a6 = locals			d6 = itabres
+;		a7 = 				d7 = 8-itabres
+;-------------------------------------------------------
+		
+sc32to8
+		;One time initializations here
+
+		MOVE.W	stITabRes(A6),d6	; get the iTable resolution
+		moveq	#8,d7				; get cmpSize
+		sub.w	d6,d7				; get cmpSize-itabres
+		move.l  dstAlign(a6),d0		; -(# of dst bits to skip)
+		asr.l	#1,d0				; compute - (# of src bytes to back up)
+		add.l	d0,a4				; back off src ptr to beginning of dst long
+		MOVE.L	stITabPtr(A6),A3	; get ptr to ITable
+		
+		lea		@first,a0			;go here from now on
+		move.l	A3,scaleBltA3(a6)	;save for reload after seekMask
+		move.l	a0,ScaleCase(a6)	;remember for later
+		bra.s	@first				;go to it
+
+@nxtScan
+		move.l	dstRow(a6),d2	;get dst rowbytes
+		add.l	d2,a5			;BUMP DST TO NEXT ROW
+		move.l	srcRow(a6),d2	;get src rowbytes
+		add.l	d2,a4			;BUMP src TO NEXT ROW
+		addq.w	#1,vert(a6)		;BUMP DOWN A SCAN LINE
+		swap	d1				;get back scan count
+		subq	#1,d1
+		ble.s	NXTMASK
+@first		
+		move.l	a4,a0			;init tmp src ptr
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	runBuf(a6),a1	;point to run encoded mask buffer
+		swap	d1				;save scan count in high byte
+		
+@inst	move.w	#3,d1			;zero based dst pixels per source pixel
+		move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		lea		(a0,d3.w*4),a0	;make dst byte skip into src byte skip
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+
+		
+
+@mask	MOVE.L	(A0)+,D5		;GET A LONG OF SRC
+		bra.s	@first2			;fill (cache) first
+
+@nxtDs2	move.w	#3,d1			;dst pixels per source pixel (zero based)
+@nxtSr2	MOVE.L	(A0)+,D5		;GET A LONG OF SRC
+		cmp.l	d5,d4			;same as last time (cache) ?
+		beq.s	@again2			;yes, use (cache)
+
+@first2	moveq	#0,d2	;0,2,3	;start fresh
+		move.w	d5,d4	;0,2,3	;save blue/green for later
+		swap	d5		;1,4,4	;get red in low byte
+		move.b	d5,d2	;0,2,3
+		lsl.l	d6,d2	;3,6,6	;save itabres bits of red in high bytes
+		lsr.l	#8,d4	;1,4,4	;chuck blue and get green cmp
+		move.b	d4,d2	;0,2,3	;get green
+		lsl.l	d6,d2	;3,6,6	;save itabres bits of green in high bytes
+		swap	d5		;1,4,4	;get blue in low byte
+		move.b	d5,d2	;0,2,3	;get blue
+		lsr.l	d7,d2	;3,6,6	;shift back by cmpsize-itabres
+						;12,40,45
+		move.l	d5,d4			;save last src (for cache)
+		move.b	0(A3,D2),d2 	;get index in d2.b (for cache)
+@again2	lsl.l	#8,d0			;shift other pixels up to make room
+		move.b	d2,d0			;add in this pixel
+		dbra	d1,@nxtSr2		;for each pixel in dst long
+
+		MOVE.L	(A1)+,D5		;GET MASK
+		AND.L	D5,D0			;MASK src DATA
+		NOT.L	D5				;MAKE NOTMASK
+		AND.L	(A2),D5 		;GET DST DATA
+		OR.L	D5,D0			;MERGE WITH PAT DATA
+		MOVE.L	D0,(A2)+		;PUT RESULT TO DST
+
+		DBRA	D3,@nxtDs2		;LOOP ALL PIXELS THIS RUN
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+
+@blit	MOVE.L	(A0)+,D5		;GET A LONG OF SRC
+		bra.s	@first1			;fill (cache) first
+
+@nxtDst	move.w	#3,d1			;dst pixels per source pixel (zero based)
+@nxtSrc	MOVE.L	(A0)+,D5		;GET A LONG OF SRC
+		cmp.l	d5,d4			;same as last time (cache) ?
+		beq.s	@again			;yes, use (cache)
+
+@first1	moveq	#0,d2	;0,2,3	;start fresh
+		move.w	d5,d4	;0,2,3	;save blue/green for later
+		swap	d5		;1,4,4	;get red in low byte
+		move.b	d5,d2	;0,2,3
+		lsl.l	d6,d2	;3,6,6	;save itabres bits of red in high bytes
+		lsr.l	#8,d4	;1,4,4	;chuck blue and get green cmp
+		move.b	d4,d2	;0,2,3	;get green
+		lsl.l	d6,d2	;3,6,6	;save itabres bits of green in high bytes
+		swap	d5		;1,4,4	;get blue in low byte
+		move.b	d5,d2	;0,2,3	;get blue
+		lsr.l	d7,d2	;3,6,6	;shift back by cmpsize-itabres
+						;12,40,45
+		move.l	d5,d4			;save last src (for cache)
+		move.b	0(A3,D2),d2 	;get index in d2.b (for cache)
+@again	lsl.l	#8,d0			;shift other pixels up to make room
+		move.b	d2,d0			;add in this pixel
+		dbra	d1,@nxtSrc		;for each pixel in dst long
+		move.l	d0,(a2)+		;write out 4 pixels
+
+		DBRA	D3,@nxtDst		;LOOP ALL PIXELS THIS RUN
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+		
+
+
+;-------------------------------------------------------
+;
+;  scale and clip 32-bit src to 8-bit gray dst
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert/scratch
+;		a1 = tmpmask		d1 = scanCount/pixel cnt
+;		a2 = tmpdst			d2 = mapping cache
+;		a3 = luma table		d3 = run cnt
+;		a4 = srcPtr			d4 = green cmp (byte)
+;		a5 = dstPtr			d5 = src RGB / luminance
+;		a6 = locals			d6 = blue cmp (byte)
+;		a7 = 				d7 = red cmp (byte)
+;-------------------------------------------------------
+		
+sc32to8gray
+		;One time initializations here
+		moveq	#0,d4				;clear out high end for luminance calculation
+		move.l	d4,d6				;clear out high end for luminance calculation
+		move.l	d4,d7				;clear out high end for luminance calculation
+		move.l  dstAlign(a6),d0		; -(# of dst bits to skip)
+		asr.l	#1,d0				; compute - (# of src bytes to back up)
+		add.l	d0,a4				; back off src ptr to beginning of dst long
+		MOVE.L	stITabInfo(A6),A3	;get pointer to the luminance table (past header)
+		
+		lea		@first,a0			;go here from now on
+		move.l	A3,scaleBltA3(a6)	;save for reload after seekMask
+		move.l	a0,ScaleCase(a6)	;remember for later
+		bra.s	@first				;go to it
+
+@nxtScan
+		move.l	dstRow(a6),d2	;get dst rowbytes
+		add.l	d2,a5			;BUMP DST TO NEXT ROW
+		move.l	srcRow(a6),d2	;get src rowbytes
+		add.l	d2,a4			;BUMP src TO NEXT ROW
+		addq.w	#1,vert(a6)		;BUMP DOWN A SCAN LINE
+		swap	d1				;get back scan count
+		subq	#1,d1
+		ble.s	NXTMASK
+@first		
+		move.l	a4,a0			;init tmp src ptr
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	runBuf(a6),a1	;point to run encoded mask buffer
+		swap	d1				;save scan count in high byte
+		
+@inst	move.w	#3,d1			;zero based dst pixels per source pixel
+		move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		lsl.w	#2,d3			;make dst byte skip src byte skip
+		add.w	d3,a0			;bump src ptr
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+
+		
+
+@mask	MOVE.L	(A0)+,D5		;GET A LONG OF SRC
+		bra.s	@first2			;fill (cache) first
+
+@nxtDs2	move.w	#3,d1			;dst pixels per source pixel (zero based)
+@nxtSr2	MOVE.L	(A0)+,D5		;GET A LONG OF SRC
+		cmp.l	d5,d2			;same as last time (cache) ?
+		beq.s	@again2			;yes, use (cache)
+
+@first2
+		move.l	d5,d2			; copy last src long for (cache)
+		move.b	d5,d6			; get the blue component
+		lsr.l	#8,d5			; get red,green in low word
+		move.b	d5,d4			; get the green component
+		lsr.w	#8,d5			; get red in low byte
+		move.b	d5,d7			; get the red component
+		
+; Compute Luminance = ((((((r+g)/2)+b)/2+r)/2)+g)/2
+
+		add.w	d4,d5
+		add.w	d6,d5
+		add.w	d6,d5
+		lsr.w	#2,d5
+		add.w	d7,d5
+		add.w	d4,d5
+		add.w	d4,d5
+		lsr.w	#2,d5
+		move.b	(a3,d5),d7		; pick up index for this luminance (cache)
+
+@again2	lsl.l	#8,d0			;shift other pixels up to make room
+		move.b	d7,d0			;add in this pixel
+		dbra	d1,@nxtSr2		;for each pixel in dst long
+
+		MOVE.L	(A1)+,D5		;GET MASK
+		AND.L	D5,D0			;MASK src DATA
+		NOT.L	D5				;MAKE NOTMASK
+		AND.L	(A2),D5 		;GET DST DATA
+		OR.L	D5,D0			;MERGE WITH PAT DATA
+		MOVE.L	D0,(A2)+		;PUT RESULT TO DST
+
+		DBRA	D3,@nxtDs2		;LOOP ALL PIXELS THIS RUN
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+
+@blit	MOVE.L	(A0)+,D5		;GET A LONG OF SRC
+		bra.s	@first1			;fill (cache) first
+
+@nxtDst	move.w	#3,d1			;dst pixels per source pixel (zero based)
+@nxtSrc	MOVE.L	(A0)+,D5		;GET A LONG OF SRC
+		cmp.l	d5,d2			;same as last time (cache) ?
+		beq.s	@again			;yes, use (cache)
+
+@first1
+		move.l	d5,d2			; copy last src long for (cache)
+		move.b	d5,d6			; get the blue component
+		lsr.l	#8,d5			; get red,green in low word
+		move.b	d5,d4			; get the green component
+		lsr.w	#8,d5			; get red in low byte
+		move.b	d5,d7			; get the red component
+		
+; Compute Luminance = ((((((r+g)/2)+b)/2+r)/2)+g)/2
+
+		add.w	d4,d5
+		add.w	d6,d5
+		add.w	d6,d5
+		lsr.w	#2,d5
+		add.w	d7,d5
+		add.w	d4,d5
+		add.w	d4,d5
+		lsr.w	#2,d5
+		move.b	(a3,d5),d7		; pick up index for this luminance (cache)
+
+@again	lsl.l	#8,d0			;shift other pixels up to make room
+		move.b	d7,d0			;add in this pixel
+		dbra	d1,@nxtSrc		;for each pixel in dst long
+		move.l	d0,(a2)+		;write out 4 pixels
+
+		DBRA	D3,@nxtDst		;LOOP ALL PIXELS THIS RUN
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+		
+
+;-------------------------------------------------------
+;
+;  seek loop for serpentine dithering with run masks
+;
+;-------------------------------------------------------
+
+; from QDciPatchROM.a, although some old code appears to have been left 	<sm 6/9/92>stb
+; in the false portion of an if…else…endif.									<sm 6/9/92>stb
+
+NXTMASKDither
+		move	MinRect+bottom(a6),d2		;get bottom vertical position
+		sub		vert(a6),d2					;compute scans remaining, prime d2
+		ble		Done
+		move	d2,d3						;save scans remaining
+		JSR 	([SEEKMASK,A6])				;MAKE MASK BUFFER CURRENT
+		move	d2,d1						;get scan count in d1
+		cmp		d3,d1						;scan count > scans remaining?
+		ble.s	@go							;no, call the blit loop
+		move	d3,d1						;yes, pin to scans remaining
+@go		
+		move.l	runBuf(a6),d3				;save original
+		move.w	#-4,RUNBUMP(a6)				;set transfer direction for seekmask
+		move.l	runBuf2(a6),runBuf(a6)		;point at alternate
+		JSR 	([RUNRTN,A6])				;MAKE BAKWRDS RUN BUFFER CURRENT
+		move.l	d3,runBuf(a6)				;restore original
+		move.w	#4,RUNBUMP(a6)				;set transfer direction for seekmask
+		JSR 	([RUNRTN,A6])				;MAKE FORWRDS RUN BUFFER CURRENT
+		move.l	scaleBltA3(a6),A3			;reload A3 for scan loops
+		MOVE.L	ScaleCase(A6),A2 			;GET MODE CASE JUMP
+		JMP 	(A2)						;TAKE MODE JUMP
+
+;-------------------------------------------------------
+;
+;  scale, dither and clip 32-bit src to 8-bit dst
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = src RGB pixel
+;		a1 = tmpmask		d1 = pixel cnt/scratch
+;		a2 = tmpdst			d2 = output pixels
+;		a3 = ITable			d3 = run cnt
+;		a4 = errBuffer		d4 = scratch
+;		a5 = CLUT			d5 = red error
+;		a6 = locals			d6 = grn error
+;		a7^= scancount		d7 = blu error (itabres)
+;-------------------------------------------------------
+		
+sc32to8Dither
+		;One time initializations here
+		
+		subq	#4,sp				;space for scancount
+		move.l  dstAlign(a6),d0		; -(# of dst bits to skip)
+		asr.l	#1,d0				; compute - (# of src bytes to back up)
+		add.l	d0,a4				; back off src ptr to beginning of dst long
+		move.l	a4,srcAddr(a6)		; save for later
+		MOVE.L	stITabPtr(A6),A3	; get ptr to ITable
+		MOVE.L	stCLUTPtr(A6),A5	; get ptr to CLUT
+		moveq	#0,d4				; clear out high word always
+		
+		lea		@first,a0			;go here from now on
+		move.l	A3,scaleBltA3(a6)	;save for reload after seekMask
+		move.l	a0,ScaleCase(a6)	;remember for later
+		bra.s	NXTMASKDither		;go to it
+		
+	align 16
+	
+@nxtScan
+		move.l	dstRow(a6),d2		;get dst rowbytes
+		add.l	d2,dstAddr(a6)		;BUMP DST TO NEXT ROW
+		move.l	srcRow(a6),d2		;get src rowbytes
+		add.l	d2,srcAddr(a6)		;BUMP src TO NEXT ROW
+		addq.w	#1,vert(a6)			;BUMP DOWN A SCAN LINE
+		subq	#1,(sp)				;decrement scan count
+		move	(sp),d1				;get back scan count
+		ble.s	NXTMASKDither
+@first		
+		move.l	srcAddr(a6),a0		;init tmp src ptr
+		move.l	dstAddr(a6),a2		;init tmp dst ptr
+		move.l	runBuf(a6),a1		;point to run encoded mask buffer
+		move	d1,(sp)				;save scan count on stack
+		MOVE.L	ErrBuf(a6),A4		;get ptr to ErrBuf
+		MOVEQ	#0,D5				;init redAccum
+		MOVE.L	D5,D6				;init grnAccum
+		MOVE.L	D5,D7				;init bluAccum
+		MOVE.W	stITabRes(A6),d7	;get the iTable resolution
+		swap	d7					;keep in high word
+		not.b	errDir(a6)			;check and toggle diffusion direction
+		bne.s	@inst				;all ok if going left to right
+		
+		move.l	runBuf2(a6),a1		;get right to left run buffer
+		
+@inst	move.l	(a1)+,d3			;pick up next instruction long
+		bmi.s	@nxtScan			;if high bit set then done with scan
+		add.w	d3,a2				;bump destptr by skip amount
+		add.w	d3,d3				;bump errbuf by 1x
+		add.w	d3,a4				;bump errbuf by 2x
+		add.w	d3,d3				;make dst byte skip src byte skip
+		add.w	d3,a0				;bump src ptr by 4x
+		add.w	d3,a4				;bump errbuf by 6x
+		swap	d3					;get mask/blit
+		lsl.l	#32-runMaskBit,d3	;shift mask flag into high word
+		lsr.w	#32-runMaskBit,d3	;clear flags from low word
+		tst.b	errDir(a6)			;check diffusion direction
+		bne.s	@forward			;src is OK for forward travel
+
+
+@backward 
+		bsr.s	ditherCore8
+		
+		sub.w	#48,a4				;bump back by 4+4 error pixels
+		sub.w	#32,a0				;bump back by 4+4 src pixels
+
+		btst	#16,d3 				;check mask flag
+		beq.s	@bblit				;no mask
+		
+		MOVE.L	(A1)+,D0			;GET MASK
+		AND.L	D0,D2				;MASK src DATA
+		NOT.L	D0					;MAKE NOTMASK
+		AND.L	(A2),D0 			;GET DST DATA
+		OR.L	D0,D2				;MERGE WITH PAT DATA
+@bblit	MOVE.L	D2,(A2)				;PUT RESULT TO DST
+		subq	#4,a2				;bump the dst
+		DBRA	D3,@backward		;LOOP ALL PIXELS THIS RUN
+		BRA.s 	@inst 				;LOOP BACK FOR more runs
+		
+
+@forward 
+		bsr.s	ditherCore8
+
+		btst	#16,d3 				;check mask flag
+		beq.s	@fblit				;no mask
+		
+		MOVE.L	(A1)+,D0			;GET MASK
+		AND.L	D0,D2				;MASK src DATA
+		NOT.L	D0					;MAKE NOTMASK
+		AND.L	(A2),D0 			;GET DST DATA
+		OR.L	D0,D2				;MERGE WITH PAT DATA
+@fblit	MOVE.L	D2,(A2)+			;PUT RESULT TO DST
+		DBRA	D3,@forward			;LOOP ALL PIXELS THIS RUN
+		BRA.s 	@inst 				;LOOP BACK FOR more runs
+		
+		
+	if 1 then
+			
+DitherCore8
+		moveq	#3,d1						;4 per dst long; clear high 3 bytes
+@nxtSrc
+		swap	d1							;save pixel cnt in high word
+		move.l	(a0)+,d0					;fetch next src pixel
+		
+		move.b	d0,d4						;get blue as a word
+		add.w	4(a4),D7					;consume blu error from above
+		add.w	d4,d7						;accumulate blue
+		spl		d4							;get pin value if neg
+		cmp.w	d4,d7						;is it too big
+		sgt		d1							;get pin value if too big
+		and		d4,d7						;mask to zero or a byte
+		or		d1,d7						;conditionally pin to ff
+		lsr.w	#8,d0						;toss blue
+		
+		add.w	2(a4),D6					;consume grn error from above
+		add.w	d0,d6						;accumulate green
+		spl		d4							;get pin value if neg
+		cmp.w	d4,d6						;is it too big
+		sgt		d1							;get pin value if too big
+		and		d4,d6						;mask to zero or a byte
+		or		d1,d6						;conditionally pin to ff
+		swap	d0							;toss green
+		
+		move.b	d0,d4						;get red as a word
+		add.w	(a4),D5						;consume red error from above
+		add.w	d4,d5						;accumulate red
+		spl		d4							;get pin value if neg
+		cmp.w	d4,d5						;is it too big
+		sgt		d1							;get pin value if too big
+		and		d4,d5						;mask to zero or a byte
+		or		d1,d5						;conditionally pin to ff
+		
+		move.l	d7,d0						;get the iTable resolution in high word
+		swap	d0							;move it to low word
+		move.b	d5,d4						;get desired red value
+		lsl.l	d0,d4						;move it up
+		move.b	d6,d4						;get desired grn value
+		lsl.l	d0,d4						;move it up
+		move.b	d7,d4						;get desired blu value
+		neg		d0
+		addq	#8,d0
+		lsr.l	d0,d4						;throw out the insignificant bits
+		
+		move.b	(a3,d4.L),d1				;get the index in D1.w (hi byte still clear)
+		lsl.l	#8,d2						;shift other pixels up to make room
+		move.b	d1,d2						;save this pixel
+		move.l	CTTable+rgb+red(a5,d1.w*8),d0	;get RRRRGGGG
+		
+		moveq	#0,d4						;clear out high end
+		lsr.l	#8,d0						;get high byte of green
+		move.b	d0,d4						;make it a word
+		sub.w	d4,d6						;compute green error
+
+		swap	d0							;get high byte of red
+		sub.w	d0,d5						;compute red error
+
+		move.b	CTTable+rgb+blue(a5,d1.w*8),d4	;get BBBB
+		sub.w	d4,d7						;compute blue error
+		
+		MOVEQ	#0,D4						;GET A HANDY KONSTANT
+		asr.w	#1,d5						;get half red error
+		move.w	d5,(a4)+					;save 1/2 for next scanline and carry 1/2 to right
+		ADDX.W	D4,D5						;KEEP NEGATIVE NUMBERS FROM DRIFTING AWAY FROM ZERO
+		asr.w	#1,d6						;get half grn error
+		move.w	d6,(a4)+					;save 1/2 for next scanline and carry 1/2 to right
+		ADDX.W	D4,D6						;KEEP NEGATIVE NUMBERS FROM DRIFTING AWAY FROM ZERO
+		asr.w	#1,d7						;get half blu error
+		move.w	d7,(a4)+					;save 1/2 for next scanline and carry 1/2 to right
+		ADDX.W	D4,D7						;KEEP NEGATIVE NUMBERS FROM DRIFTING AWAY FROM ZERO
+		
+		swap	d1							;get back pixel cnt
+		dbra	d1,@nxtSrc					;do for each src pixel in this dst long
+		rts
+
+	else
+			
+DitherCore8
+		moveq	#3,d1						;4 per dst long; clear high 3 bytes
+@nxtSrc
+		swap	d1							;save pixel cnt in high word
+		move.l	(a0)+,d0					;fetch next src pixel
+		moveq	#0,d4						;clear out temp
+		
+		move.b	d0,d4						;get blue as a word
+		add.w	4(a4),D7					;consume blu error from above
+		add.w	d4,d7						;accumulate blue
+		spl		d4							;get pin value if neg
+		cmp.w	#$ff,d7						;is it too big
+		sgt		d1							;get pin value if too big
+		and		d4,d7						;mask to zero or a byte
+		or		d1,d7						;conditionally pin to ff
+		lsr.l	#8,d0						;toss blue
+		
+		move.b	d0,d4						;get green as a word
+		add.w	2(a4),D6					;consume grn error from above
+		add.w	d4,d6						;accumulate green
+		spl		d4							;get pin value if neg
+		cmp.w	#$ff,d6						;is it too big
+		sgt		d1							;get pin value if too big
+		and		d4,d6						;mask to zero or a byte
+		or		d1,d6						;conditionally pin to ff
+		lsr.l	#8,d0						;toss green
+		
+		move.b	d0,d4						;get red as a word
+		add.w	(a4),D5						;consume red error from above
+		add.w	d4,d5						;accumulate red
+		spl		d4							;get pin value if neg
+		cmp.w	#$ff,d5						;is it too big
+		sgt		d1							;get pin value if too big
+		and		d4,d5						;mask to zero or a byte
+		or		d1,d5						;conditionally pin to ff
+		
+	;	move.w	stITabRes(A6),D0			;get the iTable resolution
+		move.b	d5,d4						;get desired red value
+		lsl.l	#4,d4						;move it up
+		move.b	d6,d4						;get desired grn value
+		lsl.l	#4,d4						;move it up
+		move.b	d7,d4						;get desired blu value
+	;	neg		d0
+	;	addq	#8,d0
+		lsr.l	#4,d4						;throw out the insignificant bits
+		
+		move.b	(a3,d4.L),d1				;get the index in D1.w (hi byte still clear)
+		lsl.l	#8,d2						;shift other pixels up to make room
+		move.b	d1,d2						;save this pixel
+		move.l	CTTable+rgb+red(a5,d1.w*8),d0	;get RRRRGGGG
+		
+		moveq	#0,d4						;clear out high end
+		lsr.l	#8,d0						;get high byte of green
+		move.b	d0,d4						;make it a word
+		sub.w	d4,d6						;compute green error
+
+		swap	d0							;get high byte of red
+		move.b	d0,d4						;make it a word
+		sub.w	d4,d5						;compute red error
+
+		move.w	CTTable+rgb+blue(a5,d1.w*8),d0	;get BBBB
+		lsr.w	#8,d0						;get high byte of blue
+		move.b	d0,d4						;make it a word
+		sub.w	d4,d7						;compute blue error
+		
+		asr.w	#1,d5						;get half red error
+		move.w	d5,(a4)+					;save 1/2 for next scanline and carry 1/2 to right
+		asr.w	#1,d6						;get half grn error
+		move.w	d6,(a4)+					;save 1/2 for next scanline and carry 1/2 to right
+		asr.w	#1,d7						;get half blu error
+		move.w	d7,(a4)+					;save 1/2 for next scanline and carry 1/2 to right
+		
+		swap	d1							;get back pixel cnt
+		dbra	d1,@nxtSrc					;do for each src pixel in this dst long
+		rts
+
+	endif
+
+
+;-------------------------------------------------------
+;
+;	<14SEP90 SMC>
+;		scale and clip 1-bit color src to 2-bit color dst
+;
+;	Some optimizations have been commented out to save a very
+;	small amount of space.  This case will rarely be called
+;	and isn't worth much code space.
+;
+;-------------------------------------------------------
+;		a0 = temp srcPtr	d0 = scratch
+;		a1 = temp mskPtr	d1 = scanCount/
+;		a2 = temp dstPtr	d2 = 
+;		a3 = scale table	d3 = run count
+;		a4 = srcPtr			d4 = scratch
+;		a5 = dstPtr			d5 = source data
+;		a6 = locals			d6 = shift
+;		a7 = 				d7 = #$FFFFFFFF
+;-------------------------------------------------------
+
+scInd1ToInd2						;One time initializations here
+
+	;if colorizing, go to loop that can handle it						<5JUNE92 SAH>
+		btst	#ScaleColorBit,XlateFlag+1(a6)						;	<5JUNE92 SAH>
+		bne		scIndToInd			;go to a colorizing loop			<5JUNE92 SAH>
+
+		MOVE.L  dstAlign(A6),D6		;get dst alignment
+		ASR.L	#1,D6				;convert it to src bits
+		ADD.L	srcAlign(A6),D6		;and add src alignment
+		MOVEQ	#0,D4				;clear out high 3 bytes
+;		MOVEQ	#-1,D7				;set comparison register to -1
+		LEA		Table2,A3			;get scaling table
+		MOVE.L	A3,scaleBltA3(A6)	;save for reload after seekMask
+		LEA		@first,A0			;go there from now on
+		MOVE.L	A0,ScaleCase(A6)	;remember for later
+		JMP		(A0)				;go to it
+
+	ALIGN	Alignment
+
+@nxtScan
+		ADD.L	dstRow(A6),A5		;bump dstptr to next row
+		ADD.L	srcRow(A6),A4		;bump srcptr to next row
+		ADDQ.W	#1,vert(A6)			;bump down a scan line
+		SUBQ	#1,D1				;dec scan count
+		BLE.S	NXTMASK				;get next set of runs
+
+@first	MOVE.L	A4,A0				;init temp srcptr
+		MOVE.L	runBuf(A6),A1		;point to run encoded mask buffer
+		MOVE.L	A5,A2				;init temp dstptr
+
+@inst	MOVE.L	(A1)+,D3			;pick up next instruction long
+		BMI.S	@nxtScan			;if high bit set then done with scan
+		ADD.W	D3,A2				;bump dstptr by skip amount
+		LSR.W	#1,D3				;bump srcptr by half skip amount
+		ADD.W	D3,A0
+		SWAP	D3					;get mask/blit cnt and check done flag
+		BCLR	#runMaskBit-16,d3	;check and clear mask flag
+		BEQ.S	@blit				;no mask, so go fast
+
+@mask	BFEXTS	(A0){D6:16},D5		;get word of src
+		ADDQ	#2,A0				;bump srcptr to next word
+		BEQ.S	@mwhite				;special case source of all zeroes
+;		CMP		D5,D7				;is source all ones?
+;		BEQ.S	@mblack				;	yes, go handle in special case
+@mmixed	MOVE.B	D5,D4				;get low byte of src word
+		LSR		#8,D5				;get high byte of src word
+		MOVE.W	0(A3,D5.W*2),D5		;expand src high byte
+		SWAP	D5					;put result high word
+		MOVE.W	0(A3,D4.W*2),D5		;expand src low byte into low word
+@mwhite	MOVE.L	(A2),D0				;get the dest
+		EOR.L	D0,D5
+		AND.L	(A1)+,D5			;splice them together with mask
+		EOR.L	D0,D5
+		MOVE.L	D5,(A2)+			;plot resulting long
+		DBRA	D3,@mask			;continue run
+		BRA.S	@inst				;get next run
+
+;@mblack	MOVE.L	(A1)+,D5			;OR long of mask to dest since
+;		OR.L	D5,(A2)+			;	source is all ones
+;		DBRA	D3,@mask
+;		BRA.S	@inst				;get next run
+
+;@mwhite	MOVE.L	(A1)+,D5			;BIC long of mask to dest since
+;		NOT.L	D5					;	source is all zeroes
+;		AND.L	D5,(A2)+
+;		DBRA	D3,@mask
+;		BRA.S	@inst				;get next run
+
+@blit	BFEXTS	(A0){D6:16},D5		;get word of src and sign extend
+		ADDQ	#2,A0				;bump srcptr to next word
+		BEQ.S	@same				;if all white, write extended long directly
+;		CMP		D5,D7				;is source all ones?
+;		BEQ.S	@same				;	yes, write extended long directly
+@mixed	MOVE.B	D5,D4				;get low byte of src word
+		LSR		#8,D5				;get high byte of src word
+		MOVE.W	0(A3,D5.W*2),D5		;expand src high byte
+		SWAP	D5					;put result high word
+		MOVE.W	0(A3,D4.W*2),D5		;expand src low byte into low word
+@same	MOVE.L	D5,(A2)+			;move result to dest
+		DBRA	D3,@blit			;continue run
+		BRA.S	@inst				;get next run
+
+
+;-------------------------------------------------------
+;
+;	<14SEP90 SMC>
+;		scale and clip 1-bit color src to 4-bit color dst
+;
+;-------------------------------------------------------
+;		a0 = temp srcPtr	d0 = scratch
+;		a1 = temp mskPtr	d1 = scanCount/scratch
+;		a2 = temp dstPtr	d2 = scratch
+;		a3 = scale table	d3 = run count
+;		a4 = srcPtr			d4 = part count
+;		a5 = dstPtr			d5 = source data
+;		a6 = locals			d6 = shift
+;		a7 = 				d7 = #$FFFFFFFF
+;-------------------------------------------------------
+
+scInd1ToInd4						;One time initializations here
+
+	;if colorizing, go to loop that can handle it						<5JUNE92 SAH>
+		btst	#ScaleColorBit,XlateFlag+1(a6)						;	<5JUNE92 SAH>
+		bne		scIndToInd			;go to a colorizing loop			<5JUNE92 SAH>
+
+		MOVE.L  dstAlign(A6),D6		;get dst alignment
+		ASR.L	#2,D6				;convert it to bytes
+		ADD.L	srcAlign(A6),D6		;and add src alignment
+		MOVEQ	#-1,D7				;set comparison register to -1
+		LEA		Table4,A3			;get scaling table
+		MOVE.L	A3,scaleBltA3(A6)	;save for reload after seekMask
+		LEA		@first,A0			;go there from now on
+		MOVE.L	A0,ScaleCase(A6)	;remember for later
+		JMP		(A0)				;go to it
+
+	ALIGN	Alignment
+
+@nxtScan
+		ADD.L	dstRow(A6),A5		;bump dstptr to next row
+		ADD.L	srcRow(A6),A4		;bump srcptr to next row
+		ADDQ.W	#1,vert(A6)			;bump down a scan line
+		SWAP	D1					;get scan count in low word
+		SUBQ	#1,D1				;dec scan count
+		BLE.S	NXTMASK				;get next set of runs
+
+@first	MOVE.L	A4,A0				;init tmp src ptr
+		MOVE.L	runBuf(A6),A1		;point to run encoded mask buffer
+		MOVE.L	A5,A2				;init tmp dst ptr
+		SWAP	D1					;put scan count in high word
+		CLR.W	D1					;clear low word
+
+@inst	MOVE.L	(A1)+,D3			;pick up next instruction long
+		BMI.S	@nxtScan			;if high bit set then done with scan
+		ADD.W	D3,A2				;bump dstptr by skip amount
+		LSR.W	#2,D3				;bump srcptr by 1/4 skip amount
+		ADD.W	D3,A0
+		SWAP	D3					;get mask/blit cnt and check done flag
+		BCLR	#runMaskBit-16,d3	;check and clear mask flag
+		BEQ.S	@blit				;no mask, so go fast
+		BRA.S	@mask				;start masking run
+
+@mnext	SUBQ	#4,D3				;4 longs of the run have been done
+		BMI.S	@inst				;if run is complete, get another
+@mask	CMP		#3,D3				;can we do at least 4 longs of dst?
+		BLT.S	@mnextPartial		;	no, go do partial
+
+		BFEXTU	(A0){D6:0},D5		;get long of src
+		BEQ.S	@mwhite				;special case source of all zeroes
+		CMP.L	D5,D7				;is source all ones?
+		BNE.S	@mfullPartial		;	no, go do normal case
+		
+@mblack	ADDQ	#4,A0				;bump srcptr to next long
+		MOVE.L	(A1)+,D5			;OR 4 longs of the mask since the
+		OR.L	D5,(A2)+			;	source is all ones
+		MOVE.L	(A1)+,D5
+		OR.L	D5,(A2)+
+		MOVE.L	(A1)+,D5
+		OR.L	D5,(A2)+
+		MOVE.L	(A1)+,D5
+		OR.L	D5,(A2)+
+		BRA.S	@mnext				;go do more
+		
+@mwhite	ADDQ	#4,A0				;bump srcptr to next long
+		MOVE.L	(A1)+,D5			;BIC 4 longs of the mask since the
+		NOT.L	D5					;	source is all zeroes
+		AND.L	D5,(A2)+
+		MOVE.L	(A1)+,D5
+		NOT.L	D5
+		AND.L	D5,(A2)+
+		MOVE.L	(A1)+,D5
+		NOT.L	D5
+		AND.L	D5,(A2)+
+		MOVE.L	(A1)+,D5
+		NOT.L	D5
+		AND.L	D5,(A2)+
+		BRA.S	@mnext				;go do more
+		
+@mnextPartial
+		BFEXTU	(A0){D6:0},D5		;get a long of source
+@mfullPartial
+		MOVEQ	#4,D4				;init byte count
+@mmorePartial
+		ROL.L	#8,D5				;get byte of source
+		MOVE.B	D5,D1
+		MOVE.L	0(A3,D1.W*4),D0		;get expanded long
+		MOVE.L	(A2),D2				;get the dest
+		EOR.L	D2,D0
+		AND.L	(A1)+,D0			;splice them together with mask
+		EOR.L	D2,D0
+		MOVE.L	D0,(A2)+			;plot resulting long
+		ADDQ	#1,A0				;bump srcptr by a byte
+		SUBQ	#1,D4				;dec byte count
+		DBEQ	D3,@mmorePartial	;loop if more bytes and the run
+		DBNE	D3,@mask			;loop if more of the run
+		BRA.S	@inst				;get next run
+
+
+@next	SUBQ	#4,D3				;4 longs of the run have been done
+		BMI.S	@inst				;if run is complete, get another
+@blit	CMP		#3,D3				;can we do at least 4 longs of dst?
+		BLT.S	@nextPartial		;	no, go do partial
+
+@nextFull
+		BFEXTU	(A0){D6:0},D5		;get long of src
+		ADDQ	#4,A0				;bump srcptr to next long
+		BEQ.S	@same				;special case source of all zeroes
+		CMP.L	D5,D7				;is source all ones?
+		BEQ.S	@same				;	yes, go handle in special case
+
+@mixed	SWAP	D5					;switch bytes ABCD in D5 to CDAB
+		MOVE.L	D5,D0				;D0 = CDAB
+		LSR.L	#8,D5				;D5 = 0CDA
+		MOVE.B	D5,D1				;get byte A alone
+		MOVE.L	0(A3,D1.W*4),(A2)+	;expand it to the destination
+		MOVE.B	D0,D1				;get byte B alone
+		MOVE.L	0(A3,D1.W*4),(A2)+	;expand it to the destination
+		SWAP	D5					;D5 = DA0C
+		MOVE.L	0(A3,D5.W*4),(A2)+	;expand byte C to the destination
+		SWAP	D0					;D0 = ABCD
+		MOVE.B	D0,D1				;get byte D alone
+		MOVE.L	0(A3,D1.W*4),(A2)+	;expand it to the destination
+		BRA.S	@next				;go do more
+
+@same	MOVE.L	D5,(A2)+			;put down four longs of black or white
+		MOVE.L	D5,(A2)+			;FUN FACT: Doing a MOVE.L Dn,(An) is faster
+		MOVE.L	D5,(A2)+			;		   than doing a CLR.L (An)
+		MOVE.L	D5,(A2)+
+		BRA.S	@next				;go do more
+		
+@nextPartial
+		BFEXTU	(A0){D6:0},D5		;get a long of source
+		MOVEQ	#4,D4				;init byte count
+@morePartial
+		ROL.L	#8,D5				;move high byte of source to low byte
+		MOVE.B	D5,D1				;get low byte alone
+		MOVE.L	0(A3,D1.W*4),(A2)+	;plot expanded long
+		ADDQ	#1,A0				;bump srcptr by a byte
+		SUBQ	#1,D4				;dec byte count
+		DBEQ	D3,@morePartial		;loop if more bytes and the run
+		DBNE	D3,@blit			;loop if more of the run
+		BRA.S	@inst				;get next run
+
+
+;-------------------------------------------------------
+;
+;	<14SEP90 SMC>
+;		scale and clip 1-bit color src to 8-bit color dst
+;
+;-------------------------------------------------------
+;		a0 = temp srcPtr	d0 = scratch
+;		a1 = temp mskPtr	d1 = scanCount/nibble mask
+;		a2 = temp dstPtr	d2 = scratch
+;		a3 = scale table	d3 = run count
+;		a4 = srcPtr			d4 = part count
+;		a5 = dstPtr			d5 = source data
+;		a6 = locals			d6 = temp shift
+;		a7 = 				d7 = shift
+;-------------------------------------------------------
+
+scInd1ToInd8						;One time initializations here
+
+	;if colorizing, go to loop that can handle it						<5JUNE92 SAH>
+		btst	#ScaleColorBit,XlateFlag+1(a6)						;	<5JUNE92 SAH>
+		bne		scIndToInd			;go to a colorizing loop			<5JUNE92 SAH>
+
+		MOVE.L  dstAlign(A6),D7		;get dst alignment
+		ASR.L	#3,D7				;convert it to bytes
+		ADD.L	srcAlign(A6),D7		;and add src alignment
+		LEA		Table8,A3			;get scaling table
+		MOVE.L	A3,scaleBltA3(A6)	;save for reload after seekMask
+		LEA		@first,A0			;go there from now on
+		MOVE.L	A0,ScaleCase(A6)	;remember for later
+		JMP		(A0)				;go to it
+
+	ALIGN	Alignment
+
+@nxtScan
+		ADD.L	dstRow(A6),A5		;bump dstptr to next row
+		ADD.L	srcRow(A6),A4		;bump srcptr to next row
+		ADDQ.W	#1,vert(A6)			;bump down a scan line
+		SWAP	D1					;get scan count in low word
+		SUBQ	#1,D1				;dec scan count
+		BLE.S	NXTMASK				;get next set of runs
+
+@first	MOVE.L	A4,A0				;init tmp src ptr
+		MOVE.L	runBuf(A6),A1		;point to run encoded mask buffer
+		MOVE.L	A5,A2				;init tmp dst ptr
+		MOVE.L	D7,D6
+		SWAP	D1					;put scan count in high word
+		MOVE.W	#$0F,D1				;get low nibble mask
+
+@inst	MOVE.L	(A1)+,D3			;pick up next instruction long
+		BMI.S	@nxtScan			;if high bit set then done with scan
+		ADD.W	D3,A2				;bump destptr by skip amount
+		MOVE.W	D3,D0				;make copy of bump							<6>
+		EXT.L	D0					;extend it to a long						<6>
+		ADD.L	D0,D6				;bump source shift by skip amount			<6>
+		SWAP	D3					;get mask/blit cnt and check done flag
+		MOVEQ	#-1,D0				;fill register with ones for comparisons
+		BCLR	#runMaskBit-16,d3	;check and clear mask flag
+		BEQ.S	@blit				;no mask, so go fast
+		BRA.S	@mask				;start masking run
+
+@mnext	SUBQ	#4,D3				;4 longs of the run have been done
+		BMI.S	@inst				;if run is complete, get another
+@mask	CMP		#3,D3				;can we do at least 4 longs of dst?
+		BLT.S	@mnextPartial		;	no, go do partial
+
+		MOVEQ	#-1,D0				;fill register with ones for comparisons
+		BFEXTU	(A0){D6:16},D5		;get word of src
+		BEQ.S	@mwhite				;special case source of all zeroes
+		CMP		D5,D0				;is source all ones?
+		BNE.S	@mfullPartial		;	no, go do normal case
+		
+@mblack	ADDQ	#2,A0				;bump srcptr to next word
+		MOVE.L	(A1)+,D5			;OR 4 longs of the mask since the
+		OR.L	D5,(A2)+			;	source is all ones
+		MOVE.L	(A1)+,D5
+		OR.L	D5,(A2)+
+		MOVE.L	(A1)+,D5
+		OR.L	D5,(A2)+
+		MOVE.L	(A1)+,D5
+		OR.L	D5,(A2)+
+		BRA.S	@mnext				;go do more
+		
+@mwhite	ADDQ	#2,A0				;bump srcptr to next word
+		MOVE.L	(A1)+,D5			;BIC 4 longs of the mask since the
+		NOT.L	D5					;	source is all zeroes
+		AND.L	D5,(A2)+
+		MOVE.L	(A1)+,D5
+		NOT.L	D5
+		AND.L	D5,(A2)+
+		MOVE.L	(A1)+,D5
+		NOT.L	D5
+		AND.L	D5,(A2)+
+		MOVE.L	(A1)+,D5
+		NOT.L	D5
+		AND.L	D5,(A2)+
+		BRA.S	@mnext				;go do more
+		
+@mnextPartial
+		BFEXTU	(A0){D6:16},D5		;get a word of source
+@mfullPartial
+		SWAP	D5					;move it to high word
+		MOVEQ	#4,D4				;init nibble count
+@mmorePartial
+		ROL.L	#4,D5				;get nibble of source
+		AND.W	D1,D5				;get low 4 bits
+		MOVE.L	0(A3,D5.W*4),D0		;get expanded long
+		MOVE.L	(A2),D2				;get the dest
+		EOR.L	D2,D0
+		AND.L	(A1)+,D0			;splice them together with mask
+		EOR.L	D2,D0
+		MOVE.L	D0,(A2)+			;plot resulting long
+		ADDQ.L	#4,D6				;bump source shift by a nibble
+		SUBQ	#1,D4				;dec nibble count
+		DBEQ	D3,@mmorePartial	;loop if more nibbles and the run
+		DBNE	D3,@mask			;loop if more of the run
+		BRA.S	@inst				;get next run
+
+
+@next	SUBQ	#4,D3				;4 longs of the run have been done
+		BMI.S	@inst				;if run is complete, get another
+@blit	CMP		#3,D3				;can we do at least 4 longs of dst?
+		BLT.S	@nextPartial		;	no, go do partial
+
+@nextFull
+		BFEXTS	(A0){D6:16},D5		;get word of src and extend to long
+		ADDQ	#2,A0				;bump srcptr to next word
+		BEQ.S	@same				;special case source of all zeroes
+		CMP		D5,D0				;is source all ones?
+		BEQ.S	@same				;	yes, go handle in special case
+
+@allMixed							;expand 1 word of src into 4 longs of dst 
+		SWAP	D5					;move source to high word
+		ROL.L	#4,D5				;get first nibble of source
+		AND.W	D1,D5				;get low 4 bits
+		MOVE.L	0(A3,D5.W*4),(A2)+	;plot the expanded long
+
+		ROL.L	#4,D5				;do it again
+		AND.W	D1,D5
+		MOVE.L	0(A3,D5.W*4),(A2)+
+
+		ROL.L	#4,D5				;and again
+		AND.W	D1,D5
+		MOVE.L	0(A3,D5.W*4),(A2)+
+
+		ROL.L	#4,D5				;and again
+		AND.W	D1,D5
+		MOVE.L	0(A3,D5.W*4),(A2)+
+		BRA.S	@next				;go do more
+		
+@same	MOVE.L	D5,(A2)+			;put down four longs of black or white
+		MOVE.L	D5,(A2)+			;FUN FACT: Doing a MOVE.L Dn,(An) is faster
+		MOVE.L	D5,(A2)+			;		   than doing a CLR.L (An)
+		MOVE.L	D5,(A2)+
+		BRA.S	@next				;go do more
+		
+@nextPartial
+		BFEXTU	(A0){D6:16},D5		;get a word of source
+		SWAP	D5					;move it to high word
+		MOVEQ	#4,D4				;init nibble count
+@morePartial
+		ROL.L	#4,D5				;get nibble of source
+		AND.W	D1,D5				;get low 4 bits
+		MOVE.L	0(A3,D5.W*4),(A2)+	;plot expanded long
+		ADDQ.L	#4,D6				;bump source shift by a nibble
+		SUBQ	#1,D4				;dec nibble count
+		DBEQ	D3,@morePartial		;loop if more nibbles and the run
+		DBNE	D3,@blit			;loop if more of the run
+		BRA.S	@inst				;get next run
+
+
+;-------------------------------------------------------
+;
+;	<14SEP90 SMC>
+;		scale and clip 8-bit color src to 8-bit color dst
+;	
+;-------------------------------------------------------
+;		a0 = temp srcPtr	d0 = vert/scratch
+;		a1 = temp mskPtr	d1 = scanCount/pixel cnt
+;		a2 = temp dstPtr	d2 = scratch
+;		a3 = scale table	d3 = run count
+;		a4 = srcPtr			d4 = source cache
+;		a5 = dstPtr			d5 = scratch
+;		a6 = locals			d6 = 
+;		a7 = 				d7 = dest cache
+;-------------------------------------------------------
+		
+scInd8ToInd8						;One time initializations here
+		MOVE.L  dstAlign(a6),D0		;get dest alignment
+		ASR.L	#3,D0				;and convert to pixels
+		MOVE.L	srcAlign(A6),D2		;get src alignment
+		ASR.L	#3,D2				;and convert to pixels
+		ADD.L	D2,D0				;add them together
+		ADD.L	D0,A4				;back off src ptr to beginning of dst long
+		MOVE.L	SCALETBL(A6),A3		;get mapping table
+		
+		LEA		@first,A0			;come here from now on
+		MOVE.L	A3,scaleBltA3(A6)	;save for reload after seekMask
+		MOVE.L	A0,ScaleCase(A6)	;remember for later
+
+		MOVEQ	#0,D4				;use zero for initial input cache
+		MOVE.L	(A3),D0				;compute output cache value
+		MOVE.B	D0,D7				;map 1st byte
+		LSL.L	#8,D7
+		MOVE.B	D0,D7				;map 2nd byte
+		MOVE.W	D7,D0				;get 2 mapped bytes
+		SWAP	D7
+		MOVE.W	D0,D7				;map 3rd and 4th bytes
+
+		JMP		(A0)				;go to it
+
+@nxtScan
+		ADD.L	dstRow(A6),A5		;bump dstptr to next row
+		ADD.L	srcRow(A6),A4		;bump srcptr to next row
+		ADDQ.W	#1,vert(A6)			;bump down a scan line
+		SUBQ	#1,D1				;dec scan count
+		BLE.S	NXTMASK				;get next set of runs
+
+@first	MOVE.L	A4,A0				;init tmp src ptr
+		MOVE.L	runBuf(A6),A1		;point to run encoded mask buffer
+		MOVE.L	A5,A2				;init tmp dst ptr
+		MOVEQ	#0,D5				;clear out high bytes
+		
+@inst	MOVE.L	(A1)+,d3			;pick up next instruction long
+		BMI.S	@nxtScan			;if high bit set then done with scan
+		ADD.W	D3,A0				;bump srcptr by skip amount
+		ADD.W	D3,A2				;bump destptr by skip amount
+		SWAP	D3					;get mask/blit cnt and check done flag
+		BCLR	#runMaskBit-16,D3	;check and clear mask flag
+		BEQ.S	@blit				;no mask, so go fast
+
+@mask	MOVE.L	(A0)+,D0			;get a long of src
+		CMP.L	D0,D4				;same as last time (cache) ?
+		BEQ.S	@msame				;yes, use cache
+		MOVE.L	D0,D4				;save last src for cache
+
+		MOVE.B	D0,D5				;color map four bytes of source
+		MOVE.B	3(A3,D5.W*4),D0
+		ROL.L	#8,D0
+		MOVE.B	D0,D5
+		MOVE.B	3(A3,D5.W*4),D0
+		ROL.L	#8,D0
+		MOVE.B	D0,D5
+		MOVE.B	3(A3,D5.W*4),D0
+		ROL.L	#8,D0
+		MOVE.B	D0,D5
+		MOVE.B	3(A3,D5.W*4),D0
+		ROL.L	#8,D0
+		MOVE.L	D0,D7				;remember result of mapping
+		
+@msame	MOVE.L	(A2),D0				;get a long of dst
+		MOVE.L	D7,D2				;get a copy of mapping result
+		EOR.L	D0,D2
+		AND.L	(A1)+,D2			;splice them together with the mask
+		EOR.L	D0,D2
+		MOVE.L	D2,(A2)+			;move the result out to dst
+		DBRA	D3,@mask			;continue this run
+		BRA.s 	@inst 				;get another run
+
+@blit	MOVE.L	(A0)+,D0			;get a long of source
+		cmp.l	d0,d4				;same as last time (cache) ?
+		beq.s	@same				;yes, use cache
+		move.l	d0,d4				;save last src for cache
+
+		MOVE.B	D0,D5				;color map four bytes of source
+		MOVE.B	3(A3,D5.W*4),D0
+		ROL.L	#8,D0
+		MOVE.B	D0,D5
+		MOVE.B	3(A3,D5.W*4),D0
+		ROL.L	#8,D0
+		MOVE.B	D0,D5
+		MOVE.B	3(A3,D5.W*4),D0
+		ROL.L	#8,D0
+		MOVE.B	D0,D5
+		MOVE.B	3(A3,D5.W*4),D0
+		ROL.L	#8,D0
+		MOVE.L	D0,D7				;remember result of mapping
+		
+@same	MOVE.L	D7,(A2)+			;move the result to dst
+		DBRA	D3,@blit			;continue this run
+		BRA.s 	@inst 				;get another run
+
+
+;-------------------------------------------------------
+;
+;	<14SEP90 SMC>
+;		scale and clip 8-bit color src to 1-bit color dst
+;
+;-------------------------------------------------------
+;		a0 = TMPSRCPTR		d0 = vert/scratch
+;		a1 = TMPMSKPTR		d1 = scanCount/pixel cnt
+;		a2 = TMPDSTPTR		d2 = SCRATCH
+;		a3 = SCALETBL		d3 = RUN COUNT
+;		a4 = srcPtr			d4 = SOURCE CACHE
+;		a5 = dstPtr			d5 = 
+;		a6 = locals			d6 = 
+;		a7 = 				d7 = DEST CACHE
+;-------------------------------------------------------
+		
+scInd8ToInd1						;One time initializations here
+		MOVE.L  dstAlign(a6),D0		;get dst alignment
+		MOVE.L	srcAlign(A6),D2		;get src alignment
+		ASR.L	#3,D2				; and convert it to dest pixels
+		ADD.L	D2,D0				;add them together
+		ADD.L	D0,A4				;back off src ptr to beginning of dst long
+		MOVE.L	SCALETBL(A6),A3		;get mapping table
+		
+		LEA		@first,A0			;come here from now on
+		MOVE.L	A3,scaleBltA3(A6)	;save for reload after seekMask
+		MOVE.L	A0,ScaleCase(A6)	;remember for later
+		JMP		(A0)				;go to it
+
+	ALIGN	Alignment
+
+@nxtScan
+		ADD.L	dstRow(A6),A5		;bump dstptr to next row
+		ADD.L	srcRow(A6),A4		;bump srcptr to next row
+		ADDQ.W	#1,vert(A6)			;bump down a scan line
+		SUBQ	#1,D1				;dec scan count
+		BLE.S	NXTMASK				;get next set of runs
+
+@first	MOVE.L	A4,A0				;init tmp src ptr
+		MOVE.L	runBuf(A6),A1		;point to run encoded mask buffer
+		MOVE.L	A5,A2				;init tmp dst ptr
+		MOVEQ	#0,D5				;clear out high bytes
+		
+@inst	MOVE.L	(a1)+,d3			;pick up next instruction long
+		BMI.S	@nxtScan			;if high bit set then done with scan
+		ADD.W	D3,A2				;bump dstptr by skip amount
+		LEA		(A0,D3.W*8),A0		;bump srcptr by skip amount * 8
+		SWAP	D3					;get mask/blit cnt and check done flag
+		BCLR	#runMaskBit-16,D3	;check and clear mask flag
+		BEQ.S	@blit				;no mask, so go fast
+
+@mask	BSR.S	Map8To1				;get a long of converted source
+		MOVE.L	(A2),D7				;get a long of dest
+		MOVE.L	D0,D2				;make copy of mapping result
+		EOR.L	D7,D2
+		AND.L	(A1)+,D2			;splice them together using mask
+		EOR.L	D7,D2
+		MOVE.L	D2,(A2)+			;move long result to dest
+		DBRA	D3,@mask			;continue this run
+		BRA.s 	@inst 				;get next run
+
+@blit	BSR.S	Map8To1				;get a long of converted source
+		MOVE.L	D0,(A2)+			;move it to dest
+		DBRA	D3,@blit			;continue the run
+		BRA.s 	@inst 				;get next run
+
+
+Map8To1	MOVE.L	(A3),D0				;set up for "caching"
+		BEQ.S	@0					;leave white if 0 index is white
+		MOVEQ	#$0F,D0				;else, put black in cache
+	@0:	MOVEQ	#7,D7				;init nibble count
+		MOVEQ	#0,D4				;clear out cache
+	@1:	MOVE.L	(A0)+,D6			;get a long of src
+		CMP.L	D6,D4				;same as last time?
+		BEQ.S	@same				;	yes, dupe previous result
+		MOVE.L	D6,D4				;remember for next time
+
+		SWAP	D6					;get next pixel
+		MOVE.B	D6,D5				;get current pixel
+		LSR.W	#8,D6
+		MOVE.B	3(A3,D6.W*4),D6		;get mapped bit
+		LSR.W	#1,D6				;get bit into carry
+		ADDX.L	D0,D0				;shift it in
+		MOVE.B	3(A3,D5.W*4),D5		;get mapped bit
+		LSR.W	#1,D5				;get bit into carry
+		ADDX.L	D0,D0				;shift it in
+		
+		SWAP	D6					;get next pixel
+		MOVE.B	D6,D5				;get current pixel
+		LSR.W	#8,D6
+		MOVE.B	3(A3,D6.W*4),D6		;get mapped bit
+		LSR.W	#1,D6				;get bit into carry
+		ADDX.L	D0,D0				;shift it in
+		MOVE.B	3(A3,D5.W*4),D5		;get mapped bit
+		LSR.W	#1,D5				;get bit into carry
+		ADDX.L	D0,D0				;shift it in
+		
+		DBRA	D7,@1				;go do next of 8 nibbles
+		RTS
+	
+@same	MOVEQ	#$0F,D5				;get nibble mask
+		AND.B	D0,D5				;get just result of last mapping
+		LSL.L	#4,D0				;duplicate it
+		OR.B	D5,D0				;and combine for current mapping
+		DBRA	D7,@1				;go do next of 8 nibbles
+		RTS
+
+
+;-------------------------------------------------------
+;
+;		scale and clip indexed source to 16-bit dst
+;	<SAH 060292>
+;		put in special case for 1->16 using Sean Callahan's
+;		code from 1->32
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert/scratch
+;		a1 = tmpmask		d1 = scanCount
+;		a2 = tmpdst			d2 = scratch
+;		a3 = scaleTbl		d3 = run cnt
+;		a4 = srcPtr/patPtr	d4 = src pixel size
+;		a5 = dstPtr			d5 = scratch
+;		a6 = locals			d6 = bit offset in src
+;		a7 = 				d7 = src shift
+;-------------------------------------------------------
+scNonBWto16
+		move	srcShift(a6),d7		;set this up once
+		move.l	scaleTbl(a6),a3		;set this up once
+
+		lea		first16,a0			;go here from now on
+		move.l	A3,scaleBltA3(a6)	;save for reload after seekMask
+		move.l	a0,ScaleCase(a6)	;remember for later
+		bra.s	first16				;go to it
+
+nxtScan16
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a4	;BUMP src TO NEXT ROW
+		addq.w	#1,vert(a6)		;BUMP DOWN A SCAN LINE
+		subq	#1,d1
+		ble		NXTMASK
+
+first16
+		move.l	dstAlign(a6),d2	;get initial dst offset
+		asr.l	#4,d2			;convert it to pixels
+		asl.l	d7,d2			;and convert it to src bits
+		move.l	srcAlign(a6),d6	;start with initial src offset
+		move.l	a4,a0			;init tmp src ptr
+	;now make sure the source is long aligned
+		move.w	a0,d5
+		and.w	#3,d5			;get the non-long address
+		beq.s	@srcAligned		;branch if aligned
+		sub.w	d5,a0			;align the source
+		lsl.w	#3,d5			;turn it into a bit offset
+		add.w	d5,d6			;add it to the src index
+@srcAligned
+		add.w	d2,d6			;back up the number of dst pixels
+		bge.s	@srcOK			;make sure we didn't go negative
+		add.w	#$20,d6			;figure out where to start in the new src long
+		subq.l	#4,a0			;back up the src
+@srcOK
+		cmp.w	#$1f,d6			;make sure we didn't overshoot this long
+		ble.s	@srcAligned2
+		addq.l	#4,a0			;bump src ptr to next long
+		and.w	#$1f,d6			;and find where we are inside it
+@srcAligned2
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	runBuf(a6),a1	;point to run encoded mask buffer
+		
+inst16	move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	nxtScan16		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		lsr.w	#1,d3			;make byte skip into pixel skip
+		lsl.w	d7,d3			;make into bit skip
+		add.w	d3,d6			;bump src offset
+		move	d6,d3			;make a copy
+		lsr.w	#5,d3			;make into long cnt
+		lea		(a0,d3.w*4),a0	;bump src ptr
+		swap	d3				;get mask/blit cnt and check done flag
+
+		BCLR	#runMaskBit-16,D3	;check and clear mask flag
+		BNE		MASKRUN16
+
+@blit	MOVE.L	(A0)+,D5		;GET FIRST LONG OF SRC
+@NXPXL	BFEXTU	D5{D6:D4},D0	;GET A PIXEL OF SRC
+		ADD		D4,D6			;ADVANCE TO NEXT SRC PIXEL
+		MOVE.L	0(A3,D0*4),D2	;TRANSLATE IT
+		and.w	#$1f,D6			;TIME FOR NEXT SRC LONG?
+		bne.s	@srcOK
+		MOVE.L	(A0)+,D5		;GET NEXT LONG OF SRC
+@srcOK
+		SWAP	D2				;MOVE LAST PIXEL INTO HIGH WORD
+		BFEXTU	D5{D6:D4},D0	;GET A PIXEL OF SRC
+		MOVE.W	2(A3,D0*4),D2 	;TRANSLATE IT
+		ADD		D4,D6			;ADVANCE TO NEXT SRC PIXEL
+		ext.l	d6				;bfext uses all of it
+		MOVE.L	D2,(A2)+		;WRITE OUT LONG TO DST
+		AND		#$1f,D6			;TIME FOR NEXT SRC LONG?
+		DBEQ	D3,@NXPXL		;LOOP ALL PIXELS THIS LONG
+		DBNE	D3,@blit		;LOOP ALL PIXELS THIS RUN
+		beq.s 	inst16 			;LOOP BACK FOR more runs
+		subq.w	#4,a0			;point back to remaining pixels
+		BRA.s 	inst16 			;LOOP BACK FOR more runs
+
+
+MASKRUN16
+@BLIT	MOVE.L	(A0)+,D5		;GET FIRST LONG OF SRC
+@NXPXL2	BFEXTU	D5{D6:D4},D0	;GET A PIXEL OF SRC
+		ADD		D4,D6			;ADVANCE TO NEXT SRC PIXEL
+		MOVE.l	0(A3,D0*4),D2 	;TRANSLATE IT
+		AND		#$1f,D6			;TIME FOR NEXT SRC LONG?
+		BNE.S	@srcOK
+		MOVE.L	(A0)+,D5		;GET NEXT LONG OF SRC
+@srcOK
+		SWAP	D2				;MOVE LAST PIXEL INTO HIGH WORD
+		BFEXTU	D5{D6:D4},D0	;GET A PIXEL OF SRC
+		ADD		D4,D6			;ADVANCE TO NEXT SRC PIXEL
+		MOVE.W	2(A3,D0*4),D2 	;TRANSLATE IT
+		MOVE.L	(A2),D0			;GET LONG OF DST
+		EOR.L	D0,D2
+		AND.L	(A1)+,D2
+		EOR.L	D0,D2
+		MOVE.L	D2,(A2)+
+		AND		#$1f,D6			;TIME FOR NEXT SRC LONG?
+		DBEQ	D3,@NXPXL2		;LOOP ALL PIXELS THIS LONG
+		DBNE	D3,@blit		;LOOP ALL PIXELS THIS RUN
+		beq.s 	inst16 			;LOOP BACK FOR more runs
+		subq.w	#4,a0			;point back to remaining pixels
+		BRA.s 	inst16 			;LOOP BACK FOR more runs
+
+scIndexedto16
+		MOVE.L	scaleTbl(A6),A3		;set this up once
+		CMP.W	#1,D4				;is src one bit?
+		BNE.S	scNonBWto16
+		TST.L	4(A3)				;is second color black?
+		BNE.S	scNonBWto16
+		MOVE.L	#$7FFF,D0
+		CMP.L	(A3),D0				;is first color white?
+		BNE.S	scNonBWto16
+		
+		MOVE.W	D0,D4				;move white mask to better register
+		SWAP	D4
+		MOVE.W	D0,D4
+		LEA		@first,A0			;go here from now on
+		MOVE.L	A0,ScaleCase(A6)	;remember for later
+		BRA.S	@first				;go to it
+		
+
+@next	ADD.L	dstRow(A6),A5	;BUMP DST TO NEXT ROW
+		ADD.L	srcRow(A6),A4	;BUMP src TO NEXT ROW
+		ADDQ.W	#1,vert(A6)		;BUMP DOWN A SCAN LINE
+		SUBQ	#1,D1
+		BLE.S	NXTMASK
+
+@first
+		MOVE.L  dstAlign(a6),D6	;get dest alignment
+		ASR.L	#4,D6			;and convert to dst pixels
+		ADD.L	srcAlign(A6),D6	;add src alignment
+		MOVE.L	A4,A0			;init tmp src ptr
+		MOVE.L	A5,A2			;init tmp dst ptr
+		MOVE.L	runBuf(A6),A1	;point to run encoded mask buffer
+
+@inst	MOVE.L	(A1)+,D3		;pick up next instruction long
+		BMI.S	@next			;if high bit set then done with scan
+		ADD.W	D3,A2			;bump destptr by skip amount
+		LSR.W	#1,D3			;byte skip to pixel skip
+		MOVEQ	#0,D2			;clear out d2
+		MOVE.W	D3,D2			;get a LONG bit skip
+		ADD.L	D2,D6			;add to current skip
+		SWAP	D3				;get mask/blit cnt and check done flag
+		
+		BCLR	#runMaskBit-16,D3	;check and clear mask flag
+		BNE		@doMaskedRun
+
+@blit	MOVEQ	#$07,D2
+		ADDQ.W	#1,D3
+		AND.W	D3,D2
+		LSR.W	#3,D3
+		SUBQ.W	#1,D3
+		BMI.S	@no16
+		
+@reblit	BFEXTS	(A0){D6:16},D0
+		ADDQ.W	#2,A0
+		BEQ.S	@white
+		NOT.L	D0
+		BEQ.S	@black
+
+		MOVEQ	#1,D5
+@pixel	ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		DBRA	D5,@pixel
+		DBRA	D3,@reblit
+		BRA.S	@no16
+
+@white	MOVE.L	D4,D0
+@black	MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		DBRA	D3,@reblit
+
+@no16	SUBQ.W	#1,D2
+		BMI.S	@inst
+@last15	BFEXTS	(A0){D6:16},D0
+		NOT.L	D0
+		EXT.L	D2
+		ADD.L	D2,D6
+		ADD.L	D2,D6			;2 pixels per long
+		ADDQ.L	#2,D6			;the 1 we subtracted above
+@sloop	ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		DBRA	D2,@sloop
+		BRA.S	@inst
+
+@doMaskedRun
+		MOVE.W	D3,D2
+		AND.W	#$7,D2
+		SUB.W	D2,D3
+		BFEXTS	(A0){D6:16},D0
+		NOT.L	D0
+		EXT.L	D2
+		ADD.L	D2,D6
+		ADD.L	D2,D6			;2 pixels per long
+		ADDQ.L	#2,D6			;we're about to do 2 pixels
+@maskPixels
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	(A2),D5			;get a long of dest
+		EOR.L	D5,D7
+		AND.L	(A1)+,D7		;splice them together using mask
+		EOR.L	D5,D7
+		MOVE.L	D7,(A2)+
+		DBRA	D2,@maskPixels
+		DBRA	D3,@doMaskedRun
+		BRA.S	@inst
+
+;-------------------------------------------------------
+;
+;	<28MAY92 SAH>
+;		scale and clip indexed source to indexed dst
+;
+;	<SM7>
+;		If mask data contains an offset, then set the destination alignment
+;		to 0 and recalculate the source alignment value. Use the high word
+;		of D4 to store srcShift-dstShift value; this value is used to
+;		convert a destination alignment value to a source alignment value.
+;		If srcShift-dstShift >= 0 (higher bit depth to lower bit depth), then
+;		shift the dstAlign value to the left; if srcShift-dstShift < 0
+;		(lower bit depth to higher bit depth), then shift the dstAlign value to
+;		the right. Subtract the resulting value from the source offset value;
+;		this causes the source buffer pointer to be offset by the appropriate
+;		value and a new srcAlign value to be calculated.
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert/scratch
+;		a1 = tmpmask		d1 = scanCount/scratch
+;		a2 = tmpdst			d2 = scratch / dst pixel
+;		a3 = scaleTbl		d3 = run cnt / scanCount
+;		a4 = srcPtr/patPtr	d4 = srcShift-dstShift / dst pixel size		<SM7>
+;		a5 = dstPtr			d5 = scratch
+;		a6 = locals			d6 = bit offset in src / offset in dst
+;		a7 = 				d7 = src shift / dst shift
+;-------------------------------------------------------
+		
+scIndtoInd
+		;One time initializations here
+	
+		;compute the dst pix to src pix shift
+		moveq.l	#3,d7
+		sub.w	dstShift(a6),d7		;get dst shift
+		add.w	srcShift(a6),d7		;set this up once
+		swap	d7					;and save in high word
+		
+		move.w	dstpix+pixelsize(a6),d7		;get dst pix size
+		
+		move.l	scaleTbl(a6),a3		;set this up once
+		
+		swap	d4					;use high word						<SM7>
+		move.w	srcShift(a6),d4		;calculate the difference of		<SM7>
+		sub.w	dstShift(a6),d4		;source and destination bit shifts	<SM7>
+		swap	d4					;use low word						<SM7>
+
+		lea		@first,a0			;go here from now on
+		move.l	A3,scaleBltA3(a6)	;save for reload after seekMask
+		move.l	a0,ScaleCase(a6)	;remember for later
+		bra.s	@first				;go to it
+
+@nxtScan
+		move.l	dstRow(a6),d2	;get dst rowbytes
+		add.l	d2,a5			;BUMP DST TO NEXT ROW
+		move.l	srcRow(a6),d2	;get src rowbytes
+		add.l	d2,a4			;BUMP src TO NEXT ROW
+		addq.w	#1,vert(a6)		;BUMP DOWN A SCAN LINE
+		swap	d3
+		move.w	d3,d1
+		subq.w	#1,d1
+		ble.s	NXTMASK
+@first	
+		move.w	d1,d3			;save d1 in case run is 0 below
+		swap	d3				;put in right place
+
+		move.l	dstAlign(a6),d6	;get the dst offset
+		neg.l	d6				;convert offset to positive
+		and.w	#$1f,d6			;make it mod 32
+		move.w	d6,d0			;and keep it for the first pixel
+		swap	d6				;make room for src offset
+		move.w	srcAlign+2(a6),d6	;start with initial src offset
+		move.l	a4,a0			;init tmp src ptr
+	;now make sure the source is long aligned
+		move.w	a0,d5
+		and.w	#3,d5			;get the non-long address
+		beq.s	@srcAligned		;branch if aligned
+		sub.w	d5,a0			;align the source
+		lsl.w	#3,d5			;turn it into a bit offset
+		add.w	d5,d6			;add it to the src index
+		cmp.w	#$1f,d6			;make sure we didn't overshoot this long
+		ble.s	@srcAligned
+		addq.l	#4,a0			;bump src ptr to next long
+		and.w	#$1f,d6			;and find where we are inside it
+@srcAligned
+	
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	runBuf(a6),a1	;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		move.w	d2,d5			;get copy of skip
+		beq.s	@noOffset
+		
+		add.w	d5,a2			;bump destptr by skip amount
+		swap	d7				;get shift
+		lsl.w	d7,d5			;make into bit skip
+		swap	d7				;put shift back
+		swap	d4				;get bit shift difference				<SM7>
+		tst.w	d4				;shift left or right?					<SM7>
+		bmi.s	@shiftRight		;shift right							<SM7>
+		lsl.w	d4,d0			;convert dst alignment to src alignment	<SM7>
+		bra.s	@afterShift		;										<SM7>
+@shiftRight						;										<SM7>
+		neg.w	d4				;get absolute value						<SM7>
+		lsr.w	d4,d0			;convert dst alignment to src alignment	<SM7>
+		neg.w	d4				;revert shift difference value			<SM7>
+@afterShift						;										<SM7>
+		swap	d4				;get dst pixel size						<SM7>
+		sub.w	d0,d5			;subtract								<SM7>
+		move.w	#0,d0			;no dst alignment						<SM7>
+		add.w	d5,d6			;bump src offset
+		move.w	d6,d5			;make a copy							
+		and.w	#$1f,d6			;make offset mod 32
+		lsr.w	#5,d5			;make a long count
+		lea		(a0,d5.w*4),a0	;bump src ptr
+@noOffset
+		swap	d2				;get mask/blit cnt and check done flag
+		move.w	d2,d3
+		
+		BCLR	#runMaskBit-16,D3	;check and clear mask flag
+		BEQ.S	@blit			;no mask, so go fast
+
+@mask	BSR.S	@MapIndToInd	;get a long of converted source
+		MOVE.L	(A2),D5			;get a long of dest
+		EOR.L	D5,D2
+		AND.L	(A1)+,D2		;splice them together using mask
+		EOR.L	D5,D2
+		MOVE.L	D2,(A2)+		;move long result to dest
+		DBRA	D3,@mask		;continue this run
+		BRA.s 	@inst 			;get next run
+		
+@blit	BSR.S	@MapIndToInd	;get a long of converted source
+		MOVE.L	D2,(A2)+		;move it to dest
+		DBRA	D3,@blit		;continue the run
+		BRA.s 	@inst 			;get next run
+
+
+@MapIndToInd
+		move.w	d0,d1			;init dst offset
+@getsrcLong
+		MOVE.L	(a0)+,d5		;GET FIRST LONG OF SRC
+@NXPXL	bfextu	d5{d6:d4},d0	;GET A PIXEL OF SRC
+		move.l	(a3,d0*4),d0	;TRANSLATE IT
+		bfins	d0,d2{d1:d7}	;and put it to dst
+		add.w	d7,d1			;advance to next dst pixel
+		and.w	#$1f,d1			;check if done all dst long
+		beq.s	@doneDstLong
+		add		d4,d6			;ADVANCE TO NEXT SRC PIXEL
+		and.w	#$1f,d6			;TIME FOR NEXT SRC LONG?
+		bne.s	@NXPXL			;no, so do next pixel
+		bra.s	@getsrcLong		;go grab next src long
+@doneDstLong
+		add.w	d4,d6			;move to next src pixel
+		and.w	#$1f,d6			;mod 32
+		beq.s 	@doneRun		;LOOP BACK FOR more runs
+		subq.w	#4,a0			;point back to remaining pixels
+@doneRun
+		moveq.l	#0,d0			;dst offset is now zero
+		rts						;return for more runs
+
+
+;-------------------------------------------------------
+
+
+
+scCopy16toIndexed
+scDither16
+scGray16
+scDitherGray16
+scCopy32toIndexed
+scDither32
+scGray32
+scDitherGray32
+scCopy32to16
+scCopy16to32
+
+
+Bogus	;_debugger
+		bra		Done
+;
+;-----------------------------------------------------------------
+
+	Align	4
+
+;-----------------------------------------------------------------
+;
+;  ScaleCase tables.
+;
+
+
+				;Source is direct data
+
+				;1-Bit Blits
+scDirTab1
+		DC.L	scCopy16toIndexed-scDirTab1		;0		16	to	1
+		DC.L	scDither16-scDirTab1			;1		16	to	1	dither
+		DC.L	scGray16-scDirTab1				;2		16	to	1	gray
+		DC.L	scDitherGray16-scDirTab1		;3		16	to	1	gray+dither
+		DC.L	scCopy32toIndexed-scDirTab1		;4		32	to	1
+		DC.L	scDither32-scDirTab1			;5		32	to	1	dither
+		DC.L	scGray32-scDirTab1				;6		32	to	1	gray
+		DC.L	scDitherGray32-scDirTab1		;7		32	to	1	gray+dither
+	
+				;2-Bit Blits
+scDirTab2
+		DC.L	scCopy16toIndexed-scDirTab2		;0		16	to	2
+		DC.L	scDither16-scDirTab2			;1		16	to	2	dither
+		DC.L	scGray16-scDirTab2				;2		16	to	2	gray
+		DC.L	scDitherGray16-scDirTab2		;3		16	to	2	gray+dither
+		DC.L	scCopy32toIndexed-scDirTab2		;4		32	to	2
+		DC.L	scDither32-scDirTab2			;5		32	to	2	dither
+		DC.L	scGray32-scDirTab2				;6		32	to	2	gray
+		DC.L	scDitherGray32-scDirTab2		;7		32	to	2	gray+dither
+	
+				;4-Bit Blits
+scDirTab4
+		DC.L	scCopy16toIndexed-scDirTab4		;0		16	to	4
+		DC.L	scDither16-scDirTab4			;1		16	to	4	dither
+		DC.L	scGray16-scDirTab4				;2		16	to	4	gray
+		DC.L	scDitherGray16-scDirTab4		;3		16	to	4	gray+dither
+		DC.L	scCopy32toIndexed-scDirTab4		;4		32	to	4
+		DC.L	scDither32-scDirTab4			;5		32	to	4	dither
+		DC.L	scGray32-scDirTab4				;6		32	to	4	gray
+		DC.L	scDitherGray32-scDirTab4		;7		32	to	4	gray+dither
+	
+				;8-Bit Blits
+scDirTab8
+		DC.L	scCopy16toIndexed-scDirTab8		;0		16	to	8
+		DC.L	scDither16-scDirTab8			;1		16	to	8	dither
+		DC.L	scGray16-scDirTab8				;2		16	to	8	gray
+		DC.L	scDitherGray16-scDirTab8		;3		16	to	8	gray+dither
+		DC.L	sc32to8-scDirTab8				;4		32	to	8
+		DC.L	sc32to8Dither-scDirTab8			;5		32	to	8	dither
+		DC.L	sc32to8gray-scDirTab8			;6		32	to	8	gray
+		DC.L	sc32to8gray-scDirTab8			;7		32	to	8	gray+dither
+		;*** should probably do a 32to8gray dither as well ***
+	
+				;16-Bit Blits
+scDirTab16
+		DC.L	Bogus-scDirTab16				;0		16	to	16
+		DC.L	Bogus-scDirTab16				;1		16	to	16	dither
+		DC.L	Bogus-scDirTab16				;2		16	to	16	gray
+		DC.L	Bogus-scDirTab16				;3		16	to	16	gray+dither
+		DC.L	scCopy32to16-scDirTab16			;4		32	to	16
+		DC.L	scCopy32to16-scDirTab16			;5		32	to	16	dither
+		DC.L	scCopy32to16-scDirTab16			;6		32	to	16	gray
+		DC.L	scCopy32to16-scDirTab16			;7		32	to	16	gray+dither
+	
+				;32-Bit Blits
+scDirTab32
+		DC.L	scCopy16to32-scDirTab32			;0		16	to	32
+		DC.L	scCopy16to32-scDirTab32			;1		16	to	32	dither
+		DC.L	scCopy16to32-scDirTab32			;2		16	to	32	gray
+		DC.L	scCopy16to32-scDirTab32			;3		16	to	32	gray+dither
+		DC.L	Bogus-scDirTab32				;4		32	to	32
+		DC.L	Bogus-scDirTab32				;5		32	to	32	dither
+		DC.L	Bogus-scDirTab32				;6		32	to	32	gray
+		DC.L	Bogus-scDirTab32				;7		32	to	32	gray+dither
+
+;	
+;	
+;-----------------------------------------------------------------
+;
+;
+
+			;Source is Indexed data
+
+				;1-Bit Blits
+scIndTab1
+		DC.L	scIndToInd-scIndTab1		;0		1	to	1		<5JUNE92 SAH>
+		DC.L	scIndToInd-scIndTab1		;1		2	to	1		<5JUNE92 SAH>
+		DC.L	scIndToInd-scIndTab1		;2		4	to	1		<5JUNE92 SAH>
+		DC.L	scInd8ToInd1-scIndTab1		;3		8	to	1		<14SEP90 SMC>
+	
+				;2-Bit Blits
+scIndTab2
+		DC.L	scInd1ToInd2-scIndTab2		;0		1	to	2		<14SEP90 SMC>
+		DC.L	scIndToInd-scIndTab2		;1		2	to	2		<5JUNE92 SAH>
+		DC.L	scIndToInd-scIndTab2		;2		4	to	2		<5JUNE92 SAH>
+		DC.L	scIndToInd-scIndTab2		;3		8	to	2		<5JUNE92 SAH>
+	
+				;4-Bit Blits
+scIndTab4
+		DC.L	scInd1ToInd4-scIndTab4		;0		1	to	4		<14SEP90 SMC>
+		DC.L	scIndToInd-scIndTab4		;1		2	to	4		<5JUNE92 SAH>
+		DC.L	scIndToInd-scIndTab4		;2		4	to	4		<5JUNE92 SAH>
+		DC.L	scIndToInd-scIndTab4		;3		8	to	4		<5JUNE92 SAH>
+	
+				;8-Bit Blits
+scIndTab8
+		DC.L	scInd1ToInd8-scIndTab8		;0		1	to	8		<14SEP90 SMC>
+		DC.L	scIndToInd-scIndTab8		;1		2	to	8		<5JUNE92 SAH>
+		DC.L	scIndToInd-scIndTab8		;2		4	to	8		<5JUNE92 SAH>
+		DC.L	scInd8ToInd8-scIndTab8		;3		8	to	8		<14SEP90 SMC>
+	
+				;16-Bit Blits
+scIndTab16
+		DC.L	scIndexedto16-scIndTab16	;0		1	to	16		<5JUNE92 SAH>
+		DC.L	scIndexedto16-scIndTab16	;1		2	to	16		<5JUNE92 SAH>
+		DC.L	scIndexedto16-scIndTab16	;2		4	to	16		<5JUNE92 SAH>
+		DC.L	scIndexedto16-scIndTab16	;3		8	to	16		<5JUNE92 SAH>
+	
+				;32-Bit Blits
+scIndTab32
+		DC.L	scIndexedto32-scIndTab32	;0		1	to	32
+		DC.L	scIndexedto32-scIndTab32	;1		2	to	32
+		DC.L	scIndexedto32-scIndTab32	;2		4	to	32
+		DC.L	scIndexedto32-scIndTab32	;3		8	to	32
+	
+;
+;
+;-----------------------------------------------------------------
+

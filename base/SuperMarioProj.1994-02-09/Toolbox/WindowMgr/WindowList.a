@@ -1,0 +1,387 @@
+;
+;	File:		WindowList.a
+;
+;	Contains:	The assembly language glue used to patch layer and window manager to implement
+;				a layerless windowing environment for applications.
+;
+;	Written by:	David Collins
+;
+;	Copyright:	© 1992-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM3>	 6/17/93	KW		(LW2 fau) Changed the clearing of DragFlag to be a word, instead
+;									of a byte.
+;		<12>	 6/25/92	DC		fixed patch on SetTrapAddress to preserve A1 and D1.
+;		<11>	  6/9/92	DC		Fixed PointInMenuBar for Non-ColorQD machines.
+;		<10>	  6/8/92	DC		Added startup icon.  Fixed PtInMenuBar for Plus and SE
+;		 <9>	  6/3/92	DC		Fixed some crashing bugs with help manager on.
+;		 <8>	 5/31/92	DC		Patched ShowHide to to call a ShowHideLayer (my routine) which
+;									does the right thing for a layer shuffled in with other layers.
+;		 <7>	 5/15/92	DC		Correct all the funky RomBinds
+;		 <6>	 5/14/92	DC		Remove patch to SendBehind because its being fixed in my version
+;									of WindowMgrPatches.a. Added a comefrom patch to FrontWindow to
+;									find the real next window to select if a window is moved
+;									backwards. We also want to do the global order change here.
+;		 <5>	 4/20/92	DC		Fixed random silly bugs.
+;		 <4>	 4/14/92	DC		Made the call to GetNextWindow to be pascal in calling
+;									convention.  Make a reference to BringToFrontGuts.
+;		 <3>	 4/10/92	DC		I'm going to incorporate a copy of LayerMgr.c and
+;									WindowMgrPatches.a into my INIT so that I can make changes to
+;									that code as necessary. All changes to working code will be
+;									conditionalized with hasLayerlessApps.
+;		 <2>	  4/1/92	DC		Patched everything.  Still not what I want.  Checking in just to
+;									save my state before restructuring.
+;		 <1>	 3/20/92	DC		first checked in
+;
+;
+
+		load 'StandardEqu.d'
+		include 'LinkedPatchMacros.a'
+
+	IF &TYPE('__INCLUDINGLAYEREQU__') = 'UNDEFINED' THEN
+		include 'LayerEqu.a'
+	ENDIF
+
+	IF &TYPE('__INCLUDINGTOOLEQU__') = 'UNDEFINED' THEN
+		include 'ToolEqu.a'
+	ENDIF
+	
+	IF &TYPE('hasLayerlessAppsINIT') = 'UNDEFINED' THEN
+hasLayerlessAppsINIT	SET 0
+	ENDIF
+	
+MBarHitMsg			EQU			1					;	no defined constant for this
+cacheSize			EQU			101
+	
+WindowListData  	RECORD  	0
+lastWindow					ds.l		1			;	windowHolder of the window whose click was detected most recently
+oldOSDispatch				ds.l		1			;	address of unpatched OSDispatch
+bringToFrontProcess			ds.l		2			;	PSN being brought to front
+windowHolderList			ds.l		1			;	the window we are managing
+windowHolderListEnd			ds.l		1			;	its layer
+hashTable					ds.l		cacheSize	;	window in behind this window
+	  				ENDR
+
+WindowHolder		RECORD		0
+whichWindow					ds.l		1			;	the window we are managing
+LayerPeek					ds.l		1			;	its layer
+inFrontOf					ds.l		1			;	window in behind this window
+behind						ds.l		1			;	window in front of this window
+next						ds.l		1			;	the next WindowHolder in the hash bucket
+visible						ds.b		1			;	stored show/hide state for layer show/hides
+	  				ENDR
+
+		ROMs Plus,SE,II,Portable,IIci
+
+;	The following ROM binds are calculated (only the FX entry is correct).  They all need to be run through the ROM listings
+AfterPaintBehindInMoveWindow	ROMBind		(Plus,$119E8),(SE,$C05A),(II,$FE14),(IIci,$18CD6),(Portable,$10BF8)	
+romDeleteWindow					ROMBind		(Plus,$11220),(SE,$B868),(II,$F474),(IIci,$182A4),(Portable,$103EA)			
+AfterDisposeRgnInCloseWindow	ROMBind		(Plus,$117AA),(SE,$BE10),(II,$FBBC),(IIci,$18A7E),(Portable,$109AE)			
+AfterSelectWindowInSendBehind	ROMBind		(Plus,$11CE8),(SE,$C388),(II,$10238),(IIci,$19112),(Portable,$10F42)
+AfterFrontWindowInSendBehind	ROMBind		(Plus,$11CD0),(SE,$C370),(II,$10220),(IIci,$190FA),(Portable,$10F2A)
+AfterSaveOldInShowHide			ROMBind		(Plus,$114B8),(SE,$BB0C),(II,$F75E),(IIci,$18598),(Portable,$1068E)
+AfterCalcRgnCallInShowHide		ROMBind		(Plus,$114C0),(SE,$BB14),(II,$F766),(IIci,$185A0),(Portable,$10696)
+romCallWindow					ROMBind		(Plus,$11A20),(SE,$C092),(II,$0FF48),(Portable,$10C48),(IIci,$18E0E)
+romCallMBarProc					ROMBind		(Plus,$11A20),(SE,$C092),(II,$113A6),(Portable,$11E84),(IIci,$178D6)
+
+wlHiliteWindow		PatchProc	_HiliteWindow
+
+					IMPORT		__patchHiliteWindow
+					JMP			__patchHiliteWindow
+
+					EXPORT		oldHiliteWindow					
+oldHiliteWindow		JMPOLD
+
+					ENDPROC
+
+;
+; 	BringToFrontOfCurLayer
+;
+
+BringToFrontOfCurLayer	PROC	EXPORT
+
+					MOVE.L	A2, -(SP)
+					MOVE.L	8(SP), A2
+					MOVE.L	A2, -(SP)
+					JSRROM	romDeleteWindow
+					LEA		WindowList, A0
+					
+checkForNeverActive	MOVE.L	(A0), D0
+					BEQ.S	insertTheWindow
+					
+					MOVE.L	D0, A1
+					CMPI.W	#$DEAD, txSize(A1)
+					BNE.S	insertTheWindow
+					TST.B	LayerRecord.neverActive(A1)
+					BEQ.S	insertTheWindow
+					LEA		nextWindow(A1), A0
+					BRA.S	checkForNeverActive
+					
+insertTheWindow		MOVE.L	D0, nextWindow(A2)
+					MOVE.L	A2, (A0)
+					MOVE.L	(SP)+, A2
+					RTS
+					
+					ENDPROC
+					
+;
+; wlFixSendBehind
+;
+
+wlFixSendBehind		ComeFromPatchProc	_FrontWindow,AfterFrontWindowInSendBehind
+
+					IMPORT	__ActiveWindow
+					JSR		__ActiveWindow
+					CMP.L	(SP)+, A3
+					BNE.S	RunAway
+					
+					SUBQ.L	#4, SP
+					MOVE.L	A3, -(SP)
+					IMPORT	GetNextVisibleWindow
+					JSR		GetNextVisibleWindow
+					MOVE.L	(SP)+, D0
+					BEQ.S	RunAway
+					
+					MOVE.L	D0, -(SP)
+					_SelectWindow
+
+					IMPORT	GetWindowHolder
+RunAway				SUBQ.L	#4, SP
+					MOVE.L	A3, -(SP)
+					JSR		GetWindowHolder
+					SUBQ.L	#4, SP
+					MOVE.L	28(SP), -(SP)		;	get the window we're moving behind
+					JSR		GetWindowHolder
+					IMPORT	Rearrange
+					JSR		Rearrange
+					ADDQ.L	#4, SP				;	pop return address off stack
+					jmpRom	AfterSelectWindowInSendBehind
+					
+					ENDPROC
+
+;
+; wlFixMoveWindow
+;
+
+wlFixMoveWindow		ComeFromPatchProc	_PaintBehind,AfterPaintBehindInMoveWindow
+
+					SUBQ.L	#4, SP
+					MOVE.L	A3, -(SP)
+					IMPORT	GetNextWindow
+					JSR		GetNextWindow
+					MOVE.L	(SP)+, 8(SP)
+					
+					jmpOld
+					
+					ENDPROC
+					
+;
+; wlFixCloseWindow
+;
+
+wlFixCloseWindow	ComeFromPatchProc	_DisposRgn,AfterDisposeRgnInCloseWindow
+
+					MOVE.L		A3, -(SP)
+					IMPORT		DeleteWindowHolders
+					JSR			DeleteWindowHolders
+					
+					JMPOLD
+					
+					ENDPROC
+										
+;
+; GetWLGlobals returns a pointer to the layerless application globals in A1.
+; preserves A0.
+;
+
+GetWLGlobals		PROC		EXPORT
+
+					MOVE.L		ExpandMem, A1
+					MOVE.L		ExpandMemRec.emWindowListGlobals(A1), A1
+					RTS
+					
+					ENDPROC
+					
+;
+; wlPatchOSDispatch
+;
+
+wlPatchOSDispatch	PROC		EXPORT
+					IMPORT		GetWLGlobals
+					
+					CMPI.W		#$3B, 4(SP)
+					BNE.S		doOld
+					
+					MOVE.L		6(SP), A0
+					JSR			GetWLGlobals
+					LEA			WindowListData.bringToFrontProcess(A1), A1
+					MOVE.L		(A0)+, (A1)+
+					MOVE.L		(A0)+, (A1)+
+					
+doOld				JSR			GetWLGlobals
+					MOVE.L		WindowListData.oldOSDispatch(A1), A1
+					JMP			(A1)
+					
+					ENDPROC
+
+;
+; wlPatchSetTrap
+;
+
+OSDispatchTrapNum	EQU			$8F
+
+wlPatchSetTrap		PatchProc	_SetTrapAddress
+
+					MOVE.L		A1, -(SP)				;	have to preserve a1
+					
+					CMPI.B		#OSDispatchTrapNum, D0
+					BNE.S		DoOld
+					
+					IMPORT		GetWLGlobals
+					JSR			GetWLGlobals
+					TST.L		WindowListData.oldOSDispatch(A1)
+					BNE.S		DoOld
+					MOVE.L		A0, WindowListData.oldOSDispatch(A1)
+					IMPORT		wlPatchOSDispatch
+					LEA			wlPatchOSDispatch, A0
+
+DoOld				MOVE.L		(SP)+, A1
+					JMPOLD
+
+					ENDPROC
+
+;
+; wlBringToFront
+;
+
+wlBringToFront		PatchProc	_BringToFront
+
+					MOVE.L		4(SP), -(SP)
+					CLR.W		DragFlag										<LW2>
+					IMPORT		BringToFrontGuts
+					LEA			BringToFrontGuts, A0
+					IMPORT		TwoByFour
+					JSR			TwoByFour
+					IMPORT		BringChildrenToFront
+					JMP			BringChildrenToFront
+					
+					ENDPROC
+					
+;
+; wlShowHide
+;
+
+wlShowHide			PatchProc	_ShowHide
+
+					MOVE.L		6(SP), D0			;	get the window
+					BEQ.S		runAway				;	if its NULL, we fall back on ROM code
+					
+					MOVE.L		D0, A0
+					CMPI.W		#$DEAD, txSize(A0)	;	check if its a layer
+					BNE.S		doneChecking		;	if its not, we treat it like a normal window
+					
+					IMPORT		ShowHideLayer		
+					JMP			ShowHideLayer		;	do the special version of this routine for layers
+					
+doneChecking		SUBQ.L		#4, SP				;	make room for return value
+					MOVE.L		D0, -(SP)			;	push the window
+					
+					IMPORT		GetWindowHolder
+					JSR			GetWindowHolder		;	get the window holder for this window
+					
+					MOVE.L		(SP)+, A0			;	make sure the visible field in the WindowHolder is current
+					MOVE.L		(A0), A0
+					MOVE.B		4(SP), WindowHolder.visible(A0)
+										
+runAway				JMPOLD
+					
+					ENDPROC
+					
+;
+; HitTestWindow
+;
+
+HitTestWindow		PROC		EXPORT
+
+					MOVEM.L		A3/D3, -(SP)			; Save A3 and D3
+					MOVEQ.L		#WHitMsg,D0				; D0 = hit message
+					MOVE.L		12(SP), A3				; A3 = window pointer
+					MOVE.L		16(SP), D3				; D3 = parameter
+					JSRROM		romCallWindow			; Go into ROM
+					MOVEM.L		(SP)+, A3/D3			; Restore A3 and D3
+					MOVE.L		(SP)+, A0				; Get the return address
+					ADDQ.L		#8, SP					; Pop off all the parameters
+					MOVE.W		D0, (SP)				; place the return value
+					JMP			(A0)					; return
+
+					ENDPROC
+					
+;
+; PointInMenuBar
+;
+
+PointInMenuBar		PROC		EXPORT
+
+					MOVE.L		4(SP), D1				; get the point to be tested
+					CMPI.W		#$3FFF, ROM85			; check for Color QuickDraw
+					BLE.S		ColorCheck				; if we have it, we call the MBarDefProc
+					SWAP		D1						; make it a long equal to the x value of the point
+					MOVE.W		MBarHeight, D0			; D1 will be less than or equal to zero if in the menubar
+					SUB.W		D1, D0
+					EXT.L		D0
+					BRA.S		RunAway
+ColorCheck			MOVE.L		#MBarHitMsg, D0			; tell the proc which message we want processed
+					JSRROM		romCallMBarProc			; call the proc
+RunAway				MOVE.L		(SP)+, A0				; get the return address
+					ADDQ.L		#4, SP					; pop off the point
+					MOVE.L		D0, (SP)				; put the return value back on the stack
+					JMP			(A0)
+					
+					ENDPROC
+					
+;
+; initWindowLists
+;
+
+iconID				EQU			128
+offset				EQU			40
+
+wListInstall		InstallProc
+
+	IF hasLayerlessAppsINIT THEN
+
+					MOVE.W		#iconID, -(SP)	;	push the id of the icon suite to use at startup
+					MOVE.W		#offset, -(SP)	;	push the offset
+					IMPORT		ShowTheIcon
+					JSR			ShowTheIcon		;	display our startup icon
+					
+					MOVEA.L		ExpandMem, A1
+					MOVE.L		ExpandMemRec.emWindowListGlobals(A1), D1
+					BEQ.S		noFixUp			;	don't do any fix up if this value is NULL
+
+					MOVE.L		D1, A0
+					_GetHandleSize				;	get the size of the fix table
+					ASR.L		#3, D0			;	get the number of fix records (each having two 4-byte addresses, thus we divide by 8)
+					SUBQ.L		#1, D0			;	subtract one because we will be using this as an index for a DBRA instruction
+					MOVE.L		D1, A0			;	get the handle to the fix table
+					MOVE.L		(A0), A0		;	get the pointer to the fix table in A0
+					MOVE.W		#$4EF9, D2		;	store the jump instruction in D2
+					
+fixPatch			MOVE.L		(A0)+, A1		;	Get the address of the patch routine
+					MOVE.W		D2, (A1)+		;	put the jump to long address
+					MOVE.L		(A0)+, (A1)+	;	put the put the argument to the jump in
+					DBF			D0, fixPatch	;	decrement the size counter and branch
+					
+					MOVEA.L		D1, A0
+					_DisposHandle
+noFixUp
+	
+	ENDIF
+
+					IMPORT		__InitWindowLists
+					JMP			__InitWindowLists
+
+					ENDPROC
+					
+					END

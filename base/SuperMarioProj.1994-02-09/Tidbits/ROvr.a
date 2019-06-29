@@ -1,0 +1,216 @@
+;
+;	File:		ROvr.a
+;
+;	Contains:	ROM resource override code -- 'ROvr' (0)
+;
+;	Written by:	Brian B. McGhie and Darin Adler
+;
+;	Copyright:	© 1986-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<SM1>	 4/23/92	CS		Apply changes from reality:
+;									<8>	 3/16/92 DTY #1024511:
+;									                 #1024511: Move ROZ cutback code back to ResourceMgrPatches.a
+;		 <7>	  3/4/91	dba		dty: get rid of SysVers conditionals
+;		 <6>	  2/8/91	dba		dty, #66370: reverting back to the old algorithm for finding
+;									ROv# resources; why did I ever change it?
+;		 <5>	 7/30/90	stb		NEEDED FOR SIXPACK: replace ROZ cutback with another version
+;		 <4>	 6/29/90	DDG		NEEDED FOR SIXPACK: Now if hasSwitchLaunchPrevention is true,
+;									the header is version seven and if it is false, the header is
+;									version three (the old version number).
+;		 <3>	 6/26/90	CCH		NEEDED FOR SIXPACK:  Added code to cutback size of ROM resource
+;									map by about 5k on $67c ROM-based machines.
+;		 <2>	  6/6/90	DTY		Added a check to the ROM Override to determine if the system is
+;									in the process of switch-launching from an older system to
+;									System 7.0. If so, install a patch on _InitFonts to prevent this
+;									switch launch from completing, and revert back to the previous
+;									System file.  Added additional check for value of SysVersion to
+;									allow network booting to work.
+;	   <1.1>	 8/30/89	dba		changed to find ROv# resources by ID instead of by embedded
+;									version number; rewrote to fix bug with resources not in ROM
+;									(use one-deep calls)
+;	   <1.0>	11/16/88	CCH		Added to EASE.
+;
+;	'ROvr' is the resource that the Resource Mgr looks for when loading in a new
+;	System file. 'ROv#' is a resource type that contains which resources
+;	in the ROM to override. The structure for 'ROv#' is as follows:
+;
+;	'ROv#':
+;		version		dc.w	$0075		; ROM version (ignored)
+;		count		dc.w	$00XX		; # of resources in list minus one
+;		type.0		dc.l	'WDEF'		; resource type to override
+;		id.0		dc.w	$0000		; resource ID
+;		type.1		dc.l	'PACK'		; resource type to override
+;		id.1		dc.w	$0004		; resource ID
+;		...
+;		type.XX		dc.l	'CURS'		; resource type to override
+;		id.XX		dc.w	$0002		; resource ID
+;
+;	NOTE: Previous versions of ROvr cycled through all of the 'ROv#' resources
+;	and obeyed any which had the proper ROM version. This version looks only at
+;	the 'ROv#' with the ROM version as its ID, and ignores the embedded version.
+;
+;	The first instruction in 'ROvr' should be a bra.s past the version word
+;	of 'ROvr'.  This will enable install programs to determine if you have
+;	the latest 'ROvr' resource, and replace it with a newer one.
+
+
+		load 'StandardEqu.d'
+		include 'ResourceMgrPriv.a'
+
+		macro
+		ResourceVersionHeader &type,&id,&version
+			bra.s @skipHeader
+			dc.l (&type)
+			dc.w (&id)
+			dc.w (&version)
+			@skipHeader:
+		endm
+
+kBranchSize		equ	2						; Size of short branch instruction in bytes
+kMinSystem		equ	$0700					; Minimum System version to allow switch launching from
+kpatchType		equ	'proc'					; _InitFonts patch is in a 'proc' resource
+kpatchID		equ	-16495					; Resource ID of patch
+kInitFontsTrap	equ	$FE						; Trap word of _InitFonts
+
+ROvr	main
+
+		ResourceVersionHeader 'ROvr',0,8	; The Big Bang ROvr (more patches for your bucks!)
+
+		tst.w	SysVersion					; At boot, SysVersion is not initialised, so we need a special
+		beq.s	DoOverrides					; case to allow normal ROM overriding at boot.
+
+		cmpi.w	#kMinSystem,SysVersion		; If SysVersion is System 7.0 or greater, allow switch launching.
+		bge.s	DoOverrides					; (Network booting)
+
+;	If SysVersion was initialized, then we’re being called during a switch launch.
+;	Since we don’t want to allow this switch launch to finish, we need to go back to the previously running
+;	system.  In the switch launch code for Finder 6.x, _InitResources is called, then _InitFonts, then the working
+;	directory reference number of the new System Folder is saved in BootDrive.
+;	Now that we’ve determined that we don’t want to switch launch, put a patch on _InitFonts which will close the
+;	System 7 (or newer) System file, re-open the old one, and rebuild the System resource map.  The patch also
+;	bumps the return address past the instructions that stash the new WDRefNum in BootDrive, since up to this
+;	point, BootDrive still contains the WDRefNum of the previous System Folder.  This fact makes life incredibly
+;	simple, and no hocus pocus has to be performed to figure out where the last System file was.
+;	The patch is in 'proc' -16495.
+
+		sub.w	#4,sp
+		move.l	#kPatchType,-(sp)
+		move.w	#kPatchID,-(sp)
+		_GetResource						; Get a handle to our patch
+		tst.l	(a1)
+		bne.s	PatchInitFonts				; If the handle we got back was good, install the patch
+
+		moveq	#dsBadPatch,d0				; Generate a System Error if _GetResource returned nil
+		_SysError
+
+PatchInitFonts
+		move.l	(sp),a1
+		_DetachResource						; Detach it so it’ll stick around
+
+		move.w	#kInitFontsTrap,d0
+		_GetTrapAddress						; Get the current _InitFonts routine
+
+		move.l	(a1),a1
+		move.l	a0,kBranchSize(a1)			; Save the address of _InitFonts
+		move.l	a1,a0
+
+		move.w	#kInitFontsTrap,d0
+		_SetTrapAddress						; Patch it
+		bra		ExitROvr					; Get out of here.									<3>
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;
+DoOverrides
+
+	;
+	;	Version 3 ROvr code starts here
+	;
+
+		movem.l	d2/a2-a3,-(sp)			; save working registers								<5><3>
+
+		move.l	ROMMapHndl,a2			; need to save ROM map attributes
+		move.l	(a2),a0					; dereference map handle
+		move.w	MAttr(a0),-(sp)			; save off current ROM map attributes
+		clr.w	MAttr(a0)				; clear all ROM map attributes for this routine
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; load override resources
+
+		moveq	#1,d2					; start with ROv# index of 1							<6>
+
+ForEachOverrideList
+		subq	#4,sp					; make space for handle
+		move.l	#'ROv#',-(sp)			; push 'ROv#' for _Get1IxResource
+		move.w	d2,-(sp)				; push resource index									<6>
+		move.w	#mapTrue,ROMMapInsert	; link in ROM map w/ResLoad true
+		_GetIndResource					; get ROv# resource (must be locked)					<6>
+		move.l	(sp)+,d0				; save handle to the list
+		bz.s	ROvrNOut				; no ROv#, so get out of here
+
+		move.l	d0,-(sp)				; save handle for ReleaseResource later
+
+		move.l	d0,a1					; get ROv# resource handle
+		move.l	(a1),a1					; get ROv# resource pointer
+		move.l	ROMBase,a0				; get a pointer to the ROM								<6>
+		move.w	8(a0),d0				; get the ROM version number							<6>
+		cmp.w	(a1)+,d0				; check if the ROv# is for this ROM						<6>
+		bne.s	NextOverrideList		; if wrong version, go on to the next ROv# resource		<6>
+
+		move.w	(a1)+,d1				; count-1 of items in list
+
+ForEachResourceInList
+		subq	#4,sp					; make space for handle
+		move.l	(a1)+,-(sp)				; push type onto stack
+		move.w	(a1)+,-(sp)				; push id onto stack
+		move.w	#mapFalse,ROMMapInsert	; link in ROM map w/ResLoad false
+		_Get1Resource
+		move.l	(sp)+,d0				; get that resource
+		bz.s	NextResourceInList		; if no resource, advance to the next one
+
+		move.l	d0,-(sp)				; push handle for RmveResource later
+
+		subq	#4,sp					; make space for map entry offset
+		move.l	d0,-(sp)				; push resource handle onto stack
+		move.w	#mapFalse,ROMMapInsert	; link in ROM map w/ResLoad false
+		st		ResOneDeep				; since there is no one-deep version of RsrcMapEntry
+		_RsrcMapEntry					; ignore errors from RsrcMapEntry
+		move.l	(sp)+,a0				; get map entry offset
+		add.l	(a2),a0					; make the map offset into a pointer
+		clr.b	RAttr(a0)				; clear the attributes for the resource (protected, etc.)
+
+		; handle to remove is already on stack
+		move.w	#mapFalse,ROMMapInsert	; link in ROM map w/ResLoad false
+		_RmveResource					; ignore errors from RmveResource
+
+		; normally, we would do a DisposHandle here, but the ROM resources are
+		; in their own special heap, and no-one cares about the wasted master pointer
+
+NextResourceInList
+		dbra	d1,ForEachResourceInList	; loop through the resources
+
+NextOverrideList
+		_ReleaseResource				; handle to release is already on stack
+		addq.w	#1,d2					; advance to next resource index						<6>
+		bra.s	ForEachOverrideList		; go loop for the next resource							<6>
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+ROvrNOut
+		move.l	(a2),a0					; dereference ROM map handle
+		move.w	(sp)+,MAttr(a0)			; restore ROM map attributes
+		movem.l	(sp)+,d2/a2-a3			; restore working registers							<6><5><3>
+
+ExitROvr								; Exit point after _InitFonts is patched
+		lea		ROvr,a0					; get pointer to this resource
+		_RecoverHandle					; get handle to this resource
+		move.l	(sp),-(sp)				; put the handle below a copy of the return address
+		move.l	a0,4(sp)				; put the handle on the stack for ReleaseResource
+		_ReleaseResource autoPop		; release this resource and return
+
+		endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		end

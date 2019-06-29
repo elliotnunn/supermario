@@ -1,0 +1,248 @@
+;
+;	File:		DialogMgrExtensions.a
+;
+;	Contains:	Extensions to the Dialog Manager used by both the ROM and System.
+;
+;	Written by:	Darin Adler, Kevin MacDonell, Roger Mann, and Jeff Miller
+;
+;	Copyright:	© 1990-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <3>	 6/10/92	JSM		Can’t do a beqOld in DSEdit, since it isn’t inside a patch proc.
+;									Just do the same thing the ROM does: repush the parameters and
+;									call _TEKey again. This means we don’t need to include
+;									LinkedPatchMacros.a anymore.
+;		 <2>	 6/10/92	JSM		Moved some routines here from DialogMgrPatches.a to factor out
+;									common code in both the ROM and the System. Don’t define
+;									kProcessInfoRecSize here (it was 6 bytes too big anyway), use
+;									ProcessInfoRec.size from Processes.a. Implement DSEdit slightly
+;									differently for ROM builds and System builds.
+;		 <1>	 6/10/92	JSM		first checked in
+;
+
+		load	'StandardEqu.d'
+		include	'Processes.a'
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; NotOwnActivator
+;
+; Check to see whether this process (currently receiving a suspend/resume event)
+; has set the doOwnActivate flag.
+;
+; Called by DialogSelectFixes and IsDialogEventFixes in DialogMgrPatches.a.
+;
+; This could be a problem if called before Process Manager is alive, but then
+; you should never get a suspend or resume event if it isn't.
+;
+; Z if not ownActivator, z if ownActivator
+;
+; Registers Used
+; --------------
+; d0 trashed
+;
+
+NotOwnActivator	Proc	Export
+
+NotOwnActivatorFrame	RECORD	{A6Link},DECR
+Return			DS.L	1
+A6Link			DS.L	1
+thePSN			DS.L	2							; Process serial number is 8 bytes
+theInfo			DS.B	ProcessInfoRec.size			; ProcessInfo record
+LocalSize		EQU		*
+				ENDR
+
+				with		NotOwnActivatorFrame
+
+				link		A6, #LocalSize
+
+;set up the info rec's input fields
+				moveq		#ProcessInfoRec.size,d0					; size of ProcessInfo record
+				move.l		d0,theInfo+processInfoLength(a6)
+				clr.l		theInfo+processName(a6)					; processName = nil
+				clr.l		theInfo+processAppSpec(a6)				; processAppSpec = nil
+
+;Set up PSN to specify current process
+				clr.l		thePSN+highLongOfPSN(a6)				; PSN.high = 0
+				moveq		#kCurrentProcess,d0
+				move.l		d0,thePSN+lowLongOfPSN(a6)				; PSN.low = kCurrentProcess
+
+; Get information about the current process
+				subq.l		#2,a7
+				pea			thePSN(a6)
+				pea			theInfo(a6)
+				_GetProcessInformation
+				moveq		#0,d0
+				tst.w		(a7)+
+				bne.s		@Done
+
+; Test the mode flag for modeDoesActivateOnFGSwitch
+				move.l		#modeDoesActivateOnFGSwitch,d0
+				and.l		theInfo+processMode(a6),d0				; Z if not ownActivator, z if ownActivator
+
+@Done
+				tst.w		d0
+				unlk		a6
+				rts
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; FakeUpEvent
+;
+; Called by DialogSelectFixes and IsDialogEventFixes in DialogMgrPatches.a.
+;
+; Registers Used
+; --------------
+;
+;	On Entry:
+;		a2	the address of the event record
+;
+;	On Exit:
+;		sp	Contains an event record which is a clone of the original with
+;			suspend mapped to deactivate and resume mapped to activate.
+;
+;		a3	trashed
+;
+
+FakeUpEvent		Proc	Export
+
+				move.l		(sp)+,a3				; save the return address and clear it off the stack
+
+; Build fake event
+				move.l		a2,a0					; point at the event
+				add.l		#evtBlkSize,a0			; point at the end of the event record
+				move.w		-(a0),-(sp)				; push modifiers
+
+; convert a suspend event to a deactivate or a resume event to an activate event.
+				btst		#0,3+evtMessage(a2)		; bit 0 is clear if this is a suspend, set if resume
+				bne.s		@SetActivate
+				bclr		#0,1(sp)				; deactivate
+				bra.s		@PushWhere
+@SetActivate
+				bset		#0,1(sp)				; activate
+@PushWhere
+				move.l		-(a0),-(sp)				; push where
+				move.l		-(a0),-(sp)				; push when
+				subq		#4,sp					; make room for the window (message)
+				_FrontWindow						; get window pointer
+				move.w		#activateEvt,-(sp)		; choice of deactivate or activate was made
+													;   in bit 0 of modifiers
+				subq		#2,sp					; make room for the result
+				pea			2(sp)					; pass the event record in
+
+				jmp			(a3)
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; DSEdit
+;
+; This routine adds support for cut/copy/paste to _DialogSelect.
+; Called by DBKeyDown in DialogMgr.a for the ROM, or by the DSEditPatch patch on _TEKey in
+; DialogMgrPatches.a for the System.
+;
+
+DSEdit			Proc		Export
+
+				IMPORT		TEFromScrap				; from Interface.o
+				IMPORT		TEToScrap				; from Interface.o
+
+DSRetAddr		EQU 		4						; EventDialog return address
+DSItemHit		EQU 		DSRetAddr+4 			; item clicked on
+DSWindow		EQU 		DSItemHit+4 			; returned dialog wondow VAR
+DSEvent 		EQU 		DSWindow+4				; in/out event
+DSResult		EQU 		DSEvent+4				; function result
+
+FunctionKey		EQU			$10
+CutKey			EQU 		$78
+CopyKey			EQU 		$63
+PasteKey		EQU 		$76
+
+				move.l		DSEvent(A6), A0			; Get the eventrecord ptr
+
+				move.l		evtMessage(A0), D0		; get key code in d0
+				cmp.b		#FunctionKey, D0		; is it the function key ?
+				bne.s		@cmdkey					; if not, check for cmd key
+
+				and.l		#keyCodeMask, D0		; get key code
+				lsr.l		#8, D0					; into byte of D0
+
+				move.l		teHandle(A4), -(SP)		; Push the TEHandle here to save code
+
+				cmp.b		#CutKey, D0
+				beq.s		@DoCut					; Is it Cut?
+				cmp.b		#CopyKey, D0
+				beq.s		@DoCopy					; Is it Copy?
+				cmp.b		#PasteKey, D0
+				beq.s		@DoPaste				; Is it Paste?
+
+				bra.s		@Bail					; don’t pass (char) FunctionKey into TE
+
+@cmdkey			move.w		evtMeta(A0), D0			; Check the cmd key
+				moveq		#cmdKey, D2
+				btst		D2, D0
+
+				bne.s		@checkChar				; if command key pressed, check for Cut/Copy/Paste
+				move.w		d1,-(sp)				; push d1 again (contains character from DBKeyDown)
+				move.l		teHandle(a4),-(sp)		; and teHandle
+				_TEKey								; call TEKey
+				bra			@Done					; and pop the original parameters off the stack and return
+
+@checkChar
+				move.l		teHandle(A4), -(SP)		; Push the TEHandle here to save code
+
+				bclr		#5, D1					; This UPPER cases C/X/V and screws up other things
+				subi.b		#'C', D1				; Is it Copy?
+				beq.s		@DoCopy
+				subi.b		#'V'-'C', D1			; Is it Paste?
+				beq.s		@DoPaste
+				subi.b		#'X'-'V', D1			; Is it Cut?
+				beq.s		@DoCut
+
+@Bail
+				addq.l		#4, SP					; Remove the handle we pushed
+				bra.s		@Done
+
+@DoCut
+				bsr.s		@ChkSelection			; Don’t cut without a selection
+				_TECut								; teHandle is already on the stack from above
+				bra.s		@XCcommon				; Do common Cut and Copy stuff
+
+@DoCopy
+				bsr.s		@ChkSelection			; Don’t copy without a selection
+				_TECopy								; teHandle is already on the stack from above
+
+@XCcommon
+				subq.l		#4, SP					; Make room for results
+				_ZeroScrap
+				jsr			TEToScrap				; Copy TEScrap to Desk scrap
+				addq.l		#4, SP					; Ignore the result
+				bra.s		@Done
+@DoPaste
+				subq.l		#2, SP					; Make room for result
+				jsr			TEFromScrap				; Copy Desk scrap to TEScrap
+				addq.l		#2, SP					; Ignore the result
+				_TEPaste							; teHandle is already on the stack from above
+@Done
+				move.l		(SP)+, A0				; Get the return address
+				addq.l		#6, SP					; Pop off the params
+				jmp			(A0)					; And jump thru
+
+@ChkSelection
+				move.l		teHandle(A4), A0		; Get tehandle
+				move.l		(A0), A0				; Handle -> Ptr
+				move.w		teSelEnd(A0),D1
+				move.w		teSelStart(A0),D0
+				sub.w		D0,D1					; SelEnd - SelStart
+				ble.s		@noSelection
+				rts
+@noSelection
+				addq		#4, SP					; Yank return addr
+				bra.s		@Bail
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+				end

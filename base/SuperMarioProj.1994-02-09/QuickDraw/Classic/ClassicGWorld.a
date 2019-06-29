@@ -1,0 +1,2257 @@
+;
+;	File:		ClassicGWorld.a
+;
+;	Contains:	Classic QuickDraw version of off-screen code
+;
+;	Copyright:	© 1989-1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<19>	 2/13/91	KON		JDR, BRC #NONE: There was an MPW error message in the middle of
+;									this file on the last check in which broke the build. Sorry.
+;		<18>	 2/13/91	KON		CEL: BRC# unknown: UpdateGWorld does not return reallocPix flag
+;									when clipPix and stretchPix were set.
+;		<17>	 2/11/91	KON		CEL: BRC# 82568: Fix bug when Update GWorld crashes when
+;									shrinking the buffer. Also, BRC# 82630: UpdateGWorld crashed
+;									when buffer purged.  This was a problem in NewGWorld.
+;		<16>	 1/15/91	KON		Change useMFTempBit to useTempMemBit. [csd]
+;		<15>	 9/25/90	KON		Change Offscreen Version to 130. Now all 7.0 offscreen versions
+;									return 130.
+;		<14>	 9/16/90	KON		Change black and white offscreen version to $30. Currently
+;									Gestalt returns 0 on B&W machines, while the color versions
+;									return offscreen version number +$100.
+;		<13>	 9/15/90	gbm		Fix bug where the bitmap bounds is incorrectly calculated for
+;									NewGWorld when the depth is non-zero.
+;		<12>	 6/26/90	KON		NewGWorld was trashing registers, NewTempScreenBuffer now checks
+;									for valid rects.
+;		<11>	 6/25/90	KON		Check if bounding rect is valid when calling NewGWorld.
+;		<10>	 6/20/90	JSM		Check for _OSDispatch correctly for the Mac Plus in
+;									NewHandleCommaTemp, convert boundRect to local coordinates in
+;									NewGWBuffer (Darin).
+;		 <9>	 6/19/90	JSM		Make sure _OSDispatch is implemented in NewHandleCommaTemp
+;									before calling it.
+;		 <8>	  6/8/90	dba		fix bug in buffer size for NewScreenBuffer case; must calculate
+;									buffer based on actual alignment since we don’t get the extra 31
+;									bits of slop
+;		 <7>	 4/26/90	csd		link and save registers for NewScreenBuffer and
+;									NewTempScreenBuffer before trashing D5, D6, and D7 and falling
+;									into NewGWBuffer.
+;		 <6>	 4/11/90	dba		fix bug where NewScreenBuffer doesn’t return an error code
+;		 <5>	  4/7/90	KON		Fix bug in depth 0 gWorlds, fix disposing of gWorlds.
+;		 <4>	  4/4/90	KON		get rid of short branches between modules (not supported by
+;									linked patches)
+;		 <3>	 3/16/90	KON		Make it link, made it work for simple case.
+;		 <2>	12/28/89	dba		made it assemble; code is OK now, but lots of comments and
+;									random shit is left from when this was GWorld.a, and it has not
+;									been tested at all yet
+;		 <1>	12/28/89	dba		first checked in to BBS
+;				12/28/89	dba		created today (with BAL) from GWorld.a
+;
+;	To Do:
+;		reduce the size by using registers
+;		UpdateGWorld is much too long and complex; a little thought will shorten it
+;
+
+OffscreenVersNum equ	$130	; B&W offscreen version for 7.0
+
+;___________________________________________________________________________
+
+; PixMaps in classic GWorlds have two possible version numbers
+
+pmVersionLocked		equ		1			; marks that baseAddr is a clean derefed handle
+pmVersionUnlocked	equ		2			; marks that baseAddr is a handle
+
+pmVersionLockedBit	equ		0			; marks that baseAddr is a clean derefed handle
+pmVersionHandleBit	equ		1			; marks that baseAddr is a handle
+
+;___________________________________________________________________________
+
+gwPortPixMap		equ		portRec					; PixMapHandle is just after the port
+gwPortSize			equ		gwPortPixMap+4			; total size
+
+gwPMVersion			equ		bitMapRec				; version is just after the BitMap
+gwPMPort			equ		gwPMVersion+2			; port is just after the version
+gwPMUseMFTemp		equ		gwPMPort+4				; flag if we used temp. memory
+gwPMSize			equ		gwPMUseMFTemp+2			; total size
+
+;----------------------------------------------------------------------------
+;
+;	Extensions to Quickdraw for 32-bit Quickdraw and Graphics Accelerators
+;
+;	This file consists of:
+;
+;	1. Offscreen Graphics Environments
+;		NewGWorld:		create an offscreen graphics world
+;		GetGWorld:		get the current graphics world
+;		SetGWorld:		set the current graphics world
+;		UpdateGWorld:	adapt the graphics world to new depth, alignment, etc.
+;		DisposeGWorld:	dispose of the graphics world
+;		LockPixels:		lock the offscreen buffer (call before calling Quickdraw)
+;		UnlockPixels:	unlock the offscreen buffer after drawing is finished
+;		AllowPurgePixels: make offscreen buffer purgeable
+;		NoPurgePixels:	make offscreen buffer unpurgeable
+;		GetPixelsState:	return the lock and purge state of the offscreen buffer
+;		SetPixelsState:	set the lock and purge state of the offscreen buffer
+;		GetPixBaseAddr:	waits until Async QD is done and return a 32-bit pointer to the offscreen buffer
+;		GetGWorldDevice: returns the attached device to an offscreen GWorld.
+;		NewScreenBuffer: allocates only an offscreen pixmap
+;		DisposeScreenBuffer: diposes of an offscreen pixmap.
+;
+;   2. Asynchronous Quickdraw
+;		PortChanged:	notifies Quickdraw of any non-procedural changes to a port
+;		PixPatChanged:	notifies Quickdraw of any non-procedural changes to a pixpat
+;		CTabChanged:	notifies Quickdraw of any non-procedural changes to a color table
+;		GDeviceChanged:	notifies Quickdraw of any non-procedural changes to a gDevice
+;
+;	3. Utilities
+;		GetMaxAreaDevice: find device with largest overlapping area with a given rectangle
+;		FindInverseTable: find an already built inverse table for a given color table in the device list
+;		QDDone:			becomes true when the pending Quickdraw calls on a given port are completed
+;		BitMapDone:		becomes true when the pending Quickdraw calls on a given pixmap are completed
+;
+;----------------------------------------------------------------------------
+; THINGS TO DO:
+;
+;	1.Some of the same code is used in three different routines (NewGWorld, UpdateGWorld,
+;	  and NewScreenBuffer).  Rearchitect it to use subroutines.
+;
+;	2.Make GetMaxAreaDevice smarter and actually use it.  GetMaxAreaDevice could estimate
+; 	  the break-even performance point between unaligned CopyBits and CopyBits
+;	  with color mapping in terms of surface area and decide between which device
+;	  to align the pixmap to.
+;
+;----------------------------------------------------------------------------
+
+QDExtDispatcher PROC EXPORT
+				IMPORT NewGWorld, LockPixels, UnlockPixels, UpdateGWorld, DisposeGWorld
+				IMPORT GetGWorld, SetGWorld, CTabChanged, PixPatChanged, PortChanged
+				IMPORT GDeviceChanged, AllowPurgePixels, NoPurgePixels, GetPixelsState
+				IMPORT SetPixelsState, GetPixBaseAddr, NewScreenBuffer, DisposeScreenBuffer
+				IMPORT GetGWorldDevice, QDDone, OffscreenVersion, NewTempScreenBuffer
+				IMPORT Pixmap32Bit, GetGWorldPixMap
+;----------------------------------------------------------------------------
+; QDExtensions Dispatcher.
+;
+; All Quickdraw extensions routines use a common trap and a selector.
+; The selector is in the low word of D0
+; The size of the parameters is in the high word of D0
+; NOTE: To avoid changing the include files again, functions number 0 through 19
+; 		are accepted with an unspecified parameter size (high word of D0 cleared).
+;		In future versions, any new function should specify the size of parameters.
+;----------------------------------------------------------------------------
+
+		cmp.w	#23,d0				; if unsigned d0 > max selector,
+		bhi.s	exit				; don’t do anything
+		lsl.w	#2,d0				; turn into jump table offset
+		jmp		dispatchTable(d0.w)	; jump in jump table
+
+dispatchTable
+		jmp		NewGWorld			; selector  0
+		jmp		LockPixels			; selector  1
+		jmp		UnlockPixels		; selector  2
+		jmp		UpdateGWorld		; selector  3
+		jmp		DisposeGWorld		; selector  4
+		jmp		GetGWorld			; selector  5
+		jmp		SetGWorld			; selector  6
+		jmp		CTabChanged			; selector  7
+		jmp		PixPatChanged		; selector  8
+		jmp		PortChanged			; selector  9
+		jmp		GDeviceChanged		; selector 10
+		jmp		AllowPurgePixels	; selector 11
+		jmp		NoPurgePixels		; selector 12
+		jmp		GetPixelsState		; selector 13
+		jmp		SetPixelsState		; selector 14
+		jmp		GetPixBaseAddr		; selector 15
+		jmp		NewScreenBuffer		; selector 16
+		jmp		DisposeScreenBuffer	; selector 17
+		jmp		GetGWorldDevice		; selector 18
+		jmp		QDDone				; selector 19
+		jmp		OffscreenVersion	; selector 20
+		jmp		NewTempScreenBuffer	; selector 21
+		jmp		PixMap32Bit			; selector 22
+		jmp		GetGWorldPixMap		; selector 23
+
+exit
+		move.l	(sp)+,a0			; get return address
+		swap	d0					; get size of parameters in low word
+		adda.w	d0,sp				; get rid of parameters
+		moveq	#paramErr,d0		; return parameter error
+		move.w	d0,MemErr			; return in low memory, too
+		jmp		(a0)				; and return to caller
+
+		ENDPROC
+
+
+NewGWorld	PROC	ENTRY
+			IMPORT	NewGWBuffer
+;----------------------------------------------------------------------------
+;
+;	FUNCTION NewGWorld (VAR offscreenGWorld: GWorldPtr; pixelDepth: INTEGER;
+;						boundsRect: Rect; cTable: CTabHandle; aGDevice:GDHandle;
+;						flags: LONGINT): OSErr;
+;
+; Creates an offscreen graphics world, including an offscreen port,
+; an offscreen pixmap, an offscreen buffer, and an optional offscreen device.
+;
+; offscreenGWorld is an output.  It is set to a pointer to a CGrafPort
+; with an expanded grafVars substructure.  A reference to the offscreen device
+; is put in the grafVars record.  If no offscreen device is created, a reference
+; to aGDevice is put in the grafVars record.  In both cases, the device is called
+; the attached device.
+;
+; The pixelDepth can be 0,1,2,4,8,16,or 32.
+;   If the pixelDepth is 0:
+;		The boundsRect is interpreted as a global rectangle in screen space.
+;		The depth and color table of the deepest device intersecting
+;		  with boundsRect is used for the offscreen graphics environment.
+;		The port's portRect is set to the same size as boundsRect with the topLeft
+;		  coordinates set to (0,0).
+;		The pixmap's bounds is set to the smallest rectangle enclosing portRect and aligned
+;		  to the greatest overlapping device with boundsRect (this is to optimize CopyBits
+;		  between offscreen and screen).
+;		The device's gdRect is copied from the pixmap's bounds.
+;   If the pixelDepth is 1,2,4,8,16,or 32:
+;		The pixmap's bounds, portRect, and device's rect are all set to boundsRect.
+;
+; If pixelDepth is zero, cTable is ignored.  Otherwise:
+; 	If cTable is not nil, it is used as the device and port's color table.
+; 	If cTable is nil, the default color table for pixelDepth is used
+;
+; Flags contain 2 flag bits:
+;	pixPurgeBit		= allocate a purgeable offscreen buffer
+;	noNewDeviceBit	= don't create an offscreen device.
+;
+; If noNewDeviceBit is clear, aGDevice is ignored.
+; If noNewDeviceBit is set, aGDevice is used as the attached device.
+
+;----------------------------------------------------------------------------
+;
+;  A6 offsets of parameters after link:
+;
+paramSize		equ		22					; size of parameters
+result			equ		paramSize+8			; WORD, OSErr
+offscreenGWorld	equ		result-4			; LONG, address of GWorldPtr variable
+pixelDepth		equ		offscreenGWorld-2	; WORD, pixel depth
+boundsRect		equ		pixelDepth-4		; LONG, address of bound Rectangle
+cTable			equ		boundsRect-4		; LONG, handle to color table
+aGDevice		equ		cTable-4			; LONG, handle to a device to use as model
+gwFlags			equ		aGDevice-4			; LONG, flags
+
+;----------------------------------------------------------------------------
+;
+;  A6 offsets of local variables after link:
+;
+
+offscreenPixMap	equ		-4					; LONG, handle to the offscreen pixmap
+offscreenPort	equ		offscreenPixMap-4	; LONG, pointer to the offscreen port
+offscreenDevice	equ		offscreenPort-4		; LONG, device returned from NewGWBuffer (always 0)
+localRect		equ		offscreenDevice-8	; Rect, rectangle returned from NewGWBuffer
+varSize			equ		localRect			; size of local variables
+
+;----------------------------------------------------------------------------
+
+		link	a6,#varSize 				; allocate local variables
+		movem.l d3-d7/a2-a4,-(sp)			; save regs
+
+;-------------------------------------------------------------------------
+; Initialize the function result to no error.  Optimistically assume that
+; everything will go fine.
+
+		move.w	#noErr,result(a6)			; flag a successful operation,
+
+;-------------------------------------------------------------------------
+; Initialize all offscreen local variables to zero.
+; If an error happens during this function, we deallocate the memory for
+; all allocated offscreen variables.
+
+		clr.l	offscreenPixMap(a6)			; handle to offscreen pixmap
+		clr.l	offscreenPort(a6)			; pointer to the offscreen port
+
+;-------------------------------------------------------------------------
+; Check that the boundsRect is not an empty rectangle.
+; If it is empty, don't do anything.
+;
+		clr.b	-(sp)						; leave room for Boolean result					<25JUN90 KON>
+		move.l	boundsRect(a6),-(sp)		; push address of rectangle on the stack		<25JUN90 KON>
+		_EmptyRect							; check if rectangle is empty or not			<25JUN90 KON>
+		move.b	(sp)+,d0					; look at the result							<25JUN90 KON>
+		bne		paramError					; if true, boundsRect is empty, exit with error	<25JUN90 KON>
+
+;-------------------------------------------------------------------------
+; Allocate memory for port.  Do it early on to avoid heap fragmentation.
+; Also, try to allocate it as low as possible in memory.
+; No need to allocate a clear handle, it will be completely filled out by OpenPort.
+
+		moveq	#gwPortSize,d0				; size of GrafPort
+		_NewPtr								; allocate a pointer (no need to clear it)
+		bne		reportError					; if Memory Manager error, report it and quit
+
+		move.l	a0,offscreenPort(a6)		; save pointer to offscreen port
+		move.l	a0,a2						; and keep it around
+
+; Initialize the rowBytes field to 0.  This field is used in case of
+; memory error to check whether the port has been opened or not (and therefore
+; I need to close it)
+
+		clr		portBits+rowBytes(a0)		; clear the rowBytes field
+
+;-------------------------------------------------------------------------
+; Remember the flags in d3
+
+		move.l	gwFlags(a6),d3				; remember for future use
+
+;-------------------------------------------------------------------------
+; Check range validity of pixelDepth -- it must be 0 or 1.
+
+		move	pixelDepth(a6),d7			; pixel resolution
+		cmp.w	#1,d7						; illegal if > 1
+		bhi		badPixelDepth				; exit with error
+
+;-------------------------------------------------------------------------
+; Allocate the pixels.
+
+		clr.w	-(sp)						; make room for result			<KON 11FEB90>
+		move.l	boundsRect(a6),-(sp)
+		btst.l	#purgePixBit,d3				; did we need them purged?
+		snz		-(sp)						; purgeable parameter
+		pea		offscreenDevice(a6)
+		pea		offscreenPixMap(a6)
+		btst.l	#useTempMemBit,d3			; MF temp memory?
+		snz		d5							; pass flag in register
+		moveq	#31,d6						; we want slop for re-alignment later
+		lea		localRect(a6),a3			; get that localRect in here
+		jsr		NewGWBuffer
+		move.w	(sp)+,d0					; get error return				<KON 11FEB90>
+		bnz		reportError
+
+;-------------------------------------------------------------------------
+; Initialize the offscreen port.
+; The port is made to represent accurately the characteristics of the
+; offscreen device (pixmap, color table, etc.)
+
+		move.l	GrafGlobals(a5),a0			; get address of Quickdraw Globals	<1.5>
+		move.l	thePort(a0),-(sp)			; save the current port				<1.5>
+
+		move.l	a2,-(sp)					; push address of offscreen port
+		_OpenPort							; initialize port structure
+		move.l	offscreenPixMap(a6),a0		; get the offscreen pixmap
+		move.l	(a0),-(sp)					; dereference
+		_SetPBits							; these are the portbits
+;
+; the base address points to our "pixmap"	<16MAR90 KON>
+;
+		move.l	offscreenPixMap(a6),a0		; get the offscreen pixmap
+		move.l	a0,portBits+baseAddr(a2)	;<16MAR90 KON>
+
+		move.l	GrafGlobals(a5),a0			; get address of Quickdraw Globals	<1.5>
+		move.l	(sp)+,thePort(a0)			; set the current port				<1.5>
+
+;-------------------------------------------------------------------------
+; Set the portRect field of the GrafPort to localRect,
+; Note that:
+;	if pixelDepth is 0:
+;		localRect = boundsRect offset so that topLeft = (0,0)
+; 	if pixelDepth is non 0:
+;		localRect = boundsRect
+
+computePortRect
+		move.l	topLeft(a3),portRect+topLeft(a2)	; copy localRect to portRect
+		move.l	botRight(a3),portRect+botRight(a2)
+
+; Set visible region of offscreen port to portRect
+
+		move.l	visRgn(a2),-(sp)			; push handle to visRgn
+		pea		portRect(a2)				; push address of portRect
+		_RectRgn							; make visRgn = portRect
+
+;-------------------------------------------------------------------------
+; Store the offscreen port in the GWorldPtr variable
+
+		move.l	offscreenPixMap(a6),a0
+		move.l	a0,gwPortPixMap(a2)			; store a pointer to the PixMap after the port
+		move.l	(a0),a0
+		move.l	a2,gwPMPort(a0)				; store a pointer to the port after the PixMap
+
+		move.l	offscreenGWorld(a6),a0		; get pointer to offscreen GWorld variable
+		move.l	a2,(a0)						; store in it the pointer to the offscreen port
+
+;-------------------------------------------------------------------------
+; We're done.  Return error code and put a copy of it in low-memory MemErr.
+
+goHome
+		move	result(a6),d0				; copy error code to d0							<21Jun89> JCM
+		move	d0,MemErr					; copy error code to low-memory global MemErr	<21Jun89> JCM
+		movem.l	(sp)+,d3-d7/a2-a4			; restore regs
+		unlk	a6							; get rid of stack frame
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+;-------------------------------------------------------------------------
+; When an error occurs, all allocated memory is freed and an error code
+; is returned.
+
+badPixelDepth
+		move	#cDepthErr,result(a6)		; pixel depth invalid
+		bra.s	disposOffscreenHandles		; release memory and exit
+
+paramError
+		move	#paramErr,result(a6)		; one of the parameters is invalid
+		bra.s	disposOffscreenHandles		; release memory and exit
+
+reportError
+		move	d0,result(a6)				; directly report Memory Manager error
+
+; Dispose of all allocated memory (handle is allocated when non zero)
+; If the port has been opened, close it and then dispose of the actual port structure
+
+disposOffscreenHandles
+
+		move.l	offscreenPixMap(a6),-(sp)	; get handle to offscreen buffer
+		_DisposeScreenBuffer				; dispose it
+		move.l	offscreenPort(a6),d7		; get handle to offscreen port
+		beq.s	goHome						; if nil, don't do anything
+		move.l	d7,a0						; if not nil, check if the port has been opened
+		move	portBits+rowBytes(a0),d0	; get rowBytes
+		bz.s	@noClose					; if 0, don’t close port
+		move.l	(a0),-(sp)					; push pointer to port
+		_ClosePort							; close it down
+@noClose
+		move.l	d7,a0						; get handle to offscreen port
+		_DisposPtr							; dispose it
+		bra.s	goHome						; exit
+
+
+			ENDPROC
+
+
+
+GetGWorld	PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE GetGWorld (VAR port: CGrafPtr; VAR gdh: GDHandle);
+;
+; Return the current port and gDevice.
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		8					; size of parameters
+port			equ		paramSize+4-4		; LONG, address of CGrafPtr variable
+gdh				equ		port-4				; LONG, address of GDHandle variable
+
+;----------------------------------------------------------------------------
+
+		move.l	port(sp),a0					; get address of port variable
+		move.l	GrafGlobals(a5),a1			; get address of Quickdraw Globals
+		move.l	thePort(a1),(a0)			; put the current port in port variable
+
+		move.l	gdh(sp),a0					; get address of device variable
+		clr.l	(a0)						; no devices here
+
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+
+
+DisposeGWorld	PROC	EXPORT
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE DisposeGWorld (offscreenGWorld: GWorldPtr);
+;
+; Dispose all the memory allocated for the offscreen graphics world
+; described by offscreenGWorld.
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		4					; size of parameters
+offscreenGWorld	equ		paramSize+4-4		; LONG, offscreen graphics world
+
+;----------------------------------------------------------------------------
+
+; Dispose of the buffer
+
+		move.l	offscreenGWorld(sp),a0		; get pointer to port
+		move.l	gwPortPixMap(a0),-(sp)		; get handle to pixmap
+		_DisposeScreenBuffer				;
+
+; Dispose of all substructures of the offscreen port
+
+		move.l	offscreenGWorld(sp),-(sp)	; push pointer to offscreen port
+		_ClosePort							; get rid of all substructures
+
+		move.l	offscreenGWorld(sp),a0		; get pointer to grafport
+		_DisposPtr							; dispose memory of grafport structure
+
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+
+UpdateGWorld PROC	EXPORT
+;----------------------------------------------------------------------------
+;
+;	FUNCTION UpdateGWorld (VAR offscreenGWorld: GWorldPtr; pixelDepth: INTEGER;
+;							boundsRect: Rect; cTable: CTabHandle; aGDevice: GDHandle;
+;							flags: LONGINT): LONGINT;
+;
+; Update the given graphics world to the new conditions (pixelDepth, boundsRect,
+; color table, and optionally aGDevice).
+;
+; offscreenGWorld is both input and output.  A pointer to the new GWorld is returned
+; in offscreenGWorld.
+;
+; Flags determine how the pixels are preserved.  It contains the following bits:
+;	clipPixBit		= clip the pixels to the new boundsRect.
+;	stretchPixBit	= stretch or shrink the pixels to the new boundsRect.
+;	ditherPixBit	= dither the pixels
+;
+;   clipPixBit and stretchPixBit are mutually exclusive.
+;	If flags is 0, no update occurs.
+;	Possible combinations are:
+;		0, clipPixMask, stretchPixMask, clipPixMask+ditherPixMask, stretchPixMask+ditherPixMask
+;
+; PixelDepth, boundsRect, and cTable work in the same way as in NewGWorld.
+;
+; If aGDevice is not NIL, pixelDepth and cTable are ignored, and aGDevice's pixel depth
+; and color table are used instead.
+;
+; If offscreenGWorld doesn't have an offscreen device and aGDevice is not NIL, aGDevice
+; becomes the new attached device.
+;
+; UpdateGWorld returns an error code if it failed, 0 if it didn't do anything, and
+; a positive number if it succeeded.  This number describes what actions UpdateGWorld performed
+; with the following bits:
+;
+;	mapPixBit		= set if color table mapping occurred
+;	newDepthBit		= set if pixels were scaled to a different depth
+;	alignPixBit		= set if pixels were realigned to screen alignment
+;	newRowBytesBit	= set if pixmap was reconfigured in a new rowBytes
+;	reallocPixBit	= set if offscreen buffer had to be reallocated
+;	clipPixBit		= set if pixels were or are to be clipped
+;	stretchPixBit	= set if pixels were or are to be stretched/shrinked
+;	ditherPixBit	= set if pixels were or are to be dithered
+
+;----------------------------------------------------------------------------
+;
+;  A6 offsets of parameters after link:
+;
+paramSize		equ		22					; size of parameters
+result			equ		paramSize+8			; LONG, QDErr or flags
+offscreenGWorld	equ		result-4			; LONG, address of offscreen GWorldPtr variable
+pixelDepth		equ		offscreenGWorld-2	; WORD, new pixel depth
+boundsRect		equ		pixelDepth-4		; LONG, address of new bound Rectangle
+cTable			equ		boundsRect-4		; LONG, handle to new color table
+aGDevice		equ		cTable-4			; LONG, handle to device to use instead of pixelDepth and cTable
+gwFlags			equ		aGDevice-4			; LONG, defines pixel transfer
+
+;----------------------------------------------------------------------------
+;
+;  A6 offsets of local variables after link:
+;
+
+newGWorld		equ		-4					; LONG, new offscreen GWorld
+clipSrcRect		equ		newGWorld-8			; Rect, srcRect clipped
+clipDstRect		equ		clipSrcRect-8		; Rect, same size as srcRect, but in dstRect coordinates
+newFlags		equ		clipDstRect-4		; LONG, contains purgePixBit and noNewDeviceBit
+state			equ		newFlags-4			; LONG, lock/purge state of pixels
+purged			equ		state-1				; BYTE, true if offscreen buffer has been purged
+sameBounds		equ		purged-1			; BYTE, true if the portRects of old and new gworlds are the same
+savePort		equ		sameBounds-4		; LONG, pointer to saved port
+newBounds		equ		savePort-8			; Rect, boundsRect converted to portRect
+horizOffset		equ		newBounds-2			; WORD, alignment of new offscreen pixmap
+newGWRowBytes	equ		horizOffset-2		; WORD, rowBytes of new offscreen gworld
+oldBufSize		equ		newGWRowBytes-4		; LONG, size of old offscreen buffer
+saveClip		equ		oldBufSize-4		; LONG, handle to saved clip region
+varSize			equ		saveClip			; size of local variables
+
+;----------------------------------------------------------------------------
+
+		link	a6,#varSize					; allocate local variables
+		movem.l	a2-a4/d5-d7,-(sp)			; save regs
+
+;----------------------------------------------------------------------------
+; Initialize the flags
+
+		clr.l	result(a6)					; Assume no error and nothing to do
+		clr.l	newFlags(a6)				; initialize flags for NewGWorld
+
+; Check that clipPixBit and stretchPixBit are not both set in the gwFlags
+
+		move.l	gwFlags(a6),d0				; get the flags
+		and.l	#clipPix+stretchPix,d0		; get clipPixBit and stretchPixBit
+		cmp.l	#clipPix+stretchPix,d0		; if both bit are set, quit with parameter error
+		beq		paramError					; report error and quit
+
+;----------------------------------------------------------------------------
+; Remember pointer to offscreen GWorld
+
+getOffGWorld
+		move.l	offscreenGWorld(a6),a3
+		move.l	(a3),a3						; get pointer to offscreen GWorld
+
+; Save the current graphics world
+
+		pea		savePort(a6)				; push address of savePort
+		_GetPort
+
+;----------------------------------------------------------------------------
+; Compute new portRect and get new pixSize and color table seed for new offscreen graphics world
+
+getNewParms
+		move.l	boundsRect(a6),a0			; get pointer to boundsRect
+
+; Check range validity of pixelDepth -- it must be between 0 or 1.
+
+		move	pixelDepth(a6),d7			; pixel resolution
+		beq.s	useMaxDevice				; if depth = 0, find max resolution
+		cmp		#1,d7						; illegal if > 0
+		bhi		badPixelDepth				; exit with error
+		bra.s	boundsIsLocal				; no, just copy boundsRect as is
+
+;----------------------------------------------------------------------------
+; If pixelDepth = 0:
+; Offset boundsRect in newBounds so that topLeft = (0,0)
+
+useMaxDevice
+		clr.l	newBounds+topLeft(a6)
+		move	bottom(a0),d0				; compute newBounds.bottom = boundsRect->bottom - boundsRect->top
+		sub		top(a0),d0
+		move	d0,newBounds+bottom(a6)
+		move	right(a0),d0				; compute newBounds.right = boundsRect->right - boundsRect->left
+		sub		left(a0),d0
+		move	d0,newBounds+right(a6)
+
+; Get new pixmap alignment with the max device
+
+		move.l	boundsRect(a6),a0			; get pointer to boundsRect
+		move	left(a0),d0					; get left coordinate of boundsRect
+		move	d0,horizOffset(a6)			; save offset
+
+		bra.s	checkPixShift
+
+;----------------------------------------------------------------------------
+; pixelDepth is 1:
+; Copy boundsRect to newBounds without modification
+
+boundsIsLocal
+		move.l	topLeft(a0),newBounds+topLeft(a6)	; copy boundsRect to newBounds
+		move.l	botRight(a0),newBounds+botRight(a6)
+
+; Alignment is 0
+
+		clr		horizOffset(a6)				; no alignment if boundsRect is not global
+
+;----------------------------------------------------------------------------
+; Convert pixel depth to shift amount
+; Use ShiftTbl for conversion
+
+checkPixShift
+
+; Convert horizOffset to a number of pixels such that the equivalent number of bits is modulo 32
+
+		and		#$1F,horizOffset(a6)		; save back in horizOffset	<19Jun89> JCM
+
+;----------------------------------------------------------------------------
+; Get rowBytes from old port, assume it will not change
+
+		move	portBits+rowBytes(a3),newGWRowBytes(a6)	; assume rowBytes doesn't change
+
+;----------------------------------------------------------------------------
+; Compare the portRects of the old and new world.
+; If same, set the sameBounds flag
+
+		clr.b	sameBounds(a6)				; assume portRects are different
+		move.l	portRect+topLeft(a3),d0		; get the topLeft coordinates of the old gworld
+		cmp.l	newBounds+topLeft(a6),d0	; compare with topLeft coordinates of new gworld
+		bne.s	compareSize
+		move.l	portRect+botRight(a3),d0	; get the botRight coordinates of the old gworld
+		cmp.l	newBounds+botRight(a6),d0	; compare with botRight coordinates of new gworld
+		bne.s	compareSize
+
+		move.b	#true,sameBounds(a6)		; rectangles are equal, set the sameBounds flag
+		bra.s	checkAlignment				; skip comparing size
+
+;----------------------------------------------------------------------------
+; If different size, set clipPixBit or stretchPixBit depending on flags
+
+compareSize
+		move	portRect+right(a3),d0		; calculate old port's width (a3 = old GWorldPtr)
+		sub		portRect+left(a3),d0
+		move	newBounds+right(a6),d1		; calculate new port's width
+		sub		newBounds+left(a6),d1
+		cmp		d0,d1						; are widths the same?
+		bne.s	checkRowBytes				; no, check the rowBytes
+
+		move	portRect+bottom(a3),d0		; calculate old port's height
+		sub		portRect+top(a3),d0
+		move	newBounds+bottom(a6),d1		; calculate new port's height
+		sub		newBounds+top(a6),d1
+		cmp		d0,d1						; are heights the same?
+		beq.s	checkAlignment				; yes, portRect's are same size, no clipping/stretching
+
+;----------------------------------------------------------------------------
+; Compute rowBytes of new world.
+; Compare the rowBytes of the old and new world.
+; If different, set newRowBytesBit
+; Then, set the clipPixBit or stretchPixBit
+
+checkRowBytes
+		move	newBounds+right(a6),d0		; compute pixmap.bounds.right - pixmap.bounds.left
+		sub		newBounds+left(a6),d0		; don't take into account alignment
+
+;-------------------------------------------------------------------------
+; Allocate the actual offscreen buffer.
+;	rowBytes is computed as the smallest number of longs containing one line of pixel + 31 bits,
+;	converted to bytes:
+;			(((localRect.right - localRect.left) * pixelSize + 31 + 31) / 32) * 4
+;
+; NOTE 1: Adding 31 bits gives us some leg room if we want to realign the pixmap in UpdateGWorld.
+;		The additional 31 bits are to force a round-up top the next long (as usual).
+; NOTE 2: localRect is used instead of pixmapBounds because rowBytes is computed independently
+;		  of the current alignment but for all possible alignments.
+; NOTE 3: The above formula for rowBytes can be simplified in:
+;			(((localRect.right-localRect.left) * pixelSize + 30) / 32 + 1) * 4
+
+		ext.l	d0							; convert to long
+		lsl.l	d7,d0						; convert pixels to bits (pixShift is in d7)
+		add.l	#30,d0						; add 30 bits as per simplified formula above
+		lsr.l	#5,d0						; convert bits to longs
+		addq.w	#1,d0						; add one long as per simplified formula above
+		lsl.w	#2,d0						; convert longs to bytes
+		move.w	d0,newGWRowBytes(a6)			; save # of bytes in a row
+
+; Compare the rowBytes of the old and new world and set the newRowBytesBit if different
+
+		cmp.w	portBits+rowBytes(a3),d0	; if different, set newRowBytes bit
+		beq.s	setClipStretchBit			; same rowBytes, don't set newRowBytes bit
+		or.l	#newRowBytes,result(a6)		; set newRowBytes bit
+
+;----------------------------------------------------------------------------
+; PortRects of old and new world are of different sizes, decide between clip and stretch
+
+setClipStretchBit
+		move.l	gwFlags(a6),d0				; get flags
+		and.l	#clipPix,d0					; is the clipPixBit set?
+		bne.s	@0							; yes, use clipping
+		move.l	#stretchPix,d0				; no, use stretching
+@0
+		or.l	d0,result(a6)				; store bits in result		<1.6>
+
+;----------------------------------------------------------------------------
+; Compare the left coordinates of the portPixMap->bounds of the old and new world.
+; If different, assume alignment is taking place (don't bother getting with
+; max area device and checking that alignment might still be the same)
+
+checkAlignment
+		move.w	portBits+bounds+left(a3),d0	; get bounds.left of old pixmap
+		move.w	horizOffset(a6),d1			; get alignment of new pixmap
+		neg.w	d1							; the algebraic opposite is the bounds.left of the new pixmap
+		cmp.w	d1,d0						; compare them both
+		beq.s	@noAlignment				; identical, no alignment
+		or.l	#alignPix,result(a6)		; different, set alignment bit
+@noAlignment
+
+;----------------------------------------------------------------------------
+; Get state of offscreen buffer
+
+getState
+		clr.l	-(sp)						; leave room for flags result
+		move.l	gwPortPixMap(a3),-(sp)		; push handle to pixmap
+		_GetPixelsState						; get state of pixels
+		move.l	(sp)+,d0					; get the result
+		move.l	d0,state(a6)				; remember it for later
+
+; Prevent purging of the offscreen buffer for the time of UpdateGWorld
+
+		move.l	gwPortPixMap(a3),-(sp)		; push handle to pixmap
+		_NoPurgePixels						; don't purge the pixels
+
+;----------------------------------------------------------------------------
+; Set purgePixBit in the flags for NewGWorld if the pixels are purgeable or purged
+; Set reallocPixBit in the result of UpdateGWorld if the pixels are purged
+
+		clr.b	purged(a6)					; assume pixels aren't purged
+
+		clr.l	-(sp)						; leave room for Ptr result
+		move.l	gwPortPixMap(a3),-(sp)		; push handle to pixmap
+		_GetPixBaseAddr						; get address of offscreen buffer
+		move.l	(sp)+,d0					; put it in d0
+		bne.s	notPurged					; offscreen buffer hasn't been purged
+
+		or.l	#purgePix,newFlags(a6)		; offscreen buffer is purged, it means it's purgeable
+		or.l	#reallocPix,result(a6)		; flag that we had to reallocate the pixels
+
+; Remember that offscreen buffer is purged.
+; GetPixelsState returns an error if the offscreen buffer is purged.
+; Changed the result of GetPixelsState to a long with the purge bit set.
+; (lock bit wasn't set before the purge or buffer wouldn't have been purged)
+
+		move.b	#true,purged(a6)			; remember that offscreen buffer is purged
+		move.l	#pixelsPurgeable,state(a6)	; if the pixels are purged, recompute state
+
+		bra.s	testMFTempPixels
+
+notPurged
+		move.l	state(a6),d0				; get the state of the pixels
+		btst.l	#pixelsPurgeableBit,d0		; is the pixelsPurgeableBit set?
+		beq.s	@notPurgeable				; no, don't set purgePixBit in the flags
+
+		or.l	#purgePix,newFlags(a6)		; offscreen buffer is purgeable, set the purgePixBit
+@notPurgeable
+
+; If the pixels are allocated in MultiFinder temp memory (as indicated in the		<07Jul89> JCM
+; grafVars), set the useTempMemBit in the flags for NewGWorld.						<07Jul89> JCM
+
+testMFTempPixels
+		move.l	gwPortPixMap(a3),a0			; get handle to pixmap
+		move.l	(a0),a0						; get pointer to pixmap
+		tst.b	gwPMUseMFTemp(a0)			; test useMFTemp flag in grafVars		<07Jul89> JCM
+		beq.s	dispatchFlags				; not set, don't set useMFTempBit		<07Jul89> JCM
+		or.l	#useTempMem,newFlags(a6)		; set useMFTempBit						<07Jul89> JCM
+
+;----------------------------------------------------------------------------
+; Look at the result flags and find if we can use optimized algorithms
+; Currently optimized cases are:
+;	0. Nothing needs to be done (just exit and return 0)
+;	1. Pixels have been purged (nothing else changes)
+;	2. Pixels need to be realigned (but boundsRect's size doesn't change)
+
+dispatchFlags
+		move.l	result(a6),d0				; get the result flags
+		beq.s	nothingToDo					; if no bit set, there is nothing to do
+
+		cmp.l	#reallocPix,d0				; is reallocPixBit the only bit set?
+		beq.s	reallocBuffer				; yes, just reallocate the offscreen buffer
+
+; The following cases are relevant only if the pixels are to be preserved
+; If the pixels are not to be preserved, just dispose of the old gworld and create a new one
+
+		tst.l	gwFlags(a6)					; is any update flag set?
+		beq		updatePixels				; nope, go dispose of old gworld and create a new one
+
+		cmp.l	#alignPix,d0				; is alignPixBit the only bit set?
+		beq.s	realignPixels				; yes, just realign the pixels and pixmap
+
+		bra		updatePixels				; none of these cases apply, use regular case
+
+;----------------------------------------------------------------------------
+; Nothing at all has changed in the offscreen gworld.
+
+nothingToDo
+		move.l	a3,newGWorld(a6)			; that's it, we already have the new gworld
+
+		bra		setState					; set the state of the offscreen buffer and quit
+
+;----------------------------------------------------------------------------
+; Nothing has changed in the offscreen gworld except that the pixels have been purged
+; Reallocate them and put the handle in the baseAddr of the pixmap.
+; NOTE: If the pixels are purged, the pmVersion of the pixmap is always PixMapVers2 (LockPixels
+;       doesn't set the pmVersion to PixMapVers1 if the pixels are purged), therefore, the handle
+;		is the appropriate thing to put in the baseAddr.
+
+reallocBuffer
+		move	newBounds+bottom(a6),d0		; compute height = bottom-top
+		sub		newBounds+top(a6),d0
+		mulu.w	newGWRowBytes(a6),d0		; compute height * rowBytes
+
+		move.l	gwPortPixMap(a3),a1
+		move.l	(a1),a1						; get pointer to offscreen pixmap
+		move.l	baseAddr(a1),a0				; get handle to offscreen buffer from offscreen pixmap
+		_ReallocHandle						; allocate offscreen buffer (could be in MFTemp memory)
+		bne		reportError					; if Memory Manager error, report it and quit
+
+		_MoveHHi							; move the buffer as high as possible in memory
+
+		move.l	a3,newGWorld(a6)			; that's it, we already have the new gworld
+
+		bra		setState					; set the state of the offscreen buffer and quit
+
+;----------------------------------------------------------------------------
+; Nothing has changed in the offscreen gworld except that the boundsRect
+; has been moved around (while keeping the same size).
+; The algorithm realigns all the pixels.  No mask is used for the edges because they
+; contain unused pixels.
+
+realignPixels
+
+; Update the port pixmap's bounds to the newBounds with alignment
+
+		move.l	gwPortPixMap(a3),a2			; get handle to pixmap
+		move.l	(a2),a4						; get pointer to pixmap
+		move	newBounds+top(a6),bounds+top(a4)	; put new bounds.top
+		move	newBounds+left(a6),d0		; compute left coordinate with alignment
+		sub		horizOffset(a6),d0
+		move	d0,bounds+left(a4)			; put new bounds.left
+		move.l	newBounds+botRight(a6),bounds+botRight(a4)	; put new bounds.botRight
+
+; Set up the base address without locking (oooh...)
+
+		move.l	baseAddr(a4),d3				; save the current base address (or handle)
+		subq.w	#4,sp						; leave room for result
+		move.l	a2,-(sp)					; push handle to pixmap
+		_GetPixBaseAddr						; get address of pixels
+		move.l	(sp)+,a1					; keep address in a1
+		move.l	a1,portBits+baseAddr(a3)	; jam it in the portBits
+		move.l	a1,baseAddr(a4)				; jam it in the pixmap
+
+; Save the port, set it to no port, so we don’t get StdBits
+
+		move.l	GrafGlobals(a5),a0			; get the port
+		move.l	thePort(a0),d4				; save for later
+		clr.l	thePort(a0)					; set to no port
+
+; Copy the bits over a few pixels (srcRect = newBounds, dstRect = pixMap^^.bounds)
+
+		pea		portBits(a3)				; srcBits = portBits (old bounds)
+		move.l	a4,-(sp)					; dstBits = pixMap^ (new bounds)
+		pea		portBits+bounds(a3)			; srcRect = srcBits.bounds
+		pea		bounds(a4)					; dstRect = dstPix.bounds
+		move.w	#srcCopy,-(sp)
+		clr.l	-(sp)
+		_CopyBits							; slide them over
+
+; Restore the port
+
+		move.l	GrafGlobals(a5),a0			; get the port
+		move.l	d4,thePort(a0)
+
+; Restore the base address
+
+		move.l	d3,baseAddr(a4)				; jam it in the pixmap
+		move.l	d3,portBits+baseAddr(a3)	; jam it in the portBits, just in case it is locked
+
+; Update the port’s portBits.bounds to the newBounds with alignment (in pixMap.bounds)
+
+		move.l	bounds+topLeft(a4),portBits+bounds+topLeft(a3)
+		move.l	bounds+botRight(a4),portBits+bounds+botRight(a3)
+
+; Update the port’s portRect to the newBounds without alignment
+
+		move.l	newBounds+topLeft(a6),portRect+topLeft(a3)	; copy newBounds to portRect
+		move.l	newBounds+botRight(a6),portRect+botRight(a3)
+
+; Set visible region of offscreen port to portRect
+
+		move.l	visRgn(a3),-(sp)			; push handle to visRgn
+		pea		portRect(a3)				; push address of portRect
+		_RectRgn							; make visRgn = portRect
+
+; Return the old GWorld into the newGWorld
+
+		move.l	a3,newGWorld(a6)			; GWorld hasn't changed
+
+		bra		setState					; we're done, go set the state of the offscreen buffer and quit
+
+;----------------------------------------------------------------------------
+; Create a new graphics world and, if necessary, CopyBits the old graphics world into the new one
+
+updatePixels
+
+; Update the flags in result according to the update flags passed to UpdateGWorld
+; We're going to realloc the offscreen
+
+		or.l	#reallocPix,result(a6)		; flag that we had to reallocate the pixels	<KON 11FEB91>
+
+;----------------------------------------------------------------------------
+; Dispose of old offscreen buffer if no CopyBits will take place.
+; Don't dispose of the old graphics world (in case NewGWorld fails).
+
+testUpdate
+		move.l	MinusOne,oldBufSize(a6)		; initialize to -1 (assume old offscreen not disposed of)
+
+		tst.b	purged(a6)					; are the pixels purged?
+		bne.s	@0							; yes, dispose of the old graphics world
+		move.l	gwFlags(a6),d0				; get flags
+		bne.s	createNew					; if there is update to do, don't dispose old GWorld
+@0
+		move.l	gwPortPixMap(a3),a4			; get handle to old pixmap
+
+		move.l	a4,-(sp)					; push it
+		_UnlockPixels						; unlock pixels so we have a handle in baseAddr
+
+		move.l	(a4),a1						; get pointer to pixmap
+		move.l	baseAddr(a1),a4				; get handle to offscreen buffer
+
+		clr.l	baseAddr(a1)				; clear it to mark that it's disposed
+
+		move.l	a4,a0						; get offscreen buffer handle in a0
+		_GetHandleSize						; get size of offscreen buffer
+		move.l	d0,oldBufSize(a6)			; remember it in case NewGWorld fails
+
+		move.l	a4,a0
+		_DisposHandle						; get rid of old offscreen buffer
+
+;----------------------------------------------------------------------------
+; Create a new graphics world
+
+createNew
+		clr		-(sp)						; leave room for result				
+		pea		newGWorld(a6)				; push address of new offscreen GWorldPtr variable
+		move	pixelDepth(a6),-(sp)		; new pixel depth
+		move.l	boundsRect(a6),-(sp)		; new bound rectangle
+		move.l	cTable(a6),-(sp)			; new color table
+		move.l	aGDevice(a6),-(sp)			; pass aGDevice (NIL if noNewDeviceBit is clear)
+		move.l	newFlags(a6),-(sp)			; flags with appropriate noNewDeviceBit and purgePixBit
+		_NewGWorld							; create a new GWorld
+		move	(sp)+,d0					; look at result
+		bne		newGWorldError				; an error happened, handle it properly
+
+;----------------------------------------------------------------------------
+; Update new grafport with fields from old grafport
+
+		move.l	newGWorld(a6),a4			; get pointer to new grafport
+
+	if 0 then
+; Update clipRgn by:
+;	offsetting it to the new portRect if clipPixBit set
+;	mapping it to the new portRect if stretchPixBit set
+
+		_MaxBlock							; get maximum space left in heap
+		move.l	d0,d3						; save it
+		move.l	clipRgn(a3),a0				; get size of clipRgn
+		_GetHandleSize
+		cmp.l	d0,d3						; is there enough space in heap?
+		blt		purgedError					; no => branch to noMem error
+	endif
+	
+		move.l	clipRgn(a3),-(sp)			; first copy clip region
+		move.l	clipRgn(a4),-(sp)
+		_CopyRgn
+
+		move.l	gwFlags(a6),d0				; get the flags
+		and.l	#clipPix,d0					; look at the clipPixBit
+		bne.s	offsetClip					; clipPixBit set, offset the clip region
+
+; Map clipRgn to the new portRect
+
+		move.l	clipRgn(a4),-(sp)			; push handle to clip Region
+		pea		portRect(a3)				; push address of old portRect
+		pea		portRect(a4)				; push address of new portRect
+		_MapRgn								; map region from old portRect to new portRect
+		bra.s	copyPixPats
+
+; Offset clipRgn to the new portRect
+
+offsetClip
+		move.l	clipRgn(a4),-(sp)			; push handle to clip Region
+		move	portRect+left(a4),d0		; compute offset between left coordinates of old and new portRect
+		sub		portRect+left(a3),d0
+		move	d0,-(sp)
+		move	portRect+top(a4),d0			; compute offset between top coordinates of old and new portRect
+		sub		portRect+top(a3),d0
+		move	d0,-(sp)
+		_OfsetRgn							; offset the region
+
+; Copy the patterns, pen characteristics, etc.
+
+copyPixPats
+		lea		bkPat(a4),a0				; copy from the old port
+		lea		bkPat(a3),a1				; into the new port
+		moveq	#portRec-bkPat,d0			; copy this much of the port
+		_BlockMove
+
+;----------------------------------------------------------------------------
+; If the pixels in the old world are purged, don't update them
+
+		tst.b	purged(a6)					; are the old pixels purged?
+		bne		noCopyBits					; yes, don't CopyBits
+
+; If flags is not 0, find out how the pixels will be updated and call CopyBits to update them
+
+		move.l	gwFlags(a6),d0				; if flags is 0,
+		beq		noCopyBits					; just set state of new offscreen buffer and return
+
+;----------------------------------------------------------------------------
+; Lock the pixels of both gworlds
+
+		clr.b	-(sp)						; leave room for Boolean result
+		move.l	gwPortPixMap(a3),-(sp)		; handle to old offscreen PixMap
+		_LockPixels							; lock the pixels down
+		move.b	(sp)+,d0					; ignore result (if we're here, it means pixels are not purged)
+
+		clr.b	-(sp)						; leave room for Boolean result
+		move.l	newGWorld(a6),a0			; get pointer to new offscreen GWorld
+		move.l	gwPortPixMap(a0),-(sp)		; push handle to new offscreen PixMap
+		_LockPixels							; lock the pixels down
+		move.b	(sp)+,d0					; if pixels are purged already, quit now
+		beq		purgedError					; report error and exit
+
+; Set current graphics world to new GWorld
+
+		move.l	newGWorld(a6),-(sp)			; push pointer to new GWorld
+		clr.l	-(sp)						; NIL device
+		_SetGWorld							; set current GWorld for CopyBits
+
+;----------------------------------------------------------------------------
+; Save the clipRgn of the newGWorld and set it to newGWorld's portRect
+; so that CopyBits copies the whole pixmap
+
+		clr.l	-(sp)						; leave room for RgnHandle result
+		_NewRgn								; create a new region for saveClip
+		move.l	(sp),saveClip(a6)			; remember region handle in saveClip
+
+		_GetClip							; get the current clipRgn in saveClip
+
+		move.l	newGWorld(a6),a0			; get pointer to new GWorld
+		pea		portRect(a0)				; push address of portRect
+		_ClipRect							; set clipRgn to portRect
+
+;----------------------------------------------------------------------------
+; Call CopyBits to update the pixels.  Compute srcRect and dstRect according
+; to update mode (clipping or stretching)
+
+		pea		portBits(a3)				; srcBits = pointer to old pixmap
+		move.l	newGWorld(a6),a1			; get pointer to new offscreen port
+		pea		portBits(a1)				; dstBits = pointer to new pixmap
+
+		lea		portRect(a3),a0				; get address of old portRect
+		lea		portRect(a1),a1				; get address of new portRect
+
+		move.l	gwFlags(a6),d0				; get the flags
+		btst.l	#stretchPixBit,d0			; is stretchPixBit set?
+		bne.s	doCopyBits					; yes, use srcRect and dstRect with no clipping
+
+; If clipPixBit is set, clip CopyBits to size of destination rectangle
+
+doClipping
+
+		move.l	topLeft(a0),clipSrcRect+topLeft(a6)	; topLeft coordinates remain the same
+		move.l	topLeft(a1),clipDstRect+topLeft(a6)
+
+; Compute smallest height of old and new rectangle
+
+		move	bottom(a0),d0				; compute old height
+		sub		top(a0),d0
+		move	bottom(a1),d1				; compute new height
+		sub		top(a1),d1
+		cmp		d0,d1						; which height is smaller?
+		blt.s	@0							; new height is smaller, keep in d1
+		move	d0,d1						; old height is smaller, keep in d1
+@0
+		move	top(a0),d0					; compute old top + clipped height
+		add		d1,d0
+		move	d0,clipSrcRect+bottom(a6)	; store in clipSrcRect.bottom
+		move	top(a1),d0					; compute new top + clipped height
+		add		d1,d0
+		move	d0,clipDstRect+bottom(a6)	; store in clipDstRect.bottom
+
+; Compute smallest width of old and new rectangle
+
+		move	right(a0),d0				; compute old width
+		sub		left(a0),d0
+		move	right(a1),d1				; compute new width
+		sub		left(a1),d1
+		cmp		d0,d1						; which width is smaller?
+		blt.s	@1							; new width is smaller, keep in d1
+		move	d0,d1						; old width is smaller, keep in d1
+@1
+		move	left(a0),d0					; compute old left + clipped width
+		add		d1,d0
+		move	d0,clipSrcRect+right(a6)	; store in clipSrcRect.right
+		move	left(a1),d0					; compute new left + clipped width
+		add		d1,d0
+		move	d0,clipDstRect+right(a6)	; store in clipDstRect.right
+
+		lea		clipSrcRect(a6),a0			; srcRect = smallest of old portRect and new portRect
+		lea		clipDstRect(a6),a1			; dstRect = idem but in coordinate system of new port
+
+doCopyBits
+		move.l	a0,-(sp)					; srcRect = old portRect (clipped or unclipped)
+		move.l	a1,-(sp)					; dstRect = new portRect
+		move.w	#srcCopy,-(sp)				; mode = srcCopy or dither
+		move.l	#nil,-(sp)					; no mask
+		_CopyBits							; transfer the pixels
+
+;----------------------------------------------------------------------------
+; Restore the clipRgn of the newGWorld
+
+		move.l	saveClip(a6),-(sp)			; push handle to saveClip
+		_SetClip							; restore clipRgn
+
+		move.l	saveClip(a6),-(sp)			; push handle to saveClip
+		_DisposRgn							; get rid of clipRgn
+
+;----------------------------------------------------------------------------
+; Unlock the pixels of the new offscreen GWorld (don't care about the old one, we'll get rid of it)
+
+		move.l	newGWorld(a6),a0			; get pointer to new offscreen GWorld
+		move.l	gwPortPixMap(a0),-(sp)		; push handle to its pixmap			<KON 8FEB91>
+		_UnlockPixels						; unlock the pixels
+
+;----------------------------------------------------------------------------
+; After CopyBits, dispose of the old offscreen graphics world
+
+noCopyBits
+		move.l	a3,-(sp)					; push handle to old GWorld
+		_DisposeGWorld						; dispose of it
+
+;----------------------------------------------------------------------------
+; Set lock/purge state of new offscreen buffer to the same as old offscreen buffer
+
+setState
+		move.l	newGWorld(a6),a3			; get pointer to new GWorld
+
+; Get here if restoring state of old offscreen buffer after an error (old GWorldPtr is in a3)
+
+setStateWithError
+
+		move.l	gwPortPixMap(a3),-(sp)		; push handle to its pixmap			<KON 8FEB91>
+		move.l	state(a6),-(sp)				; push lock/purge state
+		_SetPixelsState						; set the state
+
+;----------------------------------------------------------------------------
+; If savePort is the old GWorld, set savePort to the new one
+; If saveDevice is the old attached device, set saveDevice to the new attached device
+
+		move.l	offscreenGWorld(a6),a0		; get pointer to GWorldPtr variable
+		move.l	(a0),a0						; get old GWorld
+		cmpa.l	savePort(a6),a0				; compare with savePort
+		bne.s	@notSame					; if not the same, go check the saveDevice
+		move.l	a3,savePort(a6)				; savePort is old GWorld, replace with new GWorld
+@notSame
+
+; Restore current graphics world
+
+restoreGWorld
+		move.l	savePort(a6),-(sp)			; push pointer to saved port
+		_SetPort
+
+;----------------------------------------------------------------------------
+; Return pointer to new GWorld in offscreenGWorld
+; If got here after an error, a3 contains the old graphics world
+
+		move.l	offscreenGWorld(a6),a0		; get pointer to GWorldPtr variable
+		move.l	a3,(a0)						; store pointer to new GWorld in offscreenGWorld variable
+
+exit	move.w	#noErr,MemErr				; assume no error					<21Jun89> JCM
+		move.l	result(a6),d0				; copy result to d0					<21Jun89> JCM
+		bpl.s	@0							; if result is < 0,					<21Jun89> JCM
+		move.w	d0,MemErr					; copy low-word of result to QDErr	<21Jun89> JCM
+@0											;									<21Jun89> JCM
+		movem.l	(sp)+,a2-a4/d5-d7			; restore regs
+		unlk	a6							; get rid of stack frame
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+;----------------------------------------------------------------------------
+; Errors
+
+reportError
+		ext.l	d0							; convert error to a long
+		move.l	d0,result(a6)				; report error
+		bra.s	setStateWithError			; restore state of old offscreen buffer and quit
+
+badPixelDepth
+		move.l	#cDepthErr,result(a6)		; pixel depth invalid
+		bra.s	exit						; exit
+
+purgedError
+		move.l	#cNoMemErr,result(a6)		; report a Quickdraw memory error
+		bra.s	setStateWithError			; restore state of old offscreen buffer and quit
+
+paramError
+		move.l	#paramErr,result(a6)		; report a parameter error
+		bra.s	exit						; and exit
+
+; If NewGWorld error fails and the old offscreen buffer was disposed of,
+; reallocate old offscreen buffer, report error, and quit.
+
+newGWorldError
+		move.l	oldBufSize(a6),d1			; get size of old offscreen buffer
+		bmi.s	reportError					; if 0, it means old offscreen hasn't been disposed of
+
+		move	d0,d7						; save error code
+
+		move.l	d1,d0						; get size of old offscreen buffer in d0
+
+		move.l	gwPortPixMap(a3),a0			; get pixmap handle
+		move.l	(a0),a0						; get pixmap pointer
+		tst.b	gwPMUseMFTemp(a0)			; were the pixels in temp memory?							<07Jul89> JCM
+		bz.s	@useCurHeap					; no, allocate in current heap								<07Jul89> JCM
+		_NewHandleCommaTemp					; allocate it in MF heap
+		bra.s	@shareErr
+@useCurHeap
+		_NewHandle							; allocate offscreen buffer (don't initialize it)			<07Jul89> JCM
+@shareErr
+		bne.s	reportError					; if error, report it and quit				<07Jul89> JCM
+
+@gotMem
+		move.l	gwPortPixMap(a3),a1			; get pixmap handle
+		move.l	(a1),a1						; get pixmap pointer
+		move.l	a0,baseAddr(a1)				; store handle to offscreen buffer in baseAddr
+		; buffer is not locked so we do not have to set up the baseAddr of the portBits
+
+		move.w	d7,d0						; restore error code
+		bra.s	reportError					; report error and quit
+
+		ENDPROC
+
+
+SetGWorld	PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE SetGWorld (port: CGrafPtr; gdh: GDHandle);
+;
+; Set the current port and device.
+;
+; If port is a GWorldPtr, set the current device to its attached device and ignore gdh.
+; If port is not a GWorldPtr, set the current device to gdh.
+;
+; HIDDEN FEATURES:
+;	If port is not a GWorldPtr and gdh is NIL, the current device is set to MainDevice.
+;	If port is a GWorldPtr but doesn't have an attached device (should never happen),
+;	  the current device is set to MainDevice.
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		8					; size of parameters
+port			equ		paramSize+4-4		; LONG, new current port
+gdh				equ		port-4				; LONG, new current device
+
+;----------------------------------------------------------------------------
+
+; Set the current port
+
+		move.l	GrafGlobals(a5),a0			; get address of Quickdraw Globals
+		move.l	port(sp),thePort(a0)		; set the current port
+
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+
+
+GetGWorldDevice	PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	FUNCTION GetGWorldDevice (offscreenGWorld: GWorldPtr): GDHandle;
+;
+; Returns a handle to the attached device to offscreenGWorld.
+; If offscreenGWorld is not a GWorld, returns the current device.
+;
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		4					; size of parameters
+offscreenDevice	equ		paramSize+4			; LONG, handle to attached device
+offscreenGWorld	equ		offscreenDevice-4	; LONG, offscreen graphics world
+
+;----------------------------------------------------------------------------
+
+		clr.l	offscreenDevice(sp)			; we don’t have gDevices!
+
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+
+QDDone	PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	FUNCTION QDDone (port: GrafPtr): Boolean;
+;
+; Returns true if all pending Quickdraw requests for the given port are completed.
+; Returns false if not.
+;
+; Call PixMapDone to do the job.
+;
+; This function should be called before accessing the pixels directly (e.g.
+; using distorsion algorithm, etc.) or to make sure that the drawing to a given
+; port is finished (animation, etc.)
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		4					; size of parameters
+result			equ		paramSize+4			; BOOLEAN, function result
+port			equ		result-4			; LONG, pointer to port
+
+;----------------------------------------------------------------------------
+
+		move.b	#true,result(sp)
+
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+
+
+LockPixels	PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	FUNCTION LockPixels (pm: PixMapHandle): Boolean;
+;
+; Lock offscreen buffer down, change the handle in baseAddr to a 32-bit
+; pointer to the offscreen buffer, and change the gwPMVersion from pmVersionUnlocked to pmVersionLocked.
+;
+; Don't do anything and return false if handle as been purged.
+; Don't do anything and return true if gwPMVersion is not pmVersionUnlocked.
+;
+; This procedure must be called before drawing to an offscreen world.
+;
+; NOTE: If gwPMVersion is pmVersionLocked, it means LockPixels is being called twice in a row.
+;		LockPixels doesn't do anything in this case.
+;
+; The fact that the baseAddr can be locked and unlocked allows Quickdraw
+; to use a relocatable block for offscreen buffers, therefore avoiding heap
+; fragmentation.
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		4					; size of parameters
+result			equ		paramSize+4			; BYTE, result: false if handle is purged
+pm				equ		result-4			; LONG, handle to pixmap
+
+;----------------------------------------------------------------------------
+
+; Assume handle isn't purged
+
+		move.b	#true,result(sp)			; set result to true
+
+; Check that PixMap’s version is pmVersionUnlocked.
+; If it's not pmVersionUnlocked, don't do anything and return true
+
+		move.l	pm(sp),a1					; get handle to pixmap
+		move.l	(a1),a1						; get pointer to pixmap
+		move	gwPMVersion(a1),d0			; get version
+		cmp		#pmVersionUnlocked,d0		; is pixmap unlocked?
+		bne.s	exit						; no, exit
+
+; Get 32-bit pointer to offscreen buffer
+
+		move.l	baseAddr(a1),a0				; get handle to offscreen buffer
+		move.l	(a0),d0						; get master pointer
+		_StripAddress						; if 32-bit QD not present, don't use Translate24To32
+
+; Check that the offscreen buffer isn't purged
+
+		tst.l	d0							; is pointer to offscreen buffer = 0?
+		bne.s	@0							; no, continue as planned
+		move.b	#false,result(sp)			; yes, it's purged, return false
+		bra.s	exit						; and exit
+@0
+
+; Store 32-bit pointer in baseAddr
+
+		move.l	d0,baseAddr(a1)				; baseAddr can now be used by 32-bit Quickdraw correctly
+
+; Change gwPMVersion to reflect that baseAddr is a 32-bit pointer
+
+		move	#pmVersionLocked,gwPMVersion(a1)	; set version to pmVersionLocked (baseAddr is 32-bit pointer)
+
+; Lock down handle to offscreen buffer
+
+		_HLock								; lock it (a0 contains the handle)
+
+; If the pixMap we locked has an associated port, jam in the baseAddr.
+
+		move.l	gwPMPort(a1),d0				; get the associated port
+		bz.s	@noPort
+		move.l	d0,a1						; point to the port
+		move.l	(a0),d0						; get new baseAddr
+		_StripAddress
+		move.l	d0,portBits+baseAddr(a1)	; drop him into place, ready for Quick-drawing	<16MAR90 KON>
+@noPort
+
+exit	rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+
+
+UnlockPixels PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE UnlockPixels (pm: PixMapHandle);
+;
+; If gwPMVersion is pmVersionLocked, change the baseAddr from a pointer to a handle, unlock
+; the handle, and change gwPMVersion to pmVersionUnlocked.
+;
+; If gwPMVersion is not 1, don't do anything.
+;
+; NOTE: If gwPMVersion is pmVersionUnlocked, UnlockPixels is being called twice.
+;		UnlockPixels doesn't do anything in this case.
+;
+; This procedure must be called when the application is finished drawing
+; to the offscreen pixmap.
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		4					; size of parameters
+pm				equ		paramSize+4-4		; LONG, handle to pixmap
+
+;----------------------------------------------------------------------------
+
+; Check that PixMap’s version is pmVersionLocked.
+; If it's not pmVersionLocked, don’t do anything.
+
+		move.l	pm(sp),a1					; get handle to pixmap
+		move.l	(a1),a1						; get pointer to pixmap
+		move	gwPMVersion(a1),d0		; get version
+		cmp		#pmVersionLocked,d0			; is pixmap locked?
+		bne.s	exit						; no, exit
+
+; If gwPMVersion = pmVersionLocked, convert the baseAddr to a handle and unlock it
+
+		move.l	baseAddr(a1),a0				; push address of offscreen buffer
+		_RecoverHandle						; get handle to offscreen buffer
+		_HUnlock							; unlock it
+
+; Store handle in baseAddr
+
+		move.l	pm(sp),a1					; get handle to pixmap
+		move.l	(a1),a1						; get pointer to pixmap
+		move.l	a0,baseAddr(a1)				; store handle to offscreen buffer in baseAddr
+
+; Change gwPMVersion to reflect that baseAddr is a handle
+
+		move	#pmVersionUnlocked,gwPMVersion(a1)	; set version to pmVersionUnlocked
+
+; If the pixMap we locked has an associated port, jam in the baseAddr.
+
+		move.l	gwPMPort(a1),d0				; get the associated port						<16MAR90 KON>
+		bz.s	@noPort						;												<16MAR90 KON>
+		move.l	d0,a1						; point to the port								<16MAR90 KON>
+		move.l	pm(sp),portBits+baseAddr(a1); put the handle to the pixmap back in the port	<16MAR90 KON>
+@noPort
+
+exit	rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+
+
+PortChanged	PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE PortChanged (port: CGrafPtr);
+;
+; Called after non-procedural changes are made to a port.
+; This procedure should be called before doing any more drawing.
+;
+; Note: this procedure is useful for Asynchronous Quickdraw
+
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE PixPatChanged (ppat: PixPatHandle);
+;
+; Called after non-procedural changes are made to a pixel pattern.
+; This procedure should be called before doing any more drawing.
+;
+; Note: this procedure is useful for Asynchronous Quickdraw
+
+			ENTRY	PixPatChanged
+PixPatChanged
+
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE CTabChanged (cTab: CTabHandle);
+;
+; Called after non-procedural changes are made to a color table.
+; This procedure should be called before doing any more drawing.
+;
+; Note: this procedure is useful for Asynchronous Quickdraw
+
+			ENTRY	CTabChanged
+CTabChanged
+
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE GDeviceChanged (gdh: GDHandle);
+;
+; Called after non-procedural changes are made to a gDevice
+; This procedure should be called before doing any more drawing.
+;
+; Note: this procedure is useful for Asynchronous Quickdraw
+
+			ENTRY	GDeviceChanged
+GDeviceChanged
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		4					; size of parameters
+param			equ		paramSize+4-4		; LONG
+
+;----------------------------------------------------------------------------
+
+; doesn't do anything in Synchronous Quickdraw
+
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+
+
+AllowPurgePixels	PROC	ENTRY
+		ENTRY	NoPurgePixels
+		ENTRY	GetPixelsState
+		ENTRY	DisposeScreenBuffer
+
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE AllowPurgePixels (pm: PixMapHandle);
+;
+; Allow purging of the offscreen buffer by calling HPurge.
+;
+; If gwPMVersion is pmVersionUnlocked, baseAddr is a handle, call HPurge directly.
+; If gwPMVersion is pmVersionLocked, baseAddr is a pointer, get the handle first.
+; If gwPMVersion is not pmVersionLocked or pmVersionUnlocked, don't do anything.
+;
+; NOTE: It is safe to set the purge state of the handle to the offscreen
+;       buffer even if the baseAddr contains only the pointer.  The reason
+;		is that if the baseAddr is a pointer, it means LockPixels has been
+;		called and therefore the handle is locked and won't be purged.
+
+;----------------------------------------------------------------------------
+
+		bsr.s	PixelsHandleHelper			; get the handle
+		_HPurge
+		jmp		(a1)						; return
+
+
+
+NoPurgePixels
+
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE NoPurgePixels (pm: PixMapHandle);
+;
+; Prevents purging of the offscreen buffer by calling HNoPurge.
+;
+; If gwPMVersion is pmVersionUnlocked, baseAddr is a handle, call HNoPurge directly.
+; If gwPMVersion is pmVersionLocked, baseAddr is a pointer, recover the handle first.
+; If gwPMVersion is not pmVersionLocked or pmVersionUnlocked, don't do anything.
+
+;----------------------------------------------------------------------------
+
+		bsr.s	PixelsHandleHelper			; get the handle
+		_HNoPurge
+		jmp		(a1)						; return
+
+
+
+GetPixelsState
+
+;----------------------------------------------------------------------------
+;
+;	FUNCTION GetPixelsState (pm: PixMapHandle): LONGINT;
+;
+; Get the state of the offscreen buffer handle by calling HGetState.  The result
+; contains two bits: pixelsLockedBit and pixelsPurgeableBit.
+; For convenience, these bits happen to be the same as the lock and purge bit
+; of the Memory Manager.
+;
+; If gwPMVersion is pmVersionUnlocked, the baseAddr is a handle, call HGetState directly.
+; If gwPMVersion is pmVersionLocked, the baseAddr is a pointer, call RecoverHandle first.
+; If gwPMVersion is neither, return 0.
+;
+
+;----------------------------------------------------------------------------
+
+; Start with a state of 0
+
+		clr.l	8(sp)						; default result
+
+		bsr.s	PixelsHandleHelper			; get the handle
+		bz.s	@done						; no handle here!
+		_HGetState							; get the state in low byte of d0
+		move.b	d0,3(sp)					; store state in low byte of result
+@done
+		jmp		(a1)						; return
+
+
+
+DisposeScreenBuffer
+
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE DisposeScreenBuffer (offscreenPixMap: PixMapHandle);
+;
+; Dispose the memory allocated for the offscreen pixmap and offscreen buffer.
+; I don't use DisposPixMap because the color table is owned by the device,
+; not the pixmap.
+
+;----------------------------------------------------------------------------
+
+; Check offscreenPixMap's gwPMVersion.  If not pmVersionLocked or pmVersionUnlocked, don't do anything.
+; Get handle to offscreen buffer
+; If gwPMVersion=pmVersionUnlocked, baseAddr is a handle
+; If gwPMVersion=pmVersionLocked, baseAddr is the master pointer
+
+		move.l	4(sp),-(sp)					;copy return address		<6Apr90 KON>
+		move.l	4(sp),-(sp)					;copy PixMapHandle			<6Apr90 KON>
+		bsr.s	PixelsHandleHelper			; get the handle, put return address in a1
+		bne.s	@cont						; DisposeHandle
+		
+		addq	#8,sp						;clean up stack				<25Jun90 KON>
+		jmp		(a1)						;							<25Jun90 KON>
+@cont
+		_DisposHandle						; dispose offscreen buffer
+
+		move.l	(sp)+,a1					; get return address		<6Apr90 KON>
+		move.l	(sp)+,a0					; get handle to offscreen PixMap	<6Apr90 KON>
+		_DisposHandle						; get rid of it				<6Apr90 KON>
+		jmp		(a1)						;<6Apr90 KON>
+
+
+PixelsHandleHelper
+
+; This is a handleburger helper routine which gets the handle to the pixels in a gwPixMap, which
+; may be locked and derefenced at the time.
+;
+;	In:
+;		(sp)	return address
+;		4(sp)	caller’s caller
+;		8(sp)	GWPixMapHandle
+;
+;	Out:
+;		CC		Z if the pixels are not in a handle, NZ if there is a handle
+;		a0		handle to pixels (or NIL, if not in a handle)
+;		a1		caller’s caller (return with a jmp (a1))
+;
+;	Trashes d0-d2/a0-a1
+
+		move.l	(sp)+,d1					; keep return address for a rainy day
+		move.l	(sp)+,d2					; keep caller’s caller
+		move.l	(sp)+,d0					; and a start with the pixmap handle
+		bz.s	@nothing					; we found nothing at all
+		move.l	d0,a1
+
+		move.l	(a1),a1						; get pointer to pixmap
+		move.l	baseAddr(a1),a0				; get baseAddr
+
+		move.w	gwPMVersion(a1),d0			; get gwPMVersion
+		cmp.w	#pmVersionUnlocked,d0		; is gwPMVersion an unlocked handle?
+		beq.s	@gotHandle					; yes, baseAddr is a handle
+		cmp.w	#pmVersionLocked,d0			; is gwPMVersion an locked handle?
+		bne.s	@nothing					; no, don’t do anything
+@gotPointer
+		_RecoverHandle						; get the handle
+@gotHandle
+		moveq	#1,d0						; set CCs NZ to indicate we found it
+@done
+		movea.l	d2,a1						; give the caller his caller
+		movem.l	d1,-(sp)					; we are done, return preserving condition codes
+		rts
+
+@nothing
+		moveq	#0,d0						; set CCs Z to indicate nothing found
+		move.l	d0,a0
+		bra.s	@done
+
+		ENDPROC
+
+
+SetPixelsState	PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	PROCEDURE SetPixelsState (pm: PixMapHandle; flags: LONGINT);
+;
+; Set the state of the offscreen buffer handle by calling LockPixels/UnlockPixels
+; and AllowPurgePixels/NoPurgePixels.
+;
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		8					; size of parameters
+pm				equ		paramSize+4-4		; LONG, handle to pixmap
+gwFlags			equ		pm-4				; LONG, flags
+
+;----------------------------------------------------------------------------
+
+; Check pixelsPurgeableBit and call AllowPurgePixels or NoPurgePixels
+
+		move.l	gwFlags(sp),d0				; get the flags
+		btst.l	#pixelsPurgeableBit,d0		; is pixelsPurgeableBit set?
+		bne.s	allowPurge					; yes, call AllowPurgePixels
+
+		move.l	pm(sp),-(sp)				; no, call NoPurgePixels
+		_NoPurgePixels
+		bra.s	checkLock
+
+allowPurge
+		move.l	pm(sp),-(sp)				; call AllowPurgePixels
+		_AllowPurgePixels
+
+; Check pixelsLockedBit and call LockPixels or UnlockPixels
+
+checkLock
+		move.l	gwFlags(sp),d0				; get the flags
+		btst.l	#pixelsLockedBit,d0			; is pixelsLockedBit set?
+		bne.s	lockIt						; yes, call LockPixels
+
+		move.l	pm(sp),-(sp)				; no, call UnlockPixels
+		_UnlockPixels
+		bra.s	exit
+
+lockIt
+		move.l	pm(sp),a0					; get PixMapHandle
+		clr.b	-(sp)						; room for Boolean result
+		move.l	a0,-(sp)					; push PixMapHandle
+		_LockPixels							; call LockPixels
+		move.b	(sp)+,d0					; ignore result
+
+exit
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+
+GetPixBaseAddr	PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	FUNCTION GetPixBaseAddr (pm: PixMapHandle): Ptr;
+;
+; Make sure that Asynchronous Quickdraw is done and get the 32-bit pointer to
+; the offscreen buffer.
+;
+; If gwPMVersion is PixMapVers4, the baseAddr is a 32-bit pointer, just return it.
+; If gwPMVersion is pmVersionUnlocked, the baseAddr is a handle, get the 24-bit pointer and clean it.
+; If gwPMVersion is pmVersionLocked, the baseAddr is a clean 24-bit pointer, just return it.
+; If gwPMVersion is PixMapVers0,
+;		if the baseAddr is the same as one of the screens in the devicelist then return it
+;		else clean it first.
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		4					; size of parameters
+bufResult		equ		paramSize+4			; LONG, result
+pm				equ		bufResult-4			; LONG, handle to pixmap
+
+; Initialize bufPtr to baseAddr (assume gwPMVersion is not pmVersionUnlocked).
+
+		move.l	pm(sp),a1					; get handle to pixmap
+		move.l	(a1),a1						; get pointer to pixmap
+		move.l	baseAddr(a1),a0				; get baseAddr
+		move.l	a0,bufResult(sp)			; store in result
+
+; Check PixMap's gwPMVersion.
+
+		move.w	gwPMVersion(a1),d0			; get gwPMVersion
+		btst	#pmVersionHandleBit,d0		; is it a handle?
+		beq.s	exit						; no, we're done
+
+; If gwPMVersion = pmVersionUnlocked, baseAddr is a handle, get the master pointer
+; and translate it to a 32-bit pointer.
+
+		move.l	(a0),d0						; get master pointer
+		_StripAddress						; if 32-bit QD not present, don't use Translate24To32
+		move.l	d0,bufResult(sp)			; store it in result
+
+exit	rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+
+
+Pixmap32Bit		PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	FUNCTION Pixmap32Bit (pm: PixMapHandle): boolean;
+;
+;
+; If gwPMVersion is PixMapVers4, the baseAddr is a 32-bit pointer, return true.
+; If gwPMVersion is pmVersionUnlocked, the baseAddr is a handle,         return false.
+; If gwPMVersion is pmVersionLocked, the baseAddr is a 24-bit pointer, return false.
+; If gwPMVersion is PixMapVers0,
+;		if the baseAddr is the same as a devicelist screen, then return true (for now)
+;		else return false.
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		4					; size of parameters
+bufResult		equ		paramSize+4			; boolean, result
+pm				equ		bufResult-4			; LONG, handle to pixmap
+
+
+; Initialize result to false (assume gwPMVersion is not PixMapVers4 or a screen).
+
+		clr.w	bufResult(sp)				; assume return false
+
+exit	rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+NewScreenBuffer	PROC	ENTRY
+			ENTRY	NewTempScreenBuffer
+			ENTRY	NewGWBuffer
+;----------------------------------------------------------------------------
+;
+;  A6 offsets of parameters after link:
+;
+paramSize		equ		14					; size of parameters
+result			equ		paramSize+8			; WORD, OSErr
+boundsRect		equ		result-4			; LONG, address of global Rectangle
+purgeable		equ		boundsRect-2		; BOOLEAN, purgeable pixels flag						<14Jul89> JCM
+gdhP			equ		purgeable-4			; LONG, address of GDHandle variable					<14Jul89> JCM
+offscreenPMP	equ		gdhP-4				; LONG, address of PixMapHandle variable
+
+;----------------------------------------------------------------------------
+;
+;  A6 offsets of local variables after link:
+;
+
+bytesPerRow		equ		-2					; WORD, rowBytes of offscreen pixmap
+offscreenBufH	equ		bytesPerRow-4		; LONG, handle to the offscreen buffer
+offscreenPixMap	equ		offscreenBufH-4		; LONG, handle to the offscreen pixmap
+pixmapBounds	equ		offscreenPixMap-8	; Rect, rectangle describing pixmap bounds
+localRect		equ		pixmapBounds-8		; Rect, localized version of rect passed in				<10>
+varSize			equ		localRect			; size of local variables								<14Jul89> JCM
+
+;----------------------------------------------------------------------------
+
+;----------------------------------------------------------------------------
+;
+;	FUNCTION NewScreenBuffer (globalRect: Rect; purgeable: BOOLEAN;									<14Jul89> JCM
+;					VAR gdh: GDHandle; VAR offscreenPixMap: PixMapHandle): OSErr;
+;
+; Creates an offscreen pixmap and an offscreen buffer, using globalRect as a global
+; rectangle in screen space and finding the deepest device that intersects that
+; rectangle.  The device is returned in gdh, the offscreen PixMap is created
+; according to the characteristics of the device (pixel depth, color table, etc.).
+; The color table is shared with the device.
+
+		link	a6,#varSize 				; allocate local variables								<7> csd
+		movem.l d3-d7/a2-a4,-(sp)			; save regs												<7> csd
+		moveq	#0,d5						; MF temp mem selector = 0 (don't use MF temp mem)		<14Jul89> JCM
+		bra.s	CommonScreenBuffer			; branch to common code
+
+;----------------------------------------------------------------------------						<14Jul89> JCM
+;																									<14Jul89> JCM
+;	FUNCTION NewTempScreenBuffer (globalRect: Rect; purgeable: BOOLEAN;								<14Jul89> JCM
+;					VAR gdh: GDHandle; VAR offscreenPixMap: PixMapHandle): OSErr;					<14Jul89> JCM
+;																									<14Jul89> JCM
+; Same as NewScreenBuffer but allocates the pixels in MultiFinder temporary memory					<14Jul89> JCM
+
+NewTempScreenBuffer							;														<14Jul89> JCM
+		link	a6,#varSize 				; allocate local variables								<7> csd
+		movem.l d3-d7/a2-a4,-(sp)			; save regs												<7> csd
+		moveq	#1,d5						; MF temp mem selector = 1 (use MF temp mem)			<14Jul89> JCM
+
+CommonScreenBuffer
+		moveq	#0,d7
+		moveq	#0,d6
+		lea		localRect(a6),a3			; use the localRect from here
+		bra.s	CommonBuffer				; enter buffer code after link & register save			<7> csd
+
+; FUNCTION NewGWBuffer (globalRect: Rect; purgeable: BOOLEAN;
+;		VAR gdh: GDHandle; VAR offscreenPixMap: PixMapHandle): OSErr
+
+; NewGWBuffer is shared by NewScreenBuffer and NewGWorld
+; It has the same parameters as NewScreenBuffer, except for:
+
+; 1) D5.B contains 0 for normal memory, 1 for MF temp. memory
+; 2) D7.W contains 0 to get depth from screen, non-zero to use specific depth
+; 3) d6.L contains the number of extra pixels for alignment (31 for NewGWorld, 0 for NewScreenBuffer)
+; 4) A3 contains a place to put the localRect (for use as a portRect later)
+
+NewGWBuffer
+
+		link	a6,#varSize 				; allocate local variables
+		movem.l d3-d7/a2-a4,-(sp)			; save regs
+
+CommonBuffer								;														<7> csd
+		move.l	boundsRect(a6),a2
+
+;-------------------------------------------------------------------------
+; Initialize the function result to no error.  Optimistically assume that
+; everything will go fine.
+
+		moveq	#noErr,d3					; flag a successful operation,
+
+;-------------------------------------------------------------------------
+; Initialize all offscreen local variables to zero.
+; If an error happens during this function, we deallocate the memory for
+; all allocated offscreen variables.
+
+		clr.l	offscreenBufH(a6)			; handle to offscreen buffer
+		clr.l	offscreenPixMap(a6)			; handle to offscreen pixmap
+
+;-------------------------------------------------------------------------
+; Check that the boundsRect is not an empty rectangle.
+; If it is empty, don't do anything.
+;
+		clr.b	-(sp)						; leave room for Boolean result					<25JUN90 KON>
+		move.l	boundsRect(a6),-(sp)		; push address of rectangle on the stack		<25JUN90 KON>
+		_EmptyRect							; check if rectangle is empty or not			<25JUN90 KON>
+		move.b	(sp)+,d0					; look at the result							<25JUN90 KON>
+		bne		paramError					; if true, boundsRect is empty, exit with error	<25JUN90 KON>
+
+;-------------------------------------------------------------------------
+; For maximum efficiency when copying offscreen pixmap to screen, try
+; to match the pixel alignment of the offscreen pixmap to the pixel
+; alignment of the portion of screen space described by boundsRect.
+
+computeAlignment
+
+		move.l	topLeft(a2),topLeft(a3)
+		move.l	botRight(a2),botRight(a3)
+
+		move.l	a3,a2									; and use the localRect from now on						<10>
+
+; Convert localRect to local coordinates (topLeft = 0, 0)											<10>
+
+		tst.w	d7							; don’t convert bounds to local if depth is specified
+		bnz.s	@noLocalizing
+
+		move.w	left(a2),d0					; compute boundsRect->right - boundsRect->left			<10>
+		sub.w	d0,right(a2)				; store in localRect.right								<10>
+		move.w	top(a2),d0					; compute boundsRect->bottom - boundsRect->top			<10>
+		sub.w	d0,bottom(a2)				; store in localRect.bottom								<10>
+		clr.l	topLeft(a2)					; set localRect.top and localRect.left to 0				<10>
+
+@noLocalizing
+
+; Change the left coordinate of the pixmap bounds so that the buffer will be aligned.
+; To align, just clear out the low bits.
+
+		move.l	topLeft(a2),pixmapBounds+topLeft(a6)	; pixmapBounds.top = localRect.top
+		move.l	botRight(a2),pixmapBounds+botRight(a6)	; bottom and right coordinates unchanged
+
+		tst.w	d7							; don’t align if depth is specified
+		bnz.s	@noAligning
+
+		and.w	#~$1F,pixmapBounds+left(a6)	; align the buffer
+@noAligning
+
+; Bug fix:
+;	If d6 contains 0, that means that this pixmap is not going to be realigned.
+;	It also means that the rowBytes computation is not taking into account the full width
+;	of the buffer, because it assumes that the localRect width plus the slop is enough to cover
+;	any future realignment. Because of this, we load a2 with pixMapBounds(a6), if d6 is 0.
+
+		tst.l	d6							; is this going to be realigned
+		bnz.s	@useLocalRect				; yes, use the localRect plus the 31 bits of slop
+		lea		pixmapBounds(a6),a2			; no, use pixmapBounds, but no need for any slop
+@useLocalRect
+
+;-------------------------------------------------------------------------
+; Allocate the actual offscreen buffer.
+;	rowBytes is computed as the smallest number of longs containing one line of pixel + 31 bits,
+;	converted to bytes:
+;			(((localRect.right - localRect.left) * pixelSize + 31 + 31) / 32) * 4
+;
+; NOTE 1: Adding 31 bits gives us some leg room if we want to realign the pixmap in UpdateGWorld.
+;		The additional 31 bits are to force a round-up top the next long (as usual).
+; NOTE 2: localRect is used instead of pixmapBounds because rowBytes is computed independently
+;		  of the current alignment but for all possible alignments.
+;
+;	size of the buffer is:
+;			rowBytes * (pixmapBounds.bottom - pixmapBounds.top)
+
+allocateBuffer
+		move.w	right(a2),d0				; get right coordinate
+		sub.w	left(a2),d0					; compute number of pixels per line
+		ext.l	d0							; convert to long
+		add.l	#31,d0						; add 31 bits
+		add.l	d6,d0						; add more bits if necessary
+		lsr.l	#5,d0						; convert bits to longs
+		lsl.w	#2,d0						; convert longs to bytes
+		move.w	d0,bytesPerRow(a6)			; save # of bytes in a row
+
+		move.w	bottom(a2),d1				; compute height of rectangle
+		sub.w	top(a2),d1					; bottom-top
+		mulu.w	d1,d0						; compute height * rowBytes
+
+		tst.b	d5							; use MF temp memory? 										<14Jul89> JCM
+		beq.s	@useCurHeap					; no, allocate in current heap								<07Jul89> JCM
+		_NewHandleCommaTemp					; allocate in MF heap
+		bra.s	@joinUs
+@useCurHeap
+		_NewHandle							; allocate offscreen buffer (don’t initialize it)			<07Jul89> JCM
+@joinUs
+		bne.s	reportError					; if Memory Manager error, report it and quit				<07Jul89> JCM
+
+@gotMem
+		move.l	a0,offscreenBufH(a6)		; save handle to offscreen buffer
+
+		_MoveHHi							; move the buffer as high as possible in memory
+
+; If the purgeable flag is set, make the offscreen buffer purgeable			<14Jul89> JCM
+
+		tst.b	purgeable(a6)				; is purgeable flag set?		<14Jul89> JCM
+		beq.s	@0							; no, leave as is
+		_HPurge								; yes, make it purgeable
+@0
+
+;-------------------------------------------------------------------------
+; Create the offscreen PixMap.
+; The baseAddr is a handle to the offscreen buffer.
+; IMPORTANT: the gwPMVersion field is set to pmVersionUnlocked.
+;				gwPMVersion = pmVersionUnlocked means that the baseAddr is a handle.
+;				gwPMVersion = pmVersionLocked means that the baseAddr is a 32-bit pointer.
+
+createPixMap
+		moveq	#gwPMSize,d0				; get size of PixMap structure
+		_NewHandle clear					; allocate the handle
+		bne.s	reportError					; if Memory Manager error, report it and quit
+
+		move.l	a0,offscreenPixMap(a6)		; save it
+		move.l	(a0),a1						; a1 = pixmap pointer
+
+; Start filling out the fields of the pixmap
+
+		move.l	offscreenBufH(a6),baseAddr(a1)	; store HANDLE to offscreen buffer in pixmap
+		move	bytesPerRow(a6),rowBytes(a1)	; store rowBytes and pixmap flag in pixmap
+		move.l	pixmapBounds+topLeft(a6),bounds+topLeft(a1)	; copy pixmapBounds to pixmap's bounds
+		move.l	pixmapBounds+botRight(a6),bounds+botRight(a1)
+		move	#pmVersionUnlocked,gwPMVersion(a1)	; IMPORTANT: set pixmap's version to version 2 (baseAddr is a handle)
+		move.b	d5,gwPMUseMFTemp(a1)			; remember if we used temp. memory
+
+;-------------------------------------------------------------------------
+; Store the offscreen PixMap and museDevice in the offscreenPixMap and gdh VARs
+
+		move.l	offscreenPMP(a6),a0			; get address of PixMapHandle variable
+		move.l	offscreenPixMap(a6),(a0)	; store handle to offscreen PixMap in it
+		move.l	gdhP(a6),a0					; get address of GDHandle variable
+		clr.l	(a0)						; store handle to museDevice in it
+
+;-------------------------------------------------------------------------
+; We're done.  Return error code and put a copy of it in low-memory MemErr.
+
+goHome
+		move	d3,result(a6)				; get error code in to return
+		move	d3,MemErr
+		movem.l	(sp)+,d3-d7/a2-a4			; restore regs
+		unlk	a6							; get rid of stack frame
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+;-------------------------------------------------------------------------
+; When an error occurs, all allocated memory is freed and an error code
+; is returned.
+
+paramError
+		move	#paramErr,d3				; one of the parameters is invalid
+		bra.s	disposOffscreenHandles		; release memory and exit
+
+reportError
+		move.w	d0,d3						; directly report Memory Manager error
+
+; Dispose of all allocated memory (handle is allocated when non zero)
+
+disposOffscreenHandles
+
+		move.l	offscreenBufH(a6),a0		; get handle to offscreen buffer
+		_DisposHandle						; dispose it
+		move.l	offscreenPixMap(a6),a0		; get handle to offscreen pixmap
+		_DisposHandle						; dispose it
+		bra.s	goHome						; exit
+
+			ENDPROC
+
+
+OffscreenVersion	PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	FUNCTION OffscreenVersion (): LONGINT;
+;
+; Returns the version number of the current version of the Quickdraw extensions.
+; The first version doesn't have OffscreenVersion implemented and will therefore
+; return a paramErr.
+
+
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		0					; size of parameters
+version			equ		paramSize+4			; LONG, result
+
+		move.l	#OffscreenVersNum,version(sp)		; return version number
+		rts
+
+		ENDPROC
+
+
+GetGWorldPixMap	PROC	ENTRY
+;----------------------------------------------------------------------------
+;
+;	FUNCTION GetGWorldPixMap (gw: GWorldPtr): PixMapHandle;
+;
+;	Given a GWorld, get the associated PixMap.
+;
+;----------------------------------------------------------------------------
+;
+;  Stack offsets of parameters
+;
+paramSize		equ		4					; size of parameters
+pmResult		equ		paramSize+4			; LONG, result (handle to PixMap)
+gw				equ		pmResult-4			; LONG, pointer to GWorld
+
+; The PixMap is right there in the port.
+
+		move.l	gw(sp),a0
+		move.l	gwPortPixMap(a0),pmResult(sp)
+
+		rtd_a0	paramSize					; get rid of parameters and return to caller
+
+		ENDPROC
+
+
+NewHandleCommaTemp	PROC	ENTRY
+
+; NewHandleCommaTemp has the same interfaces as NewHandle, but it gets memory from
+; MF temp. memory. If MultiFinder is not running, returns a nil handle and cTempMemErr.
+
+OSDispatchTrapNum	EQU		$8F				; _OSDispatch trap number
+UnImplTrapNum		EQU		$9F				; _Unimplemented trap number
+		
+		movem.l	a1/d1-d2,-(sp)				; save work registers
+		move.l	d0,d1						; copy requested size
+		
+		move.w	#OSDispatchTrapNum,d0		; _OSDispatch trap number
+		_GetTrapAddress	newTool				; address of _OSDispatch
+		move.l	a0,a1						; save address
+
+		move.w	#UnImplTrapNum, D0			; _Unimplemented trap number
+		_GetTrapAddress	newTool				; address of _Unimplemented trap
+		
+		cmp.l	a0,a1						; is _OSDispatch implemented (i.e. MultiFinder running)?
+		bne.s	@MFExists					; yes, go try for it
+		move.l	#0,a0						; return nil handle
+		move.w	#cTempMemErr,d0				; return error
+		bra.s	@done
+
+@MFExists
+		subq.l	#4,sp						; room for result
+		move.l	d1,-(sp)					; ask for it
+		pea		MemErr						; var result code
+		_MFTempNewHandle
+		move.l	(sp)+,a0					; get result
+		move.w	MemErr,d0					; get result code
+
+@done
+		movem.l	(sp)+,a1/d1-d2				; restore work registers
+		rts
+
+		ENDPROC

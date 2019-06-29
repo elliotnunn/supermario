@@ -1,0 +1,463 @@
+;
+;   File:       HWElemsLogs.a
+;
+;   Contains:   Routines to calculate LOG2(x), LOG2(1+x), LN(x) and LN(1+x)
+;
+;   Written by: Apple Numerics Group, DSG
+;
+;   Copyright:   © 1985-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<SM2>	 2/3/93		CSS		Update from Horror:
+;		<H2>	 9/29/92	BG		Adding Jon Okada's latest fixes.
+;		  <1>	10/24/91	SAM/KSM	Rolled in Regatta file.
+;		
+;	Terror Change History:
+;
+;         <1>   01/06/91    BG      Added to TERROR/BBS for the time.
+;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;																			  ;;
+;;	File 881ELEMSlogs.a,													  ;;
+;;	Function log,															  ;;
+;;	Implementation of log2(x), log2(1+x), ln(x) & ln(1+x) for ΩSANE.		  ;;
+;;	For machines with MC68881/68882 FPU.									  ;;
+;;																			  ;;
+;;	Copyright Apple Computer, Inc. 1985-7, 1989, 1990, 1992, 1993.			  ;;
+;;																			  ;;
+;;	Written by Ali Sazegari, started on March 15 1989,						  ;;
+;;	2nd revision for integration into ROM control routine on June 13 1989.	  ;;
+;;	3rd rev - folding of log routines into a common code. on June 28 1989.	  ;;
+;;	4th rev - optimization of fp registers, naive testing on July 06 1989.	  ;;
+;;	5th	rev - branch optimization & looking into denormal on Sept 25 1989.	  ;;
+;;	6th rev - fix small numbers in log (1+x) and ln (1+x) on Octo 10 1989.	  ;;
+;;	7th rev - add section for flags and powers of 2 flags on Dece 06 1989.	  ;;
+;;	8th	rev - flags tested by hand: -inf, negative arguments, -1, 0, +inf	  ;;
+;;	nans, denormals and a bag full of cases. The inexact flag error which	  ;;
+;;	was not set for some powers of two in LN & LN1 in the orginal code by	  ;;
+;;	jerome was also corrected.												  ;;
+;;	9th rev - fixed the ineaxct for argument in [√2/2,√2] on Febr 01 1990.	  ;;
+;;	10th rev- the input -0 causes the negative branch to be taken and NaN	  ;;
+;;	is delivered. It cascades into XPwrY and XPwrI, Fixed on May  22 1990.	  ;;
+;;	11th rev- propagate inexact from (1+r) in log21 fixed on June 06 1990.	  ;;
+;;  12th rev - fixed underflow signaling in log21 on March 31 1992. - JPO	  ;;
+;;			   replaced FMOVECR instructions on March 31 1992.      - JPO.	  ;;
+;;			   replaced subroutine 'ArgReduce' with an implementation 	 	  ;;
+;;			     which avoids FGETEXP and FGETMAN on April 3 1992	- JPO.	  ;;
+;;																			  ;;
+;;	based on Elems881, package code for Macintosh by J. Coonen,				  ;;
+;;	who wrote it from pascal programs by D. Hough, C. McMaster and K. Hanson. ;;
+;;	influenced by C. Lewis program design choices.							  ;;
+;;																			  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;					L	O	G	(	x	)	B	A	S	E	2				  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+RLog2x
+		
+			FMOVE.L	FPSR,D0				; what kind of arg? fpsr has the key
+			BSR.W	Classify			; classify the arg with a neat trick
+			BSR.W	ArgReduce			; reduce the argument
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	The approximation procedure is for y = 1 + s.  Subtract 1 from argument.  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			FSUB.L	#1,FP0				; s = y - 1
+			FSNE	D1					; is reduced arg zero? for flag use
+										; don't use d1 anywhere till tested!
+			
+			BSR.W	Log2Approx			; compute the approximation for Log2
+			TST.B	D1					; was it a power of 2?
+			BEQ.S	@1					; yes, don't set the inexact flag
+			MOVE.L	#SetInexact,D0		; set up inexact
+@1			JMP		(A4)				; get out we're done!
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;				L	O	G	(	1	+	x	)	B	A	S	E	2			  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+RLog21x
+
+			FMOVE.X	FP0,FP1				; keep a copy for computational use
+										; the following is a change of variable
+										; to make the classify routine work
+			FADD.L	#1,FP0				; arg < -1 ? <=> arg +1 < 0 ?
+			FMOVE.L	FPSR,D0				; what kind of arg? fpsr has the key
+			BSR.W	Classify			; classify the arg with a neat trick
+			FMOVE.L	FPSR,D1				; is it an inexact operation?
+			SWAP	D1					; high word contains the inexact flag
+
+			FCMP.X	FPKSQRT2,FP0		; is arg + 1 < √2 ?
+			FBGT.W	@3					; if arg + 1 > √2, then do ArgReduce
+			FCMP.X	FPKSQRTHALF,FP0		; is arg + 1 < √2/2 ?
+			FBLT.W	@3					; if arg + 1 < √2/2 then do ArgReduce
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	no ArgReduce needed, but we still have to go through the acrobatics of 	  ;;
+;;	exponent and mantissa.  see the body of ArgReduced.						  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+			FMOVE.L	#0,FP3				; set exponent for LogApprox						
+			FMOVE.X	FP1,FP0				; restore the original argument
+										; and set FPSR for denormal use
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	EXTREMELY IMPORTANT! Keep the order of the above two FP instructions as	  ;;
+;;	is.  The denormal section of the routine relies on the fact the FPSR has  ;;
+;;	been set correctly.														  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	all right! we are in buisness for log2(1+x) computation.				  ;;
+;;																			  ;;
+;;	Check for denormalized input variables.  This only happens for log2(1+x)  ;;
+;;	and not for log2(x) since x in log2(x) gets mapped to the interval		  ;;
+;;	[√2/2,√2].  Lovely trick, finally fixed on 11/8/89.						  ;;
+;;																			  ;;
+;;	Extract the exponent and the leading bit of mantissa ( extended precision ;;
+;;	has an explicit leading bit set to 1 ) to check for denormalized numbers. ;;
+;;	Remember to discard the sign bit.										  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			BFEXTU	(A0) {1:16},D0		; get the exponent & 1st mantissa bit
+			BEQ.B	Log21Denormal		; if D0 = 0 then current arg s = denorm		
+			
+;			FMOVE.W	#1,FP1				; load 1 for comparison
+;			FCMP.X	FP1,FP0				; is the REAL argument 2? ( log2(1+1) )
+;			FSNE	D1					; if no set d1 for further use
+			MOVEQ	#1,D1				; set flag for inexact
+			
+			BRA.S	@4					; in interval, no ArgReduce needed
+@3			BSR.W	ArgReduce			; reduce the argument
+			FSUB.L	#1,FP0				; s = y - 1, since we added 1 on top
+			FSNE	D1					; is reduced arg zero? for flag use
+										; don't use d1 anywhere!
+@4			BSR.W	Log2Approx			; compute the approximation for Log2
+			TST.B	D1					; was it a power of 2?
+			BNE.S	@6					; yes, don't set the inexact flag
+			BTST	#19,D1				; was inexact flag set? (1+r) ineaxct
+			BEQ.S	@7					; no, don't set the inexact
+@6			MOVE.L	#SetInexact,D0		; set up inexact
+@7			JMP		(A4)				; get out we're done!
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	OK.  argument was a denormal number ( i.e., s ), as JTC puts it:		  ;;
+;;	Log2(1 + TinyWiny) = Ln(1 + TinyWiny) / Ln(2),							  ;;
+;;	Ln(1 + TinyWiny) ≈ TinyWiny  ==>  fp0 = TinyWiny / Ln(2).				  ;;
+;;	Also filter out zero arguments.											  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+Log21Denormal	
+			FBEQ.W	@5					; arg = 0, get out without setting flags
+;			FMOVECR	#Ln2,FP1			; load Ln(2) from 68881 constant ROM - DELETED <3/31/92, JPO>
+;			FDIV.X	FP1,FP0				; fp0 = result 	- DELETED <3/31/92, JPO>
+			FDIV.X	FPKLOGE2,FP0		; return input/ln(2) 	 <3/31/92, JPO>
+			FMOVEM.X FP0,-(SP)			; check if result is denormal <3/31/92, JPO>
+			TST.W	4(SP)				;				   <3/31/92, JPO>
+			LEA		12(SP),SP			; restore stack    <3/31/92, JPO>
+			BMI.S	@5					; normal result    <3/31/92, JPO>
+			
+			MOVE.L	#SetUflow,D0		; set up under flow
+			
+@5			JMP		(A4)				; get out of here
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;				L	O	G	(	1	+	x	)	B	A	S	E	e			  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+RLn1x
+		
+			FMOVE.X	FP0,FP1				; keep a copy for computational use
+										; the following is a change of variable
+										; to make the classify routine work
+			FADD.L	#1,FP0				; arg < -1 ? <=> arg +1 < 0 ?
+			FMOVE.L	FPSR,D0				; what kind of arg? fpsr has the key
+			BSR.S	Classify			; classify the arg with a neat trick
+			
+			FCMP.X	FPKSQRT2,FP0		; is arg + 1 < √2 ?
+			FBGT.W	@1					; if arg + 1 > √2, then do ArgReduce
+			FCMP.X	FPKSQRTHALF,FP0		; is arg + 1 < √2/2 ?
+			FBLT.W	@1					; if arg + 1 < √2/2 then do ArgReduce
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	no ArgReduce needed, but we still have to go through the acrobatics of 	  ;;
+;;	exponent and mantissa.  see the body of ArgReduced.						  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+			FMOVE.L	#0,FP3				; set exponent for LogApprox						
+			FMOVE.X	FP1,FP0				; restore the original argument
+										; and set FPSR for denormal use
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	EXTREMELY IMPORTANT! Keep the order of the above two FP instructions as	  ;;
+;;	is.  The denormal section of the routine relies on the fact the FPSR has  ;;
+;;	been set correctly.														  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+						
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	all right! we are in buisness for ln(1+x) computation.					  ;;
+;;																			  ;;
+;;	Check for denormalized input variables.  This only happens for ln(1+x)	  ;;
+;;	and not for ln(x) since x in ln(x) gets mapped to the interval [√2/2,√2]. ;; 
+;;																			  ;;
+;;	Extract the exponent and the leading bit of mantissa ( extended precision ;;
+;;	has an explicit leading bit set to 1 ) to check for denormalized numbers. ;;
+;;	Remember to discard the sign bit.										  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+;			MOVE.L	(A0),D0				; take the sign and exponent of arg
+;			ADD.L	D0,D0				; cheap way to drop the sign bit
+;			MOVEQ	#16,D1				; lovely trick fixed
+;			LSR.L	D1,D0				; is the explicit bit set to 1?
+			BFEXTU	(A0) {1:16},D0		; get the exponent & 1st mantissa bit
+			BEQ.B	Ln1Denormal			; if D0 = 0 then current arg s = denorm		
+			
+			BRA.S	@2					; in interval, no ArgReduce needed
+@1			BSR.W	ArgReduce			; reduce the argument - CHANGED .B to .W <4/3/92, JPO>
+			FSUB.L	#1,FP0				; s = y - 1, since we added 1 on top
+@2			BSR.S	Log2Approx			; compute the approximation for Log2
+;			FMOVECR	#Ln2,FP1			; fetch Ln(2) for final computation - DELETED <3/31/92, JPO>
+;			FMUL.X	FP1,FP0				; convert to natural log, all set - DELETED <3/31/92, JPO>
+			FMUL.X	FPKLOGE2,FP0		; multiply by ln(2)			 <3/31/92, JPO>
+			MOVE.L	#SetInexact,D0		; set up inexact
+			JMP		(A4)				; get out we're done!
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	OK.  argument was a denormal number ( i.e., s ), just return it back!	  ;;
+;;	Since Ln(1 + TinyWiny) ≈ TinyWiny  and  fp0 = TinyWiny.					  ;;
+;;	Also filter out zero arguments.											  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+Ln1Denormal	
+
+			FBEQ.W	@5					; arg = 0, get out without setting flags
+			MOVE.L	#SetUflow,D0		; set up under flow
+@5			JMP		(A4)				; get out of here
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;					L	O	G	(	x	)	B	A	S	E	e				  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+RLnx
+
+			FMOVE.L	FPSR,D0				; what kind of arg? fpsr has the key
+			BSR.B	Classify			; classify the arg with a neat trick
+			BSR.W	ArgReduce			; reduce the argument - CHANGED .B to .W <4/3/92, JPO>
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	The approximation procedure is for y = 1 + s.  Subtract 1 from argument.  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			FSUB.L	#1,FP0				; s = y - 1
+			
+			BSR.B	Log2Approx			; compute the approximation for Log2
+;			FMOVECR	#Ln2,FP1			; fetch Ln(2) for final computation - DELETED <3/31/92, JPO>
+;			FMUL.X	FP1,FP0				; convert to natural log, all set   - DELETED <3/31/92, JPO>
+			FMUL.X	FPKLOGE2,FP0		; convert to natural log 	 <3/31/92, JPO>
+			FBEQ.W	@1					; if fp0 = 0, then don't set inexact
+			MOVE.L	#SetInexact,D0		; set up inexact
+			JMP		(A4)				; get out we're done!
+@1			MOVE.L	#ClrInexact,D0		; clear all flags
+			JMP		(A4)				; out
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;						C	L	A	S	S	I	F	Y						  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+										
+Classify
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Here is the strategy  ( commonly known as the scoop ) by C. R. Lewis:	  ;;
+;;	Register D0 has N, Z, I, NaN burried in it.  Mask off unwanted bits to 	  ;;
+;;	get them. Then, left shift NZINaN to have Z at MSB position.  If D0 = 0	  ;;
+;;	then arg is finite.														  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			MOVE.L	#ExcMask,D1			; mask it kid
+			AND.L	D1,D0				; we now have the meat
+			LSL.L	#ShiftIt,D0			; N->C, Z->MSB, I->30th & NaN->29th bit
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	If arg is negative then return NaN and signal invalid.					  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			BCS.B	LogNeg				; is arg < 0 ?  - CHANGED .W to .B <4/3/92, JPO>
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	If arg is a positive finite number, great!  let's fall through, otherwise ;;
+;;	take the problem cases. Isn't this cutsy?								  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	
+			BNE.B	BadStuff			; take care of the bad guys (Z bar set)
+			RTS
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;						A	R	G	R	E	D	U	C	E					  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+										
+;ArgReduce								; old implementation DELETED <4/3/92, JPO>
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Represent x = ( 2 ** l ) * y.											  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;			
+;			FGETEXP	FP0,FP3				; FP3 = l, has the exponent of x
+;			FGETMAN	FP0,FP0				; FP0 = y has the mantissa of x
+;			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Note that y ( the mantissa ) is 1.0 < y < 2.0, then if y < √2 continue 	  ;;
+;;	to the approximation procedure, Log2Approx.  Otherwise  y <- y/2 & l++.	  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;						
+;			FCMP.X	FPKSQRT2,FP0		; is y < √2 ?
+;			FBLT.W	@1					; if y < √2, then do Log2Approx
+;			FADD.W	#1,FP3				; if y > √2, then l++
+;			FDIV.W	#2,FP0				; and divide y by 2
+;@1										; otherwise continue to Log2Approx
+;			RTS
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;					L	O	G	2	A	P	P	R	O	X					  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+										
+Log2Approx
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	We now build r = s / ( s + 2 ), s is the reduced form of the original	  ;;
+;;	argument: x = ( 2 ** l ) * y, where l is an integer and √2/2 =< y =< √2	  ;;
+;;	and s = y - 1, then Log2(x) = l + Log2(s+1).							  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+			FMOVE.X	FP0,FP2				; save the arg = s
+			FADD.L	#2,FP2				; fp2 has the arg = s + 2
+			FDIV.X	FP2,FP0				; fp0 has r = s / ( s + 2 )
+			FMOVE.X	FP0,FP2				; fp2 also has r
+			FMUL.X	FP2,FP0				; fp0 now has r**2 & ready for the game
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	All right.  We are ready for the main dish -- it's been a long time.	  ;;
+;;	r**2 is in fp0 and Log2(1+s) = r * P(r**2) / Q(r**2).  Get PolyEval to	  ;;
+;;	work by: supplying r**2 in fp0 and coefficient table pointer in A0.		  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			LEA		LOG21P,A0			; A0 = coeff table ptr for PolyEval
+			BSR		PolyEval			; fp1 = PolyEval(P, r**2)
+			
+			FMUL.X	FP1,FP2				; form fp2 = r * P(r**2)
+			
+			LEA		LOG21Q,A0			; A0 = coeff table ptr for PolyEval
+			BSR		PolyEval			; fp1 = PolyEval( Q, r**2 )
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Be sure that all underflows up to the next step is cleared and force	  ;;
+;;	the inexact flag after the operation ( r * P(r**2) ) / Q(r**2).			  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			FMOVE.L	FPSR,D0				; get the current fpsr
+			BCLR.L	#UnderFlow,D0		; set up clear all accrued underflows
+			FMOVE.L	D0,FPSR				; write all flags
+			FDIV.X	FP1,FP2				; form fp2 = ( r * P(r**2) ) / Q(r**2)
+			FMOVE.X	FP2,FP0				; log(mantissa(s)) comupted
+			FADD.X	FP3,FP0				; add the exponent, ready for GoLogGo
+			RTS
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;				P	R	O	B	L	E	M	C	A	S	E	S				  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+										
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Problem cases: NaN, +∞ and zero.										  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	
+BadStuff	ADDQ.L	#4,SP				; wait! adjust for the RTS we missed
+			BMI.B	LogZero				; is arg = 0 ? ( N set )
+;			BTST	#29,D0				; is arg a NaN? ( bit position 29 )
+;			BEQ.B	LogInf				; scream, arg = +∞ detected!
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	All right boys & girls, at this time it is apparent that the good old arg ;;
+;;	is an infinity or a NaN.												  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;			MOVE.L	#SetInvalid,D0     	; signal invalid
+;LogInf		JMP		(A4)				; return either NaN or +∞
+			JMP		(A4)				; return either NaN or +∞
+			
+LogZero		FMOVE.X	#NegInf,FP0			; return a -∞
+			MOVE.L	#SetDivByZ,D0		; signal divide by zero
+			JMP		(A4)
+
+LogNeg		ADDQ.L	#4,SP				; wait! adjust for the RTS we missed
+			LSL.L	#1,D0				; N->Out, Z->C, I->MSB & NaN->30th bit
+			BCS.S	LogZero				; is arg = -0 ? ( Z set )
+			BTST	#30,D0				; is arg a -NaN? ( bit 29 +1 )
+			BNE.S	@1					; jump out if -NaN is detected
+			FMOVE.X	#NaNLog,FP0			; no! arg < 0 -> Log2(arg) = NaN
+			MOVE.L	#ClrInexact+SetInvalid,D0     	; signal invalid
+@1			JMP		(A4)
+						
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;						A	R	G	R	E	D	U	C	E					  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; New implementation of ArgReduce represents x = 2^l * y, where 0.0 < x < +INF,
+; l is an integral value, and √2/2 <= y < √2.  This implementation avoids all
+; FPU instructions except for FMOVEM and FMOVE.   <4/3/92, JPO>
+;
+; Input:   FP0 <- x (nonzero, positive, and finite)
+; Output:  FP0 <- y and FP3 <- l
+; No other registers are modified.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+										
+ArgReduce:								; New implementation  <4/3/92, JPO>
+			movem.l	d0-d2,-(sp)			; save D0-D2, STACK:  D0-D2 save < &ret
+			fmovem.x fp0,-(sp)			; push x, STACK:  x (12 bytes) < D0-D2 save < &ret
+			movem.l	(sp),d0-d2			; D0-D2 <- x
+			swap	d0					; D0.W <- exponent of positive finite x
+			move.w	#$3fff,(sp)			; set exponent on stack to biased zero (will become y's exponent)
+			subi.w	#$3fff,d0			; unbias exponent of x (will become l)
+			tst.l	d1					; is x normal?
+			bmi.b	@norm				; yes
+
+; Denormal input requires normalization of significand and adjustment of l in D0
+			bne.b	@donorm				; SIG.HI != 0, do normalization
+
+			exg	d1,d2					; SIG.HI = 0 so exchange D1/D2
+			subi.w	#32,d0				; adjust exponent of x
+			tst.l	d1					; normalized yet?
+			bmi.b	@normdone			; yes
+
+@donorm:								; normalization loop
+			subq.w	#1,d0				; decrement l
+			add.l	d2,d2				; shift significand one bit to left
+			addx.l	d1,d1
+			bpl.b	@donorm				; repeat until normalized
+
+@normdone:
+			movem.l	d1-d2,4(sp)			; write normalized significand to stack
+
+@norm:
+			cmp.l	FPKSQRT2+4,d1		; y >= sqrt(2.0)?
+			bgt.b	@halfy				; greater than: adjust y and l
+			bne.b	@goty				; less than:  load y and l into FP0/FP3
+
+			cmp.l	FPKSQRT2+8,d2		; SIG.HI = SIG.HI of sqrt(2)
+			bcs.b	@goty				; SIG.LO < SIG.LO of sqrt(2)
+	
+@halfy:									; y >= sqrt(2.0)
+			addq.w	#1,d0				; increment l in D0.W
+			subq.w	#1,(sp)				; halve y by decrementing its exponent
+
+@goty:
+			fmove.x	(sp)+,fp0			; FP0 <- y, STACK:  D0-D2 save < &ret
+			fmove.w	d0,fp3				; FP3 <- l
+			movem.l	(sp)+,d0-d2			; restore D0-D2, STACK:  &ret
+
+			rts							; return to caller
+

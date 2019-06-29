@@ -1,0 +1,169 @@
+;
+;	File:		32ATInit.a
+;
+;	Contains:	ArrowInit.a
+;
+;	Written by:	Jim Straus
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <2>	 4/16/90	KON		Remove Duplicate definitions from HardwarePrivateEqu.a
+;
+;	To Do:
+;
+
+;	======================================================================
+;	ArrowInit.a			© 1988-1990 by Apple Computer Inc
+;						by Jim Straus					12/8/88
+;	======================================================================
+
+	BLANKS      ON
+	PRINT		OFF
+	
+	INCLUDE		'Traps.a'
+	INCLUDE		'SysEqu.a'
+	INCLUDE		'QuickEqu.a'
+	INCLUDE		'HardwarePrivateEqu.a'
+	INCLUDE		'ToolEqu.a'
+	INCLUDE		'SlotEqu.a'
+	INCLUDE 	'VideoEqu.a'
+	INCLUDE 	'ROMEqu.a'
+	PRINT		ON
+	BRANCH		SHORT
+	STRING      ASIS
+	
+;	======================================================================
+;	Header to main init code.
+;	======================================================================
+
+			MACHINE MC68020
+
+Init		MAIN	EXPORT
+
+;----------
+; Hardware configuration bits.
+;----------
+
+HWCfgFlags	EQU 		$B22	  				; (word) HW Configuration flags
+
+			MOVE.W		HwCfgFlags,D0			; check ‘em the compulsive way
+			BTST		#hwCbAUX,D0				; is it A/UX time?			
+			BEQ.S		PatchInit				; if not, go install patch
+			RTS									; else do nothing
+
+
+AppleShare	EQU		$FFD6				; one's complement of hard coded 41
+KillArrows	EQU		$F9					; control code to kill the arrows
+
+
+
+; This patch turns off the arrows in the corner when AppleShare is running.
+			
+OurOpen		CMP.L	#$0e2e4146,([18,A0])	; does name start with $#e'.AF'?
+			BNE.S	NotOurs					; if not, just pass it on
+MayBeOurs	CMP.L	#'PTra',([18,A0],4)		; compare the last character 'PTra'
+			BNE.S	NotOurs
+
+			; the driver is Appleshare, so make the call and return to us.
+			
+			PEA		MakeCtrl				; where we want to return to
+NotOurs		JMP		([RealOpen])			; call RealOpen without disturbing registers
+			
+MakeCtrl	BNE.S	OutOfHere				; if error on open then return it
+											; make the control call turning off the arrows
+											; [reuse parameter block, ioRefNum is valid]
+			MOVE.L	#0,csParam(A0)
+			MOVE.W	#KillArrows,csCode(A0)
+			MOVE.L	#0,ioCompletion(A0)
+			MOVE.W	#0,ioVRefNum(A0)
+			_Control						; turn off arrows
+			
+OutOfHere	RTS								; and we're done
+			
+RealOpen	DC.L	0						; a place for pointer to real Open
+
+RealEnd		EQU		*
+
+
+; This init installs the patch code into the system heap and patches
+; the trap to point to the new code.  It also stores the old address
+; of the trap into the patch so the patch may pass the call along.
+; If the mouse button is down when the INIT happens, the code is not
+; installed and the icon not shown.
+
+
+f32BitMod 		EQU			2							; you probably don't have this equate
+
+PatchInit
+			WITH spBlock,vpBlock		; only do the test at init time.  If capable, make the patch
+				
+;
+; allocate a spBlock (slot parameter block) on the stack
+;
+	
+				SUB.w		#spBlockSize,SP				;
+				MOVE.L		SP,A0						; save pointer to block
+		
+;
+; initialize the fields for a sNextTypesRsrc call (see IM5, Ch24, p9 for more info)
+;
+	
+				CLR.B		spID(A0)					; start at spID 0
+				CLR.B		spExtDev(A0)				; set ext dev ID to 0 also
+				MOVE.W		#CatDisplay, spCategory(A0)	; look for a Mac-style video card
+				MOVE.W		#TypVideo, spCType(A0)		; 
+				MOVE.W		#DrSwApple,spDrvrSw(A0)		; 
+				MOVE.B		#1,spTBMask(A0)				; set sType masking field
+
+				MOVE.B		#-1,spSlot(A0)				; put in first slot number
+		
+;
+; now, call the slot manager to find the sRsrc list for this card
+;
+											
+@NxtSlot		add.b		#1,spSlot(a0)
+				_sNextTypesRsrc						
+				BNE.S		Dead						; oh oh, something's seriously wrong
+		
+;
+; now that you have the right sRsrcList in spsPointer, get the sRsrcFlags word
+;	from the video sRsrc
+;
+
+				MOVE.B		#sRsrcFlags,spID(A0)		; look for sRsrcFlags
+				_sReadWord								; spsPointer is still set up from before
+				BNE.S		@NxtSlot					; ***can there be more than one?
+				MOVE.l		spResult(A0),D0				; get the result in a reg
+;
+; test the flag word for 32-bit devices
+;
+				BTST		#f32BitMod,D0				; test it
+				BEQ.S		@NxtSlot					; if not a 32-bit device, don't do init
+							
+   
+				MOVE.L	#(RealEnd - OurOpen),D1	; get size of our code
+				MOVE.L	D1,D0
+				_NewPtr	,SYS				; get a pointer of the appropriate size
+				TST.L	D0					; see if an error
+				BNE		Dead				; if so, quit out
+				MOVE.L	A0,A3				; save pointer to new block
+				LEA		OurOpen,A0			; get address of code to install
+				MOVE.L	A3,A1				; destination of the code
+				MOVE.L	D1,D0				; and length of the code
+				_BlockMove					; put the code into the system heap
+				MOVE.L	#$A000,D0			; Open
+				_GetTrapAddress				; get the real address
+				MOVE.L	A0,RealOpen-OurOpen(A3)	; and save in special location
+				MOVE.L	#$A000,D0			; Open
+				MOVE.L	A3,A0				; this is the new code
+				_SetTrapAddress				; and it is installed
+	
+;
+; release the slot manager block
+;
+Dead			ADD.L	#spBlockSize,SP		; clean up the stack
+				RTS
+
+			END

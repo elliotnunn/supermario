@@ -1,0 +1,631 @@
+;
+;	File:		getPMData.a
+;
+;	Copyright:	© 1989-1991 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <5>	 10/2/91	DTY		Conditionalise last change for TheFuture.
+;		 <4>	 10/1/91	KON		Check for QDError = AbortPicPlaybackErr after calling
+;									GetPicData. If an error is detected, abort immediately.
+;		 <3>	  8/2/90	gbm		Change some identifiers that conflict with existing ones
+;		<1+>	  1/3/90	BAL		Fix bug in call to stackspace.
+;	   <1.0>	11/15/89	KON		Broken out of pictures.a
+;
+;	To Do:
+;
+
+;EASE$$$ READ ONLY COPY of file “GetPMData.a”
+; 1.0	KON 11/15/1989 Broken out of pictures.a
+; END EASE MODIFICATION HISTORY 
+
+
+GetDirectPMData		PROC	EXPORT
+			IMPORT	GetBigPicData, UnPackWords, GetPicData, GetUByte, GetWord
+;------------------------------------------------------
+;
+;  PROCEDURE GetDirectPMData(myDst: Ptr; myData: Handle);
+;
+;  HANDLE SIZE IS SET TO ROWBYTES*(BOUNDS.BOTTOM-BOUNDS.TOP) EXTERNALLY
+;  Handle is locked by caller.
+;
+;
+PARAMSIZE		EQU		8
+MYDST			EQU		PARAMSIZE+8-4			;DST PIXMAP POINTER
+MYDATA			EQU		MYDST-4					;DST DATA HANDLE
+		
+SRCPTR			EQU		-4						;VAR POINTER TO SOURCE
+DSTPTR			EQU		SRCPTR-4				;VAR POINTER TO DST
+DSTBUF			EQU		DSTPTR-4				;POINTER TO WINDING BUFFER
+PACKBUF			EQU		DSTBUF-4				;POINTER TO PACKING BUFFER
+SAVEDSP			EQU		PACKBUF-4				;PRESERVE STACK POINTER
+PackHandle		equ		SAVEDSP-4
+VARSIZE			EQU		PackHandle
+
+		LINK	A6,#VARSIZE						;MAKE A STACK FRAME
+		MOVEM.L	D3-D7/A2-A4,-(SP)				;SAVE WORK REGISTERS
+		
+		MOVE.L	SP,SAVEDSP(A6)					;PRESERVE STACK POINTER
+		MOVE.L 	MYDST(A6),A2					;POINT TO BITMAP
+		MOVE.L	MYDATA(A6),A0					;GET DATA HANDLE
+		;_HLOCK									;LOCK IT DOWN
+		MOVE.L	(A0),A3							;GET DATA POINTER IN A3
+		MOVEQ	#8,D6							;GET USEFUL VALUE
+		
+		MOVE	BOUNDS+BOTTOM(A2),D7
+		SUB 	BOUNDS+TOP(A2),D7				;HEIGHT := BOUNDS BOT - TOP
+
+		MOVE	ROWBYTES(A2),D5					;GET ROWBYTES
+		AND		#nuRBMask,D5					;CLEAR OFF FLAG BITS
+		CMP 	D6,D5							;IS NEWROW < 8 ?
+		BLT		NOPACK							;=>YES, DON'T UNPACK
+		
+
+;----------------------------------------------------------------
+;
+;  Determine desired packing scheme:
+;
+;		Type	Depth(s)	Description
+;		----	--------	-----------
+;		  1		 16/32		No packing;  	Memory image (Handled by GetPMData)
+;		  2		  16		Pixel packing;  RunLength by pixel size (PackWords)
+;		  3		  32		Drop pad byte;  Save RGB triples
+;		  4		  32		Run packing;  	RunLength by component by scanline
+;		  >4	  32		UNKNOWN;  		skip data for future compatibility
+;
+
+		cmp.w	#4,packType(a2)					;which packing format?
+		bgt		SkipScans						;unknown, skip over data
+		beq.s	RunPacking						;unpack by cmp by scan
+		cmp.w	#3,packType(a2)					;which packing format?
+		beq		PixelPacking					;run length (16 bit) pixels
+		
+
+MakePadByte		
+		move.w	d5,d0							;get rowbytes
+		mulu.w	d7,d0							;get rowbytes * height
+		lsr.l	#2,d0							;get pixel count = byte count / 4
+		move.l	d0,d7							;make a copy in d7
+		add.l	d0,d0							;2 * pixel count
+		add.l	d7,d0							;3 * pixel count
+		MOVE.L	A3,-(SP)						;PUSH DATA POINTER
+		add.l	d7,(sp)							;advance 1/4 way into data buffer
+		MOVE.L	d0,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetBigPicData					;READ DATA RGB's
+		
+		move.l	a3,a0							;point to output buffer
+		move.l	a3,a1							;
+		add.l	d7,a1							;advance to RGB triples
+		
+@1		clr.b	(a0)+							;clear out alpha channel
+		move.b	(a1)+,(a0)+						;copy red
+		move.b	(a1)+,(a0)+						;copy green
+		move.b	(a1)+,(a0)+						;copy blue
+		subq.l	#1,d7							;for all output pixels
+		bhi.s	@1
+		bra		done							;clean up and return
+			
+RunPacking
+;----------------------------------------------------------------
+;
+;  ALLOCATE PACKBUF ON THE STACK
+;
+		clr.l	packHandle(a6)					;assume there'll be space on stack
+		_StackSpace								;make sure we have enough...
+		ext.l	d5								;make rowbytes a long
+		cmp.l	d0,d5							;...room to allocate one buffer
+		bge		SkipScans						;just consume data and return
+;
+;Stack space exists for at least one buffer.
+;
+		SUB		D5,SP							;GET SIZE OF DSTBUF
+		MOVE.L	SP,DSTBUF(A6)					;POINT TO DSTBUF
+		moveq	#0, d1							;clear high bytes
+		MOVE	D5,D1							;GET ROWBYTES
+		LSR		#7,D1							;GET # OF 128 BYTE RUNS
+		ADDQ	#2,D1							;ROUND UP
+		bclr	#0,d1							;guarantee A7 word alignment  <BAL 28Apr89>
+		add.l	d5,d1							;get buffer+padding
+		_StackSpace			;room for second buffer?
+		cmp.l	d0, d1
+		blt.s	@UseStack
+		move.l	d1,d0
+		_NewHandle
+		bne		SkipScans
+		move.l	(a0), packbuf(a6)
+		move.l	a0, packHandle(a6)
+		_HLock
+		bra.s	BufferAllocated
+@UseStack		
+		sub		d1, sp
+		move.l	sp, packbuf(a6)
+		
+BufferAllocated
+		CMP		#4,CMPCOUNT(A2)					;MUST WE CLEAR DEST PAD BYTE?
+		BEQ.S	NOPAD							;NO, SKIP CLEARING
+		
+		MOVE	D5,D1							;GET DEST ROWBYTES
+		MULU	D7,D1							;CALC DEST BYTES = ROWBYTES*HEIGHT
+		LSR.L	#2,D1							;GET LONG CNT OF LONGS
+		MOVE	D1,D2							;GET LOWORD IN D2
+		SWAP	D1								;GET HIWORD IN D1
+		MOVEQ	#0,D3							;USE AS SRC OF ZERO'S
+		MOVE.L	A3,A0							;POINT AT DEST
+		BRA.S	@CLR
+		
+@1		MOVE.L	D3,(A0)+
+@CLR	DBRA	D2,@1
+		DBRA	D1,@CLR
+		
+;----------------------------------------------------------------
+;
+;  PACKED FORMAT = [BYTECOUNT][rrrrr...ggggg...bbbbb]  FOR EACH SCANLINE
+;
+;  IF ROWBYTES > 250 THEN BYTECOUNT IS A WORD, ELSE IT IS A BYTE
+;
+;  ASSUME:	PIXELSIZE = 32
+;			CMPSIZE	  =	8
+;			CMPCOUNT  = 3,4
+
+NOPAD	ADDQ	#4,A3						;POINT PAST END OF FIRST PIXEL
+		SUB		CMPCOUNT(A2),A3				;POINT TO FIRST CMP OF FIRST PIXEL
+		
+		MOVE	D5,D4							;GET FINAL ROWBYTES
+		LSR		#2,D4							;GET PIXEL CNT  **** ASSUMES PIXSIZE = 32
+		MULU	CMPCOUNT(A2),D4					;GET COMPRESSED ROWBYTES
+		BRA.S	START4							;GO TO LOOP START
+
+MORE4	CMP		#250,D5							;IS ROWBYTES > 250?
+		BGT.S	@1								;=>YES, GET WORD
+		JSR		GetUByte						;ELSE GET A BYTE INTO D0
+		BRA.S	@2								;=>AND GO GET DATA
+@1		JSR		GETWORD							;GET A WORD INTO D0
+@2		MOVE.L 	PACKBUF(A6),-(SP)				;PUSH ADDR OF BUFFER
+		MOVE.L	(SP),SRCPTR(A6) 				;PUT IN SRCPTR TOO
+		MOVE	D0,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET PACKED DATA
+	if TheFuture then							; Build only for TheFuture <5>
+		cmp.w	#AbortPicPlayBackErr,qdErr		;abort if our special error <4>
+		beq.s	Abort
+	endif										; <5>
+		MOVE.L	DSTBUF(A6),DSTPTR(A6) 			;SET DSTPTR TO WINDING BUFFER
+		PEA 	SRCPTR(A6)						;PUSH VAR SRCPTR
+		PEA 	DSTPTR(A6)						;PUSH VAR DSTPTR
+		MOVE	D4,-(SP)						;PUSH COMPRESSED ROWBYTES
+		_UnpackBits								;UNPACK INTO DATA HANDLE
+				
+		MOVE	CMPCOUNT(A2),D3				;GET CMPCOUNT FOR LOOP			<16Jun88 BAL>>
+		SUBQ	#1,D3						;MAKE IT ZERO BASED
+		MOVE.L	DSTBUF(A6),A0				;POINT TO UNWINDING BUFFER
+		MOVE	D5,D0						;GET ROWBYTES
+		LSR		#2,D0						;GET PIXEL WIDTH	@@@@@
+		SUBQ	#1,D0						;MAKE IT ZERO BASED
+		
+@NXTCMP	MOVE.L	A3,A4						;PTR INTO THIS CMP OF FIRST PIXEL
+		ADDQ	#1,A3						;POINT AT NEXT CMP
+		MOVE	D0,D6						;GET PIXEL CNT
+
+@NXTPIX MOVE.B	(A0)+,(A4)					;COPY COMPONENT
+		ADDQ	#4,A4						;BUMP TO NEXT PIXEL
+		DBRA	D6,@NXTPIX
+		DBRA	D3,@NXTCMP					;								<16Jun88 BAL><
+
+		SUB		CMPCOUNT(A2),A3				;RESET A3 TO FIRSTCMP, FIRSTPIX
+		ADD		D5,A3						;BUMP TO NEXT DEST ROW
+		
+START4	DBRA	D7,MORE4					;LOOP HEIGHT ROWS
+Abort	move.l	packHandle(a6), d0
+		beq		done						;nil handle: must have used stack buffer
+		move.l	d0, a0
+		_DisposHandle
+		BRA		DONE						;CONTINUE
+
+
+PixelPacking
+;----------------------------------------------------------------
+;
+;  ALLOCATE PACKBUF ON THE STACK
+;
+		SUB		D5,SP							;SET SIZE OF PACKBUF
+		SUB		D5,SP							;TO 2*ROWBYTES FOR LONG ALIGNMENT
+		MOVE.L	SP,PACKBUF(A6)					;POINT TO PACKBUF
+		
+;----------------------------------------------------------------
+;
+;  PACKED FORMAT = [BYTECOUNT][DATA]  FOR EACH SCANLINE
+;
+;  IF ROWBYTES > 250 THEN BYTECOUNT IS A WORD, ELSE IT IS A BYTE
+;
+		MOVE.L	A3,DSTPTR(A6) 					;INIT DSTPTR
+		BRA.S	START3							;GO TO LOOP START
+
+MORE3	CMP		#250,D5							;IS ROWBYTES > 250?
+		BGT.S	@1								;=>YES, GET WORD
+		JSR		GetUByte						;ELSE GET A BYTE INTO D0
+		BRA.S	@2								;=>AND GO GET DATA
+@1		JSR		GETWORD							;GET A WORD INTO D0
+@2		MOVE.L 	PACKBUF(A6),-(SP)				;PUSH ADDR OF BUFFER
+		MOVE.L	(SP),SRCPTR(A6) 				;PUT IN SRCPTR TOO
+		MOVE	D0,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET PACKED DATA
+	if TheFuture then							; Build only in TheFuture <5>
+		cmp.w	#AbortPicPlayBackErr,qdErr		;abort if our special error <4>
+		beq.s	done
+	endif										; <5>
+		PEA 	SRCPTR(A6)						;PUSH VAR SRCPTR
+		PEA 	DSTPTR(A6)						;PUSH VAR DSTPTR
+		MOVE	D5,-(SP)						;PUSH ROWBYTES
+		jsr		UnPackWords						;UNPACK INTO DATA HANDLE
+START3	DBRA	D7,MORE3						;LOOP HEIGHT ROWS
+		BRA.S	DONE							;CONTINUE
+
+
+SkipScans
+;----------------------------------------------------------------
+;
+;  PACKED FORMAT = [BYTECOUNT][DATA]  FOR EACH SCANLINE
+;
+;  IF ROWBYTES > 250 THEN BYTECOUNT IS A WORD, ELSE IT IS A BYTE
+;
+		move.w	d5,d6							;get rowbytes
+		mulu.w	d7,d6							;get rowbytes * height
+		BRA.S	START5							;GO TO LOOP START
+
+MORE5	CMP		#250,D5							;IS ROWBYTES > 250?
+		BGT.S	@1								;=>YES, GET WORD
+		JSR		GetUByte						;ELSE GET A BYTE INTO D0
+		BRA.S	@2								;=>AND GO GET DATA
+@1		JSR		GETWORD							;GET A WORD INTO D0
+@2		MOVE.L 	A3,-(SP)						;PUSH DST ADDR
+		MOVE	D0,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET PACKED DATA
+	if TheFuture then							; Don’t build until TheFuture is here <5>
+		cmp.w	#AbortPicPlayBackErr,qdErr		;abort if our special error <4>
+		beq.s	done
+	endif										; <5>
+START5	DBRA	D7,MORE5						;LOOP HEIGHT ROWS
+
+		move.l	a3,a0							;point to output buffer
+@1		clr.b	(a0)+							;clear out buffer
+		subq.l	#1,d6							;for all output pixels
+		bhi.s	@1
+		BRA.S	DONE							;CONTINUE
+
+
+;----------------------------------------------------------------
+;
+;
+;  ROWBYTES < 8, DON'T USE PACKING
+;
+NOPACK	MULU	D7,D5							;BYTECOUNT := HEIGHT * WIDTH
+		MOVE.L	A3,-(SP)						;PUSH DATA POINTER
+		MOVE.l	D5,-(SP)						;PUSH BYTECOUNT as a long
+		JSR 	GetBigPicData					;READ BITMAP DATA BITS
+
+DONE	MOVE.L	MYDATA(A6),A0					;GET DATA HANDLE
+		;_HUnlock								;AND UNLOCK IT
+		MOVE.L	SAVEDSP(A6),SP					;RESTORE STACK POINTER
+		MOVEM.L	(SP)+,D3-D7/A2-A4				;RESTORE WORK REGISTERS
+		UNLINK	PARAMSIZE,'GETDPMDAT'			;UNLINK AND RETURN
+
+
+GetPMData 	PROC	EXPORT
+
+	IF (&TYPE('PATCHMAC2') = 'UNDEFINED') THEN
+
+			IMPORT GetPicData, GetUByte, GetWord, GetDirectPMData, GetBigPicData
+	ENDIF
+	
+;------------------------------------------------------
+;
+;  PROCEDURE GetPMData(myDst: Ptr; myData: Handle);
+;
+;  HANDLE SIZE IS SET TO ROWBYTES*(BOUNDS.BOTTOM-BOUNDS.TOP) EXTERNALLY
+;  Assume handle is locked externally since this routine will be called
+;  repeatedly during a banding operation.
+;
+PARAMSIZE		EQU		8
+MYDST			EQU		PARAMSIZE+8-4			;DST PIXMAP POINTER
+MYDATA			EQU		MYDST-4					;DST DATA HANDLE
+		
+SRCPTR			EQU		-4						;VAR POINTER TO SOURCE
+DSTPTR			EQU		SRCPTR-4				;VAR POINTER TO DST
+PACKBUF			EQU		DSTPTR-4				;POINTER TO PACKING BUFFER
+SAVEDSP			EQU		PACKBUF-4				;PRESERVE STACK POINTER
+VARSIZE			EQU		SAVEDSP
+
+		LINK	A6,#VARSIZE						;MAKE A STACK FRAME
+		MOVEM.L	D4-D6/A2-A3,-(SP)				;SAVE WORK REGISTERS
+		
+		MOVE.L	SP,SAVEDSP(A6)					;PRESERVE STACK POINTER
+		MOVE.L 	MYDST(A6),A2					;POINT TO BITMAP
+		MOVE.L	MYDATA(A6),A0					;GET DATA HANDLE
+		;_HLOCK									;(assume it is locked already)	<16Jun88 BAL>
+		MOVE.L	(A0),A3							;GET DATA POINTER IN A3
+		MOVEQ	#8,D6							;GET USEFUL VALUE
+		
+		MOVE	BOUNDS+BOTTOM(A2),D4
+		SUB 	BOUNDS+TOP(A2),D4				;HEIGHT := BOUNDS BOT - TOP
+		
+		MOVE	ROWBYTES(A2),D5					;GET ROWBYTES
+		AND		#nuRBMask,D5					;CLEAR OFF FLAG BITS
+		CMP 	D6,D5							;IS NEWROW < 8 ?
+		BLT.S	NOPACK							;=>YES, DON'T UNPACK
+		
+		tst.w	ROWBYTES(A2)					;bitmap data?				<29Mar89 BAL>
+		bpl.s	UNPACK							;yes, must unpack			<29Mar89 BAL>
+		
+		cmp.w	#16,pixelType(a2)				;DIRECT DATA?				<22Jan89 BAL>
+		bne.s	UNPACK							;NO, UNPACK IT				<22Jan89 BAL>
+		
+		CMP		#1,PACKTYPE(A2)					;IS IT PACKED DIRECT DATA?	<16Jun88 BAL>
+		beq.s	NOPACK							;NO, DONT UNPackBits		<16Jun88 BAL>
+		
+		MOVEM.L	(SP)+,D4-D6/A2-A3				;RESTORE REGISTERS
+		UNLK	A6								;UNLINK AND RETURN
+		JMP		GetDirectPMData					;let someone else do the work
+		
+UNPACK		
+;----------------------------------------------------------------
+;
+;  MAKE SURE THE STACK IS ON A LONGWORD BOUNDARY (FOR FAST BUFFERS)
+;
+		MOVE.L	SP,D1						;GET THE STACK POINTER
+		AND.B	#$FC,D1						;FORCE LONG ALIGNMENT
+		MOVE.L	D1,SP						;USE IT
+
+;----------------------------------------------------------------
+;
+;  ALLOCATE PACKBUF ON THE STACK
+;
+		SUB		D5,SP							;SET SIZE OF PACKBUF
+		SUB		D5,SP							;TO 2*ROWBYTES FOR LONG ALIGNMENT
+		MOVE.L	SP,PACKBUF(A6)					;POINT TO PACKBUF
+		
+;----------------------------------------------------------------
+;
+;  ROWBYTES >= 8, READ THE PACKED BIT/PIXMAP FROM THE PICTURE
+;
+;  PACKED FORMAT = [BYTECOUNT][DATA]  FOR EACH SCANLINE
+;
+;  IF ROWBYTES > 250 THEN BYTECOUNT IS A WORD, ELSE IT IS A BYTE
+;
+		MOVE.L	A3,DSTPTR(A6) 					;INIT DSTPTR
+		BRA.S	START1							;GO TO LOOP START
+
+MORE1	CMP		#250,D5							;IS ROWBYTES > 250?
+		BGT.S	@1								;=>YES, GET WORD
+		JSR		GetUByte						;ELSE GET A BYTE INTO D0
+		BRA.S	@2								;=>AND GO GET DATA
+@1		JSR		GETWORD							;GET A WORD INTO D0
+@2		MOVE.L 	PACKBUF(A6),-(SP)				;PUSH ADDR OF BUFFER
+		MOVE.L	(SP),SRCPTR(A6) 				;PUT IN SRCPTR TOO
+		MOVE	D0,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET PACKED DATA
+	if TheFuture then							; Build only for TheFuture <5>
+		cmp.w	#AbortPicPlayBackErr,qdErr		;abort if our special error <4>
+		beq.s	done
+	endif
+		PEA 	SRCPTR(A6)						;PUSH VAR SRCPTR
+		PEA 	DSTPTR(A6)						;PUSH VAR DSTPTR
+		MOVE	D5,-(SP)						;PUSH ROWBYTES
+		_UnpackBits								;UNPACK INTO DATA HANDLE
+START1	DBRA	D4,MORE1						;LOOP HEIGHT ROWS
+		BRA.S	DONE							;CONTINUE
+;
+;  ROWBYTES < 8, DON'T USE PACKING
+;
+NOPACK	MULU	D4,D5							;BYTECOUNT := HEIGHT * WIDTH
+		MOVE.L	A3,-(SP)						;PUSH DATA POINTER
+		MOVE.L	D5,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetBigPicData					;READ BITMAP DATA BITS
+
+DONE	MOVE.L	MYDATA(A6),A0					;GET DATA HANDLE
+		;_HUnlock								;AND UNLOCK IT (not this time) 	<16Jun88 BAL>
+		MOVE.L	SAVEDSP(A6),SP					;RESTORE STACK POINTER
+		MOVEM.L	(SP)+,D4-D6/A2-A3				;RESTORE WORK REGISTERS
+		UNLINK	PARAMSIZE,'GETPMDAT'			;UNLINK AND RETURN
+
+
+GetBigPicData PROC  EXPORT 					;17Jun88 BAL
+		IMPORT	GetPicData
+;------------------------------------------------------------------
+;
+;  FUNCTION GetBigPicData(dataPtr: QDPtr; byteCount: LONG);
+;
+;	This is the same as GetPicData except the byteCount is a long
+;
+partSize	EQU		$4000
+partShift	EQU		$E
+
+		MOVEM.L	D7/A3-A4,-(SP)					;save a couple of registers
+
+		MOVE.L	20(SP),A3						;get the pointer to data
+		MOVE.L	16(SP),A4						;get data length
+		MOVE.L	A4,D7							;copy pointer
+		MOVEQ	#partShift,D0					;get a constant for the upcoming shift
+		LSR.L	D0,D7							;find the number of 16K "pages"
+		BEQ.S	LeftOvers						;no, so do the remaining part of the picture
+		
+@1
+		MOVE.L	A3,-(SP)						;PUSH DATA POINTER
+		MOVE	#partSize,-(SP)					;move 16K of data
+		JSR 	GetPicData						;AND CALL GET PROC
+		ADD.W	#partSize,A3					;move data start pointer up
+		SUB.W	#partSize,A4					;subtract for remainder later
+		SUBQ.L	#1,D7							;decrease the number of pages
+		BNE.S	@1								;loop for each page
+
+LeftOvers
+		MOVE.L	A3,-(SP)						;PUSH DATA POINTER
+		MOVE.W	A4,-(SP)						;move remainder
+		JSR 	GetPicData						;AND CALL GET PROC
+
+		MOVEM.L	(SP)+,D7/A3-A4					;restore registers
+		RTD_	8								;STRIP PARAMS AND RETURN
+
+		ENDPROC
+
+		IF hasCQD THEN
+
+; PackWords and UnPackWords	linked in from somewhere else.
+
+		ELSE
+		
+PackWords PROC  EXPORT
+		EXPORT UnpackWords
+;---------------------------------------------------------------------
+;
+;  PROCEDURE PackWords(VAR srcPtr,dstPtr: Ptr; srcBytes: INTEGER);
+;
+;  Packs one scanline of data, compressing equal words.
+;  Returns updated srcPtr and dstPtr.
+;
+;  Equates for parameters are shared with UnpackWords
+;
+PARAMSIZE		EQU 	10					;TOTAL BYTES OF PARAMS
+SRCPTR			EQU 	PARAMSIZE+4-4		;LONG, VAR
+DSTPTR			EQU 	SRCPTR-4			;LONG,VAR
+SRCBYTES		EQU 	DSTPTR-2			;WORD
+DSTBYTES		EQU 	SRCBYTES			;ALIAS
+
+		MOVEM.L	D3-D4/A2,-(SP)				;SAVE REGS
+		MOVE	#128,D4						;GET USEFUL VALUE
+		MOVE.L	SRCPTR+12(SP),A0 			;GET VAR ADDR
+		MOVE.L	(A0),A0 					;GET SRCPTR ITSELF
+		MOVE.L	DSTPTR+12(SP),A1 			;GET VAR ADDR
+		MOVE.L	(A1),A1 					;GET DSTPTR ITSELF
+		MOVE	SRCBYTES+12(SP),D3			;GET SRCBYTES
+		lsr.w	#1,d3						;make in to word count			<BAL 25Mar89>
+		SUB 	#1,D3						;INIT SRC DBRA COUNT
+		BLT		DONE						;QUIT IF SRCBYTES <= 0
+GoStart	MOVE.w	(A0)+,D0					;GET FIRST word OF SRC			<BAL 25Mar89>
+		BRA.S	START						;AND GO TO LOOP START
+
+FILLOP	MOVE.w	-2(A0),D0					;PUT SRCDATA IN DO				<BAL 25Mar89>
+		SUB 	A0,D2						;COMPUTE FILLOP
+		asr.w	#1,d2						;make into word cnt
+		ADD		D2,D3						;UPDATE wordCOUNT
+		ADD 	#1,D2						;-2..-128 -> -1..-127
+		MOVE.B	D2,(A2) 					;STORE FILLOP
+
+START	MOVEQ	#127,D1						;GET MAX wordCOUNT-1 FOR A RUN
+		CMP		D4,D3						;THAT MANY words LEFT?
+		BGE.S	@1							;=>YES, DO CHUNK OF 128
+		MOVE	D3,D1						;ELSE DO REMAINING BYTES
+		
+@1		MOVE	A0,D2						;REMEMBER SRCSTART
+		MOVE.L	A1,A2						;REMEMBER OPLOC
+		CLR.B	(A1)+						;RESERVE ROOM FOR OPCODE
+		CMP.w	(A0),D0 					;IS NEXT SRC THE SAME ?			<BAL 25Mar89>
+		BNE.S	DOCOPY						;NO, USE COPY LOOP
+		CMP.w	2(A0),D0					;THREE IN A ROW ?				<BAL 25Mar89>
+		BNE.S	DOCOPY						;NO, USE COPY LOOP
+		BRA.S	DOFILL						;YES, USE FILL LOOP
+
+NXTCOPY MOVE.w	(A0)+,D0					;GET word OF SRC				<BAL 25Mar89>
+		CMP.w	(A0),D0 					;IS THE NEXT THE SAME ?			<BAL 25Mar89>
+		BNE.S	DOCOPY						;NO, CONTINUE
+		CMP.w	2(A0),D0					;THREE IN A ROW ?				<BAL 25Mar89>
+		BEQ.S	COPYOP						;YES, END OF COPY RUN
+DOCOPY	MOVE.w	D0,(A1)+					;COPY DATA TO DST				<BAL 25Mar89>
+		DBRA	D1,NXTCOPY					;AND LOOP FOR MORE
+
+ENDCOPY SUB 	A0,D2						;COMPUTE COPYOP
+		NEG 	D2							;NEGATE ONLY
+		asr.w	#1,d2						;make word count				<BAL 25Mar89>
+		MOVE.B	D2,(A2) 					;INSTALL COPYOP
+		SUB		D4,D3						;SUBTRACT NEXT CHUNK
+		BPL.S	GoStart						;=>MORE TO DO, CONTINUE
+		BRA.S	DONE						;AND QUIT
+		
+COPYOP	TST 	D1							;IS THIS THE LAST SRC BYTE ?
+		BEQ 	DOCOPY						;YES, FINISH OFF COPY RUN
+		SUB 	A0,D2						;COMPUTE COPYOP
+		asr.w	#1,d2						;make word count				<BAL 25Mar89>
+		ADD		D2,D3						;UPDATE BYTECOUNT
+		NOT 	D2							;NEGATE AND SUBTRACT 1
+		MOVE.B	D2,(A2) 					;STORE COPYOP
+
+		MOVEQ	#127,D1						;GET MAX BYTECOUNT FOR A RUN
+		CMP		D4,D3						;THAT MANY BYTES LEFT?
+		BGE.S	@1							;=>YES, DO CHUNK OF 128
+		MOVE	D3,D1						;ELSE DO REMAINING BYTES
+		
+@1		MOVE.L	A0,D2						;REMEMBER SRCSTART
+		MOVE.L	A1,A2						;REMEMBER OPLOC
+		CLR.B	(A1)+						;RESERVE ROOM FOR OPCODE
+
+DOFILL	MOVE.w	D0,(A1)+					;COPY THE DATA word				<BAL 25Mar89>
+NXTFILL CMP.w	(A0)+,D0					;IS NEXT word THE SAME ?		<BAL 25Mar89>
+		DBNE	D1,NXTFILL					;LOOP TILL NOT SAME OR END SRC
+		BEQ.S	ENDFILL 					;BRANCH IF SRC EXHAUSTED
+		SUB 	#1,D1						;COMPENSATE FOR DBNE DIDNT SUB
+		BGE 	FILLOP						;BR IF SRC NOT EXHAUSTED
+
+ENDFILL SUB		#2,A0						;BACK UP FOR LAST word COMPARED	<BAL 25Mar89>
+		SUB 	A0,D2						;COMPUTE FILLOP
+		asr.w	#1,d2						;make word count				<BAL 25Mar89>
+		MOVE.B	D2,(A2) 					;INSTALL FILLOP
+		SUB		D4,D3						;SUBTRACT NEXT CHUNK
+		BPL.S	GoStart						;=>MORE TO DO, CONTINUE
+
+DONE	CLR.L	D0							;GET READY FOR WORD
+		MOVE	SRCBYTES+12(SP),D0			;GET SRCBYTES
+		MOVE.L	SRCPTR+12(SP),A0 			;GET VAR ADDR OF SRCPTR
+		ADD.L	D0,(A0) 					;BUMP SRCPTR
+		MOVE.L	DSTPTR+12(SP),A2 			;GET VAR ADDR OF DSTPTR
+		MOVE.L	A1,(A2) 					;UPDATE DSTPTR
+		MOVEM.L	(SP)+,D3-D4/A2				;RESTORE REGS
+SHARE	MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		ADD 	#PARAMSIZE,SP				;STRIP PARAMS
+		JMP 	(A0)						;AND RETURN
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE UnpackWords(VAR srcPtr,dstPtr: Ptr; dstBytes: INTEGER);
+;
+;  Unpacks one scanline of data, as compressed by PackWords.
+;  Returns updated srcPtr and dstPtr.
+;
+;  Equates for parameters are the same as PackWords!
+;
+UnpackWords
+		MOVE.L	SRCPTR(SP),A0				;GET ADDR OF SRCPTR
+		MOVE.L	(A0),A0 					;GET SRCPTR ITSELF
+		MOVE.L	DSTPTR(SP),A1				;GET ADDR OF DSTPTR
+		MOVE.L	(A1),A1 					;GET DSTPTR ITSELF
+		MOVE	DSTBYTES(SP),D2 			;GET DSTBYTES
+		EXT.L	D2							;MAKE IT LONG
+		ADD.L	A1,D2						;LIMIT := DSTPTR + BYTECOUNT
+		BRA.S	@3							;GO TO LOOP START
+@1		EXT.W	D1							;CLEAR HI BYTE OF COUNT
+@2		MOVE.b	(A0)+,(A1)+ 				;COPY A word OF DATA			<BAL 25Mar89>
+		MOVE.b	(A0)+,(A1)+ 				;COPY A word OF DATA			<KON 6Sept89>
+		DBRA	D1,@2						;LOOP ALL COPY words
+@3		CMP.L	D2,A1						;IS DSTPTR >= LIMIT ?
+		BHS.S	@5							;YES, WE'RE DONE
+		MOVE.B	(A0)+,D1					;NO, GET  OPCODE
+		BPL.S	@1							;0..127 --> COPY 1..128 BYTES
+		NEG.B	D1							;-1..-127 --> FILL 2..128 BYTES
+		BVS.S	@3							;IGNORE $80 FOR BACKWARD COMPAT
+		EXT.W	D1							;CLEAR HI BYTE OF COUNT
+		MOVE.b	(A0)+,D0					;GET FILL DATA 					<BAL 25Mar89>
+		lsl		#8,d0						;we could be on an odd address...<KON 6Sept89>
+		or.b	(a0)+,d0					;... so move two bytes			<KON 6Sept89>
+@4		MOVE.w	D0,(A1)+					;COPY IT TO DST					<BAL 25Mar89>
+		DBRA	D1,@4						;LOOP ALL FILL words
+		BRA.S	@3							;THEN GET NEXT OPCODE
+@5		MOVE.L	A0,D0						;STASH SRCPTR
+		MOVE.L	SRCPTR(SP),A0				;GET VAR ADDR
+		MOVE.L	D0,(A0) 					;UPDATE VAR SRCPTR
+		MOVE.L	DSTPTR(SP),A0				;GET VAR ADDR
+		MOVE.L	A1,(A0) 					;UPDATE VAR DSTPTR
+		BRA.S	SHARE
+
+		ENDPROC
+
+;-------------------- END OF Pack and UnPack Words ----------------
+
+		ENDIF	;hasCQD

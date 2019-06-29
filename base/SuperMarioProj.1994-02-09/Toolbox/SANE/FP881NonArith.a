@@ -1,0 +1,610 @@
+;EASE$$$ READ ONLY COPY of file “FP881nonarith.a”
+; 1.2	GGD 07/14/1989  Fixed CopySign to copy Sign(dst) -> Sign(src), even though it seems
+;	backwards, that is how it is documented, and how the Mac Plus/SE work.
+; 1.1	CCH 11/11/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.0	BBM 2/12/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: FP881nonarith.a
+;; Implementation of FP68K non-arithmetic functions.
+;; Copyright Apple Computer, Inc. 1985,1986,1987
+;; All Rights Reserved
+;; Confidential and Proprietary to Apple Computer,Inc.
+;;
+;; Written by Clayton Lewis, begun 14 Feb 85.
+;; Debugged by Stuart McDonald.
+;;
+;; Modification history:
+;;   Rev2: 16 May 85
+;;   Rev3: 17 May 85
+;;   Rev4: 17 May 85
+;;   Rev5: 27 May 85
+;;   Rev6: 30 May 85
+;;   Rev7: 04 Jun 85
+;;   Rev8: 16 Jun 85 CRL moved to MPW
+;;   Rev9: 08 Sep 86 -S.McD. Minor revs. to NextAfter to handle NaNs and SNaNs
+;;   RevA: 19 Nov 86 -S.McD. Fixed TestExp's case selection.
+;;         26 Dec 86 -S.McD. CopySign rearranged slightly.
+;;         28 Dec 86 -S.McD. Fixed ProcEx's behavior.
+;;         30 Dec 86 -S.McD. Zeroed FPSR for NonArith codes exiting thru halt check.
+;;         03 Jan 87 -S.McD. Nextafter was signalling on old status. 
+;;         13 Jan 87 -S.McD. Now save/restore any of the registers FP2-FP7 used.
+;;         15 Jan 87 -S.McD. Status and copyright notice changed.
+;;         21 Jan 87 -S.McD. Cleaned up SetHv/GetHv.
+;;         22 Jan 87 -S.McD. SetExp was setting halt bit instead of flag bit.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+ToSANE		; used by EGet below and by halt mechanism in FP881Arith
+	DC.B	0,16,8,24,2,18,10,26,4,20,12,28,6,22,14,30
+	DC.B	1,17,9,25,3,19,11,27,5,21,13,29,7,23,15,31
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; GET ENVIRONMENT.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+GetEnv
+	BSR.S	EGet	; returning SANE Env in D1
+	MOVEA.L	LKADR1(A6),A1
+	MOVE.W	D1,(A1)
+	BRA	Exit1NoHalt
+
+EGet
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Used by GetEnvironment, ProcEntry.
+	;; Returns SANE environment in D1.
+	;; D5.hi = STATUS.lo; D5.lo = CONTROL
+	;; -----------------------------------------
+	;; First transfer accrued exceptions to D1.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEQ	#19,D1	; clear result space
+
+	MOVE.L	D5,D0
+	LSR.L	D1,D0	; move exceptions to low bits
+	ANDI.W	#XCPMASK,D0	; mask word to only 5 bits
+	MOVE.B	ToSANE(PC,D0),D1	; set SANE exception bits
+	LSL.W	#8,D1	;   and move to high byte
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Move CONTROL to the stack and map the eight
+	;;   881 halt bits to 5 SANE bits in D1.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.W	D5,-(SP)	; copy of caller control register
+
+	MOVE.B	(SP),D0	; pick up only the halt bits
+	LSR.B	#1,D0	; shift I1 to carry bit
+	BCC.S	@1	; branch if I1 not set
+	ORI.B	#1,D0	;   else copy I1 to I2 as lowest bit
+@1
+	CMPI.B	#$10,D0	; are any of the 3 invalid bits set?
+	BCS.S	@2	;   if not, branch
+	BSET	#0,D1	;   else set invalid in D1
+@2
+	ANDI.W	#$0F,D0	; show only OUDI bits
+	OR.B	ToSANE(PC,D0),D1	; set corresponding SANE halts
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Collect and set in D1 first RR (rounding precision)
+	;;   bits then rr (rounding direction) bits.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.W	#$C0,D0
+	AND.W	(SP),D0	; show only RR bits of CONTROL
+	ROL.B	#2,D0	; RR to low bits
+	OR.B	RPrec(PC,D0),D1	; set RR in D1
+
+	MOVEQ	#$30,D0	; mask for rr bits
+	AND.W	(SP)+,D0	; collect rr bits; pop temp from stack
+	LSR.B	#3,D0	; move to bits 1 & 2 (index to a WORD table)
+	OR.W	rDir(PC,D0),D1	; set rr in D1
+	RTS
+RPrec
+	DC.B	0,64,32,0
+rDir
+	DC.W	0,24576,16384,8192
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SET ENVIRONMENT.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+SetEnv
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Move SANE environment to D0, convert to
+	;;   881 format, set environment, and exit.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEA.L	LKADR1(A6),A1
+	MOVE.W	(A1),D0
+	BSR.S	ESet	; sets SANE Env currently in D0
+	BRA	Exit1NoHalt
+ESet
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Used by SetEnv, ProcExit, SetException.
+	;; Enter with D0 holding SANE environment to be set.
+	;; Routine sets equivalent environment in D5 for later pass to 881.
+	;; -----------------------------------------------------
+	;; Install the exception bits in the 881 STATUS register.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.W	D0,-(SP)	; keep a copy of env on the stack
+	MOVEQ	#XCPMASK,D0	; mask for 5 exception bits
+	AND.B	(SP),D0	; capture exception bits
+
+	FMOVE	FPSR,D1
+
+	MOVE.B	FromSANE(PC,D0),D1	; map to 881 accrued exceptions
+
+				; and install in 881
+	FMOVE	D1,FPSR
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Collect halt bits in D0.  Duplicate hi bit 3 times and
+	;; low bit twice to set all 3 invalid and 2 inexact halts.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEQ	#XCPMASK,D0	; show only 5 halt bits
+	AND.W	(SP),D0
+	MOVE.B	FromSANE(PC,D0),D0	; halts in hi bits of byte
+	ASR.B	#2,D0	; replicate the hi bit twice
+	LSL.W	#6,D0	; shift all but lowest bit to hi byte
+	ASR.B	#1,D0	; replicate the low bit once
+	LSL.W	#2,D0	;   and shift all bits to hi byte
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Set rr (rounding direction) bits in D0.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEQ	#0,D1	; clear D1 for indexing below
+	MOVE.B	#3,D0	; mask and shift count
+	MOVE.B	(SP),D1	; fresh copy of SANE environment
+	ROL.B	D0,D1	; move rr to low bits
+	AND.B	D0,D1	;   and mask to show only rr
+	MOVE.B	rrDir(PC,D1),D0	; map to 881 rr bits
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Set RR (rounding precision) bits in D0 and reset control in D5.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEQ	#$60,D1
+	AND.W	(SP)+,D1	; mask to RR and pop saved env from stack
+	ROL.B	#3,D1	; shift to low bits
+	OR.B	RRPrec(PC,D1),D0	; map to 881 RR bits
+	MOVE.W	D0,D5	; reset user control held in D5
+	RTS
+FromSANE
+	DC.B	0,128,32,160,64,192,96,224
+	DC.B	16,144,48,176,80,208,112,240
+	DC.B	8,136,40,168,72,200,104,232
+	DC.B	24,152,56,184,88,216,120,248
+RRPrec
+	DC.B	0,128,64,0
+rrDir
+	DC.B	0,48,32,16
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SET HALT VECTOR & GET HALT VECTOR.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+SetHv
+	MOVE.L	#FPSTATE+2,A0
+	MOVE.L	LKADR1(A6),A1
+	MOVE.L	(A1),(A0)
+	BRA	Exit1NoHalt
+
+GetHv
+	MOVE.L	#FPSTATE+2,A0
+	MOVE.L	LKADR1(A6),A1
+	MOVE.L	(A0),(A1)
+	BRA	Exit1NoHalt
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; NEGATE.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Negate
+	MOVE.L	LKADR1(A6),A0
+	BCHG.B	#7,(A0)
+	BRA	Exit1NoHalt
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ABSOLUTE VALUE.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Abs
+	MOVE.L	LKADR1(A6),A0
+	BCLR.B	#7,(A0)
+	BRA	Exit1NoHalt
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; PROCENTRY.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ProcEnt
+	BSR	EGet	; SANE env now in D1
+	MOVE.L	LKADR1(A6),A0
+	MOVE.W	D1,(A0)
+
+	MOVEQ	#0,D5	; set environment 0
+
+	FMOVE	D5,FPSR
+
+	BRA	Exit1NoHalt
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; TESTEXCEPTION.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+TestExp
+	MOVE.L	LKADR1(A6),A0
+	MOVE.W	(A0),D1		; was .L    -S.McD.
+	MACHINE	MC68020
+	MOVE.W	IndTab(PC,D1*2),D1	; added *2. -S.McD.
+	MACHINE	MC68000
+	CLR.W	(A0)
+	BTST	D1,D5
+	BEQ.S	@2
+	ADDQ.B	#1,(A0)
+@2
+	BRA	Exit1NoHalt
+
+IndTab
+	DC.W	23,21,22,20,19	; not 22,21. -S.McD.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; NEXTAFTER - Modify SRC by one ulp in direction of DST
+;;   1.  Clear the control register (default rounding, no halts) and
+;;       move the tiniest extended denorm to FP2.
+;;   2.  Move SRC to FP0.  If INF bit is set, then set SRCINF flag and save sign bit.
+;;   3.  Move DST to FP1.  If NaN bit is set, then move FP1 to FP0.
+;;   4.  Compare FP0 and FP1.  If equal, then go to 9.
+;;   5.  If SRC = Infinity, handle separately, returning INF dec 1.
+;;       If FP1 > FP0 then set rounding to upward, & add tiniest denorm to FP0
+;;                    else set rounding downward, & subt tiniest denorm from FP0.
+;;       Test for 0 result.  If found, change sign.
+;;   6.  Move result from FP0 to SRC and check for INF.  Skip 7 if not found.
+;;   7.  INF returned.  If SRCINF is not set, then set [ovfl, inex] locally.
+;;   8.  Check opcode for format of SRC and examine exponent manually for zero or
+;;       denorm.  If either, then set [underflow, inexact] locally.
+;;   9.  Pass local exception flags to 881.  Exit through halt checking code
+;;       (which acts like procexit; restoring caller's environment, stimulating
+;;       current exceptions, and possibly halting).
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+NextAfter
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State 1.	 Clear the control register and move the tiniest extended denorm to FP2
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FMOVE	#0,FPCR
+	FMOVEM	FP2,-(SP)	; must save/restore FP2-FP7 -S.McD.
+	FMOVE.X	#"$000000000000000000000001",FP2
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State 2.	 Move SRC to FP0.
+;;	 If INF bit is set, then set SRCINF flag, handle INF and goto 6.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.L	LKADR2(A6),A0	; collect source address
+	MOVEQ	#19,D0
+	EOR.W	D0,D1	; leave only format in opword
+	ROL.W	#4,D1	; D-bit to bit 15, S-bit to bit 0. Other bits zero.
+	BNE.S	@2	; branch if single or double
+
+	ADDQ.L	#6,A0	; Extended SRC
+	MOVE.L	(A0),-(SP)
+	MOVE.L	-(A0),-(SP)
+	SUBQ.L	#2,A0
+	MOVE.L	(A0),-(SP)
+
+	FMOVE.X	(SP)+,FP0
+
+	BRA.S	@6
+@2
+	BPL.S	@4	; branch if single
+
+	FMOVE.D	(A0),FP0	; Double  SRC
+
+	BRA.S	@6
+@4
+	FMOVE.S	(A0),FP0	; Single SRC
+@6
+	;;;;;;;;;;;;;;;;;;;;;;;
+	;; Test SRC for INF or SNaN
+	;;;;;;;;;;;;;;;;;;;;;;;
+	FMOVE	FPSR,D0
+
+	BTST	#14,D0	; is SNaN bit set from SRC move?-S.McD.
+	BEQ.S	@7	;   if not, skip to INF tests
+	BSET	#29,D1	;   else save SNaN bit in D1 and
+	BRA.W	State6	;        begin returning Nan
+@7
+	BTST	#25,D0	; is INF bit set from SRC move?
+	BEQ.S	State3	;   if not, skip flag setting
+	BSET	#31,D1	;   else set SRCINF flag in D1
+
+	BTST	#27,D0	; what sign infinity?
+	BEQ.S	State3	; branch if positive
+	BSET	#30,D1	; save sign bit in D1
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State 3.	 Move DST to FP1.
+;;	 If NaN bit is set, then move FP1 to SRC.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State3
+	MOVE.L	LKADR1(A6),A1	; collect destination address
+	TST.W	D1
+	BNE.S	@8	; branch if single or double format
+
+	ADDQ.L	#6,A1	; Extended DST
+	MOVE.L	(A1),-(SP)
+	MOVE.L	-(A1),-(SP)
+	SUBQ.L	#2,A1
+	MOVE.L	(A1),-(SP)
+
+	FMOVE.X	(SP)+,FP1
+
+	BRA.S	@12
+@8
+	BPL.S	@10	;   branch if single
+
+	FMOVE.D	(A1),FP1	; Double DST
+
+	BRA.S	@12
+@10
+	FMOVE.S	(A1),FP1	; Single DST
+
+	;;;;;;;;;;;;;;;;;;;;;;;
+	;; Move DST if NaN bit set
+	;;;;;;;;;;;;;;;;;;;;;;;
+@12
+	FBOR.W	State4	; branch if NaN bit not set
+	FMOVE	FP1,FP0	;   else DST was a NaN.  Copy it to FP0.
+	BTST.B	#6,2(A1)	; was that a SNaN?
+	BNE.S	State6	; if no, then State6
+	BSET	#29,D1	; if yes, use bit 29 of D1 as temp SNaN flag
+	BRA.S	State6	; NaN result.  Time to get out. -S.McD.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State 4.	 Compare FP0 and FP1.  If equal, then go to state 9.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State4
+	FCMP	FP0,FP1
+	FBNE.W	State5
+
+	BRA	State9
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State 5.	 If SRC = Infinity, handle separately, returning INF dec 1.
+;; 	 If FP1 > FP0, then set rounding to upward & add FP2 to FP0
+;;		   else set rounding to dwnwrd & sub FP2 fm FP0.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State5
+	TST.L	D1	; was source an infinity?
+	BGE.S	@8	; if not, branch around infinity code
+
+	;;;;;;;;;;;;;;;;;;;;;;;
+	;; Infinity code.
+	;; INF = SRC ≠ DST, so result = Infinity decremented by 1.
+	;; Move this value to FP0.
+	;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEQ	#-1,D0	; no exceptions to be OR'd in
+	TST.W	D1
+	BNE.S	@2	; branch if single or double format
+
+	;;;;;;;;;;;;;;;;;;;;;;;
+	;; Handle extended precision INF dec 1.
+	;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.W	#$7FFE,(A0)+
+	MOVE.L	D0,(A0)+
+	MOVE.L	D0,(A0)
+	SUBQ	#6,A0
+	BRA.S	@6
+@2
+	BPL.S	@4	; branch if single
+
+	;;;;;;;;;;;;;;;;;;;;;;;
+	;; Handle double precision INF dec 1.
+	;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.L	#$7FEFFFFF,(A0)+
+	MOVE.L	D0,(A0)
+	SUBQ	#4,A0
+	BRA.S	@6
+@4
+	;;;;;;;;;;;;;;;;;;;;;;;
+	;; Handle single precision INF dec 1.
+	;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.L	#$7F7FFFFF,(A0)
+@6
+	BTST	#30,D1	; sign of SRC?
+	BEQ.S	@7	; do nothing if positive
+	BSET	#7,(A0)	;   else set sign bit
+@7
+	MOVEQ	#0,D0	; signal no exceptions
+	BRA	State9	; and leave
+
+	;;;;;;;;;;;;;;;;;;;;;;;
+	;; Non-infinity code.
+	;;;;;;;;;;;;;;;;;;;;;;;
+@8
+	FBOGT.W	@10	; branch if FP1 > FP0
+
+	MOVEQ	#$20,D0	; set rounding downward
+
+	FMOVE	D0,FPCR
+	FSUB	FP2,FP0
+
+	BRA.S	@12	; branch if FP1 <? FP0
+@10
+	MOVEQ	#$30,D0	; set rounding upward
+
+	FMOVE	D0,FPCR
+	FADD	FP2,FP0
+@12
+	FBNE.W	State6
+	FNEG	FP0,FP0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State 6.	 Move result from FP0 to SRC.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State6
+	TST.W	D1
+	BNE.S	@2	; branch if single or double format
+
+	;;;;;;;;;;;;;;;;;;;;;;;
+	;; Handle extended precision.
+	;;;;;;;;;;;;;;;;;;;;;;;
+	FMOVE.X	FP0,-(SP)	; Extended DST
+
+	MOVE.L	(SP)+,(A0)+
+	SUBQ.L	#2,A0
+	MOVE.L	(SP)+,(A0)+
+	MOVE.L	(SP)+,(A0)
+	SUBQ.L	#6,A0
+
+	FMOVE	FPSR,D0	; check INF
+
+	BTST	#29,D1	; is SNaN bit set? -S.McD.
+	BEQ.S	@1	;   skip if not SNaN
+	MOVE.L	#$80,D0	;   set invalid if SNaN
+	BRA.S	State85
+@1
+	BTST	#25,D0	; is INF bit set?
+	BEQ.S	State8	;   State8 if not INF
+	BRA.S	State7	;   State7 if INF
+
+	;;;;;;;;;;;;;;;;;;;;;;;
+	;; Handle double precision.
+	;;;;;;;;;;;;;;;;;;;;;;;
+@2
+	BPL.S	@4	; branch if single
+
+	FMOVE.D	FP0,(A0)	; Double DST
+
+	MOVE.L	(A0),D0	; examine hi long of double for INF
+	ADD.L	D0,D0	; ignore sign bit
+	CMPI.L	#$FFE00000,D0	; does it match INF?
+	BNE.S	State8	;   State8 if no match
+	TST.L	4(A0)	; does lo long of double match INF?
+	BNE.S	State8	;   State8 if not INF
+	BRA.S	State7	;   State7 if INF
+
+	;;;;;;;;;;;;;;;;;;;;;;;
+	;; Handle single precision.
+	;;;;;;;;;;;;;;;;;;;;;;;
+@4
+	FMOVE.S	FP0,(A0)	; Single DST
+
+	MOVE.L	(A0),D0	; examine single for INF
+	ADD.L	D0,D0	; ignore sign bit
+	CMPI.L	#$FF000000,D0	; does it match INF?
+	BNE.S	State8	; branch if no match
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State 7.	 INF returned.  If SRCINF is not set, then set [ovfl, inex].
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State7
+	TST.L	D1	; check SRCINF flag at bit 31
+	BMI.S	State8	;     if set, go to next state
+	MOVEQ	#$48,D0	; if INF ^ ~SRCINF then hold o,x in D0 for later
+	BRA.S	State85
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State 8.	 Check opcode for format of SRC and examine exponent
+;;	 manually for zero or denorm.  If either, then set [ufl, inex].
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State8
+	MOVEQ	#0,D0
+State85
+	TST.W	D1
+	BNE.S	@2	; branch if single or double format
+	MOVE.W	#$7FFF,D1	; extended exponent mask
+	TST.B	2(A0)	; test the 'i' bit in extended format
+	BMI.S	State9	;   if set, then cannot be denormal.BNE->BMI-S.McD.
+	BRA.S	@6
+@2
+	BPL.S	@4	; branch if single
+	MOVE.W	#$7FF0,D1	; double exponent mask
+	BRA.S	@6
+@4
+	MOVE.W	#$7F80,D1	; single exponent mask
+@6
+	AND.W	(A0),D1	; exactly the exponent bits
+	BNE.S	State9	; if nonzero, then neither zero nor denorm
+	MOVEQ	#$28,D0	; if exponent=0 then hold u,x for later
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State 9.	 Pass local exception flags to 881.  Exit thru common code.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State9
+	MOVEQ	#0,D1	; zero status -S.McD.
+	MOVE.W	D0,D1	; set exceptions from above -S.McD.
+
+	FMOVE	D1,FPSR
+	FMOVEM	(SP)+,FP2	; must save/restore FP2-FP7 -S.McD.
+
+	BRA	Exit2Args
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; PROCEXIT
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ProcEx
+	FMOVE	FPSR,D1	; get current status -S.McD.
+	MOVE.W	D1,A1	; and save it temporarily in A1. -S.McD.
+
+	MOVE.L	LKADR1(A6),A0	; addr saved environment
+	MOVE.W	(A0),D0	; saved environment
+	BSR	ESet	; SANE env in D0 -> FPSR:FPCR in D5
+
+	MOVEQ	#STKREM1,D0	; unrolled Exit1Arg to handle special D1. -S.McD.
+	LEA	LKADR1(A6),A0
+	MOVE.W	D0,LKCNT(A6)	; final stack adjust
+
+	MOVE.W	A1,D1	; restore current status to D1. -S.McD.
+	FMOVE	FPSR,D0	; "or" in current status with saved status. -S.McD.
+	OR.W	D1,D0
+	FMOVE	D0,FPSR
+
+	SWAP	D5	; ExitProcEx expects FPSR and FPCR swapped. -S.McD.
+	BRA	ExitProcEx	; -S.McD.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SETEXCEPTION
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+SetExp
+	FMOVE	#0,FPSR	; IEEE default status -S.McD.
+	MOVE.L	LKADR1(A6),A0
+	BSR	EGet	; returns SANE environment in D1
+	MOVE.W	(A0),D0	; bit index of exception to be set
+	ADDQ.W	#8,D0	; Set flag, not halt bit! -S.McD.
+	BSET	D0,D1	; set the exception
+	MOVE.W	D1,D0	; new SANE environment
+SetOut
+	BSR	ESet	; place in 881
+	BRA	Exit1Arg	; and exit through halt testing code
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; COPYSIGN.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+CopySign
+	MOVE.L	LKADR1(A6),A0
+	MOVE.L	LKADR2(A6),A1
+
+; This code is opposite from the MacSE, should copy dst->src
+*	BCLR	#7,(A0)	;			<1.2>
+*	TST.B	(A1)	;			<1.2>
+*	BPL.S	Exit2NoHalt	;			<1.2>
+*	BSET	#7,(A0)	;			<1.2>
+
+; CopySign is documented as Sign(dst) -> Sign(src)
+	move.w	(a0),d0	; get dst sign into bit 15	<1.2>
+	move.b	(a1),d0	; get src sign into bit 8	<1.2>
+	add.w	d0,d0	; shift dst sign into carry	<1.2>
+	roxr.b	#1,d0	; shift dst sign into src	<1.2>
+	move.b	d0,(a1)	; restore updated src sign	<1.2>
+
+Exit2NoHalt
+	MOVEQ	#STKREM2,D0
+	MOVE.L	LKRET(A6),LKADR2(A6)
+	BRA.S	AndOut
+
+Exit1NoHalt
+	MOVEQ	#STKREM1,D0
+	MOVE.L	LKRET(A6),LKADR1(A6)
+
+AndOut
+	MOVE.W	D0,LKCNT(A6)
+
+	MOVE.W	D5,D0	; rest of D0 zeroed by MOVEQs. -S.McD.
+	FMOVE	D0,FPCR	; restore control register from D0, which may
+			; have been modified by ESet or ProcEntry
+
+	MOVEA.L	(A6),A6
+	MOVEM.L	(SP)+,D0/D1/D5/A0/A1
+	ADDA.W	(SP),SP
+	RTS
+

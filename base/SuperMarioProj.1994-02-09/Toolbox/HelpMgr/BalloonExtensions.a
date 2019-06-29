@@ -1,0 +1,358 @@
+;
+;	File:		BalloonExtensions.a
+;
+;	Contains:	Extensions to the Balloon Help Manager used by both the ROM and System.
+;
+;	Written by:	Randy Carr
+;
+;	Copyright:	© 1989-1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM4>	11/19/92	RB		Set ROMMapInsert to MapTrue just before doing some GetResource
+;									calls so that we look in ROM first.
+;		 <2>	  7/8/92	JSM		Move HelpMgrInstall, Pack14Entry, ptchHMUpdateHelpMenu,
+;									ptchHMGetHelpGlobal, ptchHMGetBalloons, and ptchHMSetHelpGlobal
+;									here from Balloonptch28.a.
+;		 <1>	  7/8/92	JSM		first checked in
+;
+
+	IF &TYPE('HelpMgrTesting')='UNDEFINED' THEN
+HelpMgrTesting			EQU 0
+	ENDIF
+
+			PRINT	PUSH,OFF
+
+			LOAD	'StandardEqu.d'
+			INCLUDE 'LinkedPatchMacros.a'			; linked patch stuff
+			INCLUDE	'BalloonsPriv.a'				; my private help manager equates
+			INCLUDE	'IconUtilsPriv.a'
+			INCLUDE 'GestaltEqu.a'
+
+
+			PRINT	POP
+;
+; Macro to put in debug symbols for MacsBug
+;
+			IF HelpMgrTesting THEN
+			MACRO
+				DoDebugSymbols &name
+				DC.B	$80 + &LEN(&name), '&name'
+				DC.W	$0000
+			ENDM
+			ENDIF
+
+			ROMs		Plus,SE,II,Portable,IIci
+
+;__________________________________________________________________________________
+;
+; Routine:	HelpMgrInstall
+;
+; Inputs:	None
+;
+; Outputs:	None
+;
+; Destroys:	d0
+;
+; Function:	This routine installs the linked patch for the Help Manager.
+;			Since this routine is NOT marked resident, it will be disposed of after
+;			it has been called.
+;
+;___________________________________________________________________________________
+
+HelpMgrInstall	InstallProc
+				IMPORT		ptchHMBootInitHelpManager
+				IMPORT		ptchHMGestaltIsThereHelp
+
+				SUBQ		#2,sp							; Save room for OSErr
+				JSR			ptchHMBootInitHelpManager		; Init help mgr
+				MOVE.W		(sp)+,d0						; if error occurs then
+				BEQ.S		@NoProblem
+				PEA			HMProblemMessage				;	get error message
+				_DebugStr									; 	output error message
+				BRA.S		@Done
+@NoProblem													; else
+				MOVE.L		#gestaltHelpMgrAttr,d0			;	get 'help'
+				leaResident	ptchHMGestaltIsThereHelp,a0		; 	get Gestalt function
+				_NewGestalt									;	install Gestalt function
+				BEQ.S		@Done							;   if error occurs then
+				PEA			HMProblemMessage				;		get error message
+				_DebugStr									;		output error message
+@Done
+				RTS
+
+				STRING PASCAL
+HMProblemMessage
+				DC.B	'Unable to init Help Manager'
+
+				STRING ASIS
+				ALIGN	2
+
+				ENDPROC
+
+;__________________________________________________________________________________
+;
+; Routine:	NewPack14 - patch for Help Manager package.
+;
+; Inputs:	nothing
+;
+; Outputs:	N/A jumps to PACK after loading
+;
+; Destroys:	iff PACK can not be loaded then D0 & A0 are destroyed
+;
+; Function:	This routine patches the PACKage dispatching in ROM.  The reason this
+;			is done is that the ROM dispatcher will call _SysErr (can you say bomb)
+;			if the PACKage can not be loaded.  This is punishment far in excess
+;			of the crime.  Since all PACK=14 routines now have a return value and
+;			D0 specifies the amount of parameters on the stack, it is possible
+;			to remove the parameters and return gracefully with an OSErr.
+;___________________________________________________________________________________
+;___________________________________________________________________________________
+;
+;			PACK 14 entry - Help Manager
+;
+;___________________________________________________________________________________
+
+Pack14Entry		PatchProc	_Pack14
+
+				IMPORT		ptchHMPascalGetBalloons
+
+Pack14Handle	EQU			App2Packs+24
+Pack14Globals	EQU			ExpandMemRec.emPack14Globals	; use count global for ProcHelper
+
+				CMP			#kHMGetBalloons,D0				; special case this call as we don't want
+				BEQ.S		@WasGetBalloons					;	to load package to check state, get it from our globals instead
+
+				CMP			#kHMInitHelpMenu,D0				; yet another special case
+				BEQ.S		@BootHelpMgrSystemMenu			; initialize the helpmgr menu
+;
+;				Set up for ProcHelper normally
+;
+				MOVE.L		Pack14Handle,A0					; A0 = handle to PACK
+				MOVE.L		ExpandMem, A1					; A1 = expanded memory area
+				ADD.W		#Pack14Globals,A1				; A1 = pointer to PACK use count
+				_ProcHelper									; let ProcHelper take over
+
+@WasGetBalloons
+				JMP			ptchHMPascalGetBalloons			; what is the state of What Is? mode?
+
+@BootHelpMgrSystemMenu
+
+BSaveReg		REG		A3/A4
+
+				movem.l	BSaveReg,-(sp)
+
+				subq	#4,sp									; room for package
+				move.l	#'PACK',-(sp)							; we want the package resource
+				move	#14,-(sp)								; of ID = 14
+				MOVE.W	#MapTrue,RomMapInsert					; look in ROM first							<SM4> rb
+				_GetResource
+				move.l	(sp)+,d0								; did we get it?
+				beq.s	done									; no, so exit w/o putting up icon
+
+				move.l	d0,-(sp)								; toss it initially
+				_ReleaseResource								; 	we just wanted to see if it was around
+
+				subq	#4,sp									; Make room for result
+				move.w	#kHMHelpMenuID,-(sp)					; Push the balloon menu ID
+				_GetRMenu										; Go get it
+				move.l	(sp)+,d0								; Get the menu handle
+				beq.s	done
+				move.l	d0,a3									; Save handle across get icon suite
+
+				subq	#6,sp									; Make room for result+handle address
+				pea		2(sp)									; Handle return place
+				move.w	#kHMHelpMenuID,-(sp)					; Push the balloon menu ID
+				move.l	#svAllSmallData,-(sp)					; Push the selector to get all small icons
+				_GetIconSuite									; Go and get them
+				move.w	(sp)+,d0								; Did it work?
+				move.l	(sp)+,a4								; Did it work?
+				bne.s	done									; Guess not
+				move.l	a4,d0
+				beq.s	done
+
+				bsr.s	StuffSuiteIntoMenu						; a3=menuhandle, a4=suite
+				move.l	a3,-(sp)								; Push the menuhandle
+				move.w	#0,-(sp)								; Insert after everyone
+				_InsertMenu										; Blast it in
+done
+				movem.l	(sp)+,BSaveReg
+				rts
+
+;
+; StuffSuiteIntoMenu
+;
+; Stuffs the icon suitehandle in a4 into the title of the menuhandle in a3
+;	Enter:	a3 = menuHandle
+;			a4 = icon suite handle
+; Trashes:  A0,D0
+;
+StuffSuiteIntoMenu
+				move.l	(a3),a0									; dereference menu handle
+				lea		menudata(a0),a0							; point to the menudata
+				cmp.b	#5,(a0)									; is the length of the data OK
+				beq.s	@readytostuff							; if ok, go ahead and stuff icon
+
+				bra.s	@SysErr127								; *** someday call the code below
+
+				; Bummer, the title area is not the right size to stuff the handle
+;				subq	#4,sp									; Make room for munger result
+;				move.l	a3,-(sp)								; Push menuhandle
+;				move.l	#menudata,-(sp)							; Push offset to menudata
+;				clr.l	-(sp)									; ptr1=nil -> replace offset,length
+;				move.l	(a3),a0									; dereference menuhandle
+;				moveq	#0,d0									; clear high bytes
+;				move.b	menudata(a0),d0							; get the length
+;				addq	#1,d0									; be sure and replace the length byte too
+;				move.l	d0,-(sp)								; len1=title length + 1
+;				moveq	#6,d0									; new size of title string
+;				move.l	d0,-(sp)								; ptr2=anything but nil and odd (replace)
+;				move.l	d0,-(sp)								; len2=6 replacement size
+;				_Munger											; Munge in 6 bytes from address 6 as title
+;				addq	#4,sp									; ignore result
+;				move.l	(a3),a0									; dereference menu handle
+;				lea		menudata(a0),a0							; point to the menudata
+
+@readytostuff
+				move.w	#$0501,(a0)+							; Set the magic cookie
+				move.l	a4, (a0)								; Stuff the icon
+				rts
+@SysErr127
+				moveq	#127,d0
+				_SysError
+
+				ENDPROC										; Pack14Entry
+
+;
+;
+;	PROCEDURE ptchHMUpdateHelpMenu;
+;
+;	This code updates the text in the items of the help menu.
+;
+;	Everytime _MenuSelect is called, this routine is called.  Why? Because since there
+;	are multiple copies of the help menu in different heaps and we don't keep a list of
+;	those menus around, we just stuff the menu item text each time. It also doesn't help
+;	to remember what state balloons was in, because we would have to do a comparestring
+;	for the text of the menu, instead, we just restuff the text each time.
+;
+;	The reason we don't need to keep a list of menus around is that a copy of the global
+;	system help menu is made each time someone calls _InsertMenu.  We don't have to worry
+;	then about an application crashing with this menu, cuz the app heap just gets reinited
+;	and voila, the menu goes away.
+;
+;	Destroys pascal register conventions
+;
+ptchHMUpdateHelpMenu PROC EXPORT
+
+			IMPORT ptchHMGetBalloons
+
+			MOVE.L	D7,-(SP)				; save a work register
+
+			SUBQ	#4,SP					; make some space
+			MOVE.W	#kHMHelpMenuID,-(SP)	; we want our help menu handle
+			_GetMHandle						; get the handle
+			MOVE.L	(SP)+,D0				; pop the menu handle (if any) into D0
+			BEQ.S	@MenuNotThere			; yikes! menu handle wasn't found
+
+			MOVE.L	D0,-(SP)				; push the menu handle
+			MOVE.W	#kHMShowBalloonsItem,-(SP)	; set item number #kHMShowBalloonsItem
+
+			MOVE	#kHMBalloonHelpID,D0	; start w/ this index
+			JSR		ptchHMGetBalloons		; what is the state of What Is? mode?
+			BEQ.S	@OffMenuString			;	EQ means the mode was off
+
+			ADDQ	#1,D0					; convert Boolean result to 'STR ' res ID
+@OffMenuString
+			SUBQ	#4,SP					; room for string handle
+			MOVE	D0,-(SP)				; push string res ID
+			_GetString						; get the string resource
+			MOVE.L	(SP)+,D7				; D7 = string handle
+			BEQ.S	@noStringFound			; EQ means it was NIL so stuff a default string (*** for now)
+
+			MOVE.L	D7,A0					; A0 = string handle
+			_HLock							; always lock the string (it always gets purged!)
+
+			MOVE.L	(A0),A0					; deref to get pointer
+			BRA.S	@gotTheMenuString		; go set the item with the string found
+@noStringFound
+			LEA		whatIsDefaultString,A0	; use this default string instead
+@gotTheMenuString
+			MOVE.L	A0,-(SP)
+			_SetItem						; set the What Is? menu item with the Show/Hide string
+
+			MOVE.L	D7,D0					; test the contents of D7 (possibly a string handle)
+			BEQ.S	@MenuNotThere			; EQ means NIL
+
+			MOVE.L	D7,A0					; put string handle in A0
+			_HUnlock						;	and unlock it
+@MenuNotThere
+			MOVE.L	(SP)+,D7				; restore the register
+			RTS								; return to caller
+
+			STRING PASCAL
+			ALIGN	0
+whatIsDefaultString	DC.B	'Show/Hide Balloons'	; this is the default text for the current menu item
+			ALIGN	2
+			STRING ASIS
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	ptchHMUpdateHelpMenu		; label for MacsBug
+		ENDIF
+
+		ENDP
+
+;
+; FUNCTION ptchHMGetHelpGlobal: HMGlobalPtr;		; we need this for pascal
+;
+;	Returns our global ptr for the help manager globals
+;
+ptchHMGetHelpGlobal	PROC EXPORT
+			MOVE.L	ExpandMem,A0							; point to the expand mem ptr
+			MOVE.L	ExpandMemRec.emHelpGlobals(A0),4(SP)	; return the global ptr on the stack
+			RTS												; return to caller
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	ptchHMGetHelpGlobal		; label for MacsBug
+		ENDIF
+
+			ENDP
+
+;
+;	ptchHMGetBalloons
+;
+;	Returns with CCRs set (& flag in D0.B) if WhatIs mode is on (this routine is a speed/code saver 4 the ptch only)
+;
+;	Preserves all registers except A0
+;
+ptchHMGetBalloons	PROC EXPORT
+			MOVE.L	ExpandMem,A0							; point to the expand mem ptr
+			MOVE.L	ExpandMemRec.emHelpGlobals(A0),A0		; get the global ptr in A0
+			TST.B	hmgWhatIs(A0)
+			RTS												; return to caller
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	ptchHMGetBalloons		; label for MacsBug
+		ENDIF
+
+			ENDP
+
+;
+;
+; PROCEDURE ptchHMSetHelpGlobal(gp: HMGlobalPtr);
+;
+;	Sets the help manager global ptr to the specified ptr
+;
+ptchHMSetHelpGlobal	PROC EXPORT
+				MOVE.L	(SP)+,D0						; get return address
+				MOVE.L	ExpandMem,A0					; point to the expand mem ptr
+				MOVE.L	(SP)+,ExpandMemRec.emHelpGlobals(A0)		; stuff the global ptr
+				MOVE.L	D0,A0							; put the return address in A0
+				JMP		(A0)							; ok, jump to it!
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	ptchHMSetHelpGlobal		; label for MacsBug
+		ENDIF
+
+			ENDP
+
+		END

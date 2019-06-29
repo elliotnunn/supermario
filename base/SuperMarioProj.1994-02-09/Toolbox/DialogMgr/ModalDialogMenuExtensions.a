@@ -1,0 +1,290 @@
+;
+;	File:		ModalDialogMenuExtensions.a
+;
+;	Contains:	Assembly language portions of Modal Dialog Menu Access Facility
+;				used by both the ROM and System.
+;
+;	Written by:	Darin Adler, Kevin MacDonell, Roger Mann, and Jeff Miller
+;
+;	Copyright:	© 1990-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <6>	12/17/92	JSM		Remove TheFuture conditionals.
+;		 <5>	 12/9/92	DTY		GetIsDialogState and SetIsDialogState are never used, so get rid
+;									of them.  (Just so Jeff can’t do it.)
+;		 <4>	 6/10/92	JSM		Need to include DialogsPriv.a for ROM and future System builds.
+;		 <3>	 6/10/92	JSM		Only include LinkedPatchMacros.a for non-ROM builds, add some
+;									more comments about why we can use peaOld here.
+;		 <2>	 6/10/92	JSM		Moved some routines here from ModalDialogMenuPatches.a to factor
+;									out common code in both the ROM and the System. Added
+;									InitDialogMgrGlobals for ROM builds and future System builds so
+;									we don’t have to keep our globals in code space, and change the
+;									Set/GetXXXRoutines to use ExpandMem for the ROM and the future.
+;									Changed MDJGNEFilter for ROM builds so it does the right thing.
+;		 <1>	 6/10/92	JSM		first checked in
+;
+
+		load	'StandardEqu.d'
+
+	IF NOT forROM THEN
+		include	'LinkedPatchMacros.a'			; To get peaOld macro for MDJGNEFilter
+	ENDIF
+
+		include	'BalloonsPriv.a'				; To get the _HMModalDialogMenuSetup macro
+		include	'ScriptPriv.a'					; To get the equates to call _KeyScript
+		include	'MenuMgrPriv.a'					; To get kApplicationMenuID
+		include	'DialogsPriv.a'					; To get DialogMgrGlobals definition
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; ModalDialogMenuSetup - implements _ModalDialogMenuSetup
+;
+; PROCEDURE ModalDialogMenuSetup(nowModal: BOOLEAN);
+; nowModal: TRUE if set up for modal, FALSE if restore to normal
+;
+; Referenced by DispTable.a for the ROM and by a MakePatch macro in ModalDialogMenuPatches.a
+; for the System.
+;
+
+ModalDialogMenuSetup 	Proc	Export
+
+SetupHelpMenu
+				subq	#2,sp					; make space for the useless OsErr return
+				move.b	6(sp),-(sp)				; push the boolean
+				_HMModalDialogMenuSetup			; set up Help Mgr menu
+				addq	#2,sp					; Dump result
+
+SetupKeyScriptMenu
+				moveq	#smKeyDisableAboutKybds,d0	; Assume we are going modal
+				tst.b	4(sp)						; Are we going modal?
+				bne.s	@doDisable
+				moveq	#smKeyEnableAboutKybds,d0	; Re-enable the KeyScript menu
+@doDisable
+				move.w	d0,-(sp)				; Pass opcode to KeyScript
+				_KeyScript
+
+SetupApplicationMenu
+				subq	#4,sp					; Make room to get menuhandle
+				move.w	#kApplicationMenuID,-(sp)	; Push the menuID
+				_GetMHandle						; Look for the Application menu
+				move.l	(sp)+,d0				; Did we get it?
+				beq.s	@done					; Nope
+				move.l	d0,-(sp)				; Push the menuhandle
+				move.w	#0,-(sp)				; Zero means whole menu
+				tst.b	10(sp)					; Are we going modal?
+				bne.s	@doDisable				; Non-zero means modal
+				_EnableItem
+				bra.s	@done					; GTFO
+@doDisable
+				_DisableItem
+@done
+
+				; Clean up the mess
+				move.l	(sp)+,a0				; Pull off the return address
+				addq	#2,sp					; Dump the original boolean
+				jmp		(a0)					; Return from whence we came
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; MDJGNEFilter
+;
+; Pass each event through our filter
+;
+; Referenced by StartInit.a for the ROM and by a MakePatch macro in ModalDialogMenuPatches.a
+; for the System.
+;
+; The ROM and System versions are packaged slightly differently.  The ROM version just calls
+; NMGNEFilter after it’s done, whereas the System calls through to whatever the old filter
+; was at patch time.
+;
+
+MDJGNEFilter	Proc 	Export
+
+				import	FilterEvent				; from ModalDialogMenuExtensions.c
+
+				tst.b	WWExist					; do nothing unless Window Mgr. is here
+				bnz.s	@done
+				movem.l	d0-d2/a0-a2,-(sp)
+				move.l	a1,a2
+				move.l	a1,-(sp)				; pass event record pointer
+				jsr		FilterEvent				; call event filter
+				tst.w	evtNum(a2)				; is it a null event?
+				bnz.s	@notNull				; null events must return false
+				clr.w	6*4+4(sp)				; change result code to false
+@notNull
+				movem.l	(sp)+,d0-d2/a0-a2
+
+		IF forROM THEN
+				import	NMGNEFilter				; from NotificationMgr.c
+				pea		NMGNEFilter				; call NMGNEFilter
+		ELSE
+				peaOld							; call the old filter
+												; note: we can use peaOld here because
+												; the System references us with a MakePatch,
+												; if it jumped to MDJGNEFilter from a patch
+												; instead then peaOld wouldn’t work
+
+				tst.l	(sp)					; check if there was one
+				bnz.s	@done					; yes, go do it
+				addq.l	#4,sp					; no filter, don’t call
+		ENDIF									; forROM
+
+@done
+				rts
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; InitDialogMgrGlobals — allocate and initialize globals stored in emDialogGlobals
+;
+; Called by StartBoot.a for the ROM, or by a MakeInstall macro in ModalDialogMenuPatches.a for the System.
+;
+
+InitDialogMgrGlobals		Proc	Export
+
+		with	DialogMgrGlobals
+
+; allocate mem & get ptr to it
+
+		move.l  #DialogMgrGlobalsSize,D0       	; D0 = size of RAM we need
+		_NewPtr SYS,CLEAR          				; Get RAM for variables
+
+; set ptr in ExpandMemRec.emDialogGlobals
+
+		move.l	ExpandMem,A1						; A1 -> ExpandedMem	
+		move.l	A0,ExpandMemRec.emDialogGlobals(A1)	; store vars Pointer in ExpandMem
+		
+; initialize varibles
+; no need to set the ones that are 0, NewPtr did that above, but I’ll leave them here for clarity
+
+;		move.w	#0, AnalyzedWindowState(A0)			; used in Set/GetAnalyzedWindowState proc
+		move.l	#1, AnalyzedWindow(A0)				; used in Set/GetAnalyzedWindow proc
+;		move.l	#0, SavedMenuState(A0)				; used in Set/GetSavedMenuState proc
+		
+		endwith
+		
+		rts
+		
+		endproc
+		
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; SetAnalyzedWindowState (GetAnalyzedWindowState)
+; SetAnalyzedWindow (GetAnalyzedWindow)
+; SetSavedMenuState (GetSavedMenuState)
+; SetIsDialogState (GetIsDialogState)
+;
+; Routines to set and get globals used by the Dialog Mgr.
+;
+
+SetAnalyzedWindowState	proc	export
+				export	GetAnalyzedWindowState
+
+				move.l	(sp)+,a0
+				move.l	ExpandMem,a1						; A1 -> Expanded Low Memory
+				move.l	ExpandMemRec.emDialogGlobals(a1),a1	; A1-> ptr to globals
+				move.w	(sp)+,DialogMgrGlobals.AnalyzedWindowState(a1)		; set new value
+				jmp		(a0)
+
+GetAnalyzedWindowState
+				move.l	ExpandMem,a1						; A1 -> Expanded Low Memory
+				move.l	ExpandMemRec.emDialogGlobals(a1),a1	; A1-> ptr to globals
+				move.w	DialogMgrGlobals.AnalyzedWindowState(a1),4(sp)	; get return value
+				rts
+
+				endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+SetAnalyzedWindow		proc	export
+				export	GetAnalyzedWindow
+
+				move.l	(sp)+,a0
+				move.l	ExpandMem,a1						; A1 -> Expanded Low Memory
+				move.l	ExpandMemRec.emDialogGlobals(a1),a1	; A1-> ptr to globals
+				move.l	(sp)+,DialogMgrGlobals.AnalyzedWindow(a1)	; set new value
+				jmp		(a0)
+
+GetAnalyzedWindow
+				move.l	ExpandMem,a1						; A1 -> Expanded Low Memory
+				move.l	ExpandMemRec.emDialogGlobals(a1),a1	; A1-> ptr to globals
+				move.l	DialogMgrGlobals.AnalyzedWindow(a1),4(sp)	; get return value
+				rts
+
+				endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+SetSavedMenuState		proc	export
+				export	GetSavedMenuState
+
+				move.l	(sp)+,a0
+				move.l	ExpandMem,a1						; A1 -> Expanded Low Memory
+				move.l	ExpandMemRec.emDialogGlobals(a1),a1	; A1-> ptr to globals
+				move.l	(sp)+,DialogMgrGlobals.SavedMenuState(a1)	; set new value
+				jmp		(a0)
+
+GetSavedMenuState
+
+				move.l	ExpandMem,a1						; A1 -> Expanded Low Memory
+				move.l	ExpandMemRec.emDialogGlobals(a1),a1	; A1-> ptr to globals
+				move.l	DialogMgrGlobals.SavedMenuState(a1),4(sp)	; get return value
+				rts
+
+				endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; PushMenuState: SavedHandle;
+;
+; savedMenus = 0;
+; if (ActiveWindowNeedsHelp())
+;	savedMenus = SetSaveMenusEnableState();
+;
+; On entry: nothing
+; On exit:  stack has saved menu handle or NIL
+
+PushMenuState	Proc	Export
+
+				import SetSaveMenusEnableState	; from ModalDialogMenuExtensions.c
+				import ActiveWindowNeedsHelp	; from ModalDialogMenuExtensions.c
+
+				clr.l	-(sp)					; default result of function
+				subq	#2,sp					; make room for result
+				jsr		ActiveWindowNeedsHelp	; does this window need help?
+				jsr		SetSaveMenusEnableState	; pass TAnalyzedWindowState info
+@noHelpNeeded
+				move.l	(sp)+,d0				; get result
+				move.l	(sp),a0					; get return address
+				move.l	d0,(sp)					; put result on stack
+				jmp		(a0)					; return
+
+				endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; PopMenuState
+;
+; if (savedMenus)
+;	RestoreMenusEnableState(savedMenus);
+;
+; On entry: stack has saved menu handle or NIL
+; On exit:  handle is popped off the stack
+
+PopMenuState	Proc	Export
+
+				import RestoreMenusEnableState	; from ModalDialogMenuExtensions.c
+
+				move.l	4(sp),d0				; check out the saved menu handle
+				beq.s	@done					; NIL, do nothing
+
+				move.l	d0,-(sp)
+				jsr		RestoreMenusEnableState	; Restore the state
+@done
+				move.l	(sp)+,(sp)				; pop off the handle
+				rts
+
+				endproc
+
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+				end

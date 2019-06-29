@@ -1,0 +1,363 @@
+;EASE$$$ READ ONLY COPY of file “BitEdit.a”
+; 1.1	CCH 10/16/1989 Incorporated new changes from Craig Carper.
+; 1.0	CCH 08/03/1989 Adding to EASE for Big Bang build as PACK ID=1.
+; END EASE MODIFICATION HISTORY 
+; File BitEdit.a
+; 19-jun-86
+;
+; version 1.0A1
+;
+
+ BLANKS ON
+ STRING ASIS
+
+	PRINT	OFF
+	LOAD	'StandardEqu.d'
+	PRINT	ON
+
+
+BE68K       PROC        EXPORT
+
+;======================================================================
+;
+;	    PROCEDURE FixRect( r: Rect ); EXTERNAL;
+;
+;======================================================================
+
+            EXPORT      FixRect
+FixRect
+            MOVE.L      (SP)+,A1	        ; pop RTS
+            MOVE.L      (SP)+,A0
+
+            MOVE        D3,-(SP)
+
+            MOVEM       (A0)+,D0-D3	        ; get coordinates
+
+            CMP	        D0,D2		        ; compare bottom to top
+            BGE.S       @0
+            EXG	        D0,D2
+@0
+            CMP	        D1,D3		        ; compare right to left
+            BGE.S       @1
+            EXG	        D1,D3
+@1
+            MOVEM       D0-D3,-(A0)	        ; restore coordinates
+
+            MOVE        (SP)+,D3
+
+            JMP	        (A1)
+
+
+GetSelPat	PROC	EXPORT
+;XREF GetSelPat
+;---------------------------------------------------------------
+;
+;  PROCEDURE GetSelPat(patIndex: INTEGER; VAR pat: Pattern);
+;  given index, return striped "marching ants" pattern
+;
+		MOVE.L  (SP)+,A0	        ;POP RETURN ADDR
+        MOVE.L  (SP)+,A1	        ;POP ADDR OF PATTERN
+        MOVE    (SP)+,D0	        ;POP PATINDEX
+        AND     #7,D0		        ;TREAT PATINDEX MOD 8
+        MOVE.B  #$F8,D1		        ;INIT PATTERN DATA
+        ROR.B   D0,D1		        ;USE PATINDEX TO ROTATE
+        MOVE    #7,D2		        ;INIT LOOP COUNT
+NXTBYT1 MOVE.B  D1,(A1)+	        ;STORE BYTE OF PATTERN
+        ROL.B   #1,D1		        ;ROTATE FOR NEXT BYTE
+        DBRA    D2,NXTBYT1	        ;LOOP 8 BYTES
+        JMP     (A0)				;AND RETURN
+
+
+NewPtrClr	PROC	EXPORT
+;XREF NewPtrClr
+;---------------------------------------------------------------
+;
+;  FUNCTION	NewPtrClr(logicalSize: Size): Ptr
+;  given size, return a cleared newptr block
+;
+		move.l  (sp)+,a1	        ; pop return addr
+		move.l	(sp)+,d0			; get size in d0
+		_NewPtr ,CLEAR				; get a cleared block
+;		move.l	a0,-(sp)			; put ptr on stack
+		move.l	a0,(sp)				; put ptr on stack - PEA 12/9/87
+        jmp     (a1)				; and return
+
+
+ClearHandle	PROC	EXPORT
+;XREF ClearHandle
+;---------------------------------------------------------------
+;
+;  PROCEDURE ClearHandle(block: Handle);
+;  given handle, clear it
+;
+		move.l  (sp)+,a1	        ; pop return addr
+		move.l	(sp)+,a0			; get handle in a0
+		move.l	a3,-(sp)			; save work reg.
+		move.l	a0,a3				; preserve handle
+		_GetHandleSize				; get size in d0
+
+		move.l	(a3),a0				; get ptr in a0
+		lsr.l	#1,d0				; get # of words in handle
+		bra.s	dodbra
+
+clrloop
+		clr.w	(a0)+
+
+dodbra
+		dbra	d0,clrloop
+		
+		move.l	(sp)+,a3			; restore a3
+        jmp     (a1)				; and return
+
+
+
+GetRgnMax PROC EXPORT
+;--------------------------------------------------------
+;
+;  FUNCTION  GetRgnMax: INTEGER;
+;
+    MOVE.L    GRAFGLOBALS(A5),A0
+    MOVE      RGNMAX(A0),4(SP)         ;GET RGNMAX
+    RTS
+	
+
+
+CalcEdges PROC  EXPORT   
+;XREF CalcEdges 
+;----------------------------------------------------------------
+;
+;   PROCEDURE CalcEdges(srcBuf,dstBuf: QDPtr;
+;		        topVert,height,rowBytes: INTEGER;
+;		        lassoBlack: BOOLEAN);
+;
+;   Calc the edges of srcBuf into dstBuf.
+;
+; Registers used:  A0: Pointer to source bitmap.
+;				   A1: Pointer to destination bitmap.
+;                  A2: Pointer to working storage.
+;
+;				   D1: Scratch computations.
+;				   D2: Loop counter for inner loops.
+;				   D3: # of scanlines to process- loop counter for outer loop.
+;				   D5: # of words per scanline.
+;				   D6: # of bytes per scanline.
+;
+;
+ROW			EQU	   74		     	;Bytes in scanline buffer.
+
+PARAM7		EQU	    16
+SRC			EQU	    PARAM7+8-4    	;LONG
+DST			EQU	    SRC-4	     	;LONG
+TOPVERT		EQU	    DST-2			;WORD, (GLOBAL coordinate)
+HEIGHT		EQU	    TOPVERT-2		;WORD
+ROWBYT1	  	EQU		HEIGHT-2		;ANOTHER WORD
+LASSOBLK	EQU	    ROWBYT1-2	    ;BOOLEAN
+
+
+			LINK	 	A6,#-ROW		   	;ALLOCATE SCANBUF
+			MOVEM.L		A2/D3-D6,-(SP)		;SAVE REGS
+			moveq		#0,d6				; clear d6 'cause we use it as a long
+			move.w		ROWBYT1(a6),d6		;Bytes per row in d6
+			move.l		d6,d5
+			asr.l		#1,d5				;Words per row in d5
+			CLR.L		D4					;CLEAR INVERTFLAG
+			TST.B		LASSOBLK(A6)		;IS LASSOBLACK TRUE ?
+			BEQ.S		NOTBLK		     	;NO, CONTINUE
+          	NOT.L	  	D4					;YES, INVERTFLAG := ALL ONES
+NOTBLK		MOVE		TOPVERT(A6),D0		;GET TOP VERT
+			mulu		d6,d0
+          	MOVE.L		SRC(A6),A0		 	;POINT TO SRC
+          	ADD.L	  	D0,A0				;OFFSET SRC TO TOPVERT
+          	MOVE.L		DST(A6),A1		 	;POINT TO DST
+          	ADD.L	  	D0,A1			 	;OFFSET DST TO TOPVERT
+          	MOVE.L		SP,A2				;POINT TO SCANBUF
+          	MOVE		HEIGHT(A6),D3		;GET SCANLINE COUNT
+          	BRA.S	  	START1			   	;GO TO LOOP START
+		 
+;
+; Source (A0), destination (A1), and working storage (A2) now set up.
+; (D3) is # of scan lines. We'll loop through Loop1 and Loop2 this many
+; times.
+;
+; Loop 1: AND src data with scan lines above and below, right shift, store
+;         in scan buffer (A2).
+;		
+nxtRow1		MOVE.L		d5,d2
+			SUBQ.L		#1,d2				;For DBRA
+       		SUB	  		D0,D0			   	;CLEAR X-BIT
+LOOP3	    MOVE.W		(A0)+,D0			;GET A word FROM SRC
+		 	NEG.L	  	d6
+		  	AND.W	  	-2(a0,d6.l),d0	 	; AND with scanline above
+		   	NEG.L	  	d6
+		   	AND.W	  	-2(a0,d6.L),d0	 	; AND with scanline below
+
+          	MOVE.W		D0,D1			   	;COPY RESULT
+          	ROXR.W		#1,D1			   	;SHIFT RIGHT WITH CARRY
+          	AND.W	  	D1,D0			   	;AND WITH RIGHT-SHIFT
+          	MOVE.W		D0,(A2)+		 	;STORE RESULT INTO SCANBUF
+          	DBRA	  	D2,LOOP3		 	;LOOP however many LONGS
+;
+; Loop 2: AND with left shift, AND with original, store into destination.
+;
+			ADDA.L		d6,a1				; Add offset, we're counting backwards
+			MOVE.L		d5,d2
+			SUBQ.L		#1,d2
+          	SUB	  		D0,D0			   	;CLEAR X-BIT
+LOOP4	    MOVE.W		-(A2),D0		 	;GET LONG FROM SCANBUF
+          	ROXL.W		#1,D0			   	;SHIFT LEFT WITH CARRY
+          	AND.W	  	(A2),D0		   		;AND WITH UNSHIFTED
+          	NOT.W	  	D0			     	;INVERT THE INSET RESULT
+          	AND.W	  	-(A0),D0		 	;AND WITH ORIGINAL SRC
+          	EOR.W	  	D4,-(A1)		 	;INVERT DST IF LASSOBLACK
+          	AND.W	  	D0,(A1)		  		;AND RESULT INTO DST
+          	DBRA	  	D2,LOOP4		 	;LOOP 17 LONGS
+
+;Right here, A0 and A1 should both be back where they started...
+
+		 	ADDA.L		d6,a0
+		  	ADDA.L		d6,a1
+START1		DBRA		D3,nxtRow1			;LOOP HEIGHT ROWS
+
+      		MOVEM.L 	(SP)+,A2/D3-D6		;RESTORE REGS
+         	UNLK	  	A6			     	;RELEASE STACK FRAME
+          	MOVE.L		(SP)+,A0			;POP RETURN ADDR
+          	ADD	  		#PARAM7,SP			;STRIP PARAMS
+          	JMP	  		(A0)				;AND RETURN
+			STRING		Asis
+			Dc.b		'CalcEdge'
+
+
+TrimBBox PROC  EXPORT
+;XREF TrimBBox
+;---------------------------------------------------------------
+;
+;  PROCEDURE TrimBBox(dstBuf: QDPtr; VAR dstRect: Rect; rowB: INTEGER);
+;
+PARAM6       EQU     10
+DSTBUF1	     EQU     PARAM6+8-4	        ;LONG
+DSTRECT	     EQU     DSTBUF1-4	        ;LONG
+rowB		 EQU	 DSTRECT-2			;word (keep in d3)
+
+		LINK    A6,#0			        ;NO LOCALS
+        MOVEM.L D3-D7/A2-A4,-(SP)	    ;SAVE REGS
+        MOVE.L  DSTRECT(A6),A4		    ;GET ADDR OF DSTRECT
+        MOVE.L  DSTBUF1(A6),A3		    ;GET ADDR OF DSTBUF
+		move.w	rowB(a6),d3				; get rowBytes in d3
+
+        MOVE    BOTTOM(A4),D7		    ;GET DSTRECT BOTTOM
+        SUB     TOP(A4),D7		        ;SUB TOP FOR HEIGHT
+        BLE     EMPTY			        ;SKIP IF EMPTY
+
+;
+;  SCAN FOR TOP NON-ZERO OR EMPTY
+;
+        MOVE    TOP(A4),D0		        ;GET DSTRECT TOP
+        MULU    d3,D0			        ;TIMES ROW FOR OFFSET
+        MOVE.L  A3,A0			        ;COPY BUFSTART
+        ADD.L   D0,A0			        ;POINT TO RECT TOPLEFT
+        MOVE.L  A0,A2			        ;SAVE FOR LATER
+        MOVE    D7,D1			        ;GET HEIGHT
+		move.w	d3,d5					; get rowBytes in d5
+		divu	#2,d5					; divide by 2 for words
+        MULU    d5,D1			        ;TIMES words
+        SUB     #1,D1			        ;MINUS 1 FOR DBRA COUNT
+TOPLP   TST.W   (A0)+			        ;IS THIS LONG ZERO ?
+        DBNE    D1,TOPLP		        ;LOOP TILL NON-ZERO OR EMPTY
+        BEQ     EMPTY			        ;QUIT IF EMPTY
+
+        SUB     #2,A0			        ;UNDO AUTO-INCR
+        MOVE.L  A0,D0			        ;COPY ADDRESS
+        SUB.L   A3,D0			        ;SUBTRACT START ADDRESS
+        DIVU    d3,D0			        ;DIV BY ROW FOR VERT COORD
+        MOVE    D0,TOP(A4)		        ;STORE TOP COORD INTO DSTRECT
+
+;
+;  FIND BOTTOM NON-ZERO
+;
+        MOVE    BOTTOM(A4),D0		    ;GET DSTRECT BOTTOM
+        MULU    d3,D0			        ;TIMES ROW FOR OFFSET
+        MOVE.L  A3,A0			        ;COPY BUFSTART
+        ADD.L   D0,A0			        ;POINT TO RECT BOTTOM
+BOTLP   TST.L   -(A0)			        ;IS THIS LONG ZERO ?
+        BEQ.S   BOTLP			        ;YES, LOOP TILL NON-ZERO
+
+        MOVE.L  A0,D0			        ;COPY ADDRESS
+        SUB.L   A3,D0			        ;SUBTRACT START ADDRESS
+        DIVU    d3,D0			        ;DIV BY ROW FOR VERT COORD
+        ADD     #1,D0			        ;ADD 1 FOR BBOX BOTTOM
+        MOVE    D0,BOTTOM(A4)		    ;STORE BOTTOM INTO DSTRECT
+
+;
+;  FIND LEFTMOST ONE-BIT
+;
+        SUB     #1,D7			        ;CALC HEIGHT-1 FOR DBRA
+
+        MOVE    LEFT(A4),D2		        ;GET DSTRECT LEFT
+        AND     #$FFF0,D2		        ;TRUNCATE TO LEFT WORD
+        MOVE    D2,D0			        ;MAKE A COPY
+        LSR     #3,D0			        ;DIV BY 8 FOR BYTE OFFSET
+        MOVE.L  A2,A1			        ;POINT TO RECT TOP
+        ADD     D0,A1			        ;OFFSET TO LEFT
+
+LMORE   MOVE.L  A1,A0			        ;POINT TO TOP OF COLUMN
+        MOVE    D7,D1			        ;GET HEIGHT-1
+        CLR     D0			        	;CLEAR ACCUMULATOR
+LSCAN   OR      (A0),D0			        ;OR A WORD INTO ACCUMULATOR
+        ADD     d3,A0			        ;BUMP TO NEXT ROW
+        DBRA    D1,LSCAN		        ;LOOP HEIGHT ROWS
+        BNE.S   LFOUND			        ;BR IF COL NOT BLANK
+        ADD     #16,D2			        ;SKIP BLANK WORD
+        ADD     #2,A1
+        BRA.S   LMORE			        ;TRY ANOTHER COLUMN
+
+LFOUND  ADD     D0,D0			        ;GET A BIT FROM LEFT
+        BCS.S   LDONE			        ;QUIT IF ITS A ONE
+        ADD     #1,D2			        ;ELSE BUMP DSTRECT LEFT
+        BRA.S   LFOUND			  		;AND LOOP FOR MORE
+LDONE   MOVE    D2,LEFT(A4)		        ;UPDATE NEW LEFT COORD
+
+
+;
+;  FIND RIGHTMOST ONE-BIT
+;
+        MOVE    RIGHT(A4),D2		    ;GET DSTRECT RIGHT
+        ADD     #15,D2
+        AND     #$FFF0,D2		        ;ROUND UP TO RIGHT WORD
+        MOVE    D2,D0			        ;MAKE A COPY
+        LSR     #3,D0			        ;DIV BY 8 FOR BYTE OFFSET
+        LEA     -2(A2,D0),A1		    ;POINT TO RECT TOP RIGHT
+
+RMORE   MOVE.L  A1,A0			        ;POINT TO TOP OF COLUMN
+        MOVE    D7,D1			        ;GET HEIGHT-1
+        CLR     D0			        	;CLEAR ACCUMULATOR
+RSCAN   OR      (A0),D0			        ;OR A WORD INTO ACCUMULATOR
+        ADD     d3,A0			        ;BUMP TO NEXT ROW
+        DBRA    D1,RSCAN		        ;LOOP HEIGHT ROWS
+        BNE.S   RFOUND			        ;BR IF COL NOT BLANK
+        SUB     #16,D2			        ;SKIP BLANK WORD
+        SUB     #2,A1			        ;BUMP TO NEXT COL LEFT
+        BRA.S   RMORE			        ;TRY ANOTHER COLUMN
+
+RFOUND  LSR     #1,D0			        ;GET A BIT FROM RIGHT
+        BCS.S   RDONE			        ;QUIT IF ITS A ONE
+        SUB     #1,D2			        ;ELSE BUMP RIGHT COORD
+        BRA.S   RFOUND			    	;AND LOOP FOR MORE
+RDONE   MOVE    D2,RIGHT(A4)		    ;UPDATE NEW RIGHT COORD
+
+        BRA.S   DONE
+
+
+EMPTY   CLR.L   (A4)+			        ;RETURN DSTRECT = (0,0,0,0)
+        CLR.L   (A4)+
+
+DONE    MOVEM.L (SP)+,D3-D7/A2-A4	    ;RESTORE REGS
+        UNLK    A6			        	;RELEASE STACK FRAME
+        MOVE.L  (SP)+,A0		        ;POP RETURN ADDR
+        ADD     #PARAM6,SP		   		;STRIP PARAMS
+        JMP     (A0)			        ;AND RETURN
+		STRING		Asis
+		Dc.b		'TrimBBox'
+
+
+			END 
+

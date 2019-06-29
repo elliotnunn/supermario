@@ -1,0 +1,107 @@
+;
+;	File:		JPAlert.a
+;
+;	Contains:	xxx put contents here xxx
+;
+;	Written by:	xxx put writers here xxx
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <3>	 2/15/90	BAL		Fixed Alert calls to initFonts and initWindows so as not to
+;									crash System 6.0.3
+;		 <2>	 2/14/90	BAL		Allow installation on System 6.0.4 but not 6.0.3
+;		 <1>	 1/31/90	csd		first checked in to put up an alert if this version of 32-Bit
+;									QuickDraw is placed in a 6.0.4 or earlier System Folder.
+;
+;	To Do:
+;
+
+				LOAD	'StandardEqu.d'
+
+;---------------------------------------------------------------------
+WrongQD32		MAIN	EXPORT
+
+
+	
+			move.l	(sp),a0						; get address of caller (PTCH $178)
+			cmp.l	#$303c0304,(a0)				; is it about to  MOVE.W  #$304,D0?
+			bne.s		not604
+			cmp.l	#$A74643FA,4(a0)			; is it about to  _GetTrapAddress ...
+			bne.s		not604
+			add.l	#$48,(sp)					; upon return, skip over undesirable after patches
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	Install 32 bit color QuickDraw:
+;
+CQD			subq		#4,SP				; room for result
+			Move.L		#'ptch',-(SP)		; signature of loadable patch resource
+			Move.W		#132,-(SP)			; pass along CQD loader ID
+			_Get1Resource					; just in case we want to ROM it later on
+			move.l		(SP)+,d0			; handle returned?
+			beq.s		@skip				; no, skip install
+
+			Move.l		d0,A0				; fetch handle
+			Move.L		(A0),A0				; point at head of resource
+			Jmp			(A0)				; go execute install code
+@skip
+			rts								;  return to rom78fix.a
+
+
+not604
+;---------------------------------------------------------------------
+
+badQD32Vars		RECORD	0,DECREMENT
+saveQDExists 	ds.w	1						; saves QDExists flag
+saveA5			ds.l	1
+localA5			ds.l	1
+thePort			ds.l	1						; my own QuickDraw (required!)
+				ds.b	grafSize-4				; other QuickDraw globals (except thePort)
+varsSize		equ		*
+				ENDR
+
+ROMInitFonts	EQU		$17A0C
+ROMInitWinds	EQU		$0F836
+
+
+	MACHINE		MC68020
+
+			WITH	badQD32Vars
+
+			link	a6,#varsSize				; create stack frame
+
+			move.l	a5,saveA5(a6)				; save host A5					<1.2><1.3>
+			lea		localA5(a6),a5				; setup new A5					<1.2>
+			move.b	QDExist,saveQDExists(a6)	; save state of QDExist flag	<1.2>
+
+			pea		thePort(a6)					; ptr to our quickdraw globals
+			_InitGraf							; init our QD world
+			
+			clr.l	deskHook					; or the Window Manager will die
+
+	;		_InitFonts							; init the font manager
+			jsr		([romBase],(ROMInitFonts).L)
+
+	;		_InitWindows						; init the window manager
+			jsr		([romBase],(ROMInitWinds).L)
+
+			_TEInit								; init TextEdit
+
+			clr.l	-(sp)						; no resume proc
+			_InitDialogs
+
+			subq	#2,sp						; room for function result
+			move.w	#WrongQD32Alert,-(sp)		; push our alert ID
+			clr.l	-(sp)						; no ProcPtr
+			_CautionAlert						; put up the alert
+
+			move.b	saveQDExists(a6),QDExist	; restore state of QDExist flag	<1.2>
+			move.l	saveA5(a6),a5				; restore host A5				<1.2>
+
+			unlk	A6							; dump our locals
+			rts									; get outta here
+			
+			END

@@ -1,0 +1,242 @@
+;
+;	File:		PutLine.m.a
+;
+;	Contains:	xxx put contents here (or delete the whole line) xxx
+;
+;	Written by:	xxx put name of writer here (or delete the whole line) xxx
+;
+;	Copyright:	© 1988-1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <2>	10/10/90	JL		Change FixRatio to MFixRatio to avoid conflict with Traps.a
+;	   <1.1>	11/11/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	   <1.2>	10/12/88	CCH		Changed “m.GrafType.a” to “GrafType.m.a”.
+;	   <1.1>	 5/18/88	MSH		Changed inclides to use m.GRAPHTYPES to work under EASE.
+;	   <1.0>	 2/11/88	BBM		Adding file for the first time into EASE…
+;
+;	To Do:
+;
+
+;EASE$$$ READ ONLY COPY of file “PUTLINE.m.a”
+; 1.1	CCH 11/11/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.2	CCH 10/12/1988 Changed “m.GrafType.a” to “GrafType.m.a”.
+; 1.1	MSH 5/18/88 Changed inclides to use m.GRAPHTYPES to work under EASE.
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+
+
+		BLANKS	ON
+		STRING	ASIS
+
+		INCLUDE  'GRAFTYPES.m.a'
+;-----------------------------------------------------------
+;
+;  -->	PUTLINE.TEXT
+;
+;  Decompose a line segment into a list of inversion points.
+;
+;
+
+
+PUTLINE PROC  EXPORT
+		IMPORT SETHSIZE
+;------------------------------------------------------------------
+;
+;  PROCEDURE PutLine(pt1,pt2: Point; dst: Handle; VAR index,bufMax: INTEGER);
+;
+;  INVERSION POINTS FOR A LINE SEGMENT
+;
+;  SP OFFSETS OF PARAMETERS:
+;
+PARAMSIZE		EQU 	20				;TOTAL SIZE OF PARAMETERS
+PT1 		EQU 	PARAMSIZE+4-4			;LONG, POINT (VALUE)
+PT2 		EQU 	PT1-4				;LONG, POINT (VALUE)
+BUF 		EQU 	PT2-4				;LONG, HANDLE
+INDEX			EQU 	BUF-4				;LONG, (VAR)
+BUFMAX			EQU 	INDEX-4 			;LONG, (VAR)
+
+
+
+		MOVEM.L D3-D7/A2-A4,-(SP)			;SAVE REGS, 8*4 ==> 32
+
+
+;-----------------------------------------------------
+;
+;  IF LINE IS VERTICAL, IGNORE IT.
+;
+		MOVE	PT1+H+32(SP),D2 			;GET 1ST POINT'S HORIZ
+		MOVE	PT2+H+32(SP),D4 			;GET 2ND POINT'S HORIZ
+		CMP 	D2,D4					;IS THIS A VERTICAL LINE ?
+		BEQ 	GOHOME					;YES, IGNORE IT
+
+
+;------------------------------------------------------
+;
+;  CALC BYTESNEEDED = 8 * ( Min(ABS(dh),ABS(dv)) + 1)
+;
+		MOVE	D2,D0					;GET H1
+		SUB 	D4,D0					;SUBTRACT H2
+		BPL.S	DHPOS					;BR IF DH POS
+		NEG 	D0					;ELSE TAKE ABSOLUTE VALUE
+DHPOS	MOVE	PT1+V+32(SP),D1 			;GET V1
+		SUB 	PT2+V+32(SP),D1 			;SUBTRACT V2
+		BPL.S	DVPOS					;BR IF DV POS
+		NEG 	D1					;ELSE TAKE ABSOLUTE VALUE
+DVPOS	CMP 	D1,D0					;IS DH <= DV ?
+		BLE.S	DHLESS					;YES, CONTINUE
+		MOVE	D1,D0					;NO, PUT MIN(DH,DV) INTO D0
+DHLESS	ADD 	#1,D0					;CALC MIN(DH,DV)+1
+		LSL 	#3,D0					;TIMES EIGHT FOR BYTESNEEDED
+
+
+		MOVE.L	BUF+32(SP),A3				;GET DSTHANDLE
+		MOVE.L	INDEX+32(SP),A4 			;POINT TO CURRENT INDEX
+
+;-----------------------------------------------------
+;
+;  GROW POINT BUFFER AS NECESSARY TO HOLD BYTESNEEDED
+;
+		ADD 	(A4),D0 				;NEWSIZE := INDEX + BYTESNEEDED
+		MOVE.L	BUFMAX+32(SP),A0			;POINT TO BUFMAX
+		CMP 	(A0),D0 				;DO WE HAVE TO GROW DSTBUF ?
+		BLE.S	NOGROW					;NO, CONTINUE
+		ADD 	#512,D0 				;GROW IN CHUNKS
+		MOVE	D0,(A0) 				;UPDATE NEW BUFMAX
+		MOVE.L	A3,-(SP)				;PUSH DSTBUF HANDLE
+		MOVE	D0,-(SP)				;PUSH NEW BUFMAX
+		JSR 	SETHSIZE 				;MAKE THE BUFFER BIGGER
+		MOVE	PT1+H+32(SP),D2 			;RESTORE CLOBBERED REG
+
+NOGROW
+
+
+		MOVE.L	(A3),A3 				;DE-REFERENCE DSTHANDLE
+		ADD 	(A4),A3 				;ADD INDEX TO BUFPTR
+
+;-----------------------------------------------------
+;
+;  IF LINE IS HORIZONTAL, PUT ITS TWO ENDPOINTS
+;
+		MOVE	PT1+V+32(SP),D1 			;GET 1ST POINT'S VERT
+		MOVE	PT2+V+32(SP),D3 			;GET 2ND POINT'S VERT
+		CMP 	D1,D3					;IS THIS A HORIZONTAL LINE ?
+		BNE.S	SLANTED 				;NO, BRANCH
+		MOVE	D1,(A3)+				;PUT V1 VERT COORD
+		MOVE	D2,(A3)+				;PUT H1 HORIZ COORD
+		MOVE	D3,(A3)+				;PUT V2 VERT COORD
+		MOVE	D4,(A3)+				;PUT H2 HORIZ COORD
+		BRA.S	DONE					;UPDATE INDEX AND QUIT
+
+
+;------------------------------------------------------
+;
+;  LINE IS SLANTED.  DIVIDE IT INTO HORIZONTAL SLABS
+;  AND PUT THE TWO ENDPOINTS OF EACH SLAB.
+;
+;  START BY SORTING POINTS VERTICALLY.
+;
+SLANTED BGT.S	NOSWAP					;SKIP IF ALREADY IN ORDER
+		EXG 	D1,D3					;SORT POINTS BY VERTICAL
+		EXG 	D2,D4					;SWAP HORIZ TO MATCH
+NOSWAP	MOVE	D1,D6					;INIT V TO TOPV
+
+
+;------------------------------------------------------------
+;
+;  CALCULATE FIXED POINT SLOPE = FixRatio(dh,dv);
+;
+		CLR.L	-(SP)					;MAKE ROOM FOR FCN RESULT
+		MOVE	D4,-(SP)				;PUSH BOTTOM HORIZ
+		SUB 	D2,(SP) 				;CALC DH
+		MOVE	D3,-(SP)				;PUSH BOTTOM VERT
+		SUB 	D1,(SP) 				;CALC DV
+		_MFixRatio					;CALC FIXED POINT SLOPE
+		MOVE.L	(SP)+,D7				;POP RESULT
+
+
+;---------------------------------------------------------
+;
+;  SET UP STARTING HORIZ FIXED POINT.
+;
+		MOVE.W	D2,D1
+		SWAP	D1					;HORIZ.INT := TOP HORIZ
+		MOVE.W	#$8000,D1				;HORIZ.FRACT := 1/2
+;
+;  ADJUST HORIZ DEPENDING ON SIGN AND MAGNITUDE OF SLOPE
+;
+		MOVE.L	D7,D0					;COPY SLOPE
+		ASR.L	#1,D0					;CALC SLOPE/2
+		ADD.L	D0,D1					;HORIZ := HORIZ + SLOPE/2
+
+		MOVE.L	#$00010000,D0
+
+		TST.L	D7					;IS SLOPE NEG ?
+		BMI.S	NEGSLOPE				;YES, CONTINUE
+
+		CMP.L	D0,D7					;IS SLOPE < ONE ?
+		BGE.S	SLOPEOK 				;NO, CONTINUE
+		ADD.L	D7,D1					;ADD SLOPE TO LEFTEDGE
+		BRA.S	SLOPEOK 				;CONTINUE
+
+NEGSLOPE CMP.L	#$FFFF0000,D7				;IS SLOPE > -ONE ?
+		BGE.S	SLOPEOK 				;YES, CONTINUE
+		ADD.L	D0,D1					;YES, HORIZ := HORIZ + 1
+
+SLOPEOK
+
+
+
+;------------------------------------------------------
+;
+;  FOR VERT:=TOPV TO BOTV-1 ADD SLOPE TO HORIZ AND PUT SLABS
+;
+		MOVE	D2,D5					;H:=TOPH
+LOOP	SWAP	D1					;GET HORIZ.INT INTO D1 LOWER
+		CMP 	D1,D5					;HAS HORIZ.INT CHANGED ?
+		BEQ.S	NOCHNG					;NO, CONTINUE
+		MOVE	D6,(A3)+				;YES, PUT VERT COORD
+		MOVE	D5,(A3)+				;PUT OLD HORIZ COORD
+		MOVE.W	D1,D5					;OLDH := HORIZ.INT
+		MOVE	D6,(A3)+				;PUT VERT COORD
+		MOVE	D5,(A3)+				;PUT NEW HORIZ COORD
+NOCHNG	SWAP	D1					;PUTBACK HORIZ.INT INTO D1 UPPER
+		ADD 	#1,D6					;VERT:=VERT+1
+		ADD.L	D7,D1					;ADD SLOPE TO HORIZ
+		CMP 	D6,D3					;IS VERT AT BOTTOM VERT YET ?
+		BNE 	LOOP					;NO, GO FOR MORE
+
+
+;-------------------------------------------------
+;
+;  FINISH UP LAST SLAB
+;
+		CMP 	D4,D5					;IS OLDH = BOTTOM H ?
+		BEQ.S	DONE					;YES, CONTINUE
+		MOVE	D6,(A3)+				;NO, PUT VERT COORD
+		MOVE	D5,(A3)+				;PUT HORIZ COORD
+		MOVE	D6,(A3)+				;PUT VERT COORD
+		MOVE	D4,(A3)+				;PUT BOTTOM H COORD
+
+
+;---------------------------------------------------
+;
+;  UPDATE INDEX TO REFLECT POINTS ADDED.
+;
+DONE	MOVE.L	BUF+32(SP),A0				;GET DSTHANDLE
+		SUB.L	(A0),A3 				;INDEX := BUFPTR-BUFSTART
+		MOVE	A3,(A4) 				;UPDATE INDEX
+
+GOHOME	MOVEM.L (SP)+,D3-D7/A2-A4			;RESTORE REGS
+		MOVE.L	(SP)+,A0
+		ADD.W	#PARAMSIZE,A7
+		JMP 	(A0)
+
+
+		END 
+
+
+

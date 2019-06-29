@@ -1,0 +1,1838 @@
+/*
+	File:		RomFonts.r -> MiscROMRsrcs.r
+
+	Copyright:	© 1989-1993 by Apple Computer, Inc.  All rights reserved.
+
+	Change History (most recent first):
+	
+	   <SM9>	12/13/93	PN		Roll in KAOs and Horror changes to support Malcom and AJ
+									machines.
+	   <SM8>	10/29/93	CCH		Fixed 'pslt' resources for Cold Fusion and Carl Sagan.
+	   <SM7>	10/21/93	rab		Updated 'accl' 1, 2, 6, & 7 resources from Horror. Now we have
+									the newer/better mouse acceleration tables too. Also added
+									'pslt' resources for the 610, 650, and 800 while I was at it.
+	   <SM6>	  9/1/93	BG		Added 'pslt' resources for PDM.
+	   <SM5>	 8/19/93	RC		Added 'pslt' resources for Cold Fusion and Carl Sagan
+		 <4>	 8/17/93	IH		BG checked in gestalt equates, but did not do a full build. This
+									file was still using pre-release gestalt names and wouldn't
+									build.
+	   <SM3>	 6/14/93	kc		Roll in Ludwig.
+	   <LW4>	 5/20/93	mal		Changed pslt's for Tempest to 'horizontal ascending'.
+	   >LW3>	 4/20/93	fau		#1079789: Bug # 1079789:  Added 'pslt' resources for Cyclone40,
+									Tempest25, and Tempest33.
+	   <LW2>	12/22/92	RMP		Added ICON resource for password dialog.
+	   <SM2>	 3/25/93	RB		Added Robert Polic's password-on-boot icon from Ludwig.
+	   <SM4>	12-02-92	jmp		“Resourceized” as opposed to “Dataized” the 'ppat' (16 & 18)
+									resources.
+	   <SM3>	11/20/92	RB		Added resources from the system that era usable from ROM in
+									order to save memory.
+	   <SM2>	  6/4/92	RB		Added a splt resource for Cyclone.
+		 <1>	 5/16/92	kc		first checked in
+	   <SM1>	 5/16/92	kc		Rolled in from Horror. Deleted Font resources.
+	   								Note ••• The only resources that are linked in with rom.r
+									are the 'accl' resources. The others need to be added
+		<H5>	 4/13/92	SWC		Added a ‘pslt’ resource for DBLite. It just has an entry for the
+									connector on the back.
+		<H4>	 3/11/92	SWC		Updated the mouse acceleration resources with faster curves for
+									those that don't like a more leisurely mouse.
+		<H3>	 2/19/92	SWC		Added SCSI Disk Mode pictures.
+		<H2>	 2/12/92	SWC		Added resources (accl) that define mouse/trackball acceleration
+									curves for new cursor code.
+		 <1>	11/12/91	jmp		first checked in
+	———————————————————————————————————————————————————————————————————————————————————————
+		Pre-Horror ROM comments begin here.
+	———————————————————————————————————————————————————————————————————————————————————————
+	   <1.1>	 5/23/89	CCH		Finally got rid of that dumb EASE resource!!
+	   <1.0>	 5/16/89	CCH		Adding from RomMiscResources.Rsrc. This is a text
+*/
+
+#include "GestaltPriv.r"
+#include "GestaltEqu.h"
+
+#define	oldTemp	 /* The “old” templates provide greater flexibility (less constraint), and we NEED that in some cases.	*/
+				 /* So, let your hair down -- go bungy jumping or something, but don’t baby sit my resource formats!	*/
+
+#include "SysTypes.r"
+#include "Types.r"
+
+
+/* mouse/trackball/etc. acceleration curve descriptions */
+
+/* a fdiv b is the fixed-point constant for a÷b */
+#define fdiv				* 0x10000 /
+
+resource 'accl' (0) {
+	classAbsolute,
+	{
+		0 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		},
+		1 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		}
+	}
+};
+
+resource 'accl' (1) {
+	classMouse,
+	{
+		0 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		},
+		1 fdiv 1,
+		{
+/*
+			$0001199A, $00010000,
+			$0002199A, $00028000,
+			$0002CCCD, $00050000,
+			$0003B333, $000B8000,
+			$0004B333, $001B0000,
+			$000713B1, $004F8000,
+			$000AC4EC, $00738000,
+			$0011EC4F, $00828000,
+			$00280000, $00898000
+*/
+/*
+ *	New, better-feeling mouse acceleration curve information
+ */
+			$0000713B, $00006000,
+			$00044EC5, $00108000,
+			$000C0000, $005F0000,
+			$0016EC4F, $008B0000,
+			$001D3B14, $00948000,
+			$00227627, $00960000,
+			$00246276, $00960000,
+			$00260000, $00960000,
+			$00280000, $00960000
+
+		}
+	}
+};
+
+resource 'accl' (2) {
+	classTrackball,
+	{
+		0 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		},
+		1 fdiv 1,
+		{
+			$0000A762, $00014000,
+			$00013B14, $0002A000,
+			$0001A276, $00048000,
+			$0001F627, $0008C000,
+			$000253B1, $00142000,
+			$00030000, $00310000,
+			$0003EC4F, $004A0000,
+			$00069D8A, $00668000,
+			$00266276, $00960000
+		}
+	}
+};
+
+resource 'accl' (3) {
+	classScratchPad,
+	{
+		0 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		},
+		1 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		}
+	}
+};
+
+resource 'accl' (4) {
+	classJoystick,
+	{
+		0 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		},
+		1 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		}
+	}
+};
+
+resource 'accl' (5) {
+	classRelTablet,
+	{
+		0 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		},
+		1 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		}
+	}
+};
+
+resource 'accl' (6) {
+	'@200',
+	{
+		0 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		},
+		1 fdiv 1,
+		{
+/*
+ *	New, better-feeling mouse acceleration curve information
+ */
+			$0000713B, $00006000,
+			$00044EC5, $00108000,
+			$000C0000, $005F0000,
+			$0016EC4F, $008B0000,
+			$001D3B14, $00948000,
+			$00227627, $00960000,
+			$00246276, $00960000,
+			$00260000, $00960000,
+			$00280000, $00960000
+		}
+	}
+};
+
+resource 'accl' (7) {
+	'PG&E',
+	{
+		0 fdiv 1,
+		{
+			1 fdiv 1, 1 fdiv 1
+		},
+		1 fdiv 1,
+		{
+			$0000A762, $00014000,
+			$00013B14, $0002A000,
+			$0001A276, $00048000,
+			$0001F627, $0008C000,
+			$000253B1, $00142000,
+			$00030000, $00310000,
+			$0003EC4F, $004A0000,
+			$00069D8A, $00668000,
+			$00266276, $00960000
+		}
+	}
+};
+
+resource 'accl' (8) {
+	'tpad',
+	{	/* array AcclTable: 6 elements */
+		/* [1] */
+		0x2000,
+		{	/* array AcclPoint: 5 elements */
+			/* [1] */
+			0x4692C, 0x10000,
+			/* [2] */
+			0xB9555, 0x38000,
+			/* [3] */
+			0x149555, 0x78000,
+			/* [4] */
+			0x1FAAAB, 0x110000,
+			/* [5] */
+			0x27D555, 0x1C8000
+		},
+		/* [2] */
+		0x5000,
+		{	/* array AcclPoint: 5 elements */
+			/* [1] */
+			0x4692C, 0x10000,
+			/* [2] */
+			0xB9555, 0x38000,
+			/* [3] */
+			0x14AAAB, 0xB0000,
+			/* [4] */
+			0x1FAAAB, 0x1A0000,
+			/* [5] */
+			0x27AAAB, 0x2E0000
+		},
+		/* [3] */
+		0x8000,
+		{	/* array AcclPoint: 5 elements */
+			/* [1] */
+			0x4692C, 0x10000,
+			/* [2] */
+			0xB1AAB, 0x39000,
+			/* [3] */
+			0x152AAB, 0xE8000,
+			/* [4] */
+			0x1FAAAB, 0x210000,
+			/* [5] */
+			0x276AAB, 0x368000
+		},
+		/* [4] */
+		0xB000,
+		{	/* array AcclPoint: 7 elements */
+			/* [1] */
+			0x4692C, 0x10000,
+			/* [2] */
+			0x6D332, 0x28000,
+			/* [3] */
+			0xA9555, 0x48000,
+			/* [4] */
+			0x10C000, 0xC0000,
+			/* [5] */
+			0x178000, 0x198000,
+			/* [6] */
+			0x1E5555, 0x288000,
+			/* [7] */
+			0x278000, 0x460000
+		},
+		/* [5] */
+		0xE000,
+		{	/* array AcclPoint: 7 elements */
+			/* [1] */
+			0x4692C, 0x10000,
+			/* [2] */
+			0x6D332, 0x28000,
+			/* [3] */
+			0xA1555, 0x58000,
+			/* [4] */
+			0xF8000, 0xE0000,
+			/* [5] */
+			0x161555, 0x1D0000,
+			/* [6] */
+			0x1D1555, 0x310000,
+			/* [7] */
+			0x27C000, 0x590000
+		},
+		/* [6] */
+		0x10000,
+		{	/* array AcclPoint: 9 elements */
+			/* [1] */
+			0x46AAB, 0x10000,
+			/* [2] */
+			0x69555, 0x28000,
+			/* [3] */
+			0x92AAB, 0x58000,
+			/* [4] */
+			0xE8000, 0xF0000,
+			/* [5] */
+			0x121555, 0x188000,
+			/* [6] */
+			0x158000, 0x248000,
+			/* [7] */
+			0x1C8000, 0x410000,
+			/* [8] */
+			0x224000, 0x580000,
+			/* [9] */
+			0x282AAB, 0x6D0000
+		}
+	}
+};
+
+resource 'pslt' (gestaltQuadra950, sysheap, locked) {
+	vertAscending,	
+	0,
+		{
+		$A,1;
+		$B,2;
+		$C,3;
+		$D,4;
+		$E,5;
+		}
+};
+
+resource 'pslt' (gestaltCentris650, sysheap, locked) {
+	horizAscending,	
+	0,
+		{
+			$C,1;
+			$D,2;
+			$E,3;
+		}
+};
+
+resource 'pslt' (gestaltQuadra800, sysheap, locked) {
+	vertAscending,	
+	0,
+		{
+			$C,1;
+			$D,2;
+			$E,3;
+		}
+};
+
+resource 'pslt' (gestaltCentris610, sysheap, locked) {
+	horizAscending,	
+	0,
+		{
+		$E,1;
+		}
+};
+
+resource 'pslt' (gestaltPowerBookDuo210, sysheap, locked) {
+	horizAscending,	
+	0,
+		{
+		$E,1;
+		}
+};
+
+resource 'pslt' (gestaltPowerBookDuo230, sysheap, locked) {
+	horizAscending,	
+	0,
+		{
+		$E,1;
+		}
+};
+
+
+resource 'pslt' (gestaltQuadra840AV, sysheap, locked) {	/* <LW3 */
+	vertAscending,	
+	0,
+		{
+		$C,1;
+		$D,2;
+		$E,3;
+		}
+};
+
+resource 'pslt' (gestaltCyclone33, sysheap, locked) {		/* <LW3 */
+	vertAscending,											
+	0,														
+		{													
+		$C,1;
+		$D,2;
+		$E,3;
+		}
+};
+
+resource 'pslt' (gestaltCentris660AV, sysheap, locked) {		/* <LW3 */
+	horizAscending,											/* <LW4> */
+	0,
+		{
+		$E,1;
+		}
+};
+
+resource 'pslt' (gestaltTempest33, sysheap, locked) {		/* <LW3 */
+	horizAscending,											/* <LW4> */
+	0,
+		{
+		$E,1;
+		}
+};
+
+resource 'pslt' (gestaltPDM50WLCD, sysheap, locked) {
+	horizAscending,	
+	0,
+		{
+		$E,1;
+		}
+};
+
+resource 'pslt' (gestaltPDM66WLCD, sysheap, locked) {
+	horizAscending,	
+	0,
+		{
+		$E,1;
+		}
+};
+
+resource 'pslt' (gestaltPDM80WLCD, sysheap, locked) {
+	horizAscending,	
+	0,
+		{
+		$E,1;
+		}
+};
+
+resource 'pslt' (gestaltPDM50L, sysheap, locked) {
+	horizAscending,
+	0,
+		{
+		$D,1;
+		$C,2;
+		$B,3;
+		}
+};
+
+resource 'pslt' (gestaltPDM66L, sysheap, locked) {
+	horizAscending,
+	0,
+		{
+		$D,1;
+		$C,2;
+		$B,3;
+		}
+};
+
+resource 'pslt' (gestaltPDM80L, sysheap, locked) {
+	horizAscending,
+	0,
+		{
+		$D,1;
+		$C,2;
+		$B,3;
+		}
+};
+
+resource 'pslt' (gestaltPDM66F, sysheap, locked) {
+	vertAscending,
+	0,
+		{
+		$D,1;
+		$C,2;
+		$B,3;
+		}
+};
+
+resource 'pslt' (gestaltPDM80F, sysheap, locked) {
+	vertAscending,
+	0,
+		{
+		$D,1;
+		$C,2;
+		$B,3;
+		}
+};
+
+resource 'pslt' (gestaltPDM100F, sysheap, locked) {
+	vertAscending,
+	0,
+		{
+		$D,1;
+		$C,2;
+		$B,3;
+		}
+};
+
+
+/* SCSI Disk Mode pictures */
+
+data 'PICT' (95, "DiskMode SCSI") {
+	$"073C 0000 0000 0094 0096 1101 0100 0A00 0000 0000 9400 9698 0014 0000 0000 0094"
+	$"0096 0000 0000 0094 0096 0000 0000 0094 0096 0000 02ED 0006 F800 0060 F700 06F8"
+	$"0000 F0F7 0007 F900 0101 F8F7 0007 F900 0103 FCF7 0007 F900 0107 FEF7 0007 F900"
+	$"010F FFF7 0008 F900 021F FF80 F800 08F9 0002 3FFF C0F8 0008 F900 027F FFE0 F800"
+	$"08F9 0002 FFFF F0F8 0009 FA00 0301 FFFF F8F8 0009 FA00 0303 FFFF FCF8 0009 FA00"
+	$"0307 FFFF FEF8 0008 FA00 000F FEFF F800 0AFA 0000 1FFE FF00 80F9 000A FA00 003F"
+	$"FEFF 00C0 F900 0AFA 0000 7FFE FF00 E0F9 000A FA00 04FF FF9F FFF0 F900 0BFB 0005"
+	$"01FF FF0F FFF8 F900 0BFB 0005 03FF FE07 FFFC F900 0BFB 0005 07FF FC03 FFFE F900"
+	$"0BFB 0005 0FFF F801 FFFF F900 0CFB 0006 1FFF F000 FFFF 80FA 000C FB00 063F FFE0"
+	$"007F FFC0 FA00 0CFB 0006 7FFF C000 3FFF E0FA 000C FB00 06FF FF80 001F FFF0 FA00"
+	$"0DFC 0007 01FF FF00 000F FFF8 FA00 0DFC 0007 03FF FE00 0007 FFFC FA00 0DFC 0007"
+	$"07FF FC00 0003 FFFE FA00 0DFC 0007 0FFF F800 0001 FFFF FA00 0EFC 0002 1FFF F0FE"
+	$"0002 FFFF 80FB 000E FC00 023F FFE0 FE00 027F FFC0 FB00 0EFC 0002 7FFF C0FE 0002"
+	$"3FFF E0FB 000E FC00 02FF FF80 FE00 021F FFF0 FB00 0EFD 0002 01FF FFFD 0002 0FFF"
+	$"F8FB 000E FD00 0203 FFFE FD00 0207 FFFC FB00 0EFD 0002 07FF FCFD 0002 03FF FEFB"
+	$"000E FD00 020F FFF8 FD00 0201 FFFF FB00 0EFD 0002 1FFF F0FC 0002 FFFF 80FC 000E"
+	$"FD00 023F FFE0 FC00 027F FFC0 FC00 0EFD 0002 7FFF C0FC 0002 3FFF E0FC 000E FD00"
+	$"02FF FF80 FC00 021F FFF0 FC00 0EFE 0002 01FF FFFB 0002 0FFF F8FC 000E FE00 0203"
+	$"FFFE FB00 0207 FFFC FC00 0EFE 0002 07FF FCFB 0002 03FF FEFC 000E FE00 020F FFF8"
+	$"FB00 0201 FFFF FC00 0EFE 0002 1FFF F0FA 0002 FFFF 80FD 000E FE00 023F FFE0 FA00"
+	$"027F FFC0 FD00 0EFE 0002 7FFF C0FA 0002 3FFF E0FD 000E FE00 02FF FF80 FA00 021F"
+	$"FFF0 FD00 0E04 0000 01FF FFF9 0002 0FFF F8FD 000E 0400 0003 FFFE F900 0207 FFFC"
+	$"FD00 0E04 0000 07FF FCF9 0002 03FF FEFD 000E 0400 000F FFF8 F900 0201 FFFF FD00"
+	$"0E04 0000 1FFF F0F8 0002 FFFF 80FE 000E 0400 003F FFE0 F800 027F FF80 FE00 0804"
+	$"0000 7FFF C0F2 0008 0400 00FF FF80 F200 0703 0001 FFFF F100 0703 0003 FFFE F100"
+	$"0703 0007 FFFC F100 0703 000F FFF8 F100 0703 001F FFF0 F100 0703 003F FFE0 F100"
+	$"0703 007F FFC0 F100 0E03 00FF FF80 FC00 0001 F9FF 01F8 000D 0201 FFFF FB00 0007"
+	$"F9FF 01F8 000D 0203 FFFE FB00 000F F9FF 01F8 000D 0207 FFFC FB00 001F F9FF 01F8"
+	$"000D 020F FFF8 FB00 001F F9FF 01F8 000D 021F FFF0 FB00 003F F9FF 01F8 000D 023F"
+	$"FFE0 FB00 003F F9FF 01F8 000D 027F FFC0 FB00 003F F9FF 01F8 000D 027F FFC0 FB00"
+	$"003F F9FF 01F8 000D 023F FFE0 FB00 003F F9FF 01F8 000D 021F FFF0 FB00 003F F9FF"
+	$"01F8 000D 020F FFF8 FB00 001F F9FF 01F8 000D 0207 FFFC FB00 001F F9FF 01F8 000D"
+	$"0203 FFFE FB00 000F F9FF 01F8 000D 0201 FFFF FB00 0007 F9FF 01F8 000E 0300 FFFF"
+	$"80FC 0000 01F9 FF01 F800 0703 007F FFC0 F100 0703 003F FFE0 F100 0703 001F FFF0"
+	$"F100 0703 000F FFF8 F100 0703 0007 FFFC F100 0703 0003 FFFE F100 0703 0001 FFFF"
+	$"F100 0804 0000 FFFF 80F2 0008 0400 007F FFC0 F200 0E04 0000 3FFF E0F8 0002 3FFF"
+	$"80FE 000E 0400 001F FFF0 F800 027F FF80 FE00 0D04 0000 0FFF F8F8 0001 FFFF FD00"
+	$"0E04 0000 07FF FCF9 0002 01FF FEFD 000E 0400 0003 FFFE F900 0203 FFFC FD00 0E04"
+	$"0000 01FF FFF9 0002 07FF F8FD 000E FE00 02FF FF80 FA00 020F FFF0 FD00 0EFE 0002"
+	$"7FFF C0FA 0002 1FFF E0FD 000E FE00 023F FFE0 FA00 023F FFC0 FD00 0EFE 0002 1FFF"
+	$"F0FA 0002 7FFF 80FD 000D FE00 020F FFF8 FA00 01FF FFFC 000E FE00 0207 FFFC FB00"
+	$"0201 FFFE FC00 0EFE 0002 03FF FEFB 0002 03FF FCFC 000E FE00 0201 FFFF FB00 0207"
+	$"FFF8 FC00 0EFD 0002 FFFF 80FC 0002 0FFF F0FC 000E FD00 027F FFC0 FC00 021F FFE0"
+	$"FC00 0EFD 0002 3FFF E0FC 0002 3FFF C0FC 000E FD00 021F FFF0 FC00 027F FF80 FC00"
+	$"0DFD 0002 0FFF F8FC 0001 FFFF FB00 0EFD 0002 07FF FCFD 0002 01FF FEFB 000E FD00"
+	$"0203 FFFE FD00 0203 FFFC FB00 0EFD 0002 01FF FFFD 0002 07FF F8FB 000E FC00 02FF"
+	$"FF80 FE00 020F FFF0 FB00 0EFC 0002 7FFF C0FE 0002 1FFF E0FB 000E FC00 023F FFE0"
+	$"FE00 023F FFC0 FB00 0EFC 0002 1FFF F0FE 0002 7FFF 80FB 000D FC00 020F FFF8 FE00"
+	$"01FF FFFA 000D FC00 0707 FFFC 0000 01FF FEFA 000D FC00 0703 FFFE 0000 03FF FCFA"
+	$"000D FC00 0701 FFFF 0000 07FF F8FA 000C FB00 06FF FF80 000F FFF0 FA00 0CFB 0006"
+	$"7FFF C000 1FFF E0FA 000C FB00 063F FFE0 003F FFC0 FA00 0CFB 0006 1FFF F000 7FFF"
+	$"80FA 000B FB00 050F FFF8 00FF FFF9 000B FB00 0507 FFFC 01FF FEF9 000B FB00 0503"
+	$"FFFE 03FF FCF9 000B FB00 0501 FFFF 07FF F8F9 000A FA00 04FF FF8F FFF0 F900 0AFA"
+	$"0004 7FFF DFFF E0F9 000A FA00 003F FEFF 00C0 F900 0AFA 0000 1FFE FF00 80F9 0008"
+	$"FA00 000F FEFF F800 09FA 0003 07FF FFFE F800 09FA 0003 03FF FFFC F800 09FA 0003"
+	$"01FF FFF8 F800 08F9 0002 FFFF F0F8 0008 F900 027F FFE0 F800 08F9 0002 3FFF C0F8"
+	$"0008 F900 021F FF80 F800 07F9 0001 0FFF F700 07F9 0001 07FE F700 07F9 0001 03FC"
+	$"F700 07F9 0001 01F8 F700 06F8 0000 F0F7 0006 F800 0060 F700 02ED 00FF"
+};
+
+data 'PICT' (96, "DiskMode Arrow1") {
+	$"0130 0000 0000 001B 004C 1101 0100 0A00 0000 0000 1B00 4C98 000A 0000 0000 001B"
+	$"004C 0000 0000 001B 004C 0000 0000 001B 004C 0000 0501 0003 F900 0501 000D F900"
+	$"0501 0031 F900 0501 00E1 F900 0801 03F1 FBFF 01FC 000B 090C 783C 1E0F 0783 C1E4"
+	$"000B 0938 3C1E 0F07 83C1 E0F4 000B 09FC 1E0F 0783 C1E0 F07C 000B 093E 0F07 83C1"
+	$"E0F0 783C 000B 090F 0783 C1E0 F078 3C1C 0008 0103 83FB FF01 FC00 0501 00C1 F900"
+	$"0901 0031 FC00 020C 0000 0901 000D FC00 020B 0000 0901 0003 FC00 0208 C000 06FA"
+	$"0002 0870 0008 0003 FBFF 02F8 FC00 0B09 0278 3C1E 0F07 83C1 E300 0B09 02F0 783C"
+	$"1E0F 0783 C1C0 0B09 03E0 F078 3C1E 0F07 83F0 0B09 03C1 E0F0 783C 1E0F 07C0 0B09"
+	$"0383 C1E0 F078 3C1E 0F00 0800 03FB FF02 FC1C 0006 FA00 0208 3000 06FA 0002 08C0"
+	$"0006 FA00 020B 0000 06FA 0002 0C00 00FF"
+};
+
+data 'PICT' (97, "DiskMode Arrow2") {
+	$"012F 0000 0000 001B 004C 1101 0100 0A00 0000 0000 1B00 4C98 000A 0000 0000 001B"
+	$"004C 0000 0000 001B 004C 0000 0000 001B 004C 0000 0501 0003 F900 0501 000F F900"
+	$"0501 003F F900 0501 00C7 F900 0801 0383 FBFF 01FC 000B 090F C1E0 F078 3C1E 0F04"
+	$"000B 0931 E0F0 783C 1E0F 0784 000B 09C0 F078 3C1E 0F07 83C4 000B 0930 783C 1E0F"
+	$"0783 C1E4 000B 090C 3C1E 0F07 83C1 E0F4 0008 0103 1FFB FF01 FC00 0501 00CF F900"
+	$"0901 0037 FC00 020C 0000 0901 000F FC00 020F 0000 0901 0003 FC00 020F C000 06FA"
+	$"0002 0E30 0008 0003 FBFF 02FC 1C00 0B09 020F 0783 C1E0 F078 3F00 0B09 021E 0F07"
+	$"83C1 E0F0 78C0 0B09 023C 1E0F 0783 C1E0 F030 0B09 0278 3C1E 0F07 83C1 E0C0 0B09"
+	$"02F0 783C 1E0F 0783 C300 0700 03FA FF01 8C00 06FA 0002 0F30 0006 FA00 020E C000"
+	$"06FA 0002 0F00 0006 FA00 020C 0000 FF"
+};
+
+data 'PICT' (98, "DiskMode Arrow3") {
+	$"012F 0000 0000 001B 004C 1101 0100 0A00 0000 0000 1B00 4C98 000A 0000 0000 001B"
+	$"004C 0000 0000 001B 004C 0000 0000 001B 004C 0000 0501 0003 F900 0501 000D F900"
+	$"0501 0039 F900 0501 00FD F900 0801 031F FBFF 01FC 000B 090E 0F07 83C1 E0F0 783C"
+	$"000B 093F 0783 C1E0 F078 3C1C 000B 09C7 83C1 E0F0 783C 1E0C 000B 0933 C1E0 F078"
+	$"3C1E 0F04 000B 090D E0F0 783C 1E0F 0784 0008 0103 F1FB FF01 FC00 0501 00F9 F900"
+	$"0901 003D FC00 020C 0000 0901 000F FC00 020B 0000 0901 0003 FC00 0209 C000 06FA"
+	$"0002 0BF0 0007 0003 FAFF 018C 000B 0903 C1E0 F078 3C1E 0F07 000B 0903 83C1 E0F0"
+	$"783C 1E0F C00B 0903 0783 C1E0 F078 3C1E 300B 0902 0F07 83C1 E0F0 783C C00B 0902"
+	$"1E0F 0783 C1E0 F07B 0008 0003 FBFF 02F8 FC00 06FA 0002 09F0 0006 FA00 020B C000"
+	$"06FA 0002 0F00 0006 FA00 020C 0000 FF"
+};
+
+data 'PICT' (99, "DiskMode Battery") {
+	$"00C5 0000 0000 0018 0021 1101 0100 0A00 0000 0000 1800 2190 0006 0000 0000 0018"
+	$"0021 0000 0000 0018 0021 0000 0000 0018 0021 0000 0FE0 01FC 0000 0FE0 01FC 0000"
+	$"FFFF FFFF 8000 FFFF FFFF 8000 FFFF FFFF 8000 FC7F FF8F 8000 F83F FF27 8000 F01F"
+	$"FE23 8000 F7DF FEFB 8000 F01F FE23 8000 F83F FF27 8000 FC7F FF8F 8000 FFFF FFFF"
+	$"8000 FFFF FFFF 8000 FFFF FFFF 8000 FFFF FFFF 8000 FFFF FFFF 8000 FFFF FFFF 8000"
+	$"FFFF FFFF 8000 FFFF FFFF 8000 FFFF FFFF 8000 FFFF FFFF 8000 FFFF FFFF 8000 FFFF"
+	$"FFFF 8000 FF"
+};
+
+data 'PICT' (100, "DiskMode 0") {
+	$"00C5 0000 0000 0024 001C 1101 0100 0A00 0000 0000 2400 1C90 0004 0000 0000 0024"
+	$"001C 0000 0000 0024 001C 0000 0000 0024 001C 0000 0000 0000 0000 0000 000F C000"
+	$"0038 7000 0060 1800 00E0 0C00 01C0 0E00 03C0 0700 0380 0700 0780 0780 0780 0780"
+	$"0700 0380 0700 0380 0F00 03C0 0F00 03C0 0F00 03C0 0F00 03C0 0F00 03C0 0F00 03C0"
+	$"0F00 03C0 0F00 03C0 0F00 03C0 0F00 03C0 0700 0380 0700 0380 0780 0380 0780 0700"
+	$"0380 0700 0380 0700 01C0 0E00 00C0 0C00 0060 1800 0038 3000 000F C000 0000 0000"
+	$"0000 0000 FF"
+};
+
+data 'PICT' (101, "DiskMode 1") {
+	$"00C5 0000 0000 0024 001C 1101 0100 0A00 0000 0000 2400 1C90 0004 0000 0000 0024"
+	$"001C 0000 0000 0024 001C 0000 0000 0024 001C 0000 0000 0000 0000 0000 0000 8000"
+	$"0007 8000 001F 8000 007F 8000 0087 8000 0007 8000 0007 8000 0007 8000 0007 8000"
+	$"0007 8000 0007 8000 0007 8000 0007 8000 0007 8000 0007 8000 0007 8000 0007 8000"
+	$"0007 8000 0007 8000 0007 8000 0007 8000 0007 8000 0007 8000 0007 8000 0007 8000"
+	$"0007 8000 0007 8000 0007 8000 0007 8000 0007 8000 000F C000 00FF FC00 0000 0000"
+	$"0000 0000 FF"
+};
+
+data 'PICT' (102, "DiskMode 2") {
+	$"00C5 0000 0000 0024 001C 1101 0100 0A00 0000 0000 2400 1C90 0004 0000 0000 0024"
+	$"001C 0000 0000 0024 001C 0000 0000 0024 001C 0000 0000 0000 0000 0000 001F 8000"
+	$"007F E000 00FF F800 01FF F800 03C1 FC00 0700 7C00 0600 3E00 0400 3E00 0C00 1E00"
+	$"0800 1E00 0000 1E00 0000 1C00 0000 1C00 0000 1C00 0000 3800 0000 3000 0000 7000"
+	$"0000 6000 0000 C000 0001 8000 0003 0000 0006 0000 000C 0000 0008 0000 0010 0000"
+	$"0020 0040 0040 0080 0080 0180 01FF FF00 03FF FF00 07FF FF00 0FFF FE00 0000 0000"
+	$"0000 0000 FF"
+};
+
+data 'PICT' (103, "DiskMode 3") {
+	$"00C5 0000 0000 0024 001C 1101 0100 0A00 0000 0000 2400 1C90 0004 0000 0000 0024"
+	$"001C 0000 0000 0024 001C 0000 0000 0024 001C 0000 0000 0000 0000 0000 000F C000"
+	$"003F F000 00FF F800 01C0 FC00 0180 7E00 0300 3E00 0200 1E00 0400 1E00 0000 1E00"
+	$"0000 1C00 0000 3C00 0000 3800 0000 7000 0001 C000 0007 F000 003F FC00 0001 FE00"
+	$"0000 3F00 0000 1F00 0000 0F80 0000 0F80 0000 0780 0000 0780 0000 0780 0000 0700"
+	$"0000 0700 0000 0E00 0000 0E00 0780 1C00 07E0 7000 07FF E000 01FF 0000 0000 0000"
+	$"0000 0000 FF"
+};
+
+data 'PICT' (104, "DiskMode 4") {
+	$"00C5 0000 0000 0024 001C 1101 0100 0A00 0000 0000 2400 1C90 0004 0000 0000 0024"
+	$"001C 0000 0000 0024 001C 0000 0000 0024 001C 0000 0000 0000 0000 0000 0000 3800"
+	$"0000 7800 0000 7800 0000 F800 0001 F800 0003 F800 0007 7800 0006 7800 000C 7800"
+	$"0018 7800 0038 7800 0030 7800 0060 7800 00C0 7800 0180 7800 0380 7800 0300 7800"
+	$"0600 7800 0C00 7800 1800 7800 3800 7800 3FFF FFC0 3FFF FFC0 3FFF FFC0 0000 7800"
+	$"0000 7800 0000 7800 0000 7800 0000 7800 0000 7800 0000 7800 0000 7800 0000 0000"
+	$"0000 0000 FF"
+};
+
+data 'PICT' (105, "DiskMode 5") {
+	$"00C5 0000 0000 0024 001C 1101 0100 0A00 0000 0000 2400 1C90 0004 0000 0000 0024"
+	$"001C 0000 0000 0024 001C 0000 0000 0024 001C 0000 0000 0000 0000 0000 0000 0180"
+	$"001F FF00 003F FF00 003F FF00 007F FE00 0060 0000 00C0 0000 00C0 0000 0180 0000"
+	$"03F0 0000 03FF 0000 07FF E000 07FF F000 003F FC00 0003 FC00 0000 FE00 0000 3F00"
+	$"0000 1F00 0000 0F80 0000 0F80 0000 0780 0000 0780 0000 0780 0000 0780 0000 0700"
+	$"0000 0700 0000 0F00 0000 0E00 0000 1C00 0F00 3800 1FE0 E000 1FFF C000 07FE 0000"
+	$"0000 0000 FF"
+};
+
+data 'PICT' (106, "DiskMode 6") {
+	$"00C5 0000 0000 0024 001C 1101 0100 0A00 0000 0000 2400 1C90 0004 0000 0000 0024"
+	$"001C 0000 0000 0024 001C 0000 0000 0024 001C 0000 0000 0000 0000 0000 0000 0000"
+	$"0000 1F00 0000 FC00 0003 C000 000F 0000 003E 0000 0078 0000 00F0 0000 01F0 0000"
+	$"03E0 0000 03C0 0000 0780 0000 0780 0000 0F0F E000 0F7F F800 1FC0 FC00 1F00 3E00"
+	$"1F00 1F00 1E00 0F00 1E00 0F80 1E00 0F80 1E00 0780 1E00 0780 1E00 0780 0E00 0780"
+	$"0F00 0700 0700 0700 0700 0700 0380 0E00 01C0 0C00 00C0 1800 0070 7000 001F C000"
+	$"0000 0000 FF"
+};
+
+
+// new resources from 7.1 systems
+
+// system patterns
+	resource 'PAT#' (0, sysHeap, locked) { {
+		$"FF FF FF FF FF FF FF FF";
+		$"DD FF 77 FF DD FF 77 FF";
+		$"DD 77 DD 77 DD 77 DD 77";
+		$"AA 55 AA 55 AA 55 AA 55";
+		$"55 FF 55 FF 55 FF 55 FF";
+		$"AA AA AA AA AA AA AA AA";
+		$"EE DD BB 77 EE DD BB 77";
+		$"88 88 88 88 88 88 88 88";
+		$"B1 30 03 1B D8 C0 0C 8D";
+		$"80 10 02 20 01 08 40 04";
+		$"FF 88 88 88 FF 88 88 88";
+		$"FF 80 80 80 FF 08 08 08";
+		$"80 00 00 00 00 00 00 00";
+		$"80 40 20 00 02 04 08 00";
+		$"82 44 39 44 82 01 01 01";
+		$"F8 74 22 47 8F 17 22 71";
+		$"55 A0 40 40 55 0A 04 04";
+		$"20 50 88 88 88 88 05 02";
+		$"BF 00 BF BF B0 B0 B0 B0";
+		$"00 00 00 00 00 00 00 00";
+		$"80 00 08 00 80 00 08 00";
+		$"88 00 22 00 88 00 22 00";
+		$"88 22 88 22 88 22 88 22";
+		$"AA 00 AA 00 AA 00 AA 00";
+		$"FF 00 FF 00 FF 00 FF 00";
+		$"11 22 44 88 11 22 44 88";
+		$"FF 00 00 00 FF 00 00 00";
+		$"01 02 04 08 10 20 40 80";
+		$"AA 00 80 00 88 00 80 00";
+		$"FF 80 80 80 80 80 80 80";
+		$"08 1C 22 C1 80 01 02 04";
+		$"88 14 22 41 88 00 AA 00";
+		$"40 A0 00 00 04 0A 00 00";
+		$"03 84 48 30 0C 02 01 01";
+		$"80 80 41 3E 08 08 14 E3";
+		$"10 20 54 AA FF 02 04 08";
+		$"77 89 8F 8F 77 98 F8 F8";
+		$"00 08 14 2A 55 2A 14 08";
+	} };
+
+// system color patterns
+
+	data 'ppt#' (0, sysHeap, locked) {
+	// number of patterns
+		$"000C"
+	// offsets to patterns
+		$"00000032 000000E8 0000019E 00000254 0000030A 000003C0"
+		$"00000476 0000052C 000005E2 00000698 0000074E 00000804"
+
+	// pattern 1
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"43334333"
+		$"33433343"
+		$"43334333"
+		$"33433343"
+		$"43334333"
+		$"33433343"
+		$"43334333"
+		$"33433343"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 FFFF FFFF FFFF"
+		$"0001 0000 0000 0000"
+		$"0002 0000 0000 DDDD"
+		$"0003 4B8C A1FB A86B"
+		$"0004 25A4 9057 9794"
+		$"0005 3333 6666 3333"
+		$"0006 9999 6666 2222"
+		$"0007 FFFF 9999 9999"
+
+	// pattern 2
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"22222322"
+		$"22322222"
+		$"22222232"
+		$"23222222"
+		$"22223222"
+		$"22222223"
+		$"22232222"
+		$"32222222"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 FFFF FFFF FFFF"
+		$"0001 0000 0000 0000"
+		$"0002 9E66 AA03 D286"
+		$"0003 4C0D 8A7A CF28"
+		$"0004 FFFF FFFF 3333"
+		$"0005 FFFF CCCC 9999"
+		$"0006 FFFF 6666 0000"
+		$"0007 CCCC 0000 0000"
+
+	// pattern 3
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"22222222"
+		$"22222222"
+		$"22222222"
+		$"22225222"
+		$"22222222"
+		$"22222222"
+		$"22222222"
+		$"52222222"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 FFFF FFFF FFFF"
+		$"0001 0000 0000 0000"
+		$"0002 5C10 5FFE 850D"
+		$"0003 5ABA D368 FFFF"
+		$"0004 B9CB 8C16 FFFF"
+		$"0005 55A0 CCCC A6F3"
+		$"0006 AAAA AAAA AAAA"
+		$"0007 6666 CCCC CCCC"
+
+	// pattern 4
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"10101010"
+		$"01010101"
+		$"10101010"
+		$"01010101"
+		$"10101010"
+		$"01010101"
+		$"10101010"
+		$"01010101"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 A000 A000 A000"
+		$"0001 6000 6000 6000"
+		$"0002 0000 6666 0000"
+		$"0003 0000 0000 DDDD"
+		$"0004 0000 9999 FFFF"
+		$"0005 FFFF 0000 9999"
+		$"0006 CCCC 0000 0000"
+		$"0007 FFFF FFFF 0000"
+
+	// pattern 5
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"22222232"
+		$"32322222"
+		$"22222322"
+		$"23232222"
+		$"22222223"
+		$"22322322"
+		$"22222223"
+		$"23223222"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 FFFF FFFF FFFF"
+		$"0001 0000 0000 0000"
+		$"0002 BE50 6574 7410"
+		$"0003 A50D 67F6 6988"
+		$"0004 0000 9999 FFFF"
+		$"0005 FFFF 0000 9999"
+		$"0006 CCCC 0000 0000"
+		$"0007 FFFF FFFF 0000"
+
+	// pattern 6
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"11112111"
+		$"14111111"
+		$"11111141"
+		$"11111111"
+		$"31111111"
+		$"11141111"
+		$"11111121"
+		$"11111111"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 FFFF FFFF FFFF"
+		$"0001 7286 7286 7286"
+		$"0002 5BEF C86B B339"
+		$"0003 DDDD 9D2E DCD3"
+		$"0004 C5F5 D102 FFFF"
+		$"0005 0000 0000 0000"
+		$"0006 DDDD 0000 0000"
+		$"0007 FFFF FFFF 0000"
+
+	// pattern 7
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"32323236"
+		$"23232323"
+		$"32323232"
+		$"23232323"
+		$"32323232"
+		$"23232323"
+		$"32323232"
+		$"23232323"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 FFFF FFFF FFFF"
+		$"0001 0000 0000 0000"
+		$"0002 5555 5555 5555"
+		$"0003 AAAA AAAA AAAA"
+		$"0004 0000 9999 FFFF"
+		$"0005 FFFF 0000 9999"
+		$"0006 DDDD 0000 0000"
+		$"0007 FFFF FFFF 0000"
+
+	// pattern 8
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"67777777"
+		$"56666667"
+		$"56666667"
+		$"56665667"
+		$"56676667"
+		$"56666667"
+		$"56666667"
+		$"55555556"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 FFFF FFFF FFFF"
+		$"0001 0000 0000 0000"
+		$"0002 0000 6666 0000"
+		$"0003 0000 0000 DDDD"
+		$"0004 0000 9999 FFFF"
+		$"0005 236F 764F 8D79"
+		$"0006 3834 9423 AF28"
+		$"0007 4C4D BB29 D5E4"
+
+	// pattern 9
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"23232224"
+		$"32322222"
+		$"23242223"
+		$"32424232"
+		$"22242423"
+		$"22224242"
+		$"22232424"
+		$"42323242"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 FFFF FFFF FFFF"
+		$"0001 0000 0000 0000"
+		$"0002 6560 6666 645A"
+		$"0003 DFFF 7D6A 7F8E"
+		$"0004 A6BC A793 A5E6"
+		$"0005 FFFF 0000 9999"
+		$"0006 DDDD 0000 0000"
+		$"0007 FFFF FFFF 0000"
+
+	// pattern A
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"22252325"
+		$"45222222"
+		$"22232523"
+		$"52522242"
+		$"22223252"
+		$"22322325"
+		$"25225252"
+		$"22422223"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 FFFF FFFF FFFF"
+		$"0001 0000 0000 0000"
+		$"0002 BE50 826C 515E"
+		$"0003 820E 835E 835E"
+		$"0004 50D7 50D7 50D7"
+		$"0005 9AF2 613D 5CCB"
+		$"0006 DDDD 0000 0000"
+		$"0007 E35D C55A 217B"
+
+	// pattern B
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"77677767"
+		$"67776777"
+		$"77677767"
+		$"67776777"
+		$"77677767"
+		$"67776777"
+		$"77677767"
+		$"67776777"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 FFFF FFFF FFFF"
+		$"0001 0000 0000 0000"
+		$"0002 0000 6666 0000"
+		$"0003 0000 0000 DDDD"
+		$"0004 0000 9999 FFFF"
+		$"0005 FFFF 0000 9999"
+		$"0006 DDDD 15E1 9B5F"
+		$"0007 FFFF 40E4 BD2B"
+
+	// pattern C
+		$"0001 0000001C 0000004E 00000000 0000 00000000"
+	// black & white pattern
+		$"AA 55 AA 55 AA 55 AA 55"
+	// pixmap (includes bounds and depth)
+		$"00000000 8004 0000 0000 0008 0008"
+		$"0000 0000 00000000"
+		$"00480000 00480000"
+		$"0000 0004 0001 0004"
+		$"00000000 0000006E 00000000"
+	// 4-bit color image
+		$"24212427"
+		$"33134244"
+		$"43336221"
+		$"43202432"
+		$"33002616"
+		$"42513424"
+		$"41424135"
+		$"64433342"
+	// color table
+		$"00000000 0000"
+		$"0007"
+		$"0000 D943 D943 D943"
+		$"0001 B0D7 B0D7 B0D7"
+		$"0002 9379 9379 9379"
+		$"0003 DDDD A5C1 9F63"
+		$"0004 8794 689A 7494"
+		$"0005 535E 3B22 45DC"
+		$"0006 81AF 36E0 2E31"
+		$"0007 4074 6F28 00C0"
+	};
+
+// Don't add Standard ICONs 0,1,2 because some INITs override them
+
+	resource 'ics#' (-16386, sysHeap, locked) { {
+		$"00 00 00 60 00 C0 00 80 0E 70 1F F8 3F E0 3F E0"
+		$"3F E0 3F F0 3F F8 1F F8 1F F8 0F F0 06 60 00 00",
+
+		$"00 00 00 60 00 C0 00 80 0E 70 1F F8 3F E0 3F E0"
+		$"3F E0 3F F0 3F F8 1F F8 1F F8 0F F0 06 60 00 00"
+	} };
+
+	resource 'ics8' (-16386, sysHeap, locked) {
+		$"00000000000000000000000000000000"
+		$"000000000000000000E3E30000000000"
+		$"0000000000000000E3E3000000000000"
+		$"0000000000000000E300000000000000"
+		$"00000000E3E3E30000E3E3E300000000"
+		$"000000E3E3E3E3E3E3E3E3E3E3000000"
+		$"00000505050505050505050000000000"
+		$"00000505050505050505050000000000"
+		$"00001717171717171717170000000000"
+		$"00001717171717171717171700000000"
+		$"0000D8D8D8D8D8D8D8D8D8D8D8000000"
+		$"00000020202020202020202020000000"
+		$"00000020202020202020202020000000"
+		$"00000000ECECECECECECECEC00000000"
+		$"0000000000ECEC0000ECEC0000000000"
+		$"00000000000000000000000000000000"
+	};
+
+	resource'ics4'(-16386, sysHeap, locked){
+		$"0000000000000000"
+		$"0000000008800000"
+		$"0000000088000000"
+		$"0000000080000000"
+		$"0000888008880000"
+		$"0008888888888000"
+		$"0011111111100000"
+		$"0011111111100000"
+		$"0022222222200000"
+		$"0022222222220000"
+		$"0033333333333000"
+		$"0004444444444000"
+		$"0004444444444000"
+		$"0000666666660000"
+		$"0000066006600000"
+		$"0000000000000000"
+	};
+
+
+	type 'clut' (5) {
+		unsigned hex longint = 5;								/* ctSeed				*/
+		hex integer = $8000;									/* ctFlags				*/
+		integer = $$Countof(ColorSpec) - 1;						/* ctSize				*/
+		wide array ColorSpec {
+				integer = 0;									/* value				*/
+				unsigned hex integer;							/* RGB:	red				*/
+				unsigned hex integer;							/*		green			*/
+				unsigned hex integer;							/*		blue			*/
+		};
+	};
+
+	type 'clut' (9) {
+		unsigned hex longint = 9;								/* ctSeed				*/
+		hex integer = $8000;									/* ctFlags				*/
+		integer = $$Countof(ColorSpec) - 1;						/* ctSize				*/
+		wide array ColorSpec {
+				integer = 0;									/* value				*/
+				unsigned hex integer;							/* RGB:	red				*/
+				unsigned hex integer;							/*		green			*/
+				unsigned hex integer;							/*		blue			*/
+		};
+	};
+
+// dimmed 4-bit
+	resource 'clut' (5, sysHeap, locked) { {
+		$7FFF, $8000, $7FFF,
+		$7C00, $737E, $0000,
+		$7FFE, $0000, $0000,
+		$DD6B, $08C2, $06A2,
+		$F2D7, $0856, $84EC,
+		$46E3, $0000, $A53E,
+		$0000, $0000, $D400,
+		$0241, $AB54, $EAFF,
+		$1F21, $B793, $1431,
+		$0000, $64AF, $11B0,
+		$5600, $2C9D, $0524,
+		$90D7, $7160, $3A34,
+		$3FFD, $4004, $3FFD,
+		$0000, $0003, $0000,
+		$4000, $4000, $4000,
+		$0000, $0000, $0000,
+	} };
+
+// dimmed 8-bit
+	resource 'clut' (9, sysHeap, locked) { {
+		$7FFF, $8000, $7FFF,
+		$7FFD, $8000, $4CC9,
+		$7FFF, $7FFE, $1997,
+		$7FFE, $8000, $0000,
+		$7FFC, $8002, $0000,
+		$7FFE, $8000, $0000,
+		$7FFE, $4CCD, $7FFE,
+		$7FFC, $4CCD, $4CCC,
+		$7FFE, $4CCB, $1996,
+		$7FFD, $4CCD, $0000,
+		$7FFF, $4CCD, $0000,
+		$7FFD, $4CCD, $0000,
+		$7FFD, $199A, $7FFD,
+		$7FFF, $1999, $4CCB,
+		$7FFD, $1999, $1999,
+		$7FFC, $199C, $0000,
+		$7FFE, $199A, $0000,
+		$7FFC, $199A, $0000,
+		$7FFC, $0000, $7FFC,
+		$7FFE, $0000, $4CCA,
+		$7FFC, $0000, $1998,
+		$7FFF, $0000, $0000,
+		$7FFD, $0000, $0000,
+		$7FFF, $0000, $0000,
+		$7FFF, $0000, $7FFF,
+		$7FFD, $0000, $4CC9,
+		$FFFF, $3333, $9999,
+		$FFFF, $3333, $6666,
+		$FFFF, $3333, $3333,
+		$FFFF, $3333, $0000,
+		$FFFF, $0000, $FFFF,
+		$FFFF, $0000, $CCCC,
+		$FFFF, $0000, $9999,
+		$FFFF, $0000, $6666,
+		$FFFF, $0000, $3333,
+		$FFFF, $0000, $0000,
+		$4CCB, $8000, $7FFF,
+		$4CC9, $8002, $4CC9,
+		$4CCB, $7FFE, $1997,
+		$4CCA, $8002, $0000,
+		$4CCC, $8000, $0000,
+		$4CCA, $8002, $0000,
+		$4CCA, $4CCF, $7FFE,
+		$4CCC, $4CCB, $4CCC,
+		$4CCA, $4CCD, $1996,
+		$4CC9, $4CCF, $0000,
+		$4CCB, $4CCD, $0000,
+		$4CC9, $4CCF, $0000,
+		$4CC9, $199C, $7FFD,
+		$4CCB, $1999, $4CCB,
+		$4CC9, $199A, $1999,
+		$4CCC, $199A, $0000,
+		$4CCA, $199C, $0000,
+		$4CCC, $1999, $0000,
+		$4CCC, $0000, $7FFC,
+		$4CCA, $0000, $4CCA,
+		$4CCC, $0000, $1998,
+		$4CCB, $0000, $0000,
+		$CCCC, $6666, $3333,
+		$CCCC, $6666, $0000,
+		$CCCC, $3333, $FFFF,
+		$CCCC, $3333, $CCCC,
+		$CCCC, $3333, $9999,
+		$CCCC, $3333, $6666,
+		$CCCC, $3333, $3333,
+		$CCCC, $3333, $0000,
+		$CCCC, $0000, $FFFF,
+		$CCCC, $0000, $CCCC,
+		$CCCC, $0000, $9999,
+		$CCCC, $0000, $6666,
+		$CCCC, $0000, $3333,
+		$CCCC, $0000, $0000,
+		$1996, $8000, $7FFE,
+		$1998, $7FFD, $4CCC,
+		$1996, $7FFE, $1996,
+		$1999, $7FFE, $0000,
+		$1997, $8000, $0000,
+		$1999, $7FFE, $0000,
+		$1999, $4CCB, $7FFD,
+		$1997, $4CCB, $4CCB,
+		$1999, $4CCA, $1999,
+		$1998, $4CCB, $0000,
+		$1996, $4CCD, $0000,
+		$1998, $4CCA, $0000,
+		$1998, $1999, $7FFC,
+		$1996, $199A, $4CCA,
+		$1998, $1997, $1998,
+		$1997, $199A, $0000,
+		$1999, $1999, $0000,
+		$1997, $199A, $0000,
+		$1997, $0000, $7FFF,
+		$1999, $0000, $4CC9,
+		$9999, $6666, $9999,
+		$9999, $6666, $6666,
+		$9999, $6666, $3333,
+		$9999, $6666, $0000,
+		$9999, $3333, $FFFF,
+		$9999, $3333, $CCCC,
+		$9999, $3333, $9999,
+		$9999, $3333, $6666,
+		$9999, $3333, $3333,
+		$9999, $3333, $0000,
+		$9999, $0000, $FFFF,
+		$9999, $0000, $CCCC,
+		$9999, $0000, $9999,
+		$9999, $0000, $6666,
+		$9999, $0000, $3333,
+		$9999, $0000, $0000,
+		$0000, $7FFE, $7FFE,
+		$0000, $7FFE, $4CCC,
+		$0000, $7FFD, $1996,
+		$0000, $8000, $0000,
+		$0000, $8000, $0000,
+		$0000, $8000, $0000,
+		$0000, $4CCD, $7FFD,
+		$0000, $4CCB, $4CCB,
+		$0000, $4CCB, $1999,
+		$0000, $4CCD, $0000,
+		$0000, $4CCB, $0000,
+		$0000, $4CCB, $0000,
+		$0000, $199A, $7FFC,
+		$0000, $1999, $4CCA,
+		$0000, $1999, $1998,
+		$0000, $199A, $0000,
+		$6666, $9999, $3333,
+		$6666, $9999, $0000,
+		$6666, $6666, $FFFF,
+		$6666, $6666, $CCCC,
+		$6666, $6666, $9999,
+		$6666, $6666, $6666,
+		$6666, $6666, $3333,
+		$6666, $6666, $0000,
+		$6666, $3333, $FFFF,
+		$6666, $3333, $CCCC,
+		$6666, $3333, $9999,
+		$6666, $3333, $6666,
+		$6666, $3333, $3333,
+		$6666, $3333, $0000,
+		$6666, $0000, $FFFF,
+		$6666, $0000, $CCCC,
+		$6666, $0000, $9999,
+		$6666, $0000, $6666,
+		$6666, $0000, $3333,
+		$6666, $0000, $0000,
+		$0000, $8000, $7FFE,
+		$0000, $7FFE, $4CCC,
+		$0000, $7FFE, $1996,
+		$0000, $8000, $0000,
+		$0000, $7FFE, $0000,
+		$0000, $8000, $0000,
+		$0000, $4CCD, $7FFD,
+		$0000, $4CCA, $4CCB,
+		$0000, $4CCB, $1999,
+		$0000, $4CCD, $0000,
+		$0000, $4CCD, $0000,
+		$0000, $4CCB, $0000,
+		$0000, $199A, $7FFC,
+		$0000, $199A, $4CCA,
+		$3333, $9999, $9999,
+		$3333, $9999, $6666,
+		$3333, $9999, $3333,
+		$3333, $9999, $0000,
+		$3333, $6666, $FFFF,
+		$3333, $6666, $CCCC,
+		$3333, $6666, $9999,
+		$3333, $6666, $6666,
+		$3333, $6666, $3333,
+		$3333, $6666, $0000,
+		$3333, $3333, $FFFF,
+		$3333, $3333, $CCCC,
+		$3333, $3333, $9999,
+		$3333, $3333, $6666,
+		$3333, $3333, $3333,
+		$3333, $3333, $0000,
+		$3333, $0000, $FFFF,
+		$3333, $0000, $CCCC,
+		$3333, $0000, $9999,
+		$3333, $0000, $6666,
+		$3333, $0000, $3333,
+		$3333, $0000, $0000,
+		$0000, $8000, $7FFE,
+		$0000, $7FFD, $4CCC,
+		$0000, $7FFE, $1996,
+		$0000, $8000, $0000,
+		$0000, $8000, $0000,
+		$0000, $8000, $0000,
+		$0000, $4CCD, $7FFD,
+		$0000, $4CCB, $4CCB,
+		$0000, $4CCB, $1999,
+		$0000, $4CCB, $0000,
+		$0000, $CCCC, $3333,
+		$0000, $CCCC, $0000,
+		$0000, $9999, $FFFF,
+		$0000, $9999, $CCCC,
+		$0000, $9999, $9999,
+		$0000, $9999, $6666,
+		$0000, $9999, $3333,
+		$0000, $9999, $0000,
+		$0000, $6666, $FFFF,
+		$0000, $6666, $CCCC,
+		$0000, $6666, $9999,
+		$0000, $6666, $6666,
+		$0000, $6666, $3333,
+		$0000, $6666, $0000,
+		$0000, $3333, $FFFF,
+		$0000, $3333, $CCCC,
+		$0000, $3333, $9999,
+		$0000, $3333, $6666,
+		$0000, $3333, $3333,
+		$0000, $3333, $0000,
+		$0000, $0000, $FFFF,
+		$0000, $0000, $CCCC,
+		$0000, $0000, $9999,
+		$0000, $0000, $6666,
+		$0000, $0000, $3333,
+		$EEEE, $0000, $0000,
+		$DDDD, $0000, $0000,
+		$BBBB, $0000, $0000,
+		$AAAA, $0000, $0000,
+		$8888, $0000, $0000,
+		$7777, $0000, $0000,
+		$5555, $0000, $0000,
+		$4444, $0000, $0000,
+		$2222, $0000, $0000,
+		$1111, $0000, $0000,
+		$0000, $6EED, $0000,
+		$0000, $5DDF, $0000,
+		$0000, $BBBB, $0000,
+		$0000, $AAAA, $0000,
+		$0000, $8888, $0000,
+		$0000, $7777, $0000,
+		$0000, $5555, $0000,
+		$0000, $4444, $0000,
+		$0000, $2222, $0000,
+		$0000, $1111, $0000,
+		$0000, $0000, $EEEE,
+		$0000, $0000, $DDDD,
+		$0000, $0000, $BBBB,
+		$0000, $0000, $AAAA,
+		$0000, $0000, $8888,
+		$0000, $0000, $7777,
+		$0000, $0000, $5555,
+		$0000, $0000, $4444,
+		$0000, $0000, $2222,
+		$0000, $0000, $1111,
+		$6EEE, $6EEE, $6EEE,
+		$5DDD, $5DDD, $5DDD,
+		$3BB8, $3BBF, $3BB8,
+		$2AAA, $2AAA, $2AAA,
+		$0885, $088C, $0885,
+		$7777, $7777, $7777,
+		$5555, $5555, $5555,
+		$4444, $4444, $4444,
+		$2222, $2222, $2222,
+		$1111, $1111, $1111,
+		$0000, $0000, $0000,
+	} };
+
+	
+	// color desktop pattern = sparce pattern for portables with CQD that want ppats
+
+resource 'ppat' (16, sysheap, purgeable) {
+	newPattern,
+	$"AA55 AA55 AA55 AA55",
+	4,
+	{0, 0, 8, 8},
+	0,
+	unpacked,
+	0,
+	0x480000,
+	0x480000,
+	chunky,
+	4,
+	1,
+	4,
+	0,
+	$"1010 1010 0101 0101 1010 1010 0101 0101"
+	$"1010 1010 0101 0101 1010 1010 0101 0101",
+	0x0,
+	0,
+	{	/* array ColorSpec: 8 elements */
+		/* [1] */
+		0, 40960, 40960, 40960,
+		/* [2] */
+		1, 24576, 24576, 24576,
+		/* [3] */
+		2, 0, 25775, 4528,
+		/* [4] */
+		3, 0, 0, 54272,
+		/* [5] */
+		4, 577, 43860, 60159,
+		/* [6] */
+		5, 62167, 2134, 34028,
+		/* [7] */
+		6, 56683, 2242, 1698,
+		/* [8] */
+		7, 64512, 62333, 1327
+	}
+};
+
+resource 'ppat' (18, sysheap, locked) {
+	newPattern,
+	$"AA55 AA55 AA55 AA55",
+	4,
+	{0, 0, 8, 8},
+	0,
+	unpacked,
+	0,
+	0x480000,
+	0x480000,
+	chunky,
+	4,
+	1,
+	4,
+	0,
+	$"0000 0000 0000 0300 0200 0000 0000 0000"
+	$"0000 0000 0030 0000 0000 0020 0000 0000",
+	0x1A0B,
+	0,
+	{	/* array ColorSpec: 8 elements */
+		/* [1] */
+		0, 65535, 65535, 65535,
+		/* [2] */
+		1, 0, 0, 0,
+		/* [3] */
+		2, 12000, 30261, 65535,
+		/* [4] */
+		3, 0, 65535, 65535,
+		/* [5] */
+		4, 65535, 65535, 13107,
+		/* [6] */
+		5, 65535, 52428, 39321,
+		/* [7] */
+		6, 65535, 26214, 0,
+		/* [8] */
+		7, 52428, 0, 0
+	}
+};
+	
+	
+		data 'pixs' (-14335, sysHeap, locked) {
+		$"8006 0000 0000 000B 000B 0004"
+		$"AAAAAAAAAAAA"
+		$"AAAAAAAAAAAA"
+		$"AAAAAAAAAAAA"
+		$"AAAAAAAAAAAA"
+		$"AAAAAAAAAAAA"
+		$"AAAAAAAAAAAA"
+		$"AAAAAAAAAAAA"
+		$"AAAAAAAAAAAA"
+		$"AAAAAAAAAAAA"
+		$"AAAAAAAAAAAA"
+		$"AAAAAAAAAAAA"
+	};
+
+	data 'pixs' (-14334, sysHeap, locked) {
+		$"8006 0000 0000 000B 000B 0004"
+		$"FFFFFFFFFFF0"
+		$"F5555F555500"
+		$"F5F55F55F500"
+		$"F55F5F5F5500"
+		$"F55555555500"
+		$"FFFF555FFF00"
+		$"F55555555500"
+		$"F55F5F5F5500"
+		$"F5F55F55F500"
+		$"F5555F555500"
+		$"F00000000000"
+	};
+
+	// Unhighlighted right arrow
+
+	data 'pixs' (-10199, sysHeap, locked) {
+		$"8008 0000 0000 0010 0010"
+		$"9999999999999999"
+		$"9000000000000069" 
+		$"9022222722222269"
+		$"9022222772222269"
+		$"9022222737222269"
+		$"9027777733722269"
+		$"9027333333372269"
+		$"9027333333337269"
+		$"9027333333372269" 
+		$"9027777733722269"
+		$"9022222737222269"
+		$"9022222772222269"
+		$"9022222722222269"
+		$"9022222222222269"
+		$"9666666666666669"
+		$"9999999999999999"
+	};
+
+	//	Highlighted right arrow
+	
+	data 'pixs' (-10200, sysHeap, locked) {
+		$"8008 0000 0000 0010 0010"
+		$"9999999999999999"
+		$"9000000000000069"
+		$"9022222922222269"
+		$"9022222992222269"
+		$"9022222999222269"
+		$"9029999999922269"
+		$"9029999999992269"
+		$"9029999999999269"
+		$"9029999999992269"
+		$"9029999999922269"
+		$"9022222999222269"
+		$"9022222992222269"
+		$"9022222922222269"
+		$"9022222222222269"
+		$"9666666666666669"
+		$"9999999999999999"
+	};
+	
+	//	Unhighlighted left arrow
+	
+	data 'pixs' (-10201, sysHeap, locked) {
+		$"8008 0000 0000 0010 0010"
+		$"9999999999999999"
+		$"9000000000000069"
+		$"9022222272222269"
+		$"9022222772222269"
+		$"9022227372222269"
+		$"9022273377777269"
+		$"9022733333337269"
+		$"9027333333337269"
+		$"9022733333337269"
+		$"9022273377777269"
+		$"9022227372222269"
+		$"9022222772222269"
+		$"9022222272222269"
+		$"9022222222222269"
+		$"9666666666666669"
+		$"9999999999999999"
+	};
+	
+	// Highlighted left arrow
+	
+	data 'pixs' (-10202, sysHeap, locked) {
+		$"8008 0000 0000 0010 0010"
+		$"9999999999999999"
+		$"9000000000000069"
+		$"9022222292222269"
+		$"9022222992222269"
+		$"9022229992222269"
+		$"9022299999999269"
+		$"9022999999999269"
+		$"9029999999999269"
+		$"9022999999999269"
+		$"9022299999999269"
+		$"9022229992222269"
+		$"9022222992222269"
+		$"9022222292222269"
+		$"9022222222222269"
+		$"9666666666666669"
+		$"9999999999999999"
+	};
+	
+	// Unhighlighted down arrow
+	
+	data 'pixs' (-10203, sysHeap, locked) {
+		$"8008 0000 0000 0010 0010"
+		$"9999999999999999"
+		$"9000000000000069"
+		$"9022222222222269"
+		$"9022277777222269"
+		$"9022273337222269"
+		$"9022273337222269"
+		$"9022273337222269"
+		$"9077773337777269"
+		$"9027333333372269"
+		$"9022733333722269"
+		$"9022273337222269"
+		$"9022227372222269"
+		$"9022222722222269"
+		$"9022222222222269"
+		$"9666666666666669"
+		$"9999999999999999"
+	};
+	
+	// Highlighted down arrow
+	
+	data 'pixs' (-10204, sysHeap, locked) {
+		$"8008 0000 0000 0010 0010"
+		$"9999999999999999"
+		$"9000000000000069"
+		$"9022222222222269"
+		$"9022299999222269"
+		$"9022299999222269"
+		$"9022299999222269"
+		$"9022299999222269"
+		$"9099999999999269"
+		$"9029999999992269"
+		$"9022999999922269"
+		$"9022299999222269"
+		$"9022229992222269"
+		$"9022222922222269"
+		$"9022222222222269"
+		$"9666666666666669"
+		$"9999999999999999"
+	};
+	
+	// Unhighlighted up arrow
+	
+	data 'pixs' (-10205, sysHeap, locked) {
+		$"8008 0000 0000 0010 0010"
+		$"9999999999999999"
+		$"9000000000000069"
+		$"9022222222222269"
+		$"9022222722222269"
+		$"9022227372222269"
+		$"9022273337222269"
+		$"9022733333722269"
+		$"9027333333372269"
+		$"9077773337777269"
+		$"9022273337222269"
+		$"9022273337222269"
+		$"9022273337222269"
+		$"9022277777222269"
+		$"9022222222222269"
+		$"9666666666666669"
+		$"9999999999999999"
+	};
+	
+	//	Highlighted up arrow
+	
+	data 'pixs' (-10206, sysHeap, locked) {
+		$"8008 0000 0000 0010 0010"
+		$"9999999999999999"
+		$"9000000000000069"
+		$"9022222222222269"
+		$"9022222922222269"
+		$"9022229992222269"
+		$"9022299999222269"
+		$"9022999999922269"
+		$"9029999999992269"
+		$"9099999999999269"
+		$"9022299999222269"
+		$"9022299999222269"
+		$"9022299999222269"
+		$"9022299999222269"
+		$"9022222222222269"
+		$"9666666666666669"
+		$"9999999999999999"
+	};
+	
+	//	Horizontal thumb
+	
+	data 'pixs' (-10207, sysHeap, locked) {
+		$"8008 0000 0000 000E 0010"
+		$"8111111111111117"
+		$"8144444444444447"
+		$"8144444444444447"
+		$"8144444444444447"
+		$"8143151515151447"
+		$"8143151515151447"
+		$"8143151515151447"
+		$"8143151515151447"
+		$"8143151515151447"
+		$"8143151515151447"
+		$"8144444444444447"
+		$"8144444444444447"
+		$"8144444444444447"
+		$"8777777777777777"
+	};
+	
+	//	Vertical thumb
+	
+	data 'pixs' (-10208, sysHeap, locked) {
+		$"8008 0000 0000 0010 000E"
+		$"8888888888888800"
+		$"1111111111111700"
+		$"1444444444444700"
+		$"1444333333444700"
+		$"1444111111444700"
+		$"1444555555444700"
+		$"1444111111444700"
+		$"1444555555444700"
+		$"1444111111444700"
+		$"1444555555444700"
+		$"1444111111444700"
+		$"1444555555444700"
+		$"1444111111444700"
+		$"1444444444444700"
+		$"1444444444444700"
+		$"7777777777777700"
+	};
+	
+	
+	//  Password Icon	<SM2> rb,  Robert Polic's password icon
+	
+	data 'ICON' (29296, sysHeap, locked) {
+		$"00FFFF00"
+		$"01000080"
+		$"027FFE40"
+		$"04FFFF20"
+		$"09FFFF90"
+		$"13FFFFC8"
+		$"27FFFFE4"
+		$"4FFFFFF2"
+		$"9FF81FF9"
+		$"BFF00FFD"
+		$"BFE3C7FD"
+		$"BFE7E7FD"
+		$"BFE7E7FD"
+		$"BFE7E7FD"
+		$"BFE7E7FD"
+		$"BFC003FD"
+		$"BFDFFBFD"
+		$"BFC003FD"
+		$"BFDFFBFD"
+		$"BFC003FD"
+		$"BFDFFBFD"
+		$"BFC003FD"
+		$"BFDFFBFD"
+		$"BFC003FD"
+		$"9FFFFFF9"
+		$"4FFFFFF2"
+		$"27FFFFE4"
+		$"13FFFFC8"
+		$"09FFFF90"
+		$"04FFFF20"
+		$"02000040"
+		$"01FFFF80"
+	};

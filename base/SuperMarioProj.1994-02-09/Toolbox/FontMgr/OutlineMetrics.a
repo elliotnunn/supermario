@@ -1,0 +1,599 @@
+;
+;	File:		OutlineMetrics.a
+;
+;	Written by:	Charlton E. Lui
+;
+;	Copyright:	© 1989-1993 by Apple Computer, Inc.  All rights reserved.
+;
+;   This file is used in these builds: ROM, disk
+;
+;
+;
+;	Change History (most recent first):
+;
+;	   <SM5>	 5/22/93	BT		Add check to see if hasDoubleByte has already been defined.
+;	   <SM4>	 11/3/92	SWC		Changed INCLUDEs to a LOAD of StandardEqu.d.
+;		<12>	 3/25/92	DTY		#1023489,<FM>: •BLT: There is a code patch in OutlineMetrics
+;									which leaves the contour entry bit set in the high byte of the
+;									offset into the glyph data array. This causes a bus error in 32
+;									bit mode because this offset is used in a pointer calculation.
+;									Change the branch to go to existing code which clears this bit.
+;		<11>	 9/25/91	jlf		Rolled in double-byte modifications to OutlineMetrics. Always
+;									define hasDoubleByte.
+;		<10>	 6/12/91	LN		added #include 'SysPrivateEqu.a'
+;		 <9>	12/11/90	CL		(RB) Saving off D2 before calling sb_retrieveglyph.  D2 got
+;									trashed and was used.   Using incorrect define for descent and
+;									ascent.  Needed to use the cache.ascent and cache.descent.
+;		 <8>	 12/4/90	CL		(MR) Fixing bitmap right of bitmap. Fix YMax and YMin for
+;									outline style. down by one pixel. Fixing this bug.
+;		 <7>	11/29/90	CL		(RB)YMax and YMin must be initialized to eachother.
+;		 <6>	11/12/90	CL		Accouting for algorithmic styles of bold, shadow, and outline in
+;									the bouding box, yMax, yMin, and lsb.
+;		 <5>	10/30/90	CL		(MR)Reviewed for 7.0ß2
+;		 <4>	10/23/90	CL		Need to check entryOffset instead of returned error since
+;									sbretrieve will return an error for the clipped out case.
+;		 <3>	10/22/90	CL		(BKR) Adding support for minimum memory mode to band and run in
+;									low cache conditions.
+;		 <2>	10/21/90	gbm		(with dba) Get rid of bra.s warnings by re-ordering a couple of
+;									Procs
+;		 <9>	 10/1/90	CL		Fixing some confusing comments about error handling from sbretrieveglyph.
+;	   	 <8>	  9/4/90	CL		Memory model changed a little for the cachehandle.  The cacheHandle
+;									could change when a sbretrieveglyph call is made since it may place
+;									the block in another heap.  So after call is made, re-init the cachehand
+;									via the splinekey.
+;		 <7>	  8/2/90	gbm		add an END to make assembler happy
+;		 <6>	 6/22/90	CL		Added ToolEqu.a include file
+;		 <6>	 6/22/90	CL		Added ToolEqu.a include file
+;		 <5>	 5/29/90	CL		Spline preferred no longer needs to set Lastspextra to minusone.
+;									Fixed outline metrics bug when filling out widths.
+;		 <4>	 4/11/90	CL		Missing characters did not decrement.
+;		 <3>	 3/20/90	CL		Bug fixes to Outline Metrics and a couple of speed enhancements
+;		 <2>	 2/27/90	CL		Adding Right and Left Side bearing max.  Changes made for
+;									DrText’s optimizations.  Re-wrote a good portion of Outline
+;									Metrics.
+;	   <1.4>	11/15/89	CEL		Changed functions to better names for documentation.
+;	   <1.3>	11/14/89	CEL		SetLineHeight will only invalidate the width tables instead of
+;									the caches.
+;	   <1.2>	 9/15/89	CEL		Updated calls to be pascal conventions.
+;	   <1.1>	 8/28/89	CEL		Added in IsOutline call.
+;	   <1.0>	 8/14/89	CEL		Checking file in for the first time… Three Additional calls
+;									added to Bass.
+;
+;	To Do:
+;
+
+
+	IF (&TYPE('hasDoubleByte') = 'UNDEFINED') THEN
+		hasDoubleByte		EQU		1
+	ENDIF
+	
+		LOAD		'StandardEqu.d'
+		INCLUDE 	'SplineDefines.a'
+		INCLUDE 	'fontPrivate.a'
+
+OutlineMetrics PROC	EXPORT
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+;
+;	Int OutlineMetrics( count, TextPtr, numer, denom, yMax, yMin,
+;						advanceWidthArray, lsbArray, boundsArray )
+;  		int				count;					/* Number of chars to process */
+;  		char			*TextPtr;				/* Points to the string of chars */
+;		Point			numer, denom;			/* Stretch values */
+;		short			yMax, yMin;
+;		Fixed			*advanceWidthArray;		/* Advance width array to fill by count times */
+;		Fixed			*lsbArray;				/* LSB array to fill by count times */
+;		Rect			*boundsArray;			/* Bounds rects array to fill by count times */
+;
+;  Given a string and non null pointers to arrays fill out the metrics.
+;
+;	Registers Use:
+;		D0		= scratch				A0		= scratch
+;		D1		= scratch				A1		= TextPtr.l
+;		D2		= AddLeft & down shift	A2		= awPtr.l
+;		D3		= scratch				A3		= lsbptr.l
+;		D4		= glyphArrayPtr.l		A4		= boundsPtr.l
+;		D5		= count					A5		= glyphDataPtr.l
+;		D6		= cachePtr.l			A6		= stack frame.l
+;		D7		= widTabPtr.l			A7		= stack ptr.l
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+boundsPtr		EQU 	8					;LONG, Ptr to bounds rect array
+lsbPtr			EQU 	boundsPtr+4			;LONG, Ptr to lsb array
+awPtr			EQU 	lsbPtr+4			;LONG, Ptr to Advance Width array
+yMinPtr			EQU		awPtr+4				;LONG, Ptr to a short
+yMaxPtr			EQU		yMinPtr+4			;LONG, Ptr to a short
+denom			EQU		yMaxPtr+4			;LONG, stretching var
+numer			EQU		denom+4				;LONG, stretching var
+textPtr			EQU 	numer+4				;LONG, Ptr to ASCII
+count			EQU 	textPtr+4			;WORD
+intError		EQU		count+2				;LONG, error code
+ParamSize		EQU		intError-8			;Size of parameters to pop off
+											;Do not include intError or return addr
+
+INREC			EQU 	-16 				;FMInput record
+cacheHand		EQU		INREC-4				;place for cache handle
+encodingTable	EQU		cacheHand-4			;(pointer) encoding table address.
+lowByte			EQU		encodingTable-1		;(byte) low-byte of double-byte character.
+highByte		EQU		lowByte-1			;(byte) true if invalid low byte followed high byte resulting in high byte remapping
+	;——————————————————————————————————————— 
+	;sb_Retrieves input struct - Do not split this record up!!!
+	;###WARNING: If this changes, then change the same record in DrawText.a
+bufStart		EQU 	highByte-4			;(long) _ \			start of bits buffer
+srcAddr 		EQU 	bufStart-4			;(long)  | >- these 3 grouped: ptr to bits
+srcRow			EQU 	srcAddr-4			;(long)  |/			rowbytes of font bits
+bitWidth		EQU		srcRow-2			;(word)  | for Width of char in bits
+entryOffset		EQU		bitWidth-4			;(long)  | entry offset of glyph
+fillBYTE		EQU		entryOffset-1		;(Boolean)  |
+nextBand		EQU		fillBYTE-1			;(Boolean)  | Another character band?
+nextTopBand		EQU		nextBand-2			;(word)  | next top character band
+nextBotBand		EQU		nextTopBand-2		;(word)  | next bot character band
+bandScan		EQU		nextBotBand-2		;(word)	 | band size of char band	
+scan			EQU		bandScan-2			;(word)  | number of scan lines
+devLSB			EQU		scan-2				;(short) | Device for the LSB (short)
+lsb				EQU		devLSB-4			;(long)  | for the LSB (fixed)
+yMax			EQU		lsb-2				;(word)  | for the y min (short)
+yMin			EQU		yMax-2				;(word)  | for the y max (short)
+topClip			EQU		yMin-2				;(word)  | yMax Clipping
+botClip			EQU		topClip-2			;(word)  | yMin Clipping
+clipHorz		EQU		botClip-1			;(Boolean) \ | Is it clipped horizontally
+clipVert		EQU		clipHorz-1			;(Boolean) / | Is it clipped vertically
+destDepth		EQU		clipVert-2			;(word)  | depth of destination
+ptSize			EQU		destDepth-2			;(word)  | pixels per em
+glyphID			EQU		ptSize-2			;(word)  | glyph code
+fontID			EQU		glyphID-2			;(word) _  font id code
+	;End of Structure
+	;———————————————————————————————————————
+addBitWidth		EQU		fontID-1			;(byte) bold=1+outline=1+shadow=2+(1 if outline or shadow) = addBitWidth	<6-CEL>
+addBot			EQU		addBitWidth-1		;(byte) outline=2+shadow=3 = addBot				<6-CEL>
+fontState		EQU		addBot-2			;(word) flags for font state					<6-CEL>
+VARSIZE 		EQU 	fontState
+
+		LINK	A6,#VARSIZE 				;ALLOCATE LOCALS
+		MOVEM.L D3-D7/A2-A5,-(SP)			;SAVE REGS
+		CLR.W	intError(A6)				;clear out the error field
+		ST		clipVert(A6)				;Always clipping out character - no bits needed
+
+	if (hasDoubleByte) then
+		clr.l	encodingTable(a6)			; assume no encoding table.
+	endif
+
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A0				;GET CURRENT GRAFPORT
+;
+;  Call swapfont to set up width table and return numer,denom:
+;
+		LEA 	INREC(A6),A1				;POINT TO FMINPUT RECORD
+		MOVE	TXFONT(A0),(A1)+			;GET TXFONT FROM THEPORT
+		MOVE	TXSIZE(A0),(A1)+			;GET TXSIZE FROM THEPORT
+		MOVE.B	TXFACE(A0),(A1)+			;GET TXFACE FROM THEPORT
+		ST		(A1)+						;ALWAYS SET NEEDBITS TRUE
+		MOVE	DEVICE(A0),(A1)+			;GET DEVICE FROM THEPORT
+		MOVE.L	numer(A6), (A1)+			;INSTALL INPUT NUMER
+		MOVE.L	denom(A6), (A1)+			;INSTALL INPUT DENOM
+		CLR.L	-(SP)						;ROOM FOR FCN RESULT
+		PEA 	INREC(A6)					;PUSH INPUT RECORD
+		_FMSwapFont							;CALL FMSwapFont trap
+		ADDQ	#4,	SP						;POP FMOUTPUT POINTER
+
+      	MOVE.L  WidthTabHandle,A1           ;handle to width tab
+		MOVE.L  (A1),A1						;Pointer to width tab
+		MOVE.L	A1, D7						;save widthTabPtr in reg
+		MOVE.L	WidTabFont(A1), A0			;get the font handle
+		_HGetState							;get the purge state
+		MOVE.B	D0,fontState(A6)			;preserve it until the next change
+		_HNoPurge							;Make it non-purgeable
+		TST.B	WidthIsSpline(A1)			;Is it a spline font
+		BEQ		bitMapfontErr				;Its a bitmap so exit
+
+		;————————————————————————————————————
+		; calc extra for styles			<6-CEL>
+		;————————————————————————————————————
+		MOVE.L	fontPtr(A4), A4				;Point to FmOutput record
+
+		CLR.B	addBot(A6)					;clear off adds
+		MOVEQ	#0, D2						;ready for addLeft
+
+		MOVE.B	fmOutBold(A4),	addBitWidth(A6)		;Init boldness	
+;<8-CEL>		MOVEQ	#0, D1				;ready for addLeft
+
+;<8-CEL>		MOVE.B	fmOutBold(A4),D1			;add boldness
+		MOVEQ	#3,D0						;restrict shadow in the range of 0 .. 3
+		CMP.B	fmOutShadow(A4),D0			;is it less or same?
+		BLE.S	@pinShadow					;if so, pin at limit
+		MOVE.B	fmOutShadow(A4),D0			;otherwise, pass actual value
+@pinShadow
+		TST.B	D0							;is there any?
+		BEQ.S	@doneWithAdds				;skip the left extra add
+		MOVE.B	#1, D2						;add 1 for left extra
+		CMP.B	#1, D0						;outline only?
+		BNE.S	@notOnlyOutline
+		ADD.B	#2, addBitWidth(A6)			;Add outline extra to bitwidth		<8-CEL>
+		MOVE.B	#2, addBot(A6)				;2 for outline bottom
+		BRA.S	@doneWithAdds
+@notOnlyOutline
+		CMP.B	#2, D0						;shadow only?
+		BNE.S	@notShadowOnly
+		ADD.B	#3, addBitWidth(A6)			;Get shadow value					<8-CEL>
+		MOVE.B	#3, addBot(A6)				;2 for outline bottom
+		BRA.S	@doneWithAdds
+@notShadowOnly
+		ADD.B	#4, addBitWidth(A6)			;MOVE both outline and shadow values	<8-CEL>
+		MOVE.B	#4, addBot(A6)				;2 for outline bottom
+@doneWithAdds
+;<8-CEL>		MOVE.B	D1, addBitWidth(A6)			;right side value
+		;————————————————————————————————————
+
+		;————————————————————————————————————
+		; Make sure cache is around
+		;————————————————————————————————————
+		MOVE.L	expandMem, A0							; get low mem expand
+		MOVE.L	ExpandMemRec.emSplineKey(A0), A0		; Handle to splineKey
+		MOVE.L	(A0), A0								; pointer to splinekey
+		MOVE.L	splineKeyRec.cacheHand(A0), D0			; is there a cache
+		BEQ		cacheErr
+		MOVE.L	D0, A0						; get Handle in addr reg
+		TST.L	(A0)						; Is it purged
+		BEQ		cacheErr					; bail since we have no cache
+		MOVE.L	A0, cacheHand(A6)			;save on the stack
+		MOVE.L	(A0), D6					;cachePtr.l in reg
+		MOVE.L	D6, A0						;place in addr reg
+	
+	if (hasDoubleByte) then
+		move.l	cache.fEncodingTablePointer(a0),encodingTable(a6)	; load encoding table pointer.
+	endif
+
+		TST.L	yMaxPtr(A6)					;Init if exists	<7-CEL>
+		BEQ.S	@noFill						;Nil so skip
+		MOVE.L	yMaxPtr(A6), A1				;Get ptr
+		MOVE.W	cache.descent(A0), D0		;	<9-CEL>
+		NEG		D0							;
+		MOVE.W	D0, (A1)					;Init to opposite
+@noFill
+		TST.L	yMinPtr(A6)					;Init if exists	<7-CEL>
+		BEQ.S	@noFill2					;Nil so skip
+		MOVE.L	yMinPtr(A6), A1				;Get ptr
+		MOVE.W	cache.ascent(A0), (A1)		;Init to opposite <9-CEL>
+@noFill2
+		
+		LEA		cache.glyphArray(A0), A0	;
+		MOVE.L	A0, D4						;Save array of glyphs into D4
+		;————————————————————————————————————
+		;————————————————————————————————————
+
+		MOVE.W	#-1, topClip(A6)			;do not need to render the glyph for contours
+		CLR.W	botClip(A6)					;do not need to render the glyph for contours
+		MOVE.L	textPtr(A6),A1 				;pointer to chars
+		MOVE.L	awPtr(A6),A2 				;pointer to Advance widths
+		MOVE.L	lsbPtr(A6),A3 				;pointer to left side bearings
+		MOVE.L	boundsPtr(A6),A4 			;pointer to bound rects
+		MOVEQ	#0, D5						;Clear along for subq later
+		MOVE.W	count(A6),D5				;get the glyph count
+		SUBQ	#1, D5						;dec count for loop
+		BLT		cleanUp						;nothing to do
+		BRA.S	NEXTCH						;Start the loop
+MISSING 
+		TST.L	lsbPtr(A6)			 		;Does left side bearings array exist
+		BEQ.S	@noLSBArray					;no array to be filled
+		CLR.L	(A3)+ 						;pointer to left side bearings
+@noLSBArray
+		TST.L	boundsPtr(A6) 				;Does bounds rect array exist
+		BEQ.S	@noBounds					;no array to be filled
+		CLR.W	left(A4) 					;left set to zero
+		CLR.W	right(A4)					;right set to bitwidth
+		CLR.W	top(A4)						;bottom is yMax
+		CLR.W	bottom(A4)					;top is yMin
+		ADD.L	#8, A4						;increment record
+@noBounds
+		TST.L	awPtr(A6)	 				;Does AW array exist
+		BEQ.S	@noAWArray					;no array to be filled
+        MOVE.L  D7,A0
+		ADD.W	D3, D3
+		ADD.W	D3, D3						;D3*4
+		MOVE.L	0(A0,D3), (A2)+	 			;fill out result
+@noAWArray
+		SUBQ	#1, D5						;dec count for loop
+		BLT		cleanUp						;nothing to do
+NEXTCH	
+	
+	if (hasDoubleByte) then
+		clr.w	d3							; clear high byte of low word
+		move.b	(a1)+,d3					; load the high or single byte
+		move.b	d3,highByte(a6)				; save the high byte in case we need to back up
+		clr.b	lowByte(a6)					; clear the low byte for now
+
+		tst.l	encodingTable(a6)			; is this a double byte font?
+		beq		@normalFont					; no, skip low byte loading
+		move.l	encodingTable(a6),a0		; load the encoding table
+		tst.b	0(a0,d3.w)					; is this a double byte character?
+		beq		@normalCharacter			; no, skip low byte loading
+		tst.w	d5							; more bytes left in text?
+		ble		@remapCharacterToNull		; no, remap the high byte
+		
+		subq.w	#1,d5						; decrement the character count
+		clr.w	d0							; clear high byte of low word
+		move.b	(a1)+,d0					; grab the low byte and bump the text pointer
+		adda.w	#256,a0						; offset to the low byte encoding table
+		tst.b	0(a0,d0.w)					; is this a valid low byte?
+		beq		@remapCharacterToNull		; no, remap the high byte character
+		move.b	d0,lowByte(a6)				; save the valid low byte for later use
+		bra		@normalCharacter			; continue normally
+		
+@remapCharacterToNull
+		move.b	#1,d3						; remap the high byte character
+		move.b	d3,highByte(a6)				; reset the highByte local
+		
+@normalCharacter
+@normalFont
+	else
+		MOVEQ	#0, D3						;GET READY FOR BYTE
+		MOVE.B	(A1)+,D3					;get the glyph
+	endif
+
+		move.w	d3,d0						; copy the highbyte
+		cmp.b	#32,d0						; is it a space?
+		beq		MISSING						; treat as if missing
+		ADD.W	D0, D0
+		ADD.W	D0, D0						;D0*4
+		MOVE.L	D4, A0						;Get array of glyphs into A0
+		MOVE.L	0(A0,D0), D1				; Place results in D1
+	if	(hasDoubleByte) then
+		beq		@renderGlyph				; high byte table or single byte glyph doesn't exist, go render the glyph
+		tst.b	lowByte(a6)					; are we looking at a highbyte offset table?
+		beq		@stripBits					; <12> no, go use the single byte glyph, but first, clear the contour entry bit
+		move.l	d1,a0						; grab the lowbyte table offset
+		add.l	d6,a0						; add the cache address to get the lowbyte table pointer
+		moveq	#0,d1						; initialize - can't use d0 (ack!)
+		move.b	lowByte(a6),d1				; grab the lowbyte
+		add.w	d1,d1						; convert to word offset
+		add.w	d1,d1						; convert to long offset
+		move.l	0(a0,d1.w),d1				; grab the double byte glyph offset
+	endif
+		BGT		@fillMetrics				; character exists, go use it
+		BTST.L	#30, D1						;Check if there is an error
+		BNE.S	MISSING						;Got an error so skip character
+@stripBits
+		AND.L	#$3FFFFFFF, D1				;Clear contour entry bit flag
+		BNE.S	@fillMetrics				;Got the info
+
+;————————————————————————————————————————————————————————————————————————————————————————————————
+;	calling _sbRetrieveGlyph
+;————————————————————————————————————————————————————————————————————————————————————————————————
+@renderGlyph
+		MOVEM.L	D0/D2/A1-A2,-(SP)			;Save off all registers before JSR <9-CEL>
+		SF		nextBand(A6)				;init to no next char band
+		SUBQ	#4,SP						;make room for result
+		MOVEQ	#0, D1
+		MOVE.B	-1(A1), D1					;previous char
+		MOVE	D1, glyphID(A6)				;put glyphID into sp_Glyph
+	
+	if (hasDoubleByte) then
+		tst.l	encodingTable(a6)			; is this a double byte font?
+		beq.s	@singleByteFont				; no, skip loading low byte
+		move.b	highByte(a6),glyphID(a6)	; save the high byte
+		move.b	lowByte(a6),glyphID+1(a6)	; save the low byte
+@singleByteFont
+	endif
+
+		MOVE.L	WidthTabHandle, -(SP)		;2) Push the Width Table Handle onto the stack
+		PEA		fontID(A6)					;1) Push the Glyph Rec Ptr
+		_sbRetrieveGlyph					;Call the routine via SplineDispatch
+		MOVE.L	WidthTabHandle, A0			;restore width table ptr
+		MOVE.L	(A0), D7					;got it
+											;The cacheHand may have change if we got
+											;Memory somewhere else
+		MOVE.L	expandMem,A0								; get low memory expand pointer.
+		MOVE.L	ExpandMemRec.emSplineKey(A0),A0				; get handle to splineKey globals.
+		MOVE.L	(A0), A0									; get pointer to splineKey globals.
+		MOVE.L	splineKeyRec.cacheHand(A0),A0	; Get the handle in case it changed.
+		MOVE.L	A0, cacheHand(A6)			;restore cacheHand
+		MOVE.L	(A0), D6					;cachePtr.l in reg
+		MOVE.L	D6, A0						;place in addr reg
+		LEA		cache.glyphArray(A0), A0	;
+		MOVE.L	A0, D4						;restore glyphArray ptr
+		ADDQ	#4,	SP						;Ignore errors
+		MOVEM.L (SP)+, D0/D2/A1-A2			;Restore all registers on return <9-CEL>
+		MOVE.L	entryOffset(A6), D1
+		BEQ		MISSING						;if zero then no info
+;————————————————————————————————————————————————————————————————————————————————————————————————
+@fillMetrics								; <11-jlf>
+		ADD.L	D6, D1						;Add in cacheOffset
+		MOVE.L	D1, A5						;put in addr reg
+		TST.L	awPtr(A6)	 				;Does AW array exist
+		BEQ.S	@noAWArray					;no array to be filled
+        MOVE.L  D7,A0
+		MOVE.L	0(A0,D0), (A2)+	 			;fill out result
+@noAWArray
+		TST.L	lsbPtr(A6)			 		;Does left side bearings array exist
+		BEQ.S	@noLSBArray					;no array to be filled
+		MOVE.L	glyph.lsb(A5),(A3)	 		;pointer to left side bearings	
+		SUB.W	D2, (A3)					;Add left extra value 		
+		ADDQ	#4, A3						;bump the ptr					
+@noLSBArray
+		TST.L	boundsPtr(A6) 				;Does bounds rect array exist
+		BEQ.S	@noBounds					;no array to be filled
+		CLR.W	left(A4) 					;left set to zero
+		MOVE.W	glyph.bitWidth(A5), D0		;right set to bitwidth
+		ADD.B	addBitWidth(A6), D0			;add right extra value		
+		MOVE.W	D0, right(A4)				;save off right bitwidth
+		MOVE.B	addBot(A6), D1				;add right extra value	
+		EXT.W	D1							;Make it a word			
+		MOVE.W	glyph.yMin(A5), D0			;Ymin value is top
+		SUB.W	D1, D0						;Ymin value is top
+		ADD.W	D2, D0						;adjust down if outline or shadow
+		MOVE.W	D0, top(A4)					;yMin is top
+		MOVE.W	glyph.yMax(A5), bottom(A4)	;yMax is bottom
+		ADD.W	D2, bottom(A4)				;adjust down if outline or shadow
+		ADD.L	#8, A4						;increment record
+@noBounds
+		TST.L	yMaxPtr(A6)					;
+		BEQ.S	@noCompare					;Nil so skip
+		MOVE.L	yMaxPtr(A6), A0				;Get ptr
+		MOVE.W	(A0), D0
+		MOVE.W	glyph.yMax(A5), D1			;yMax value in D1		<8-CEL>
+		ADD.W	D2, D1						;adjust up if outline or shadow	<8-CEL>
+		CMP.W	D1, D0						;Init to max neg		<8-CEL>
+		BGE.S	@noCompare					;skip since not larger
+		MOVE.W	D1, (A0)					;Change the yMax value	<8-CEL>
+@noCompare
+		TST.L	yMinPtr(A6)					;
+		BEQ.S	@noCompare2					;Nil so skip
+		MOVE.L	yMinPtr(A6), A0				;Get ptr
+		MOVE.W	glyph.yMin(A5), D1			;Init to max pos	
+		MOVE.B	addBot(A6), D0				;add bottom extra	
+		EXT.W	D0							;make it a word			
+		SUB.W	D0, D1						;Adjusted for style		
+		ADD.W	D2, D1						;adjust down if outline or shadow	<8-CEL>
+		MOVE.W	(A0), D0
+		CMP.W	D1, D0						;Init to max pos		
+		BLE.S	@noCompare2					;skip since not less than	
+		MOVE.W	D1, (A0)					;Update with the lesser value
+@noCompare2
+MORE	DBRA	D5,NEXTCH					;LOOP FOR count
+
+cleanUp
+		TST.L	yMaxPtr(A6)					;Get ptr	<7-CEL>
+		BEQ.S	@noFill						;Nil so skip
+		TST.L	yMinPtr(A6)					;test ptr   <7-CEL>
+		BEQ.S	@noFill						;Nil so skip
+		MOVE.L	yMaxPtr(A6), A0				;Get ptr
+		MOVE.W	(A0), D0
+		MOVE.L	yMinPtr(A6), A1				;Get ptr
+		CMP.W	(A1), D0
+		BGE.S	@noFill
+		CLR.W	(A1)						;Set Ymin to baseline
+		CLR.W	(A0)						;Set Ymax to baseline
+@noFill
+		MOVE.L	WidthTabHandle, A1			;Get the Width Table
+		MOVE.L	(A1), A1					;Width Ptr
+		MOVE.L	WidTabFont(A1), A0			;Got the FontHandle
+		MOVE.B	fontState(A6), D0			;preserve it until the next change
+		_HSetState							;restore purgability of original strike
+		MOVEM.L (SP)+,D3-D7/A2-A5			;RESTORE REGS
+		UNLK	A6
+		MOVE.L	(SP)+,A0					;Get return address
+		ADD		#PARAMSIZE,SP				;Pop the stack
+		JMP		(A0)						;Lets return to the music
+
+cacheErr
+		MOVE.W	#NO_CACHE_ERROR, intError(A6)	;return bad font error
+		BRA		cleanUp
+
+
+bitMapFontErr	
+		MOVE.W	#BITFONT_ERR, intError(A6)	;return bad font error
+		BRA		cleanUp
+
+SetOutlinePreferred		Proc	Export
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+;
+;	SetOutlinePreferred( outlinePreferred )
+;		Boolean			outlinePreferred;
+;
+;
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+			MOVE.L	(SP)+, A0						;get the return address
+			TST.B	(SP)							;Pop off true or false request
+			ADDQ	#2, SP							;Pop off Boolean
+			BNE.S	@yesSpline
+			BCLR	#splinePreferred, HiliteMode	;Clear the low mem bit
+			BRA.S	@donePreferred					;let’s get out of here
+@yesSpline
+			BSET	#splinePreferred, HiliteMode	;Set the low mem bit
+@donePreferred
+			MOVE.L	MinusOne,LastSpExtra			;note that widths are invalid
+			JMP		(A0)
+	
+GetOutlinePreferred	Proc	Export
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+;
+;	Boolean GetOutlinePreferred( )
+;
+;
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+			CLR.W	4(SP)
+			BTST	#splinePreferred, HiliteMode	;Is it outline preferred???
+			SNE		4(SP)							;Give back function result on stack
+			RTS
+	
+
+IsOutline	Proc	Export
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+;
+;	Boolean IsOutline(Point numer, Point denom)
+;  	
+;	Specifies whether or not the current font loaded is of type outline.
+;
+;
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+denom			EQU		8					;LONG, stretching var
+numer			EQU		denom+4				;LONG, stretching var
+isOutlineFlag	EQU		numer+4				;BOOLEAN, flag of result
+ParamSize		EQU		numer-4				;Size of parameters to pop off
+
+INREC			EQU 	-16 				;FMInput record
+VARSIZE 		EQU 	INREC
+
+		LINK	A6,#VARSIZE 				;ALLOCATE LOCALS
+		MOVEM.L D3-D6/A2-A4,-(SP)			;SAVE REGS
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A0				;GET CURRENT GRAFPORT
+;
+;  Call swapfont to set up width table and return numer,denom:
+;
+		LEA 	INREC(A6),A1				;POINT TO FMINPUT RECORD
+		MOVE	TXFONT(A0),(A1)+			;GET TXFONT FROM THEPORT
+		MOVE	TXSIZE(A0),(A1)+			;GET TXSIZE FROM THEPORT
+		MOVE.B	TXFACE(A0),(A1)+			;GET TXFACE FROM THEPORT
+		ST		(A1)+						;ALWAYS SET NEEDBITS TRUE
+		MOVE	DEVICE(A0),(A1)+			;GET DEVICE FROM THEPORT
+		MOVE.L	numer(A6), (A1)+			;INSTALL INPUT NUMER
+		MOVE.L	denom(A6), (A1)+			;INSTALL INPUT DENOM
+		CLR.L	-(SP)						;ROOM FOR FCN RESULT
+		PEA 	INREC(A6)					;PUSH INPUT RECORD
+		_FMSwapFont							;CALL FMSwapFont trap
+		MOVE.L	(SP)+,A0					;POP FMOUTPUT POINTER
+
+		CLR.W	isOutlineFlag(A6)
+		MOVE.L	WidthTabHandle, A0			;Get the Width table handle
+		MOVE.L	(A0), A0					;WidthPtr
+		TST.B	WidthIsSpline(A0)			;Test if spline
+		SNE		isOutlineFlag(A6)			;Give back function result on stack
+
+		MOVEM.L (SP)+,D3-D6/A2-A4			;RESTORE REGS
+		UNLK	A6
+		MOVE.L	(SP)+,A0					;Get return address
+		ADD		#PARAMSIZE,SP				;Pop the stack
+		JMP		(A0)						;Lets return to the music
+
+SetPreserveGlyph	Proc	Export
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+;
+;	SetPreserveGlyph( Boolean : preserveGlyphs)
+;
+;
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+			MOVE.L	(SP)+, A0						;Get return addr
+			TST.B	(SP)							;Pop off true or false request
+			ADDQ	#2, SP							;Pop off Boolean
+			BNE.S	@preserveGlyph
+			BCLR	#preserveGlyph, HiliteMode		;Clear the low mem bit
+			BRA.S	@donePreferred					;let’s get out of here
+@preserveGlyph
+			BSET	#preserveGlyph, HiliteMode		;Set the low mem bit
+@donePreferred
+			JMP		(A0)
+			Endproc
+
+GetPreserveGlyph	Proc	Export
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+;
+;	Boolean GetPreserveGlyph( )
+;
+;
+;——————————————————————————————————————————————————————————————————————————————————————————————————
+			CLR.W	4(SP)
+			BTST	#preserveGlyph, HiliteMode		;Is it glyph preservd???
+			SNE		4(SP)							;Give back function result on stack
+			RTS
+	
+	ENDPROC
+	END

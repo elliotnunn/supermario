@@ -1,0 +1,4849 @@
+;
+;	File:		WindowMgr.a
+;
+;	Contains:	Window Manager for MacIntosh User Interface ToolBox
+;
+;	Written by:	Andy Hertzfeld	May 23, 1982
+;
+;	Copyright:	© 1982-1993 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	  <SM40>	 9/30/93	IH		Change hasDisplayMgr feature to hasDisplayMgrWindows. This
+;									allows me to build the display manager in the gibbly without
+;									patching out the window manager on PDM.
+;	  <SM39>	  9/9/93	SAM		w/jdr Saved D1 thru a call to CopyRgn in DragTheRgn. Bad Ernie.
+;	  <SM38>	 9/2/93		SKH		The gray region was not being set up correctly for non-rounded GDevices
+;	  <SM37>	 6/22/93	kc		Check window title handle before dereferencing it in GetWTitle.
+;	  <SM36>	 6/17/93	KW		(LW11 fau) In the dragThumb routine, check to see if the
+;									emControlHandle is nil, and if so, do the normal case where we
+;									use Paintrgn. (LW10 fau) Cleaned up the use of DragFlag to
+;									always set and test a word.
+;	  <SM34>	 6/14/93	kc		Roll in Ludwig.
+;	   <LW6>	  5/3/93	chp		Flush the caches for WDEF handles smaller than 32 bytes. It used
+;									to be 16 bytes, but a 22-byte, unflushed, fake defproc has been
+;									discovered in Software Ventures Microphone II and Microphone
+;									Pro. (RADAR #1082386)
+;	   <LW4>	  3/8/93	fau		In the CallWindow routine, flushed the cache if the WDEF handle
+;									is less or equal to 16 bytes.  In previous ROMS, HLock was doing
+;									the cache flush, but SM Roms don't do that anymore.  See the
+;									comment for more details.
+;	  <SM34>	  6/7/93	CSS		Per Shannon Holland, fix another problem if the scroll bar was
+;									unable to get the colors it needed to draw the shaded colors on
+;									color monitor.
+;	  <SM33>	  6/3/93	CSS		Per Shannon Holland and KON, change the pattern to black when we
+;									do our special thumb dragging routine. This fixes a bug in PDM.
+;	  <SM32>	 5/17/93	CSS		Per code review with Mark Law and Kevin Williams of Cyclone:
+;									change test for whether we changed ports to WMgrCPort from a
+;									test of PortOffset (the failure case would be if local 0,0 is
+;									ever equal to global 0,0 which is possible even though unlikely)
+;									to testing if the port is color again.
+;	  <SM31>	  5/5/93	CSS		Make sure that the clip is wide open when we use the wmgrcport
+;									when dragging the thumb.
+;	  <SM30>	  5/5/93	CSS		Dean fixed a problem with <SM29> not working properly when
+;									drawing in black&white ports. Also, I cleaned up some of the
+;									code.
+;	  <SM29>	 4/30/93	CSS		Make _DragTheRgn drag a black box when we are dragging a scroll
+;									bar thumb. We tell this by using the DragFlag. So, we must be
+;									careful about clearing this flag after we are done with it. The
+;									clear state (DragFlag=0) is the original behavior of _DragTheRgn
+;	  <SM28>	  4/8/93	IH		Touch file to force rebuild because default state of
+;									hasDisplayMgr flag is changing for RISC builds. Display Manager
+;									will not initialize properly without recompiling this file.
+;	  <SM27>	 3/31/93	IH		Use Display Manager to Draw Desktop if hasDisplayMgr is true.
+;	  <SM26>	  2/4/93	CSS		Rollin Horror (WindowMgrPatch.a). Comments follow:
+;		<H5>	  7/8/92	SWC		Fixed a bug in InitWindowFramePatch that would cause it to fall
+;									thru to the ‘normal’ code even in the LCD case.
+;		<H4>	01/27/92	jmp		Removed the BoxFlag dependencies in these patches, and padded to
+;									match the TERROR/Zydeco ROM map.
+;		<H3>	 1/14/92	SWC		Added DB-Lite LC to the list of LCD screen machines. Changed
+;									boxTIM and boxTIMLC to boxPowerBook170 and boxPowerBook140.
+;		<H2>	10/29/91	jmp		Did a quick-and-dirty update to the InitWindowsFrame and
+;									InitWindowsRgn patches to support DB-Lites.  These routines need
+;									to be cleaned up soon.
+;	  <SM25>	 1/13/93	kc		Change BSR's to JSR's to appease the Linker gods.
+;	  <SM24>	12/10/92	HI		Modified CallWindow to save the A4 register for those WDEF's
+;									which trash it (specifically Dreams 1.1). (Hoon Im)
+;	  <SM23>	12/09/92	HI		Modified DragTheRgn to set/clear the emIsDragging field of
+;									ExpandMem upon entry/exit. This allows OSEventAvail to determine
+;									whether to execute the HelpMgr patch code or bypass it. The
+;									HelpMgr patch code causes the HelpMgr to remove/show balloons
+;									which trash the clipRgn, penPat, and penMode of WMgrPort; then,
+;									DragTheRgn canNOT properly remove the drag region. Bypassing the
+;									HelpMgr patch code solves this problem and IT IS supposed to
+;									behave this way in the first place. (Hoon Im)
+;	  <SM22>	 11/3/92	SWC		Changed PaletteEqu.a->Palettes.a.
+;	  <SM21>	 9/17/92	kc		Remove short branches.
+;	  <SM20>	 7/15/92	PN		Fix the bug in ShowHide where the show/hide flag was push on the
+;									stack before jsr Preshowhide. The byte gets pushed was not the
+;									flag but some garbage since the offset from (sp) was wrong.
+;	  <SM19>	 7/13/92	FM		Fixed a bug in send behind. In the case where a window had
+;									actually been moved forward by SendBehind I wasn't preserving
+;									the original nextWindow in a4. As a result the loop was
+;									comparing to whatever garbage happened to be in a4 which would
+;									often cause a crash. Basically just a dumb mistake on my part…
+;	  <SM18>	 6/22/92	RB		Rolled-in the Help Manager patch to ShowHide from
+;									BalloonPthc28.a, HMShowHidePatch.
+;	   <SM17>	 6/12/92	CSS		Roll-in Reality Changes:
+;									<10>	 6/11/92	FM		Removed the obsolete call to FixSMgrWorld.
+;	  <SM16>	 5/22/92	FM		
+;	   <SM16 >	  5/5/92	FM		Redo the windowmgr patches and bring up to date w/ Reality:
+;
+;									deleted calcviswindow since it is completely patched out. Kept SubStructLoop.
+;									deleted CheckUpdate because it is completely patched out
+;									and PaintBehind
+;									
+;									
+;									rolled in patchSectRgn. Just needed to call _ClipAbove instead of JSRing
+;									
+;									rolled in CheckPaintWhiteWord. Changed a tst.b to a tst.w
+;									
+;									rolled in PaintDesk from WindowMgrPatches.a into PaintTheDesk in the WindowMgr.a file.
+;									I renamed the routine PaintDesk (as in the patch file) and I took out the ROM85 check for
+;									color since the SuperMario ROM always has color. Took out export of NoDeskHook. Its no
+;									longer needed since (yet again) we're not jumping through the patch file anymore.
+;									
+;									rolled in PreShowHide more cleanly in ShowHide.
+;									
+;									Renamed InitWindows as InitWindowsGuts so that we wouldn't be bouncing between the patch 
+;									file, LayerMgr.c and here. The Dispatch Table now points to __InitLayers
+;									
+;									copied over Philips NewWindow and NewCWindow routines and broke them into procs.
+;									
+;									Renamed closewindow as closewindowguts so that it can be called from the layermgr
+;									and the dispatch table won't point at the patch file.
+;									
+;									rolled in patch to move ShowHide call in closewindow, in front of KillControls to eliminate unecessary redrawing
+;									
+;									Changed all frontwindow calls to JSR __ActiveWindow
+;									
+;									Rolled in ShowHideInShowWindow correctly (and cleaner). Otherwise we would be trashing A1 all the time.
+;									
+;									
+;									Roll in SetWTitleActivatePalette
+;									
+;									Rolled in PaintOneInMoveWindow w/ explanation.
+;									
+;									Cleaned up the ugly patchFrontWindow selectWindow case
+;									
+;									re-roll in the SendBehind patch instead of copyingy and pasting it so it is easier to read
+;									and more straightforaward.
+;									
+;									fixed bugs due to copy and paste in the BeginUpdate and EndUpdate
+;									proceudres.
+;									
+;									Rolled in PatchDragGrayRgn
+;									
+;									Renamed FindWindow as findlayer because thats what the patches did. Saves us going through
+;									the patch file.
+;
+;									ReRolled in the fixes to SetCtlColor and SetWinColor which were messy and wrong.
+;									Added utility routine GetRearWindow
+;
+;
+;		 <9>	 4/23/92	DTY		The last change leaves a region on the screen if you drag a
+;									window over the menu bar, then back again.  If the outline is
+;									just becoming visible again, don’t do the XorRgn.
+;		 <8>	 4/21/92	DTY		Get rid of the “fast paint” case in DragTheRgn.  _PaintRgn is
+;									fast enough now to deal with funky regions. Also reworked
+;									dragging algorithm so the region doesn’t flicker as it is
+;									dragged around.
+;		 <7>	 4/17/92	DTY		Dean hates the fact that everything’s lumped into one huge Proc.
+;									Make separate procs for all the routines.
+;		 <6>	 9/25/91	JSM		Also, stop using useless conditional HMenus.
+;		 <5>	 9/25/91	JSM		Cleanup header, remove use of hasCQD from this file since all
+;									future ROMs will have color QuickDraw.
+;		 <4>	 9/13/90	BG		Removed <3>. 040s are behaving more reliably now.
+;		 <3>	 7/19/90	BG		Added EclipseNOPs for flakey 040s.
+;		 <2>	 1/18/90	DVB		Include PalettePriv.a
+;	   <1.5>	 12/4/89	MSH		Moved a local label into a conditional.
+;	   <1.4>	10/31/89	dba		concatenated source files WindowMgr1.a, WindowMgr2.a and
+;									WindowMgr3.a to this one
+;
+;	Note: This file used to be split into four pieces.  Here are the modification histories for each:
+;
+;----------------------------------------------------------------------------------------------------
+;	Modification History for WindowMgr.a
+;----------------------------------------------------------------------------------------------------
+;
+; 1.3	SES 08/22/1989  Removed references to nFiles.
+; 1.2	DAF 05/30/1989 Added INCLUDE of PaletteEqu.a
+; 1.1	CCH 11/10/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; 1.3	GGD 11/ 2/1988 Got rid of machine specific conditionals in favor of
+;		feature based conditionals.
+; 1.2	PKE 10/27/1988 Added reference to FixSMgrWorld
+;•1.1	CCH 9/23/1988 Got rid of inc.sum.d and empty nFiles
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+;
+;	 04-Aug-82	AJH  added DocumentProc
+;	 10-Aug-82	AJH  got rid of scrapWindow,getSysWindows,GetGrayRgn
+;	 31-Aug-82	AJH  added GrowWindow
+;	 07-Sep-82	AJH  added DrawMBar external reference
+;	 22-Sep-82	AJH  integrate string routines
+;	 25-Sep-82	AJH  added dBoxWProc,TrackGoAway
+;	 29-Sep-82	AJH  made CallWindow externally accessible
+;	 09-Oct-82	AJH  converted to QuickDraw Trap interface
+;	 16-Oct-82	AJH  added copyRight notice
+;	 01-Nov-82	AJH  added FindWindow
+;	 14-Nov-82	AJH  added SelectWindow
+;	 20-Nov-82	AJH  changed SendToBack to SendBehind
+;	 21-Nov-82	AJH  got rid of DiffVisBehind
+;	 24-Dec-82	AJH  made DocumentProc,DBoxProc resources
+;	 02-Jan-83	AJH  made ShowHide externally accessible
+;	 31-Jan-83	AJH  added CloseWindow
+;	 07-Feb-83	AJH  GetSysPorts -> GetWmgrPort
+;	 03-Apr-83	AJH  Added interface for PinRect, DeltaPoint
+;	 28-Apr-83	AJH  move PinRect to cursor core
+;	 23-Jun-83	SC	 Multi-window ornaments (Changed SystemKind test in wmgrasm3)
+;	 05-Aug-83	AJH  Added DrawGrowIcon
+;	 12-Aug-83	AJH  added alternate entry point to DragTheRgn (DragGrayRgn)
+;	 09-Sep-83	AJH  made WmgrGray external
+;	23 Jan 85  LAK  Adapted for new equate files.;
+;	23-Jan-85  EHB	 added patches: cancel pending paintBehind; reset alarm parity;
+;					 say that window world exists.
+;	23-Jan-85  EHB	 Made CloseWindow cancel pending activate events; made it
+;					 properly update curActivate in DoActivate
+;	23-Jan-85  EHB	 Fixed SetWTitle so no flicker if structure doesn't change
+;	23-Jan-85  EHB	 fixed FrontWindow to return NIL if no window world
+;	31 Jan 85  EHB	 When a window is closed or disposed, and thePort was set to
+;					 that window, set thePort to WMgrPort instead.
+;	10-May-85  EHB	 Made the drawing in InitWindows really clean
+;	 9-Jul-85  EHB	 Added ROMMapInsert for ROM resources
+;	 5-Aug-85  EHB	 Made initwindows call menu routine CalcMBHeight so that the menu
+;					 bar height always correct for calc'ing regions.
+;			   EHB	 Added SetWPort and RestorePort to CallWindow so that defproc can
+;					 call GetFontInfo on the window manager port
+;	 6-Aug-85  EHB	 fixed DragWindow's pinning for variable menu heights
+;					 Added .REF of CalcMBHeight from menu manager
+;	29-Aug-85  EHB	 In SetWTitle check for NIL window title handle
+;	29-Aug-85  EHB	 Added routine TrackBox for tracking zoom boxes etc...
+;	29-Aug-85  EHB	 Added routine ZoomWindow(window:windowPtr;partCode:integer);
+;					 to do it, split off MoveGuts and SizeGuts from Move- and SizeWindow
+;	09-Sep-85  EHB	 Pull right update byte off stack in sizewindow.
+;	23-Oct-85  EHB	 save D1 across FindWindow to make OverView work
+;_______________________________________________________________________
+;
+; Post Lonely Hearts
+;_______________________________________________________________________
+;
+; <19feb86>	BBM Made some modifications to work under MPW
+;_______________________________________________________________________
+;
+; <C59/30Jun86>	DAF	Color window manager support for nuMac added (no 020 code)
+; <C75/15Jul86> DAF Updated default color constants for new QD
+; <C79/21Jul86> DAF Made a fix to GoPaintOne to correctly preserve colors
+; <C203/06Oct86> DAF Converted to RGBColor specifications everywhere.
+;					Added color window manager port.  Added new call
+;					GetCWmgrPort.
+; <C388/09Nov86> DAF reverted to setting wmgrPort rather than wmgrCPort for
+;					 compatibility
+; <C424/18Nov86> DAF Made FindWindow call MBarProc (menuMgr) to test for menubar hits
+;					 To do this, CallMBarProc is imported.
+; <C458/23Nov86> DAF Added SetDeskCPat, removed SetDeskColor
+; <C491/08Dec86> DAF Added GetWVariant
+; <C906/13oct87> MSH Port to HcMac (Laguna). Menu bar proc call.
+; <C914/29Oct87> rwh Port to Modern Victorian
+; <C949/08Nov87> DAF Updated PaintDesk to switch to system heap when using deskPPAT.
+;					 Fixed CallWindow to call syserror if WDEF LoadResource didn't work.
+;
+; <1.2/30May89>  DAF Added PaletteEqu.a.  Fixed up 32-bit mode handling of auxWinRecs.
+;					 Updated palette disposal in CloseWindow.
+;
+;----------------------------------------------------------------------------------------------------
+;	Modification History for WindowMgr1.a
+;----------------------------------------------------------------------------------------------------
+;
+; 1.2	SES 08/22/1989  Removed references to nFiles.  Updated equates accordingly.
+; 1.1	CCH 11/10/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; 1.1	GGD 11/ 2/1988 Got rid of machine specific conditionals in favor of
+;		feature based conditionals.
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+;
+;	 20-Aug-82	AJH  Fixed bug in InsertWindow when inserting 1st one in list
+;	 06-Sep-82	AJH  Made InsertWindow/DeleteWindow handle empty list
+;	 08-Oct-82	AJH  Converted for QuickDraw trap interface
+;	 21-Nov-82	AJH  got rid of DiffVisBehind (no-one was using it)
+;	 21-Nov-82	AJH  Added string routines (were in WmgrAsm2)
+;	 23-Nov-82	AJH  Made InsertWindow clear NextWindow link to avoid circles
+;	 19-Dec-82	AJH  Installed deskHook hook for painting the desk, use deskPat
+;	 23-Jan-83	AJH  Made it use deskHook for inDesk in FindWindow
+;	 10-Jun-83	AJH  Saved code in NewString, SetString using Capps' routines
+;	 15-Aug-83	AJH  Monster code krunch following review (Donn, Jerome)
+;	 01-Sep-83	AJH  Changed booleans in PaintOne to be bytes instead of words
+;	 28-Oct-85	EHB  In ShowHide, fixed compare of booleans for equality.
+;
+;	<C59/30Jun86> DAF	Changed GoPaintOne and desktop filling routines to
+;						support color in nuMac
+;	<C79/21Jul86> DAF 	Fixed color setting in GoPaintOne.
+;   <C106/5Aug86> EHB	Added routine PortToMap
+;						Make sure we use the right BOUNDS for color ports
+;						(only needed for nuMac, but works for old)
+;	<C203/06Oct86> DAF	Converted to RGB color specifications.  Changed
+;						manager to use color wmgrPort.  Disabled whiteRgn
+;						erase in PaintBehind for nuMac only.  Fixed
+;						PaintWhite to work in nuMac.
+;	<C388/09Nov86> DAF 	reverted to setting wmgrPort rather than wmgrCPort for
+;					 	compatibility
+;	<C666/22Jan87> DAF 	Fixed NoDeskHook to eliminate update bug, and use pRam copy
+;						of deskCPatEnable.
+;	<18Jun87>	   DAF	Conditionalized Palette Mgr patch to ShowHide.
+;	<C914/29Oct87> rwh  Port to Modern Victorian
+;   <C949/08Nov87> DAF	Updated PaintDesk to switch to system heap when using deskPPAT.
+;
+;----------------------------------------------------------------------------------------------------
+;	Modification History for WindowMgr2.a
+;----------------------------------------------------------------------------------------------------
+;
+; 1.7	SES 08/22/1989  Removed references to nFiles.  Updated equates accordingly.
+;•1.6	DAF 06/30/1989 Override of previous version due to lack of space on
+;		Reality
+; 1.6	DAF 06/30/1989 Cleared hi half of register in EORSymbol's call to WDEFs
+; 1.5	DAF 06/28/1989 Moved WWExist flag setting to end of routine (after
+;		window world really IS set up)
+; 1.4	DAF 05/30/1989 Fixed dispose of AuxWinRecs in 32-bit addressing mode.
+;		Updated palette dispose tests
+;•1.3	DAF 04/27/1989 Improved color desktop handling in InitWindows
+; 1.2	MSH 03/01/1989 Added support for external video (Topanga) with Dave F's
+; 		help.
+; 1.1	CCH 11/10/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; 1.2	GGD 11/ 2/1988 Got rid of machine specific conditionals in favor of
+;		feature based conditionals.
+; 1.1	PKE 10/27/1988 Added code to InitWindows for in-ROM ScriptManager.
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+;
+;	04-Aug-82  AJH	'TenBytExit' label added add end of 'SizeWindow'
+;	10-Aug-82  AJH	 Got rid of GetSysWindows,GetGrayRgn,scrapWindow;
+;	20-Aug-82  AJH	 Added InitMsg call to NewWindow; DisposeMsg call to DisposeWindow
+;	29-Aug-82  AJH	 made InitWindowsinitialize IShapeHook for controls
+;	06-Sep-82  AJH	 made CheckUpdate handle empty window list
+;	06-Sep-82  AJH	 got rid of Alert and DialogWindow as special ones
+;	07-Sep-82  AJH	 saved code in InitWindow using common code to draw menu bar
+;	12-Sep-82  AJH	 made windowMgr calcRgns for invisible windows instead of procs
+;	19-Sep-82  AJH	 made InitWindow set up symbol bitmap low memory pointers
+;	22-Sep-82  AJH	 integrated string routines
+;	26-Sep-82  AJH	 made DisposeWindow dispose the window's controls
+;	28-Sep-82  AJH	 made TrackGoAway send message to XOR, changed CallDWindow
+;	05-Oct-82  AJH	 Fixed HiliteWindow clip bug, made code saving optimizations
+;	10-Oct-82  AJH	 Converted to QuickDraw trap interface
+;	16-Oct-82  AJH	 Made dot-size independent
+;	14-Nov-82  AJH	 Added SelectWindow
+;	16-Nov-82  AJH	 Made Initwindows initialize TaskLock
+;	19-Nov-82  AJH	 Made it use more traps for internal calls
+;	21-Nov-82  AJH	 Fixed thePort trashing bug in HiliteWindow, moved string routines
+;	24-Nov-82  AJH	 Made selectWindow call BTF1 instead of BTF
+;	19-Dec-82  AJH	 Added initialization of cur(De)active, deskHook
+;	20-Dec-82  AJH	 Added SelectWindow calls to New,Dispose,Move
+;	21-Dec-82  AJH	 Made SelectWindow post activate/deactivate events
+;	22-Dec-82  AJH	 Fixed region dispose bug in MoveWindow
+;	24-Dec-82  AJH	 changed initialization, defProcs as resources for 2.0
+;	02-Jan-83  AJH	 made disposeWindow kill a the picture if its installed
+;	09-Jan-83  AJH	 removed size-checking in SizeWindow
+;	12-Jan-83  AJH	 rewrote CheckUpdate to support pictures
+;	31-Jan-83  AJH	 clear high byte when loading the defProc
+;	31-Jan-83  AJH	 no more special casing of alertWindows; fixed HideWindow problem
+;	31-Jan-83  AJH	 added CloseWindow
+;	07-Feb-83  AJH	 made NewWindow generate updates; no more deskPort
+;	26-Feb-83  AJH	 fixed select bug when disposing the last window
+;	27-Feb-83  AJH	 saved some code in CloseWindow by using ClosePort
+;	07-Mar-83  AJH	 made CloseWindow dispose of the title string
+;	09-Mar-83  AJH	 fixed bug introduced by disposing the title string
+;	02-Apr-83  AJH	 saved code by not initing wmgrPort visRgn
+;	03-Apr-83  AJH	 made NewWindow use defProc 0 if it can't find one
+;	05-Apr-83  AJH	 made InitWindows initialize the ghostWindow ptr
+;	10-May-83  AJH	 made InitWindows init CloseOrnHook
+;	09-Jun-83  AJH	 made InitWindows only draw minimal black for corners
+;	10-Jun-83  AJH	 new, much improved MoveWindow (blits as much as it can)
+;	16-Jun-83  AJH	 PaintBehind a little earlier in MoveWindow
+;	05-Aug-83  AJH	 Made NewWindow default textFont to 1
+;	06-Aug-83  BLH	 Moved oneOne, minusOne initialization to Start;
+;					 Moved DragHook, TaskLock, CloseOrnHook, DeskHook to
+;					 segment loader.
+;	13-Aug-83  AJH	 Made InitWindows do a ShowCursor
+;	15-Aug-83  AJH	 Monster code krunch after review (Donn, Jerome)
+;	02-Sep-83  AJH	 masked off high-order bits in user's storage ptr
+;	02-Sep-83  AJH	 made it use least recent deactivate
+;	12-Sep-83  AJH	 made it post CurDeKind in CloseWindow and when its
+;					 deactivated
+;	23-Jan-85  EHB	 added patches: cancel pending paintBehind; reset alarm parity;
+;					 say that window world exists.
+;	23-Jan-85  EHB	 Made CloseWindow cancel pending activate events; made it
+;					 properly update curActivate in DoActivate
+;	23-Jan-85  EHB	 Fixed SetWTitle so no flicker if structure doesn't change
+;	31 Jan 85  EHB	 When a window is closed or disposed, and thePort was set to
+;					 that window, set thePort to WMgrPort instead.
+;	10-May-85  EHB	 Made the drawing in InitWindows really clean
+;	 9-Jul-85  EHB	 Set flag to Get new window resource from ROM if possible
+;	10-Jul-85  EHB	 Set flag to reload WDEF from ROM if possible too
+;	 5-Aug-85  EHB	 Initwindows calls CalcMBHeight to set up height of menu bar
+;	29-Aug-85  EHB	 In SetWTitle check for NIL window title handle
+;	29-Aug-85  EHB	 Added routine TrackBox for tracking zoom boxes etc...
+;	29-Aug-85  EHB	 Added routine ZoomWindow(window:windowPtr;partCode:integer);
+;					 to do it, split off MoveGuts and SizeGuts from Move- and SizeWindow
+;	09-Sep-85  EHB	 Pull right update byte off stack in sizewindow.
+;	28-Oct-85  EHB	 In ShowWindow, set boolean WVISIBLE to $01, not $FF
+;	03-Nov-85  EHB	 Get Window Ptr into A3 BEFORE calling CallWCalc
+;
+;----------------------------------------------------------------------------
+;
+;  	Post Lonely Hearts Changes
+;
+;	<C59/30Jun86> DAF	Changed InitWindows to allocate window and control Aux
+;						structures and desk colors
+;	<C75/15Jul86> DAF	Updated default colors to work w/new QD
+;   <C106/5Aug86> EHB	Make sure we use the right BOUNDS for color ports
+;						(only needed for nuMac, but works for old)
+;   					Added NewCWindow.
+;	<C168/17Sep86> DAF	Added InitMenus to InitWindows so that menuBar def
+;						proc is initialized before attempting to clear
+;						the bar region.  THIS NEEDS A BETTER RESOLUTION!
+; 	<C203/08Oct86> DAF 	updated wmgr to RGBColor.  Revamped InitWindows.
+; 	<C388/09Nov86> DAF  reverted to setting wmgrPort rather than wmgrCPort for
+;					 	compatibility
+;	<C424/18Nov86> DAF	converted InitWindows to use look in system file, then ROMresources
+;						for default window and control colors (wctb=0,cctb=0).  Added
+;						DeskCPat init stuff in InitWindows.  Also made some 32-bit changes.
+;	<C491/08Dec86> DAF	general cleanup from code review.  Added GetWVariant.
+;						Restructured desk pattern stuff in InitWindows.
+;   <C589/03Jan87> EHB  Added SmartMove routine for multiple screens
+;	<C591/04Jan87> DAF	Improved 32-bit handling.  When MMUFlag=1, moved variant code to
+;						auxWinRec
+;	<C612/11Jan87> DAF	set visible flag in off at beginning of NewWindow, so
+;						SetWinColor doesn't try to draw with invalid portRect in 32-bit.
+;	<C666/21Jan87> DAF	Fixed LoadResource in CallWindow.  Switched to using pRAM copy
+;						bit (pCDeskPat) to tell which deskPat to use.  Switched to using
+;						rGetResource when loading wctb,cctb in InitWindows.  Switched 32-bit
+;						stuff to use MMU32Bit (the correct flag)
+;	<C725/31Jan87> DAF	Adjusted InitWindows to read binary deskpat always.  Also does not
+;						look in ROM for ppat=16.
+;	<C768/06Feb87> EHB  Make sure that each device is active in InitWindows.
+;
+;------ Macintosh II is born ------------------------------------------------
+;
+;	<12May87> 	   DAF	Rolled in Palette Manager patches from ROM78Fix
+;	<C914/29Oct87> rwh	Port to Modern Victorian
+;   <C949/08Nov87> DAF	Fixed CallWindow to call syserror if WDEF LoadResource didn't work.
+;						This is better since Juggler can gracefully terminate this app.
+;
+;------ Aurora -------------------------------------------------------------
+;
+;	<1.3>		   DAF	Improved DeskCPat handling in InitWindows
+;	<1.4>		   DAF	Updated CloseWindow to correctly handle the auxWinRecs in 32-bit addressing
+;						mode.  Also, dvb had an update to the Palette disposal routines.
+;	<1.5>		   DAF	Moved clearing of WWExist to end of InitWindows (when it's really done!)
+;						rather than at beginning.  This helps out the Palette manager when it's
+;						dealing with the color apple in the menubar during InitWindows' InitMenus call.
+;	<1.6>		   DAF	Fixed an old bug for Ernie.  TrackGoAway passes a word-sized part code to the
+;						WDEF in a long-size field.  Make sure that the hiword of the long is clear.
+;
+;----------------------------------------------------------------------------------------------------
+;	Modification History for WindowMgr3.a
+;----------------------------------------------------------------------------------------------------
+;
+; 1.5	DAF 07/23/1989 Corrected 32-bit mode bug in SetWinColor for dialogs.
+;		Updated obsolete equate names
+; 1.4	DAF 07/14/1989 FOR AURORA BUILD - Corrected DeAlAux in
+;		SetWinColor/SetCtlColor to fix the auxWinList/auxCtlList problems in
+;		32-bit addressing mode.
+; 1.3	DAF 05/30/1989 Improved 32-bit addressed behaviour of SetAuxWin et.al.
+;•1.2	DAF 04/27/1989 Made sure SetDeskCPat released old desktop PixPat before
+;		setting new one.
+; 1.1	CCH 11/10/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; 1.4	GGD 11/ 2/1988 Got rid of machine specific conditionals in favor of
+;		feature based conditionals.
+; 1.3	rwh 9/24/1988 fixed added NuMac conditionals to also be for onMvMac
+; 1.2	DAF 6/17/88 added conditionals for numac that were left out.
+; 1.1	CSL 4/18/88 fixed bug introduced by rolling in code for NuMac.
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+;
+;	 20-Aug-82	AJH  Fixed DragWindow bug in computing position when origin <> (0,0)
+;	 21-Aug-82	AJH  Made InvalRect/Rgn share more code with ValRect/Rgn
+;	 21-Aug-82	AJH  Added boundRect to DragTheRgn so it can be used by Controls
+;	 29-Aug-82	AJH  Made DragTheRgn use a pattern from global area (dragPattern)
+;	 30-Aug-82	AJH  Added slopRect parameter to dragTheRgn
+;	 06-Sep-82	AJH  Got rid of special casing of alert/dialog windows
+;	 06-Sep-82	AJH  Added GrowWindow
+;	 08-Sep-82	AJH  Fixed BeginUpdate -- it was trashing A3
+;	 09-Sep-82	AJH  Put bounds (size) checking into GrowWindow
+;	 28-Sep-82	AJH  Changed FrontWindow to skip alertKind only, added CallDragHook
+;	 05-Oct-82	AJH  Made some code saving optimizations
+;	 06-Oct-82	AJH  Made dragging pin instead of freezing (DragTheRgn,GrowWindow)
+;	 10-Oct-82	AJH  Converted to QuickDraw trap interface
+;	 16-Oct-82	AJH  Made independent of screen size
+;	 25-Oct-82	AJH  Made FrontWindow return frontmost visible window
+;	 01-Nov-82	AJH  Added control-less FindWindow to window manager
+;	 07-Nov-82	AJH  Tweaked delay in DragTheRgn for 512 machine
+;	 16-Nov-82	AJH  Made DragWindow look at command key state for ClipAbove
+;	 16-Nov-82	AJH  Changed menuBar hit-test in FindWindow to 20 pixels
+;	 20-Nov-82	AJH  Changed SendToBack to SendBehind
+;	 20-Nov-82	AJH  Finally fixed bounds pinning in GrowWindow
+;	 24-Nov-82	AJH  made bringToFront clear DragFlag as default entry
+;	 20-Dec-82	AJH  made bringToFront do nothing if its already the front one
+;	 21-Dec-82	AJH  made SendBehind call SelectWindow when appropriate
+;	 04-Feb-83	AJH  added actionProc to DragTheRgn
+;	 26-Feb-83	AJH  made DragTheRgn distinguish between aborted and not moved
+;					 fixed DragWindow accordingly.
+;	 05-Apr-83	AJH  made FrontWindow ignore the ghostWindow
+;	 28-Apr-83	AJH  moved PinRect to cursorCore
+;	 26-Jun-83	AJH  fixed keyMap clobber in DragWindow;
+;					  pinned users dragRect at top (12)
+;	 01-Jul-83	SC	 fixed bug in DragWindow created by above
+;	 05-Aug-83	AJH  Added DrawGrowIcon
+;	 15-Aug-83	AJH  code krunch after review
+;	 30-Aug-83	AJH  fixed restorePort bug and saved code in SendBehind (thanks,Donn)
+;	 07-Sep-83	AJH  fixed stack offset bug in SendBehind (introduced 30-Aug)
+;	 23-Jan-85	EHB  fixed FrontWindow to return NIL if no window world
+;	  5-Aug-85	EHB  fixed DragWindow's pinning for variable menu heights
+;	 23-Oct-85	EHB  save D1 across FindWindow to make OverView work
+;
+;-------------------------------  Lonely Heifer ROMs  ----------------------------------
+
+;	 14-Jan-86	EHB  Fixed infinite loop bug in DragTheRgn (@DragDelay)
+; <C106/5Aug86> EHB	 Make sure we use the right BOUNDS for color ports
+;						(only needed for nuMac, but works for old)
+;<C392/10Nov86> DAF	 Fixed DragGrayRgn and GrowWindow to save and restore penstate in
+;						both wmgrPort and wmgrCPort
+;<C407/16Nov86> DAF	 Fixed DeAlAux (in SetWinColor) to not dispose default winCTable
+;<C424/18Nov86> DAF  Made FindWindow call MBarProc (menuMgr) to test for menubar hits
+;<C458/23Nov86> DAF	 Removed SetDeskColor.  Added DeskCPat.
+;<C46x/23Nov86> EHB  Disable all drag bounds for multiple screens
+;<C467/25Nov86> EHB  Fixed bug in merged code in DragTheRgn
+;<C591/04Jan87> DAF	 Made small fixes in SetWinColor for 32-Bit Support
+;<C612/11Jan87> DAF	 Fixed some small bugs introduced in SetWinColor in C591.
+;					 Corrected resource bit test in SetWinColor (it was backward!)
+;<C616/12Jan87> DAF	 Changed _ShowControl in SetCtlColor to _Draw1Control so that it
+;					 would correctly redraw.
+;<C624/13Jan87> EHB	 Added fast version of dragTheRgn (if region is rect)
+;<C666/22Jan87> DAF	 Changed SetDeskCPat to use pCDeskPat and to switch to binary pat if
+;					 pixPatHandle is NIL.
+;<C767/06Feb87> DAF	 Fixed special case testing in SetGuts so that it wouldn't dereference
+;					 a -1 handle.
+;<C835/20Feb87> DAF	 Fixed stack trashing problem in SetDeskCPat(NIL).
+;<C841/21Feb87> DAF	 Corrected C835.
+;<C914/29Oct87> rwh  Port to Modern Victorian
+;<C970/22Nov87> DAF	 Fixed register trashing bug in GetPinMouse to correct extra update
+;					 problem in GrowWindow
+;
+;--------- Aurora!! ------------------
+;
+;<1.2/27Apr89>	DAF	 Rolled patch to SetDeskCPat into source.  Now the desk pix pat is disposed
+;					 when a new one is set (instead of overwriting!).
+;<1.3/30May89>	DAF	 Updated AuxWin/CtlRec handlers to be more graceful in 32-bit addressing mode
+;
+;<1.5/23Jul89>	DAF	 Corrected 32-bit bug in SpecAlloc.  Updated equate names in this file
+;					 to the official MPW names (this file doesn't need nToolEqu.a anymore).
+;
+
+				LOAD	'StandardEqu.d'
+				INCLUDE	'ColorEqu.a'
+				INCLUDE 'ScriptPriv.a'
+				INCLUDE	'Palettes.a'
+				INCLUDE	'PalettePriv.a'
+				INCLUDE 'Balloons.a'			; 
+				INCLUDE 'BalloonsPriv.a'		; 
+				INCLUDE 'ControlPriv.a'
+		IF hasDisplayMgrWindows THEN					;														<SM81>
+				INCLUDE 'Displays.a'		; 
+				INCLUDE 'DisplaysPriv.a'		; 
+		ENDIF
+
+				MACHINE MC68020							; needed for cache flush <LW4> fau
+
+; *** move these equates into system equate files
+
+CurLayer	EQU		$A90
+WMgrUpdate	EQU		$AFC
+
+PortToBitMap	Proc	Export
+
+; Given a window pointer in A0, return the bitmap/pixmap pointer in A0
+
+				ADDQ	#PORTBITS,A0				;POINT TO BITMAP/PIXMAP HANDLE
+				TST		ROWBYTES(A0)				;BITMAP OR PIXMAP HANDLE?
+				BPL.S	GOTBITMAP					;=>JUST A BITMAP
+				MOVE.L	BASEADDR(A0),A0				;ELSE GET PORT'S PIXMAP HANDLE
+				MOVE.L	(A0),A0						;GET PIXMAP POINTER
+GotBitMap
+				RTS
+				EndProc
+			
+;
+; SetUpColor takes a window part identifier in D0, and the windowRecord
+;	in A0, finds the appropriate rgb, and returns with a pointer to
+;	it, ready for RGBForeColor.  The auxRec is not locked, so RGBForeColor
+;	should be called immediately.  If the desired window part is not found,.
+;	the first color in the auxRec is used.
+
+SetUpColor	Proc	Export
+			MOVEM.L	D1/D3,-(SP)			; save some registers
+			MOVE.W	D0,D3				; keep the window part
+			SUBQ	#4,SP				; make room for var ptr result
+			CLR.B	-(SP)				; make room for boolean result
+			MOVE.L	A0,-(SP)			; push window ptr
+			PEA		6(SP)				; push pointer to placeholder
+			_GetAuxWin					; get the window aux rec
+			ADDQ	#2,SP				; pitch the boolean
+			MOVE.L	(SP)+,A0			; get the auxWinHandle
+			MOVE.L	(A0),A0				; get the auxWinPtr
+			MOVE.L	awCTable(A0),A0		; get the color table handle						<1.2>
+			MOVE.L	(A0),A0				; get a cTabPtr
+
+			MOVE.W	CTSize(A0),D1		; get the color table size
+			MULU	#CTEntrySize,D1		; convert to color table index
+LegalIndex
+			CMP.W	CTTable+value(A0,D1),D3	; is this the one?
+			BEQ.S	FoundIt				; if equal, then done
+			SUB.W	#CTEntrySize,D1		; try the previous one
+			BGE.S	LegalIndex			; loop while index positive
+			MOVEQ	#0,D1				; OK, use the first one
+FoundIt
+			LEA		CTTable+rgb(A0,D1),A0 ; get the address of the color to use
+			MOVE.L	A0,D0				; we'll need A0 in a second
+			MOVEM.L	(SP)+,D1/D3			; restore the registers
+			MOVE.L	(SP)+,A0			; get the return address
+			MOVE.L	D0,-(SP)			; move the ret addr back
+			JMP		(A0)				; return to caller
+			EndProc
+			
+;
+; FUNCTION NewString(string): StringHandle
+;
+;	allocates a string as a relocatable object on the heap and returns
+;	a handle to it
+;
+;
+
+NewString		Proc	Export
+				Import	GetSPtr
+
+				BSR.S	GetSPtr 		;A0 points to string, D0 has length
+				_PtrToHand				;allocate handle in A0
+				MOVE.L	A0,8(SP)		;return it as the result
+
+				MOVE.L	(SP)+,(SP)		;strip parameter
+				RTS 					;return to caller
+				EndProc
+				
+; GetSPtr is common code for NewString and SetString.  It gets the pointer
+; to the string in A0 and its length in D0
+
+GetSPtr			Proc	Export
+				MOVE.L	8(SP),A0		;get the string pointer
+				MOVEQ	#0,D0			;clear out high part of D0
+				MOVE.B	(A0),D0 		;get the length
+				ADDQ	#1,D0			;bump to include length byte
+				RTS
+				EndProc
+				
+;
+; PROCEDURE SetString(h: StringHandle; s: string)
+;
+;	 set the specified string handle to the specified string
+;
+SetString		Proc	Export
+				Import	GetSPtr
+				Import	TwoParmExit
+				
+				MOVE.L	8(SP),A1				;get the stringHandle
+				BSR.S	GetSPtr 				;set up A0 and D0
+				_PtrToXHand 					;let Capps do the work
+				BRA		TwoParmExit 			;standard exit saves code				<27oct85> BBM
+				EndProc
+				
+;
+; Utility PrevWindow(windowPtr):windowPtr
+;
+;	given a window in the display list, find the one in front of it.  If
+; the parameter is NIL, find the last one in the list.	If the parameter
+; is the first in the list, return NIL. If not found, use last window
+;
+;	this utility routine has a register interface to save code.  On entry,
+;	D0 contains the window to be searched for.	On exit, A0 contains the
+;	result.  A0, A1 and D0 are trashed -- all other registers are preserved.
+
+PrevWindow		Proc	Export
+				MOVE.L	D0,-(SP)				;save window to search for
+
+				MOVE.L	WINDOWLIST,A1			;get the 1st entry in the window list
+				SUB.L	A0,A0					;set prev to NIL
+
+PrevLoop		
+				CMP.L	(SP),A1 				;does it match the parameter?
+				BEQ.S	DONEPWINDOW 			;if so, we're done
+				MOVE.L	A1,A0					;update prev pointer
+				MOVE.L	NEXTWINDOW(A0),A1		;get the next one in the list
+				MOVE.L	A1,D0					;is it NIL?
+				BNE.S	PrevLoop				;if not,loop
+
+DonePWindow 	
+				MOVE.L	(SP)+,D0				;restore D0
+				RTS
+				EndProc
+				
+;
+; PROCEDURE InsertWindow(window,behind);
+;
+;	insert this behind into the window list behind the one specified by the
+; "behind" parameter.  If behind = NIL, insert it as the last one in the
+; list.  If this is the first window (windowList = NIL), insert as first one.
+; Make sure the window's windowLink ptr is initialized to NIL.
+;
+
+InsertWindow	Proc	Export
+				Import	PrevWindow
+				Export	TwoParmExit
+				
+				MOVE.L	8(SP),D1				;get window to insert
+				MOVE.L	D1,A1					;get ptr in A-reg
+				CLR.L	NextWindow(A1)			;make its link NIL
+
+				TST.L	WindowList				;is the windowList empty?
+				BNE.S	@1						;if not, go look at behind
+;
+; its the first one ever so install it at the head of the list
+;
+				MOVE.L	D1,WindowList			;make it the head of the list
+				BRA.S	TwoParmExit 			;all done!
+;
+; check to see if we should insert it as the last one (behind = NIL).
+;
+@1				MOVE.L	4(SP),D0				;behind = NIL ?
+				BEQ.S	INSERTLAST
+;
+				MOVE.L	D0,A0					;get behind
+				MOVE.L	NEXTWINDOW(A0),NEXTWINDOW(A1)  ;update the link of new one
+				MOVE.L	A1,NEXTWINDOW(A0)		;insert new one in list
+				BRA.S	TWOPARMEXIT 			;all done
+;
+; insert it as the last one in the list
+;
+
+InsertLast		
+				MOVEQ	#0,D0					;find the last one
+				BSR.S	PREVWINDOW				;find last window in list
+				MOVE.L	D1,NEXTWINDOW(A0)		;insert the window in the list
+;
+
+TwoParmExit 	
+				MOVE.L	(SP)+,A0				;get return address
+				ADDQ	#8,SP					;strip parameters
+				JMP 	(A0)					;all done -- return to caller
+				EndProc
+				
+;
+; PROCEDURE DeleteWindow(window)
+;
+;	 delete the specified window from the list
+;
+;
+
+DeleteWindow	Proc	Export
+				Import	PrevWindow
+				Import	OneParmExit
+				Export	OneParmExit
+				Export	WRts1
+				
+				MOVE.L	4(SP),D0				;get the parameter window
+				BSR		PREVWINDOW				;find the one before it
+;
+				MOVE.L	A0,D1					;is it the first window?
+				BNE.S	@1						;if not, skip adjust
+
+				LEA 	WindowList-NextWindow,A0 ;make it point to windowList
+
+@1				MOVE.L	D0,A1					;get the window to be deleted
+				MOVE.L	NEXTWINDOW(A1),NEXTWINDOW(A0) ;splice out of the list
+OneParmExit 	
+				MOVE.L	(SP)+,(SP)				;strip sole parameter
+WRts1			
+				RTS
+				EndProc
+				
+
+;
+; PROCEDURE ClipAbove(window)
+;
+; set the clipRgn of the window manager's port to be the gray Rgn intersected
+; with the current clipRgn, minus the structRgns of all the windows above
+; the parameter window.
+;
+
+ClipAboveGuts	Proc	Export
+				Import	SubStructLoop
+				
+				MOVEM.L D4/A2-A3,-(SP)			;save work registers
+				MOVE.L	WMGRPORT,A0 			;get ptr to the windowMgr port
+				MOVE.L	CLIPRGN(A0),D4			;get wmgrPort clipRgn handle
+				MOVE.L	16(SP),A2				;get the window
+
+				MOVE.L	D4,-(SP)				;push clipRgn
+				MOVE.L	GRAYRGN,-(SP)			;push grayRgn
+				MOVE.L	D4,-(SP)				;clipRgn gets the result
+				_SectRgn						;SectRgn(clipRgn,grayRgn,clipRgn)
+;
+; now subtract all windows above the parameter window from the clipRgn
+;
+
+				BSR		SubStructLoop			;let common code do the work
+
+				MOVEM.L (SP)+,D4/A2-A3			;restore work registers
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS 							;return to caller
+				EndProc
+
+; the following routine subtracts the structRgns of all windows in the list
+; from the region in D4 until the window in A2 is reached.	It is common code
+; to CalcVis and ClipAbove
+
+SubStructLoop	Proc	Export
+
+				MOVE.L	WINDOWLIST,A3			;get 1st window in list
+
+CVLoop			
+				CMP.L	A2,A3					;have we reached parameter window yet?
+				BEQ.S	WRTS1					;if so, we're done
+
+				TST.B	WVISIBLE(A3)			;dont bother if its not visible
+				BEQ.S	SKIPDIFFRGN
+
+				MOVE.L	D4,-(SP)				;push the visRgn
+				MOVE.L	STRUCTRGN(A3),-(SP) 	;push region to be subtracted
+				MOVE.L	D4,-(SP)				;visRgn gets the result
+				_DiffRgn
+SkipDiffRgn
+				MOVE.L	NEXTWINDOW(A3),A3		;examine next one in list
+				BRA.S	CVLOOP					;loop till we reach parameter window
+				EndProc
+
+;
+; PROCEDURE PaintOneGuts(window: windowPtr; clobbered: RgnHandle);
+;
+;	 paint one window, clipped to the clobbered region and all windows
+; above it.  If some content is exposed, erase it and add it to the
+; update region.  IF the window is NIL, paint gray (its the desk)
+; 
+; <SM16> FM the Window will never be NIL now, thanks to the layer manager.
+
+PaintOneGuts	Proc	Export		
+				Import	SetWPClip
+				Import	TestClip
+				Import	TwoParmExit
+				Import	CallDWindow
+				Import	GetNewRgn
+				Import	SetupColor
+				Export	PaintODone
+
+				MOVEM.L D3-D4/A2-A3,-(SP)		;save work registers
+				MOVE.L	24(SP),A2				;get the window pointer
+
+				BSR		SetWPClip				;setWPort, get clip in D3
+
+				MOVE.L	A2,D0					;is window NIL?
+				BNE.S	GOPAINTONE				;if not, go paint it
+
+;
+; all done with PaintOne
+;
+
+PaintODone		
+				MOVEM.L (SP)+,D3-D4/A2-A3		;restore work registers
+				BRA		TWOPARMEXIT 			;standard exit to save code (was .s)	<DAF 08-Apr-86>
+;
+; see if the window intersects with clobbered; if not, dont bother to paint;
+; otherwise go paint it
+;
+GOPAINTONE		TST.B	WVISIBLE(A2)			;is it visible?
+				BEQ.S	PAINTODONE				;if not, we're done
+				MOVE.L	20(SP),-(SP)			;push clobbered
+				MOVE.L	STRUCTRGN(A2),-(SP) 	;push the structRgn of the window
+				MOVE.L	D3,-(SP)				;their intersection is the clipRgn
+				_SectRgn						;SectRgn(clobbered,structRgn,clipRgn)
+;
+				BSR		TESTCLIP				;exit if clipRgn is empty
+				MOVE.L	A2,-(SP)				;now subtract windows above this one
+				_ClipAbove						;<SM16> FM call the trap instead JSRing
+				BSR		TESTCLIP				;exit if nothing left to paint
+;
+; draw the structure of the window by calling its window definition procedure
+;
+				MOVE.L	A2,A3					;A3 holds the window
+				BSR 	CALLDWINDOW 			;call the windowProc to draw it
+;
+; intersect the window's content region with the clipRgn and possibly erase
+; and update that area
+;
+				BSR 	GETNEWRGN				;allocate a new region handle
+				MOVE.L	(SP)+,A3				;keep it in A3
+;
+				MOVE.L	CONTRGN(A2),-(SP)		;push the content region
+				MOVE.L	D3,-(SP)				;intersect with the clipRgn
+				MOVE.L	A3,-(SP)				;put the result in the tempRgn
+				_SectRgn						;SectRgn(contRgn,clipRgn,tempRgn)
+;
+
+				TST.W	PAINTWHITE				;should we erase it? <SM16> FM do TST.w not TST.b
+				BEQ.S	SKIPERASE				;if not, skip erasing
+
+				BTST	#isPixMap,portBits+rowbytes(A2)	; is it a new window?			<C687/24Jan87> DAF
+				BEQ.S	@1					; if zero, then stay in wmgrPort			<C687/24Jan87> DAF
+				MOVE.L	wmgrCPort,-(SP)		; in new, so do it in wmgrCPort for full color	<C687/24Jan87> DAF
+				_SetPort					;											<C687/24Jan87> DAF
+@1
+				SUBQ	#6,SP				; room to save current port rgbBkColor
+				PEA		(SP)				; pointer to saved backcolor
+				_GetBackColor				; get the rgbColor
+
+				MOVE.W	#wContentColor,D0	; get the content color
+				MOVE.L	A2,A0				; copy the windowptr
+				BSR		SetUpColor			; get a pointer on the stack
+				_RGBBackColor				; and set it
+
+				MOVE.L	A3,-(SP)				;push the update area
+				_EraseRgn						;erase it
+
+				PEA		(SP)					; push the saved color
+				_RGBBackColor					; reset the back color
+				ADDQ	#6,SP					; flush the saved color
+
+				MOVE.L	wmgrPort,-(SP)			; for compatibility, force wmgrPort		<C687/24Jan87> DAF
+				_SetPort						; set it								<C687/24Jan87> DAF
+
+;
+
+SkipErase		
+				TST.B	SAVEUPDATE				;accumulate the updates?
+				BEQ.S	SKIPUPDATE
+
+				MOVE.L	UPDATERGN(A2),-(SP) 	;push the current update region
+				MOVE.L	A3,-(SP)				;push the clobbered region
+				MOVE.L	UPDATERGN(A2),-(SP) 	;result goes in update region
+				_UnionRgn						;add it to the current update region
+;
+
+SkipUpdate		
+				MOVE.L	A3,-(SP)				;push tempRgn handle
+				_DisposRgn						;de-allocate it
+				BRA  		PAINTODONE				;all done with paintOne
+				EndProc
+
+; SetWPClip is a code saving utility used in PaintOne and PaintBehind
+
+SetWPClip		Proc	Export
+				Import	SetWPort
+				
+				BSR 	SETWPORT				;get into the window mgr port
+				MOVE.L	WMGRPORT,A3 			;A3 points to the wmgrPort
+				MOVE.L	CLIPRGN(A3),D3			;D3 holds wmgrPort^.clipRgn
+				RTS 							;return to caller
+				EndProc
+				
+;
+; TestClip is a procedure used to speed things up by not bothering to paint
+; windows that wouldn't show anyway.  It does this by seeing if the clipRgn
+; (passed in D3) is empty. If it is, it pop's the stack and exits PaintOne,
+; since the window wouldn't show anyway
+;
+
+TestClip		Proc	Export
+				Import	PaintODone
+				
+				SUBQ	#2,SP					;make room for result
+				MOVE.L	D3,-(SP)				;push the region to be tested
+				_EmptyRgn						;is it empty?
+				TST.B	(SP)+					;test result
+				BNE.S	@1						;if it's empty, go pop stack
+				RTS 							;its not empty, so just return
+;
+@1				ADDQ	#4,SP					;pop off caller's return address
+				BRA		PAINTODONE				;exit immediately
+				EndProc
+				
+
+;
+; PaintDesk is a utility used to paint the desk gray.  It clips to every visible window
+; and then fills the port with gray.  It assumes A3 points to the WMgrPort
+;
+
+PaintDesk		Proc	Export
+
+		IF hasDisplayMgrWindows THEN					; We should use the Display Manager desk draw routines
+				
+				Move.l	wmgrCPort,A0			; switch to the cGrafPort
+				Move.l	clipRgn(A0),-(SP)
+				_DMDrawDesktopRegion
+		ELSE
+				
+				MOVE.L	DeskHook,D0 			;user got a deskPaint routine?
+				BEQ.S	NoDeskHook				;if not, paint gray
+
+; a routine is installed in the deskHook so invoke it to do the painting
+				MOVE.L	D0,A0					;get deskPaint address
+				MOVEQ	#0,D0					;flag its a paint call
+				JMP 	(A0)					;let the user do the painting
+
+NoDeskHook		MOVE.L	TheZone,-(SP)			; Save the current heap zone <SM16> FM
+				MOVE.L	SysZone,TheZone			; Switch to the system heap in case of pattern expansion <SM16> FM
+				
+				TST.B	pCDeskPat				; test flag to see which to use		<C666/22Jan87> DAF
+				BPL.S	@69						; if ≥, then use binary pat			<C666/22Jan87> DAF
+				SUBQ	#8,SP					; make room to save wmgrPort,curHeap	<C949/08Nov87> DAF
+				MOVE.L	theZone,4(SP)			; save current heap						<C949/08Nov87> DAF
+				PEA		(SP)					; make a pointer to it
+				_GetPort						; get that address
+				MOVE.L	wmgrCPort,-(SP)			; switch to the cGrafPort
+				_SetPort
+				MOVE.L	GrayRgn,-(SP)			;PUSH THE DESKTOP REGION	<11/9/86 EHB>
+				MOVE.L	DeskCPat,-(SP)			; push the desk ppat
+				_FillCRgn						; and fill
+				_SetPort
+				MOVE.L	(SP)+,theZone			; restore theZone						<C949/08Nov87> DAF
+				BRA.S	@70						;
+@69
+				MOVE.L	GRAYRGN,-(SP)			;PUSH THE DESKTOP REGION	<11/9/86 EHB>
+				PEA 	DeskPattern 			; push the desk pattern
+				_FillRgn						; and paint the desktop
+@70
+				MOVE.L	(SP)+,TheZone			; Restore the current heap zone <SM16> FM
+		ENDIF
+				RTS
+				EndProc
+								
+;
+;  Utility GetNewRgn:RgnHandle
+;
+;	 This short utility is used to save code.  It allocates a new region and
+;  returns its handle on the top of the stack.
+;
+
+GetNewRgn		Proc	Export
+				SUBQ	#4,SP					;make space for result
+				_NewRgn 						;allocate new region
+				MOVE.L	4(SP),A0				;get return address
+				MOVE.L	(SP)+,(SP)				;strip it
+				JMP 	(A0)					;return to caller
+				EndProc
+
+;
+; PROCEDURE SaveOld(window)
+;
+;	 SaveOld saves the parameter window's old structure and content regions
+; for the "DrawNew" operation.	It must be followed by a call to DrawNew;
+; note that they are not nestable.
+;
+
+SaveOld 		Proc	Export
+				Import	GetNewRgn
+				
+				MOVEM.L D3-D4/A2,-(SP)			;save work registers
+				BSR.S	GETNEWRGN				;get "oldStruct" region
+				MOVE.L	(SP)+,D3				;and keep in D3
+				BSR.S	GETNEWRGN				;get "oldCont" region
+				MOVE.L	(SP)+,D4				;and keep in D4
+;
+				MOVE.L	16(SP),A2				;get the window pointer
+;
+; copy the window's structRgn into oldStruct and its content region into oldCont
+;
+				MOVE.L	STRUCTRGN(A2),-(SP) 	;push the structure region
+				MOVE.L	D3,-(SP)				;push oldStruct
+				_CopyRgn						;oldStruct <- structRgn
+				MOVE.L	CONTRGN(A2),-(SP)		;push the content region
+				MOVE.L	D4,-(SP)				;push oldCont
+				_CopyRgn						;oldCont   <- contRgn
+;
+; update the oldStructure and oldContent globals and return to caller
+;
+
+SODone			
+				MOVEM.L  D3-D4,OLDSTRUCTURE 	;update oldStructure,Content
+				MOVEM.L (SP)+,D3-D4/A2			;restore work registers
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS
+				EndProc
+				
+;
+; PROCEDURE DrawNew(window: windowPtr; fUpdate: BOOLEAN);
+;
+;	 called after a "SaveOld" call.  It updates the area
+; clobbered := (oldStruct XOR newStruct) UNION (oldContent XOR newContent)
+; If fUpdate is TRUE, updates are accumulated
+;
+;
+
+DrawNew 		Proc	Export
+				Export	SixBytExit
+				
+				MOVEM.L D3-D4/A2,-(SP)			;save work registers
+				MOVE.L	18(SP),A2				;get the window ptr
+				MOVEM.L OLDSTRUCTURE,D3-D4		;get oldStructure,Content
+
+				TST.B	WVISIBLE(A2)			;is this one visible?
+				BEQ.S	SKIPXOR 				;if not, its a waste of time to XOR
+;
+; compute (oldStruct XOR newStruct) UNION (oldContent XOR newContent)
+;
+				MOVE.L	STRUCTRGN(A2),-(SP) 	;push newStruct
+				MOVE.L	D3,-(SP)				;push oldStruct
+				MOVE.L	D3,-(SP)				;oldStruct gets the result
+				_XorRgn
+;
+				MOVE.L	CONTRGN(A2),-(SP)		;push newCont
+				MOVE.L	D4,-(SP)				;push oldContent
+				MOVE.L	D4,-(SP)				;oldContent gets the result
+				_XorRgn
+;
+
+SkipXOR
+				MOVE.L	D4,-(SP)				;push oldContent
+				MOVE.L	D3,-(SP)				;push oldStructure
+				MOVE.L	D3,-(SP)				;oldStructure gets result
+				_UnionRgn						;union them together
+;
+; now paint the window clipped to the part that changed (the region in D3)
+;
+				MOVE.B	16(SP),SAVEUPDATE		;set update flag according to fUpdate
+				MOVE.L	A2,-(SP)				;push the window
+				MOVE.L	D3,-(SP)				;push clobbered
+				_PaintOne						;paint the window
+				ST		SAVEUPDATE				;re-enable update accumulation
+;
+; paint all the windows behind the parameter window as some may have been
+; exposed
+;
+				MOVE.L	NEXTWINDOW(A2),-(SP)	;start with one immediately behind
+				MOVE.L	D3,-(SP)				;clip to clobbered area
+; PaintBehind in DrawNew - since we have done CalcAncestorRgns in _PaintOne, we can do a PaintBehindLite 			<SM16> FM
+				move.l	ExpandMem,a0						; 											 			<SM16> FM
+				st		ExpandMemRec.ancestorRgnsCalced(a0)	; set the one-shot to keep from recalcing ancestor rgns	<SM16> FM
+				_PaintBehind
+				MOVE.L	A2,-(SP)				;push the parmeter window
+				MOVE.L	D3,-(SP)				;push clobbered
+				_CalcVBehind					;recalculate visRgns of behind windows
+;
+; dispose of oldStruct and oldContent regions and return to caller
+;
+				MOVE.L	D3,-(SP)				;push oldStructure
+				_DisposRgn						;dispose of it
+				MOVE.L	D4,-(SP)				;push oldContent
+				_DisposRgn						;dispose of that one, too
+;
+				MOVEM.L (SP)+,D3-D4/A2			;restore work registers
+SixBytExit		
+				MOVE.L	(SP)+,A0				;get return address
+				ADDQ	#6,SP					;strip stack of 6 parameter bytes
+				JMP 	(A0)					;return to caller
+				EndProc
+				
+;
+; PROCEDURE ShowHide(window: windowPtr; showFlag: BOOLEAN);
+;
+;	This is the low level routine for showing and hiding windows.  It sets the
+; visible state of the window according to the value of the showFlag boolean.
+; A1 is preserved so ShowWindow and HideWindow can save some code
+;
+;
+
+ShowHide		Proc	Export
+				Import	SetWPort
+				Import	CallWCalc
+				Import	RestorePort
+				Import	SixBytExit
+				IMPORT	PreShowHide
+				IMPORT	ptchHMGetBalloons			; <SM18> rb, start
+
+				MOVE.L	A1,-(SP)					; we have to save this register (Why?, I don't know)
+
+				JSR		ptchHMGetBalloons			; what is the state of What Is? mode?
+				BEQ.S	@BalloonsOff				; EQ means no, so, let's not do anything.
+
+				SUBQ	#2,SP						; room for Boolean
+				_HMIsBalloon						; was there a Balloon up?
+				TST.B	(SP)+
+				BEQ.S	@BalloonsOff				; EQ means no, so, let's exit now
+
+				MOVE.L	ExpandMem,A0						; point to the expand mem ptr
+				MOVE.L	ExpandMemRec.emHelpGlobals(A0),A0	; A0 = global ptr
+
+						; note: 10 = 6 + A1 saved on stack
+				MOVE.L	10(SP),D0					; get the ShowHide WindowPtr that was passed
+
+				CMP.L	hmgWindow(A0),D0			; was it our balloon window?
+				BEQ.S	@BalloonsOff				; yes, ignore _ShowHide calls with the balloon window
+
+				MOVE	hmgTitleBalloon(A0),D0		; see if one of the menu bar title balloons was up (<>0)
+				BNE.S	@BalloonsOff				; NE means one was so just exit the patch
+
+				TST.B	8(SP)						; true if the window is becoming active
+				BNE.S	@BalloonsOff				; NE means that somebody called ShowHide
+													;	to show a currently showing window
+@DifferentLastWindow
+
+				SUBQ	#2,SP						; remove any balloons that might have been up
+				_HMRemoveBalloon					; do the remove
+				ADDQ.L	#2,SP						; toss result
+@BalloonsOff
+				MOVE.L	(SP)+,A1					; restore the return address that was in A1
+													; <SM18> rb, end
+
+				MOVEM.L D3-D4/A1/A3,-(SP)		;save work registers
+				
+; <SM22> FM roll in patchShowHide from WindowMgrPactches.a
+; <SM22> FM
+; <SM22> FM ShowHide patch for the Layer Manager
+; <SM22> FM 	PreShowHide fixes up the regions of the windows of the layer to be shown/hidden:
+; <SM22> FM	If the layer is becoming visible, all the visible windows (determined by the visible flag)
+; <SM22> FM		will have their structRgn and contRgn recalculated.
+; <SM22> FM	If the layer is becoming invisble, all the windows will have their structRgn, contRgn and
+; <SM22> FM		visRgn emptied out.
+
+				MOVE.L	22(SP),-(SP)			; <SM22> FM Push the WindowPtr on the stack
+				MOVE.B	24(SP),-(SP)			; <SM22> FM Push the show/hide flag on the stack <PN><SM20)
+				jsr		PreShowHide				; <SM22> FM fix up regions on Layer Hides/Reveals
+				
+				MOVE.L	22(SP),A3				;get the window pointer
+				MOVE.B	20(SP),D3				; get showFlag						<EHB 28-Oct-85>
+				MOVE.B	WVisible(A3),D0 		; get wvisible flag 				<EHB 28-Oct-85>
+				EOR.B	D3,D0					; already in requested state?		<EHB 28-Oct-85>
+				LSR 	#1,D0					; only bit 0 is significant 		<EHB 28-Oct-85>
+				BCC.S	SHDONE					; => same as before 				<EHB 28-Oct-85>
+
+				BSR.S	SETWPORT				;get into the wmgrPort
+				MOVE.L	A3,-(SP)				;push window pointer
+				_SaveOld						;save old state of struct and cont
+;
+				MOVE.B	D3,WVISIBLE(A3) 		; set new state of visible
+				BSR 	CALLWCALC				;recalculate regions
+;
+				MOVE.L	A3,-(SP)				;push window
+				ST		-(SP)					;fUpdate = TRUE (accumulate updates)
+				_DrawNew						;draw the new state
+;
+				BSR.S	RESTOREPORT 			;restore saved grafPort
+
+				TST.B	WVisible(A3)			; is this window visible now?				<12May87 DAF>
+				BEQ.S	SHDONE					; if not visible, don't activate palette	<12May87 DAF>
+
+				MOVE.L	A3,-(SP)				; push the window pointer					<12May87 DAF>
+				_ActivatePalette				; and activate it
+;
+SHDone			
+				MOVEM.L (SP)+,D3-D4/A1/A3		;save work registers
+				BRA		SIXBYTEXIT				;standard exit saves code
+				EndProc
+				
+;
+; Utility SetWPort;
+;
+;	 SetWPort is a utility used to save code. It gets the current grafPort into
+; D4 (for later restoring by RestorePort) and sets the port to the wmgrPort
+;
+
+SetWPort		Proc	Export
+				MOVE.L	grafGlobals(A5),A0 		;get pointer to lisaGraf globals
+				MOVE.L	thePort(A0),D4 			;get the current port
+				MOVE.L	WMgrPort,ThePort(A0)	;push the wmgrPort pointer
+				RTS
+				EndProc
+				
+;
+; Utility RestorePort;
+;
+;	 RestorePort is a utility used to save code.  It sets the grafPort to
+; the window pointer saved in D4.
+;
+
+RestorePort 	Proc	Export
+				MOVE.L	D4,-(SP)				;push the old grafPort
+GoSetPort
+				_SetPort						;and set it
+				RTS
+				EndProc
+				
+;
+; PROCEDURE GetWMgrPort(VAR wPort: windowPtr);
+;
+;	access routine that returns pointers to the window manager's port
+;
+
+GetWMgrPort		Proc	Export
+
+				BLANKS			ON
+				STRING			ASIS
+
+				MOVE.L	(SP)+,A1				;get return address
+				MOVE.L	(SP)+,A0				;get pointer to wmgrPort variable
+				MOVE.L	WMGRPORT,(A0)			;move it in
+				JMP 	(A1)					;return to caller
+				EndProc
+
+;
+; PROCEDURE GetCWMgrPort(VAR wPort: windowPtr);
+;
+;	access routine that returns pointers to the window manager's cGrafPort
+;
+
+GetCWMgrPort	Proc	Export
+				MOVE.L	(SP)+,A1				;get return address
+				MOVE.L	(SP)+,A0				;get pointer to wmgrPort variable
+				MOVE.L	wmgrCPort,(A0)			;move it in
+				JMP 	(A1)					;return to caller
+				EndProc
+				
+
+
+;
+; Utility AllocPort -- a little utility to save some code
+;
+;	D1 is non-zero to open a color port
+;
+
+AllocPort		Proc	Export
+				Export	AllocP1
+				Export	AllocP2
+				Export	AllocCPort
+				
+				MOVEQ	#PortRec,D0				;get size of a grafPort				<C106 EHB>
+				MOVEQ	#0,D1					;say it's a black and white port	<C106 EHB>
+AllocP1			_NewPtr 						;allocate the grafPort				<C106 EHB>
+AllocP2			MOVE.L	A0,A3					;remember it in A3					<C106 EHB>
+				MOVE.L	A0,-(SP)				;push it as parameter to OpenPort	<C106 EHB>
+				TST		D1						;black and white or color?			<C106 EHB>
+				BNE.S	AllocCPort				;=>color							<C106 EHB>
+				_OpenPort						;open it							<C106 EHB>
+				RTS								;									<C106 EHB>
+AllocCPort
+				_OpenCPort						;open a color port					<C106 EHB>
+
+				RTS								;and return							<C106 EHB>
+				EndProc
+				
+			
+;
+; PROCEDURE InitWindowsGuts <SM16> FM
+;
+;	 High-level routine to initialize the window world.  Will eventually be
+; called during SYSINIT but now must be called by the application.
+;
+;	This routine is now called InitWindowsGuts because it is called from the middle <SM16> FM
+;	of InitLayers to do the low level WindowMgr initialization.						<SM16> FM
+;
+
+InitWindowsGuts		Proc	Export
+				Import	AllocPort
+				Import	AllocP1
+				Import	GetNewRgn
+				Import	CalcMBHeight
+				Import	DrawMBar
+
+; Stack Frame definition					; <C203> DAF
+
+LocalVar		EQU		0					; stack frame eliminated 	<C491/08Dec86> DAF
+
+				LINK	A6,#LocalVar			; make a stack frame		<C203> DAF
+				MOVEM.L	D3-D7/A3-A4,-(SP)		;save work registers
+
+; Added patches:  cancel pending PaintBehind; reset alarm parity; and say
+; that the window world exists. 												<EHB 1/23/85>
+
+				MOVEQ	#7,D0					; handy bit number				<EHB 1/23/85>
+				BSET	D0,DSWndUpdate			; cancel pending PaintBehind	<EHB 1/23/85>
+				BSET	D0,AlarmState			; reset alarm parity			<EHB 1/23/85>
+
+				MOVE.L	MinusOne,SaveUpdate 	;enable update accumulation and erasing
+
+; set up the deskPattern from Sys.resource
+
+				SUBQ	#4,SP					;make room for function result
+				MOVE	#deskPatID,-(SP)		;push pattern ID of deskPattern
+				_GetPattern 					;tell resource manager to get it
+				MOVE.L	(SP)+,A0				;get the pattern handle
+				MOVE.L	(A0),A0 				;get pattern pointer
+				MOVE.L	(A0)+,DeskPattern		;init the deskPattern
+				MOVE.L	(A0),DeskPattern+4		;don't forget 2nd half of it
+
+				TST.B	pCDeskPat				; test flag					<C725/31Jan87 DAF>
+				BPL.S	@12						; if hi bit clear, don't load ppat	<C725/31Jan87 DAF>
+;
+; load the DeskCPat from the system if pCDeskPat enabled
+;	Switch to the system zone temporarily, so that GetPixPat will allocate
+;	it's private storage on the system heap (it normally allocates on theZone)
+;
+
+				MOVE.L	TheZone,-(SP)			; save it					<C666/22Jan87> DAF
+				MOVE.L	SysZone,TheZone			; get the system zone		<C666/22Jan87> DAF
+
+				MOVE.L	DeskCPat,D0				; get the current pattern	<1.3>
+				BEQ.S	@100					; if NIL, then continue		<1.3>
+				CMP.L	MinusOne,D0				; is it uninitialized?		<1.3>
+				BEQ.S	@100					; if so, then continue		<1.3>
+				MOVE.L	D0,-(SP)				; push old pat handle		<1.3>
+				_DisposPixPat					; release it				<1.3>
+
+@100
+				SUBQ	#4,SP					; make room for function result
+				MOVE	#deskPatID,-(SP)		; push pattern ID of deskCPat
+				_GetPixPat 						; tell resource manager to get it from system
+				MOVE.L	(SP)+,DeskCPat			; put handle to pattern in lomem	<C725/31Jan87 DAF>
+				BNE.S	@30						; if not present, use binary pat	<C725/31Jan87 DAF>
+				BCLR	#7,pCDeskPat			; clear the cDeskPat bit			<C725/31Jan87 DAF>
+@30
+				MOVE.L	(SP)+,theZone			; restore the app's zone 	<C666/22Jan87> DAF
+@12
+
+;
+; allocate and init the window manager's port
+;
+				BSR		AllocPort
+				MOVE.L	A3,WMGRPORT 			;make it the wmgrPort
+
+;
+; also allocate the wmgr COLOR port!			; <C203/06Oct86> DAF
+;	note that both ports share the same handles to vis & clip regions!
+;	The other fields should not be changed during normal usage
+;
+;  <13Nov86 EHB>  Save visRgn and clipRgn in D6 and D7 for later use
+;
+				MOVE.L	A3,A4					; hold this for a moment		<C203/06Oct86> DAF
+				MOVE.L	visRgn(A4),D6			; deallocate oldport's regions	<C203/06Oct86> DAF
+				MOVE.L	clipRgn(A4),D7			; 	cGrafPort's regions			<C203/06Oct86> DAF
+				MOVE.L	#PortRec,D0				; get color port size for NewPtr <C203/06Oct86> DAF
+				MOVEQ	#-1,D1					; non-zero means color port		<C203/06Oct86> DAF
+				BSR		AllocP1					; 								<C203/06Oct86> DAF
+				MOVE.L	A3,wmgrCPort			; set up lomem					<C203/06Oct86> DAF
+				MOVE.L	visRgn(A3),visRgn(A4)	; copy the handles to old port	<C203/06Oct86> DAF
+				MOVE.L	clipRgn(A3),clipRgn(A4)	; 								<C203/06Oct86> DAF
+
+				MOVE.L	A4,A3
+				MOVE.L	A3,-(SP)				; push the old port
+				_SetPort						; set it back
+
+; Initialize DeskRgn, the union of all screen devices.  Set WmgrPort.VisRgn to DeskRgn.
+; The bounding box of DeskRgn region is what we will use to black out the corners.
+
+				MOVE.L	D7,-(SP)				; push DeskRgn					<13Nov86 EHB>
+				_SetEmptyRgn					; and empty it out				<13Nov86 EHB>
+				MOVE.L	DEVICELIST,A4			; get handle to main screen		<13Nov86 EHB>
+DoNextDev		
+				MOVE.L	(A4),A0					; point at main screen device	<13Nov86 EHB>
+				TST		GDFlags(A0)				; is device active?				<C768>
+				BPL.S	@NxtDev					; =>no, try next device			<C768>
+				MOVE.L	D6,-(SP)				; push ScreenRgn				<13Nov86 EHB>
+				MOVE.L	GDRect+TopLeft(A0),-(SP); push topleft of device's rect <13Nov86 EHB>
+				MOVE.L	GDRect+BotRight(A0),-(SP) ; push botright				<13Nov86 EHB>
+				_SetRecRgn						; get ScreenRgn					<13Nov86 EHB>
+				MOVE.L	D6,-(SP)				; push ScreenRgn				<13Nov86 EHB>
+				MOVE.L	D7,-(SP)				; push DeskRgn					<13Nov86 EHB>
+				MOVE.L	D7,-(SP)				; get result in DeskRgn			<13Nov86 EHB>
+				_UnionRgn						; add screen to desk			<13Nov86 EHB>
+@NxtDev			
+				MOVE.L	(A4),A0					; point to grafDevice			<13Nov86 EHB>
+				MOVE.L	GDNextGD(A0),D0			; get next grafDevice			<13Nov86 EHB>
+				MOVE.L	D0,A4					; save in A4					<13Nov86 EHB>
+				BNE.S	DoNextDev				; => more devices to do			<13Nov86 EHB>
+
+				MOVE.L	D7,-(SP)				; push the DeskRgn				<13Nov86 EHB>
+				MOVE.L	VisRgn(A3),-(SP)		; push the port's visRgn		<13Nov86 EHB>
+				_CopyRgn						; visRgn := DeskRgn				<13Nov86 EHB>
+
+
+
+		IF hasDisplayMgrWindows THEN					;														<SM81>
+; Now that the WMgr port is initialized, initialize the Display Manager
+; We must do this between when the WMgrPort is initialized and when the desktop is drawn
+				subq.l	#2,sp					; init display manager (now that wmgrport is set up)
+				_DMInitDisplayManager
+				move.w	(sp)+,d0						; get result
+		ENDIF
+
+; initialize the screen by drawing the menu bar, blacking out the corners, and then
+; filling the rest with the deskPattern.
+;
+; draw the empty menu bar, leaving the clip region set to the menuBar
+				
+				_InitMenus						; init the mbar defproc				<C168/17Sep86>DAF
+				JSR 	CalcMBHeight			; use menu mgr routine to calc new size <EHB 5Aug85>
+				JSR 	DrawMBar				; use menu mgr routine to save code
+
+; set TempRect to the DeskRgn's bounding box
+
+				MOVE.L	D7,A0					; get deskRgn					<13Nov86 EHB>
+				MOVE.L	(A0),A0					; and point at it				<13Nov86 EHB>
+				LEA		RgnBBox(A0),A0			; point to deskRgn bounding box <13Nov86 EHB>
+
+				LEA 	TempRect,A4 			; get a temp rect
+				MOVE.L	A4,A1					; get a copy to trash
+				MOVE.L	(A0)+,(A1)+ 			; copy the deskRect
+				MOVE.L	(A0),(A1)
+
+; initialize the gray region
+
+				BSR 	GETNEWRGN				; allocate a region
+				MOVE.L	(SP)+,D5				; keep grayRgn in D5
+				MOVE.L	D5,GRAYRGN				; update grayRgn global
+
+				_HidePen						; don't really draw this
+				_OpenRgn						; start recording a region
+
+; <SM26> CSS Rollin patch from Horror: InitWindowsRgnPatch
+; InitWindowsRgnPatch	- 	Decides whether WMgrCPort part of the GrayRgn should be
+;							round or square.  LCD displays have square regions and
+;							CRT displays have rounded ones.
+		IF hasPwrControls THEN					;														<SM81>
+				IMPORT	LCDScreenChk			; <SM26> CSS
+				BigJsr	LCDScreenChk,a0			; If we don’t have an LCD screen,
+				BEQ.S	@DoNormalCode			;	then just go on.
+		
+				Move.l	A4,-(Sp)				; Push the temp rect.
+				_FrameRect						; Draw it.
+				BRA.S	@DontRound
+@DoNormalCode
+		ENDIF
+		
+				MOVE.L	A4,-(SP)				; push the temp rect			<13Nov86 EHB>
+				MOVE.L	#ScreenRadius,-(SP) 	; with rounded corners
+				_FrameRoundRect 				; draw it
+@DontRound
+				; SKH, fixed SM mistake, the grayRgn was not being pushed onto the stack <SM38>
+				
+				MOVE.L	D5,-(SP)				; push the grayRgn
+				_CloseRgn						; initialize the gray region
+				_ShowPen						; show the pen again
+
+; subtract the menu bar from the gray region
+
+				MOVE.L	D5,-(SP)				; push the gray region
+				MOVE.L	ClipRgn(A3),-(SP)		; push the clipRgn (menuBar only)
+				MOVE.L	D5,-(SP)				; grayRgn gets the result
+				_DiffRgn						; grayRgn := grayRgn - menuBar
+
+; finally intersect the gray region with the deskRegion
+
+				MOVE.L	D7,-(SP)				; push the deskRgn				<13Nov86 EHB>
+				MOVE.L	D5,-(SP)				; push the gray region			<13Nov86 EHB>
+				MOVE.L	D5,-(SP)				; get result in gray region		<13Nov86 EHB>
+				_SectRgn
+
+; set the wmgrPort clipRgn to the wide open region
+
+				MOVE.L	GRAFGLOBALS(A5),A0		; get grafglobals				<13Nov86 EHB>
+				MOVE.L	WIDEOPEN(A0),-(SP)		; push wide open region			<13Nov86 EHB>
+				_SetClip						; set clipRgn to wideopen		<13Nov86 EHB>
+
+;<SM26> CSS Rollin patch: InitWIndowsRgnPatch from Horror:
+; InitWindowsFramePatch	- 	Decides whether the corners of the screen should be rounded
+;							or not.  LCD displays don’t have rounded corners while CRT
+;							displays do.
+
+		IF hasPwrControls THEN					; <SM26> CSS														<SM81>
+				IMPORT	LCDScreenChk			; <SM26> CSS
+				BigJsr	LCDScreenChk,a0			; do we have an LCD screen?		<SM26> CSS
+				BNE.S	@doneRounding			; don't round the corners
+		ENDIF
+		
+; black out the corners of the desk
+
+				MOVE.L	A4,-(SP)				; push the temp rect
+				MOVE.L	#$FFFDFFFD,-(SP)		; and make it bigger
+				_InsetRect						; by 3 pixels on each side
+
+				MOVE.L	#$00030003,-(SP)		; get a wider pen
+				_PenSize
+
+				MOVE.L	A4,-(SP)				; push the port rect
+				MOVE.L	#$00160016,-(SP)		; and a radius for nice rounding
+				_FrameRoundRect 				; and black out the corners
+				_PenNormal						; fix the pen back up
+
+		IF hasPwrControls THEN					; <SM26> CSS													<SM81>
+@doneRounding
+		ENDIF
+		
+		IF hasDisplayMgrWindows THEN					;
+				MOVE.L	D5,-(SP)				; push grayRgn				<13Nov86 EHB>
+				_DMDrawDesktopRegion
+		ELSE
+; and paint gray rgn with old or new pattern
+
+				MOVE.L	D5,-(SP)				; push grayRgn				<13Nov86 EHB>
+				TST.B	pCDeskPat				; test flag to see which to use	<C666/22Jan87> DAF
+				BPL.S	@UseOldPat				; if hi bit clear, then use binary pat
+				MOVE.L	wmgrCPort,-(SP)			; set the cgrafPort for color patterns
+				_SetPort						;
+				MOVE.L	DeskCPat,-(SP)			; push the desk PPAT
+				_FillCRgn						; and fill the gray region
+				MOVE.L	wmgrPort,-(SP)			; restore the wmgrPort
+				_SetPort						;
+				BRA.S	@DonePat				;
+@UseOldPat		PEA 	DeskPattern 			; push the desk pattern
+				_FillRgn						; and paint the desktop		<13Nov86 EHB>
+
+@DonePat
+
+		ENDIF
+
+; set the wmgrPort clipRgn to the gray region
+
+				MOVE.L	D5,-(SP)				; push grayRgn
+				_SetClip						; set clipRgn to grayRgn
+
+; make sure the cursor is visible
+
+				_ShowCursor
+;
+; initialize the window list to empty
+;
+				CLR.L	WindowList
+
+;
+; set up the AuxWinList						; <C59/30Jun86> DAF
+;
+				MOVE.L	#AuxWinSize,D0		;set up for newHandle 			<C59/30Jun86> DAF
+				_NewHandle ,CLEAR			;allocate a new record (init fields to NIL, too) <C59/30Jun86> DAF
+				MOVE.L	A0,A4				;copy the handle				<C59/30Jun86> DAF
+				_HLock						;lock that bad boy (no BUS ERRORs!)	<C491/08Dec86> DAF
+				MOVE.L	A4,AuxWinHead		;set up list head				<C59/30Jun86> DAF
+				MOVE.L	(A4),A3				;get a pointer to the default	<C59/30Jun86> DAF
+				SUBQ	#4,SP				;leave room for the function result <C666/22Nov87> DAF
+				MOVE.L	#'wctb',-(SP)		;push the resource type			<C666/22Nov87> DAF
+				CLR.W	-(SP)				;get wctb=0						<C666/22Nov87> DAF
+				_rGetResource				;get from disk or ROM (last)	<C666/22Nov87> DAF
+@1				MOVE.L	(SP)+,awCTable(A3)	;set up the colortable			<C666/22Nov87> DAF<1.7>
+				MOVE.L	A4,A0				;copy the handle to unlock
+				_HUnlock					;unlock the auxWinRec			<C491/08Dec86> DAF
+
+;
+; since there's no InitControls, set up the AuxCtlList						<C59/30Jun86> DAF
+;
+				MOVE.L	#acSize,D0			;set up for newHandle			<C59/30Jun86> DAF<1.7>
+				_NewHandle ,CLEAR			;allocate a new record (init fields to NIL, too) <C59/30Jun86> DAF
+				MOVE.L	A0,A4				;copy the handle				<C59/30Jun86> DAF
+				_HLock						;lock it down					<C491/08Dec86> DAF
+				MOVE.L	A4,AuxCtlHead		;set up list head				<C59/30Jun86> DAF
+				MOVE.L	(A4),A3				;get a pointer to the default	<C59/30Jun86> DAF
+				SUBQ	#4,SP				;leave room for the function result <C666/22Nov87> DAF
+				MOVE.L	#'cctb',-(SP)		;push the resource type			<C666/22Nov87> DAF
+				CLR.W	-(SP)				;get cctb=0						<C666/22Nov87> DAF
+				_rGetResource				;get from disk or ROM (last)	<C666/22Nov87> DAF
+@2				MOVE.L	(SP)+,acCTable(A3)	;set up the colortable			<C666/22Nov87> DAF<1.7>
+				MOVE.L	A4,A0				;copy the handle to unlock
+				_HUnlock					;unlock the auxCtlRec			<C491/08Dec86> DAF
+
+;
+; allocate saveVisRgn, a region used to save the visRgn during updates
+;
+				BSR 	GETNEWRGN				;allocate a region
+				MOVE.L	(SP)+,SAVEVISRGN		;update saveVisRgn global
+;
+; initialize window manager globals (and desk mgr)
+;
+				CLR.L	GhostWindow 			;init ghostWindow pointer
+
+				LEA 	CurActivate,A0			;get address of activate buffer
+				CLR.L	(A0)+					;clear it
+				CLR.L	(A0)+					;clear deactivate, too
+
+;
+; flag that the window manager has now been initialized
+;
+
+				CLR.B	WWExist 				; say the window world exists	<1.5> DAF
+
+				MOVE.L	D6,-(SP)				; dispose of WMGRCPORT visRgn	<13Nov86 EHB>
+				_DisposRgn
+				MOVE.L	D7,-(SP)				; and WMGRCPORT clipRgn			<13Nov86 EHB>
+				_DisposRgn
+
+				_InitPalettes					; init palette manager			<12May87 DAF>
+
+;
+; all done -- restore registers return to caller
+;
+				MOVEM.L (SP)+,D3-D7/A3-A4		;restore work registers
+				UNLK	A6						; bag the stack frame 				<C203> DAF
+				RTS
+				EndProc
+				
+;----------------------------------------------------------------------------
+;
+; FUNCTION NewCWindow(  wStorage:	Ptr;
+;					   pboundsRect: Rect;
+;					   pTitle:		String;
+;					   pVisible:	BOOLEAN;
+;					   theProc: 	INTEGER;
+;					   pBehind: 	WindowPtr;
+;					   pGoAway: 	BOOLEAN;
+;					   pRefCon: 	LongInt;   ): windowPtr;
+;
+;	 Allocates and initializes a new color window, and returns a pointer to it
+;
+; Roll in new 'NewCWindow' from WindowMgrPatches.a which rewrites the whole thing in C <SM 2><PN>
+
+NEWCWINDOW		PROC 	EXPORT
+				IMPORT	NewWindowCommon			;in layermgr.c <PN>
+				MOVE.L	(SP)+, A0
+				ST		-(SP)
+				MOVE.L	A0, -(SP)
+				IMPORT	NewWindowCommon
+				JMP		NewWindowCommon
+				ENDPROC
+; end roll in
+				
+;----------------------------------------------------------------------------
+;
+; FUNCTION NewWindow(  wStorage:	Ptr;
+;					   pboundsRect: Rect;
+;					   pTitle:		String;
+;					   pVisible:	BOOLEAN;
+;					   theProc: 	INTEGER;
+;					   pBehind: 	WindowPtr;
+;					   pGoAway: 	BOOLEAN;
+;					   pRefCon: 	LongInt;   ): windowPtr;
+;
+;	 Allocates and initializes a new window, and returns a pointer to it
+; Roll in new 'NewWindow' from WindowMgrPatches.a which rewrites the whole thing in C <SM 2><PN>
+NewWindow		PROC	EXPORT
+				IMPORT	NewWindowCommon			;in layermgr.c <PN>
+
+ 				MOVE.L	(SP)+, A0
+				CLR.B	-(SP)
+				MOVE.L	A0, -(SP)
+				JMP		NewWindowCommon
+				ENDPROC
+; end roll in
+
+
+; Utility CancelActivate -- takes a window pointer and checks to see if
+; that address is in either the CurActivate or the curDeactive locations.
+; If it is, sets the high bit of that address.	Has the effect of
+; cancelling pending activate events.  Trashes A0, D0 and D1.
+
+; Note: patch worked by clearing curActivate or curDeactive. This doesn't work
+; because if a window was both curActivate and curDeactive, then both are cleared
+; and next GetNextEvent on an activate doesn't set sys<->app bit.  Solved by
+; cancelling event by setting high bit. See also: fix in DoActivate.
+
+CancelActivate	Proc	Export
+				LEA 	CurActivate,A0			; check curActivate first		<EHB 1/23/85>
+				MOVE.L	A3,D0					; get window pointer			<EHB 1/23/85>
+				BSR.S	@1						; into D0						<EHB 1/23/85>
+				ADDQ	#4,A0					; now do curDeactive			<EHB 1/23/85>
+@1
+				MOVE.L	(A0),D1 				; get current active/deactive ptr <EHB 1/23/85>
+				EOR.L	D0,D1					; compare addresses 			<EHB 1/23/85>
+				AND.L	MaskBC,D1				; minus the high bits			<EHB 1/23/85>
+				BNE.S	@2						; oops, not the same address	<EHB 1/23/85>
+				BSET	#7,(A0) 				; else cancel the event 		<EHB 1/23/85>
+@2
+				RTS 							;								<EHB 1/23/85>
+				EndProc
+				
+;
+; PROCEDURE  CloseWindow(window);
+;
+;	 hides a window, unlinks it from the window list and disposes of all
+; the storage it uses except for the window itself.
+;
+
+CloseWindowGuts	Proc	Export
+				Import	SetWPort
+				Import	CancelActivate
+				Import	CallWindow
+				Import	DeleteWindow
+				Import	RestorePort
+				Import	DoActivate
+				Import	__ActiveWindow
+				
+				MOVEM.L D3-D4/A2/A3,-(SP)		;save working registers 		<1.4/DAF>
+				MOVE.L	20(SP),A3				;get window pointer
+				BSR 	SETWPORT				;set the port to the wmgrPort
+
+; Cancel pending activate events. (This cancels activates for DisposeWindow too)
+
+				BSR.S	CancelActivate			;								<EHB 1/23/85>
+
+				SUBQ	#4,SP					;make room for frontWindow result
+				JSR		__ActiveWindow			; <SM16> FM This was _FrontWindow
+												; But we need Active  window with layers
+												
+;
+; <SM16> FM Moved the show hide call before the KillControls call
+; <SM16> FM Preventing unecessary drawing as controls are disposed.
+
+				MOVE.L	A3,-(SP)				;push the window
+				CLR.W	-(SP)					;say "Hide"
+				_ShowHide						;hide the window
+
+;
+; dispose of all the controls in the window
+;
+				MOVE.L	A3,-(SP)				;push the window ptr
+				_KillControls					;get rid of them
+
+				MOVEQ	#WDisposeMsg,D0 		;tell window to dispose of private data
+				BSR 	CallWindow				;send window dispose message
+;
+; dispose of palette, then auxWinRec if present.  To do this, do a SetWinColor with the
+;	request being the default colortable (which deletes the auxWinRec).
+; If we are in 24-bit mode, then set the default color table which will delete the auxWinRec and
+;	color table if it's not a resource.  In 32-bit mode, also set the default color table which
+;	will delete the color table if it's not the default, then remove the auxWinRec upon return.
+;
+
+				TST		PORTBITS+ROWBYTES(A3)		; is it new?
+				BPL.S	@NotNew						; => no
+
+				MOVE.L	GrafVars(A3),A0				; get grafVar handle
+				MOVE.L	(A0),A0						; point at grafVars
+				MOVE.L	PmFgColor(A0),D0			; is there a palette
+				BEQ.S	@NotNew						; => no
+
+				Move.L	D0,A0						; let's use an address register			AWC.PB457
+				Move.L	(A0),A0						; dereference it						AWC.PB457
+				BTst	#DisposeBit,pmPrivate(A0)	; should we dispose of it?				AWC.PB457
+				Beq.S	@NotNew						; no => the user has to dispose of it	AWC.PB457
+
+				MOVE.L	D0,-(SP)					; else push palette
+				_DisposePalette						; and dump it
+@NotNew
+				MOVE.L	A3,-(SP)					; push handle for SetWinColor later
+				SUBQ	#4+2,SP						; make room for VAR return and boolean func result <1.4/DAF>
+				CLR.L	-(SP)						; push the window pointer
+				PEA		6(SP)						; push a pointer to the cTabHndl placeholder
+				_GetAuxWin							; get the default cTabHndl
+				ADDQ	#2,SP						; dump the function result
+				MOVE.L	(SP)+,A0					; get the default winRec handle
+				MOVE.L	(A0),A0						; get the default ptr
+				MOVE.L	awCTable(A0),-(SP)			; push default colors hndl								<1.7>
+
+				TST.B	MMU32Bit					; are we in 32-bit mode?								<1.4/DAF>
+				BEQ.S	@WinRec24					; nope, so get rid of it the easy, old-fashioned way	<1.4/DAF>
+
+				LEA		AuxWinHead,A1				; get the head of the auxWinList (offset is zero so this works!)
+@10
+				MOVE.L	(A1),A2						; get the handle to the auxWinRec
+				MOVE.L	(A2),A0						; get the pointer to the auxWinRec
+				CMP.L	awOwner(A0),A3				; is this the one?										<1.7>
+				BEQ.S	@20							; yes, so remove it
+				LEA		awNext(A0),A1				; get the next one										<1.7>
+				BRA.S	@10
+
+@20				MOVE.L	awNext(A0),(A1)				; link around the closing window						<1.7>
+				MOVE.L	A2,A1						; copy the dead auxWinRec handle
+				MOVE.L	(A1),A1						; get a pointer to it
+				MOVE.L	awCTable(A1),D0				; get the doomed color table handle						<1.7>
+				CMP.L	(SP)+,D0					; does this doomed record have the same color table as the default?
+				BEQ.S	@30							; if so, then don't delete it
+				MOVE.L	D0,A0						; get the doomed ctab handle in A0
+				_HGetState							; get the tag bits of this color table
+				BTST	#resource,D0				; is the resource bit set?
+				BNE.S	@30							; if so, don't delete it (it the app's responsibility)
+				_DisposHandle						; kill the color table
+@30
+				MOVE.L	A2,A0						; release the auxWinRec
+				_DisposHandle						;
+				ADDQ	#4,SP						; get rid of the extra window pointer pushed above
+				BRA.S	@WinRecDone					;
+
+@WinRec24
+				_SetWinColor						; set this window's colors to default
+
+@WinRecDone
+
+				MOVE.L	A3,-(SP)				;push windowPtr
+				BSR 	DELETEWINDOW			;splice it out of the list
+;
+; now that the visual stuffs taken care off, free up the storage of the window
+; data structure
+;
+				MOVE.L	WTitleHandle(A3),A0 	;get the title string handle
+				_DisposHandle
+
+				MOVE.L	StructRgn(A3),-(SP) 	;push the structRgn
+				_DisposRgn						;dispose it
+				MOVE.L	CONTRGN(A3),-(SP)		;push the content region
+				_DisposRgn						;dispose it
+				MOVE.L	UPDATERGN(A3),-(SP) 	;ditto for the update Rgn
+				_DisposRgn						;dispose it
+
+				MOVE.L	A3,-(SP)				;push pointer to port
+
+				TST		portVersion(A3)			; is this a Window or cWindow?	<C733/02Feb87> DAF
+				BPL.S	@Old					; if +, then old port			<C733/02Feb87> DAF
+				_CloseCPort						; if cWindow, close cPort		<C733/02Feb87> DAF
+				BRA.S	@Dunn					; all done						<C733/02Feb87> DAF
+@Old
+				_ClosePort						;deallocate vis and clip
+@Dunn											;								<C733/02Feb87> DAF
+;
+				MOVE.L	windowPic(A3),D0		;get picture handle
+				BEQ.S	@1						;if it doesnt have one, skip
+
+				MOVE.L	D0,-(SP)				;get the picture handle
+				_KillPicture					;dispose it
+
+@1				CMP.L	(SP)+,A3				;was it the old frontWindow?
+				BNE.S	@2						;if not, we're done
+
+				MOVE.W	windowKind(A3),CurDeKind ;get kind of old one
+
+				SUBQ	#4,SP					;make room for frontWindow result
+				JSR		__ActiveWindow			; <SM16> FM This was _FrontWindow
+												; But with the Layer manager we
+												; have to use ActiveWindow to get the 
+												; most truly frontmost window.
+
+				BSR 	DoActivate				;select the new frontWindow
+
+; if thePort was set to the window we just closed, leave it set to the window manager port
+
+@2
+				CMP.L	D4,A3					; was old grafPort our window?	<EHB 31 Jan 85>
+				BEQ.S	StdExitOne				; =>yes, leave ThePort=WmgrPort <EHB 31 Jan 85>
+				BSR 	RESTOREPORT 			; else restore old grafPort
+StdExitOne
+				MOVEM.L (SP)+,D3-D4/A2/A3		;restore work registers
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS
+				EndProc
+				
+; Utility MakeDeactive -- takes a window ptr in D0.  It unhilites the window
+; and posts the deactivate only if there wasn't one already posted
+
+MakeDeactive	Proc	Export
+				MOVE.L	D0,-(SP)				;push the window ptr
+
+				MOVE.L	D0,-(SP)				;push it again for hilite
+				CLR.W	-(SP)					;hilite = false
+				_HiliteWindow					;unhilite it
+
+				MOVE.L	(SP)+,D0				;get window pointer back
+				TST.L	CurDeactive 			;is the one in there already?
+				BGT.S	@1						;if so, dont post it
+
+				MOVE.L	D0,A0					;get the window pointer
+				MOVE.W	windowKind(A0),CurDeKind ;get kind of old one
+
+				MOVE.L	D0,curDeactive			;post the event!
+@1
+				RTS 							;return to caller
+				EndProc
+
+;
+; PROCEDURE DisposeWindow(theWindow: windowPtr);
+;
+;	does a close window and then disposes of the window itself -- it assumes
+; the window's storage was allocated on the heap
+;
+
+DisposeWindow	Proc	Export
+				MOVE.L	4(SP),-(SP) 			;push "theWindow"
+				_CloseWindow					;close it						   <EHB 1/25/85>
+				MOVE.L	(SP)+,A1				;get the return address
+				MOVE.L	(SP)+,A0				;get the window
+				_DisposPtr						;dispose of it
+				JMP 	(A1)					;return to caller
+				EndProc
+				
+;
+; PROCEDURE ShowWindow(theWindow: windowPtr);
+;
+;	 make the parameter window visible (if its not already).  Use the "ShowHide"
+; utility routine to do the real work.	Also, select the window if its
+; going to be the top one.
+;
+
+ShowWindow		Proc	Export
+
+				MOVE.L	WindowList,A0			;get base of windowList
+
+; in this loop we see if we can find this window before any visible one
+
+SFLoop
+				TST.B	WVisible(A0)			;is this one visible?
+				BNE.S	justShowIt				;if so, we're not frontWindow
+
+				CMP.L	4(SP),A0				;is this one us?
+				BEQ.S	ShowSelect				;if so, better go select it
+
+				MOVE.L	NextWindow(A0),A0		;try the next one
+				MOVE.L	A0,D0					;is it NIL?
+				BNE.S	SFLoop					;if not, try again
+
+; the window isn't before FrontWindow so just show it
+
+JustShowIt
+				MOVE.L	4(SP),-(SP)				; push the window for the call to ShowHide <SM16> FM
+				MOVE.B	#1,-(SP)				; push TRUE boolean 	<EHB 28-Oct-85>
+				_ShowHide						; do it
+				MOVE.L	(SP)+,A0				; Get return address in A0 <SM16> FM
+				ADDQ	#4,SP					; Nuke the window parameter <SM16> FM
+				JMP 	(A0)					; return to caller
+				
+; the window we're about to show is the new front window so we better select it
+;
+ShowSelect
+				MOVE.L	A0,-(SP)				;push it
+				_SelectWindow					;select it
+				BRA.S	JustShowIt				;go show it, too
+				EndProc
+				
+;
+; PROCEDURE HideWindow(theWindow: windowPtr);
+;
+;	  make the parameter window invisible (if its not already).  Use the "ShowHide"
+; utility routine to do the real work.	It also does the appropriate SelectWindow
+; if the one we're hiding was the front window.
+;
+
+HideWindow		Proc	Export
+				Import	__ActiveWindow
+
+				SUBQ	#4,SP					;make room for result
+				JSR		__ActiveWindow			;get the frontMost window
+
+				MOVE.L	8(SP),-(SP) 			;push the window
+				CLR.W	-(SP)					;push FALSE for "hide"
+				_ShowHide						;hide it
+
+; if the one we hid was the frontWindow, select the new frontWindow
+
+				MOVE.L	(SP)+,D0				;get old frontWindow
+				CMP.L	4(SP),D0				;is it this one?
+				BNE.S	DoneHide1				;if not, we're done
+
+; we just hid the frontWindow so call SelectWindow to fix things up
+
+				BSR	 	MakeDeactive			;go post the deactivate
+
+				SUBQ	#4,SP					;make room on stack
+				JSR		__ActiveWindow			;get new frontWindow
+				MOVE.L	(SP),CurActivate		;remember to activate it
+				BEQ.S	DoneH2					;if none, better not activate
+				_SelectWindow					;select it
+
+; all done with HideWindow
+
+DoneHide1
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS 							;return to caller
+DoneH2
+				ADDQ	#4,SP					;pop off the window
+				BRA.S	DoneHide1				;use common code
+				EndProc
+				
+;
+; FUNCTION GetWRefCon(window):LONGINT
+;
+;	 Returns the application-defined reference constant associated with the window
+;
+
+GetWRefCon		Proc	Export
+				Export	GetWCommon
+				
+				MOVE.W	#WRefCon,D1 			;get offset to refCon
+
+GetWCommon		MOVE.L	(SP)+,A0				;get return address
+				MOVE.L	(SP)+,A1				;get the window pointer
+				MOVE.L	0(A1,D1),(SP)			;pass back the refCon
+				JMP 	(A0)					;return to caller
+				EndProc
+				
+;
+; PROCEDURE SetWRefCon(window: windowPtr; value: LongInt);
+;
+;	 Sets the application-defined reference constant associated with the window
+;
+
+SetWRefCon		Proc	Export
+				Export	SetWCommon
+				
+				MOVE.W	#WRefCon,D1 			;get offset to refCon
+
+SetWCommon		
+				MOVE.L	(SP)+,A0				;get return address
+				MOVE.L	(SP)+,D0				;get the value
+				MOVE.L	(SP)+,A1				;get the window pointer
+				MOVE.L	D0,0(A1,D1) 			;pass back the refCon
+				JMP 	(A0)					;return to caller
+				EndProc
+
+; PROCEDURE SetWindowPic(window: windowPtr; thePic: PicHandle);
+;
+;  Sets the picture handle of a window
+;
+
+SetWindowPic	Proc	Export
+				Import	SetWCommon
+				
+				MOVE.W	#WindowPic,D1			;get offset to windowPic
+				BRA		SetWCommon				;use common code
+				EndProc
+				
+;
+; FUNCTION GetWindowPic(window):picHandle
+;
+;	 Returns the window picture associated with the window
+;
+
+GetWindowPic	Proc	Export
+				Import	GetWCommon
+				
+				MOVE.W	#WindowPic,D1			;get offset to windowPic
+				BRA		GetWCommon				;use common code
+				EndProc
+				
+;
+; PROCEDURE GetWTitle(window: WindowPtr; VAR title: string);
+;
+;	 return the title of the window.  Make sure we make a copy of the
+; string cause it might move around.
+;
+
+GetWTitle		Proc	Export
+
+				MOVEM.L (SP)+,D1/A0-A1			;get return address, stringPtr, windowPtr
+
+				MOVE.L	WTITLEHANDLE(A1),D0 	;do we have a title				<SM37>
+				BEQ.S	@NilTitle				; nope							<SM37>
+				
+				MOVE.L	D0,A1					;get handle of title			<SM37>
+				MOVE.L	(A1),A1 				;handle -> pointer
+
+				MOVEQ	#0,D0
+				MOVE.B	(A1),D0 				;get length of string in bytes
+@1				MOVE.B	(A1)+,(A0)+ 			;move a byte of the string
+				DBRA	D0,@1					;loop till its moved
+
+				BRA.S	@Exit					;is this really necessary		<SM37>
+
+@NilTitle		MOVE.B	#0,(A0)+ 				;zero length string				<SM37>
+
+@Exit			MOVE.L	D1,A0					;get return address
+				JMP 	(A0)					;all done!
+				EndProc
+				
+;
+; PROCEDURE SetWTitle(window: windowPtr; title: String);
+;
+;	  set the title of a window, redrawing stuff as necessary
+;
+
+SetWTitle		Proc	Export
+				Import	SetWPort
+				Import	CallWCalc
+				Import	RemoveContent
+				Import	RestorePort
+				Import	TwoParmExit
+				
+				MOVEM.L D3-D5/A2-A3,-(SP)		;save work registers (push one extra)
+
+				MOVE.L	24(SP),D5				;get title String
+				MOVE.L	28(SP),A3				;get the window pointer
+				BSR 	SETWPORT				;get into the window manager port
+;
+				MOVE.L	StructRgn(A3),A0		;get the structRgn
+				_HandToHand 					;clone it
+				MOVE.L	A0,D3					;set clobbered to struct
+
+				MOVE.L	WTitleHandle(A3),D0 	; test for NIL handle				<EHB 11-May-85>
+				BEQ.S	@2						; dispose region, restore port		<EHB 11-May-85>
+				MOVE.L	D0,-(SP)				; else push handle					<EHB 11-May-85>
+				MOVE.L	D5,-(SP)				;push pointer to new title
+				_SetString						;update the window's title
+;
+				SUBQ	#2,SP					;make room for stringWidth result
+				MOVE.L	D5,-(SP)				;push newString pointer
+				_StringWidth					;measure width of new title
+				MOVE.W	(SP)+,WTITLEWIDTH(A3)	;update window's title width
+;
+				BSR 	CALLWCALC				;invoke the windowProc to calc regions
+
+; if the new region is the same as the old region, then simply paint the
+; current window (this is the usual case). Otherwise, redraw all windows.
+
+				CLR.W	-(SP)					; room for boolean result		<EHB 1/23/85>
+				MOVE.L	StructRgn(A3),-(SP) 	; compare the new structure 	<EHB 1/23/85>
+				MOVE.L	D3,-(SP)				; to the old one				<EHB 1/23/85>
+				_EqualRgn						;								<EHB 1/23/85>
+				MOVE.W	(SP)+,D0				; are they equal??				<EHB 1/23/85>
+				BEQ.S	@1						; no, redraw everything 		<EHB 1/23/85>
+
+				BSR.S	RemoveContent			; else remove content from region <EHB 1/23/85>
+
+				MOVE.L	A3,-(SP)				; and paint the window			<EHB 1/23/85>
+				MOVE.L	D3,-(SP)				; with the new structure		<EHB 1/23/85>
+				_PaintOne						;								<EHB 1/23/85>
+				BRA.S	@2						;								<EHB 1/23/85>
+
+; compute the union of the old and new structures of the window, subtract
+; out the content region, and redraw clipped to that
+
+@1
+				
+				move.l	a3,-(sp)				;<SM16> FM pass the window pointer
+				_ActivatePalette				;<SM16> FM go tell the Palette Mgr to think about this window
+
+				MOVE.L	StructRgn(A3),-(SP) 	;push new struct
+				MOVE.L	D3,-(SP)				;push old struct
+				MOVE.L	D3,-(SP)				;clobbered gets the result
+				_UnionRgn						;clobbered = old and new struct
+
+				BSR.S	RemoveContent			; remove content from region	<EHB 1/23/85>
+
+				MOVE.L	A3,-(SP)				;push the window
+				MOVE.L	D3,-(SP)				;push clobbered
+				_PaintBehind					;PaintBehind(theWindow,clobbered)
+
+				MOVE.L	A3,-(SP)				;push the window
+				MOVE.L	D3,-(SP)				;push clobbered
+				_CalcVBehind					;CalcVBehind(theWindow,clobbered)
+;
+; all done -- dispose clobbered, restore the port and return to caller
+
+@2
+				MOVE.L	D3,-(SP)				;push clobbered
+				_DisposRgn						;dispose it
+
+				BSR 	RESTOREPORT 			;restore grafPort
+				MOVEM.L (SP)+,D3-D5/A2-A3		;restore registers
+GoTwoParm
+				BRA 	TWOPARMEXIT 			;standard exit saves code
+				EndProc
+				
+;  Utility PROCEDURE RemoveContent;
+;
+; This is a code saving utility.  It subtracts the content region of
+; the window in A3 from the region in D3 and leaves the result in
+; the region in D3.
+
+RemoveContent	Proc	Export
+				MOVE.L	D3,-(SP)				;push clobbered 				<EHB 1/23/85>
+				MOVE.L	ContRgn(A3),-(SP)		;push content region			<EHB 1/23/85>
+				MOVE.L	D3,-(SP)				;clobbered gets the result		<EHB 1/23/85>
+				_DiffRgn						;subtract off the result		<EHB 1/23/85>
+				RTS 							;								<EHB 1/23/85>
+				EndProc
+				
+;
+;  Utility FUNCTION DeltaPoint(point1,point2: Point): Point;
+;
+;	  DeltaPoint is a code saving utility that computes the difference between
+;  two LisaGraf points, Result := point1 - point2.
+;
+
+DeltaPoint		Proc	Export
+				Import	TwoParmExit
+				
+				MOVE	8(SP),D0				;get point1.v
+				SUB 	4(SP),D0				;subtract point2.v
+				MOVE	D0,12(SP)				;record result
+;
+				MOVE	10(SP),D0				;get point1.h
+				SUB 	6(SP),D0				;subtract point2.h
+				MOVE	D0,14(SP)				;record result
+				BRA		TwoParmExit				;standard exit saves code
+				EndProc
+
+; MoveGuts is common code shared between MoveWindow and ZoomWindow.  It calculates the
+; offset from the global point in D0 and the topLeft of the portRect, and offsets the
+; portRect and regions by that amount. StructRgn is in A4.
+
+MoveGuts		Proc	Export
+				Import	PortToBitMap
+				Import	DeltaPoint
+				Import	NegWords
+				
+				MOVE.L	A4,-(SP)				;push structure region
+				SUBQ	#4,SP					;make room for result
+				MOVE.L	D0,-(SP)				;get global place to move to
+				SUBQ	#4,SP					;make room for result
+				MOVE.L	PORTRECT(A3),-(SP)		;get portRect topLeft
+				MOVE.L	A3,A0					;get port pointer						<C106 EHB>
+				BSR		PortToBitMap				;convert to bitMap/pixMap pointer		<C106 EHB>
+				MOVE.L	BOUNDS(A0),-(SP)		;push portBounds topLeft				<C106 EHB>
+				BSR.S 	DeltaPoint				;compute portRect - bounds (global portRect)
+				BSR.S	DeltaPoint				;compute target - current
+;
+; now offset all the windows' regions
+;
+				MOVE.L	(SP),D3 				;remember the offset
+				_OfsetRgn						;offset the structure
+				MOVE.L	CONTRGN(A3),-(SP)
+				MOVE.L	D3,-(SP)
+				_OfsetRgn						;offset the content region
+				MOVE.L	UPDATERGN(A3),-(SP)
+				MOVE.L	D3,-(SP)
+				_OfsetRgn						;offset the update region
+
+				MOVE.L	A3,A0					;get port pointer						<C106 EHB>
+				BSR		PortToBitMap				;convert to bitMap/pixMap pointer		<C106 EHB>
+				PEA 	BOUNDS(A0)				;push pointer to port bounds rect		<C106 EHB>
+				MOVE.L	D3,-(SP)				;push offset
+				BSR 	NEGWORDS				;negate it
+				_OffsetRect 					;offset port bounds rect to new position
+
+				RTS 							; return to sender...
+				EndProc
+				
+;
+; PROCEDURE MoveWindow(window: windowPtr; hGlobal,vGlobal: INTEGER; front:BOOLEAN);
+;
+;	move the position of the window (hGlobal and vGlobal specify the
+; new position of topLeft) without changing its size.  If the front parameter
+; is true, also bring the window to the front
+;
+
+MoveWindow		Proc	Export
+				Import	SetWPort
+				Import	ClipGAbove
+				Import	GetNewRgn
+				Import	MoveGuts
+				Import	SmartMove
+				Import	SelWin1
+				Import	RestorePort
+				Import	TenBytExit
+				
+				MOVEM.L D3-D6/A3-A4,-(SP)		;save work registers
+				BSR 	SETWPORT				;get into the wmgr Port
+				MOVE.L	34(SP),A3				;get window ptr
+
+; compute the region that describes the currently visible part of the window
+; and keep it in D5
+;
+				BSR 	ClipGAbove				;clip to windows above us
+;
+				BSR 	GETNEWRGN				;allocate a new region, keep in A4
+				MOVE.L	(SP)+,D5				;call it srcRgn and keep in D5
+				MOVE.L	STRUCTRGN(A3),A4		;get the structure region
+				MOVE.L	A4,-(SP)				;push the structure region
+
+				MOVE.L	WMGRPORT,A0 			;get the wmgrPort
+
+				MOVE.L	CLIPRGN(A0),-(SP)		;intersect clipRgn with structRgn
+				MOVE.L	D5,-(SP)				;get result in srcRgn
+				_SectRgn						;intersect em
+
+;
+; remember the old struct
+;
+				MOVE.L	 A4,A0					;clone structRgn
+				_HandToHand 					;perform the clone
+				MOVE.L	 A0,D6					;keep in D6
+;
+; figure out the offsets for moving it
+
+				MOVE.L	30(SP),D0				; pass new topLeft in D0
+				BSR		MoveGuts				; call code shared with ZoomWindow
+
+; if NuMac then clip to windows that don't need to be redrawn
+
+				BSR		SmartMove				;clip to screens with same color table
+
+				MOVE.L	D5,-(SP)
+				MOVE.L	D3,-(SP)
+				_OfsetRgn						;offset visible part of struct
+;
+; Set up the clipRgn for the blit
+;
+				TST.B	28(SP)					;bring to front flag set?
+				BEQ.S	NoBTF0					;if not, skip
+
+; Roll in patchSetclip from WindowMgrPatches.a	<SM 2><PN>
+; Fix MoveWindow so that it calls ClipAbove(WindowList) for the bringToFront case
+;				_SetClip
+;
+				MOVE.L	WindowList, A3			;else, clipAbove the first window
+				BSR		ClipGAbove				;clip to windows above us
+				MOVE.L	34(SP),A3				;get window <PN> <SM12> Test & Adjust to 34(sp)
+		
+; end roll -in
+
+NoBTF0
+
+; commented out <C388/09Nov86> DAF
+				MOVE.L	WMGRPORT,A0 			;get wmgrPort
+				PEA 	PORTBITS(A0)			;use screen bitmap
+				MOVE.L	(SP),-(SP)				;its the destination, too
+				MOVE.L	D6,A0					;get src region handle
+				MOVE.L	(A0),A0 				;get pointer
+				PEA 	RGNBBOX(A0) 			;push pointer to its bounding box
+				MOVE.L	(A4),A0 				;dereference the structRgn
+				PEA 	RGNBBOX(A0) 			;its the destination box
+				CLR 	-(SP)					;mode is srcCopy
+				MOVE.L	D5,-(SP)				;clip to vis part of structRgn
+				_CopyBits						;do it!
+
+; draw the part of the window we couldn't move -- the part covered by some other
+; window or off the screen.  Compute the part of the window that needs
+; repainting into D5
+
+			   MOVE.L	 A4,-(SP)				;push the whole structure
+			   MOVE.L	 D5,-(SP)				;push the visible part
+			   MOVE.L	 D5,-(SP)				;result goes in D5
+			   _DiffRgn 						;compute invis part of struct
+;
+; better fix up the ones behind up first to avoid two images
+;
+				MOVE.L	NEXTWINDOW(A3),-(SP)	;push next window
+				MOVE.L	D6,-(SP)				;clobbered is old structure
+				_PaintBehind
+;
+; bring it to the front if necessary
+;
+				TST.B	28(SP)					;bring to front flag set?
+				BEQ.S	@3						;if not, skip
+
+				MOVE.L	A3,-(SP)				;push the window
+				MOVE.W	#$FFFF,DragFlag			;set implicit param to BTF							<LW10>
+				BSR 	SelWin1 				;bring us to the front
+				CLR.W	DragFlag				;<SM29> CSS
+; now we can repaint the clobbered part of the window in its new position
+
+@3			   MOVE.L	 A3,-(SP)				;push the windowPtr
+			   MOVE.L	 D5,-(SP)				;push clobbered
+; PaintOne in MoveWindow - since we have done CalcAncestorRgns in _PaintBehind, we can do a PaintOneLite <SM16> FM
+				move.l	ExpandMem,a0						; <SM16> FM
+				st		ExpandMemRec.ancestorRgnsCalced(a0)	; set the one-shot to keep from recalcing ancestor rgns <SM16> FM
+			   _PaintOne						;repaint it, clipped to clobbered
+
+;
+; better union new and old structRgns for CalcVisBehind clobbered
+;
+				MOVE.L	D6,-(SP)				;old struct
+				MOVE.L	A4,-(SP)				;new struct
+				MOVE.L	D6,-(SP)				;old gets result
+				_UnionRgn						;union them together
+;
+				MOVE.L	A3,-(SP)				;push the window
+				MOVE.L	D6,-(SP)				;clobbered is old structure
+				_CalcVBehind					;recalculate visRgns of those behind
+
+				MOVE.L	D5,-(SP)				;all done with this region
+				_DisposRgn						;return to free list
+				MOVE.L	D6,-(SP)
+				_DisposRgn
+
+				MOVE.L	A3,-(SP)				;push the window pointer
+				_ActivatePalette				;and activate the palette
+
+				BSR 	RESTOREPORT 			;restore the old grafPort
+				MOVEM.L (SP)+,D3-D6/A3-A4		;restore work registers
+				BRA 	TenBytExit				;standard exit saves code
+				EndProc
+
+; Utility SmartMove(srcRgn,offset)
+; We only want to blt the parts of the src that are going to screens with the same color
+; table as the src.  Subtract all other parts from the srcRgn so that they can
+; be drawn in response to an update event.
+; SrcRgn is in D5.  Offset is in D3
+
+SmartMove		Proc	Export
+				Import	NegWords
+				
+				MOVEM.L	D5-D7/A2-A4,-(SP)		; save work registers
+				SUBQ	#8,SP					; make room for rectangle
+				MOVE.L	SP,A2					; keep tempRect in A2
+
+				SUBQ	#8,SP					; make room for 2 region handles
+				_NewRgn							; allocate tempRgn
+				MOVE.L	(SP)+,D7				; keep tempRgn in D7
+				_NewRgn							; allocate rgn for dst screen
+				MOVE.L	(SP)+,D6				; keep scrnRgn in D6
+
+; check each device to see if src is on that device.
+
+				MOVE.L	DeviceList,A4			; keep current device in A4
+NxtDev1			
+				MOVE.L	(A4),A0					; point to current device
+				TST		GDFlags(A0)				; is it active?
+				BPL		SkipDev1				; => no, skip to next device
+
+				MOVE.L	D7,-(SP)				; push tempRgn
+				PEA		GDRect(A0)				; push rect
+				_RectRgn						; create a rectangular region
+
+				MOVE.L	D5,-(SP)				; push srcRgn
+				MOVE.L	D7,-(SP)				; push device's rectangle
+				MOVE.L	D7,-(SP)				; keep intersection in tempRgn
+				_SectRgn						; get intersection of window with device
+
+				CLR.B	-(SP)					; prepare for boolean result
+				MOVE.L	D7,-(SP)				; push intersection
+				_EmptyRgn						; is the result empty?
+				TST.B	(SP)+					; test result of intersection
+				BNE		SkipDev1				; => no intersection, we're cool
+
+; got a src device, check all possible dst devices
+
+				MOVE.L	DeviceList,A3			; keep current device in A3
+NxtDev2			
+				MOVE.L	(A3),A0					; point to current device
+				TST		GDFlags(A0)				; is it active?
+				BPL.S	SkipDev2				; => no, skip to next device
+
+				CMP.L	A3,A4					; does src device = dst device?
+				BEQ.S	SkipDev2				; => yes, we know the color table matches
+
+; does color table of src device match color table of dst device?
+
+				MOVE.L	(A4),A1					; point to source device
+				MOVE.L	GDPMap(A1),A1			; get handle to src pixMap
+				MOVE.L	(A1),A1					; point to src pixMap
+				MOVE.L	pmTable(A1),A1			; get handle to color table
+				MOVE.L	(A1),A1					; point to color table
+				MOVE.L	ctSeed(A1),D0			; get color table's seed
+				MOVE.L	GDPMap(A0),A1			; get handle to dst pixMap
+				MOVE.L	(A1),A1					; point to dst pixMap
+				MOVE.L	pmTable(A1),A1			; get handle to color table
+				MOVE.L	(A1),A1					; point to color table
+				CMP.L	ctSeed(A1),D0			; are color tables the same?
+				BEQ.S	SkipDev2				; => yes, blit is fine
+
+; color tables don't match.  Calculate the part of the src to be moved to this device (if any)
+
+				LEA		GDRect(A0),A0			; get dst deviceRect
+				MOVE.L	A2,A1					; get tempRect
+				MOVE.L	(A0)+,(A1)+				; copy topLeft
+				MOVE.L	(A0),(A1)				; copy botRight
+
+				MOVE.L	A2,-(SP)				; push rectangle
+				MOVE.L	D3,-(SP)				; push offset
+				BSR 	NEGWORDS				; negate it
+				_OffsetRect						; offset by move amount
+
+				MOVE.L	D6,-(SP)				; push scrnRgn
+				MOVE.L	A2,-(SP)				; push tempRect
+				_RectRgn						; regionize offset device's rect
+
+				MOVE.L	D6,-(SP)				; push scrnRgn
+				MOVE.L	D7,-(SP)				; push tempRgn
+				MOVE.L	D6,-(SP)				; get result in scrnRgn
+				_SectRgn						; get intersection
+
+				CLR.B	-(SP)					; prepare for boolean result
+				MOVE.L	D6,-(SP)				; push intersection
+				_EmptyRgn						; is the result empty?
+				TST.B	(SP)+					; test result of intersection
+				BNE.S	SkipDev2				; => no intersection, we're cool
+
+; subtract this piece of the src from the srcRgn
+
+				MOVE.L	D5,-(SP)				; push region being moved
+				MOVE.L	D6,-(SP)				; push part going to bigger screen
+				MOVE.L	D5,-(SP)				; get result as region being moved
+				_DiffRgn						; srcRgn := srcRgn-scrnRgn
+
+; check next dst device
+
+SkipDev2		
+				MOVE.L	(A3),A0					; point to current device
+				MOVE.L	GDNextGD(A0),D0			; get next device
+				MOVE.L	D0,A3					; keep current device in A3
+				BNE.S	NxtDev2					; =>do next device
+
+; check next src device
+
+SkipDev1		
+				MOVE.L	(A4),A0					; point to current device
+				MOVE.L	GDNextGD(A0),D0			; get next device
+				MOVE.L	D0,A4					; keep current device in A4
+				BNE.S	NxtDev1					; =>do next device
+
+; clean up and return
+
+				MOVE.L	D6,-(SP)				; push scrn region
+				_DisposRgn						; dispose of it
+				MOVE.L	D7,-(SP)				; push temp region
+				_DisposRgn						; dispose of it
+
+				ADDQ	#8,SP					; strip tempRect
+				MOVEM.L	(SP)+,D5-D7/A2-A4		; restore work registers
+				RTS								; and return
+				EndProc
+				
+;
+; function GetWVariant ( someWindow : WindowPtr ) : integer;
+;
+; GetWVariant returns the variant code of the windowRecord pointed at by
+;	someWindow.  The value returned is an integer even though variants
+;	are currently only 4 bits as word params on the stack are easier to
+;	handle
+;
+
+GetWVariant		Proc	Export				; <C491/08Dec86> DAF
+				MOVE.L	4(SP),A1			; get windowPtr							<C591/04Jan86> DAF
+				TST.B	MMU32Bit			; are we running 32-bit?				<C666/22Jan87> DAF
+				BEQ.S	@1					; do it the old way
+				SUBQ	#6,SP				; leave room for result and boolean
+				MOVE.L	A1,-(SP)			; push the windowPtr				<C591/04Jan86> DAF
+				PEA		6(SP)				; point to the result space
+				_GetAuxWin					; get the window's auxRec
+				ADDQ	#2,SP				; flush the boolean
+				MOVE.L	(SP)+,A0			; get the auxRec handle
+				MOVE.L	(A0),A0				; get the auxRec ptr
+				CLR.W	D0					; clear hi part of register
+				MOVE.B	awFlags(A0),D0		; get the variant byte					<1.7>
+				BRA.S	@2
+@1
+				CLR.W	D0					; clear hi part of register
+				MOVE.B	WindowDef(A1),D0	; get the variant code
+				AND.W	#$000F,D0			; trim to 4 bits
+@2
+				MOVE.W	D0,8(SP)			; return the result
+				MOVE.L	(SP)+,A0			; get the return addr				<C591/04Jan86> DAF
+				ADDQ	#4,SP				; flush parameter					<C591/04Jan86> DAF
+				JMP		(A0)				; return to caller
+				EndProc
+				
+;
+; UTILITY CallWindow
+;
+;	 This utility is used to save code.  It has a register interface:
+;			A3 holds the window
+;			D3 holds the parameter
+;			D0 holds the message
+;
+;	 On exit, D0 contains the result parameter
+;
+
+CallWindow		Proc	Export
+
+				MOVE.L	A4,-(SP)				;save A4		<SM24>
+				CLR.L	-(SP)					;make room for function result
+
+				SUBQ	#2,SP					;leave space for variant		<C491/08Dec86> DAF
+				MOVE.L	A3,-(SP)				;push window pointer
+				MOVE.W	D0,-(SP)				;push message index
+				MOVE.L	D3,-(SP)				;push parameter
+
+				SUBQ	#2,SP					;make room for function return	<C491/08Dec86> DAF
+				MOVE.L	A3,-(SP)				;push window pointer			<C491/08Dec86> DAF
+				_GetWVariant					;get variant code				<C491/08Dec86> DAF
+				MOVE.W	(SP)+,10(SP)			;put in placeholder on stack	<C491/08Dec86> DAF
+
+				MOVE.L	WindowDef(A3),A0		;get proc handle
+				TST.L	(A0)					;has the proc been purged?		<C666/21Jan87> DAF
+				BNE.S	@1						;if we got it, skip
+
+				MOVE.L	A0,D0					;clean the handle (historical)	<C666/21Jan87> DAF
+				_StripAddress					;clean the pointer				<C491/08Dec86> DAF
+				MOVE.L	D0,-(SP)				;better reload the proc			<C491/08Dec86> DAF
+				_LoadResource					;via the resource manager
+				TST.L	(A0)					;did we get it this time?		<C949/08Nov87> DAF
+				BNE.S	@1						;yup, keep going				<C949/08Nov87> DAF
+				MOVE.W	#WDEFnFnd,D0			;get error code					<C949/08Nov87> DAF
+				_SysError						;and croak						<C949/08Nov87> DAF
+@1
+
+; Some programmers are pretty slimy and load a WDEF that is empty.  They then					<LW4> fau
+; stuff some code into it.  However, since HLOCK does not flush the cache anymore,				<LW4> fau
+; the code that they stuff into it might not get written back to memory.  To solve this,		<LW4> fau
+; we check here whether the WDEF resource size is less than, say, 32 bytes.  If so, we			<LW6> chp
+; assume that they have already loaded theWDEF and modified it, so we flush the cache			<LW4> fau
+; for them.
+
+				_GetHandleSize					; How big is our WDEF Handle					<LW4> fau
+				cmp.l		#32,D0				; Is it "small"									<LW6> chp
+				bhi.s		@RealWDEF			; no, don't flush the cache						<LW4> fau
+				jsr			([jCacheFlush])		; else, flush the caches.						<LW4> fau
+@RealWDEF										;												<LW4> fau
+				_HLock							;lock the proc handle			<C424/18Nov86> DAF
+				MOVE.L	(A0),A0					;get the proc pointer			<C424/18Nov86> DAF
+				JSR 	(A0)					;call it
+				MOVE.L	WindowDef(A3),A0		;get the proc handle			<C424/18Nov86> DAF
+				_HUnlock						;free the defproc				<C424/18Nov86> DAF
+				MOVE.L	(SP)+,D0				;get the reply
+				
+				MOVE.L	(SP)+,A4				;restore A4		<SM24>
+				
+				RTS
+				EndProc
+				
+;
+;  CALLDWINDOW -- sends a draw message to the window
+;
+
+CallDWindow		Proc	Export
+				Import	CallWindow
+				
+				MOVEM.L D3,-(SP)				;preserve D3
+				MOVEQ	#0,D3					;zero D3 (draw all)
+				MOVEQ	#WDrawMsg,D0			;draw message
+				BSR.S	CallWindow				;call it
+				MOVE.L	(SP)+,D3				;restore A3
+				RTS
+				EndProc
+				
+;
+; UTILITY CallWCalc -- takes same parameters as call window and issues "calc your regions"
+; message to the window if its visible.  If the window isn't visible, it sets all the
+; regions to empty.
+;
+
+CallWCalc		Proc	Export
+				Import	CallWindow
+				
+				MOVEQ	#WCalcRgnMsg,D0			;assume its visible
+				TST.B	WVisible(A3)			;is it visible?
+;;;;			BNE.S	CallWindow				;if so, ask the window defProc to do it <C106 EHB>
+				BEQ.S	@1						;=>if not, empty regions			<C106 EHB>
+
+				LEA		PortBounds(A3),A1		;get portbounds			<C106 EHB>
+				MOVE.L	(A1)+,-(SP) 			;save whatever's there 	<C106 EHB>
+				MOVE.L	(A1)+,-(SP)				; 						<C106 EHB>
+				TST		PortBits+RowBytes(A3)	;is it a new port		<C106 EHB>
+				BPL.S	@0						;=>no					<C106 EHB>
+				MOVE.L	PortBits+BaseAddr(A3),A0	;get the pixmap		<C106 EHB>
+				MOVE.L	(A0),A0						;point to it		<C106 EHB>
+				MOVE.L	Bounds+botRight(A0),-(A1)	;					<C106 EHB>
+				MOVE.L  Bounds(A0),-(A1)			;set up bounds		<C106 EHB>
+@0
+				BSR		CallWindow				;get the defproc to recalc			<C106 EHB>
+				MOVE.L	(SP)+,PortBounds+BotRight(A3) ;restore whatever was there 	<C106 EHB>
+				MOVE.L	(SP)+,PortBounds(A3)	;									<C106 EHB>
+				RTS
+@1
+;
+; the window isn't visible so set its structure, content and visible regions to empty
+;
+				MOVE.L	STRUCTRGN(A3),-(SP) 	;zero the structure region
+				_SetEmptyRgn
+				MOVE.L	CONTRGN(A3),-(SP)		;zero the content region
+				_SetEmptyRgn
+				MOVE.L	VISRGN(A3),-(SP)		;zero the visRgn
+				_SetEmptyRgn
+				RTS 							;all done with calcRgn
+				EndProc
+				
+;
+; PROCEDURE HiliteWindow(window: windowPtr; fHilite: Boolean);
+;
+;	 Hilite or unhilite a window, depending on the state of the fHilite
+; boolean.
+;
+
+HiliteWindow	Proc	Export
+				Import	SetWPort
+				Import	ClipVStruct
+				Import	CallDWindow
+				Import	RestorePort
+				Import	SixBytExit
+				
+				MOVEM.L D3-D4/A3-A4,-(SP)		;save work registers
+				MOVE.L	22(SP),A3				;get window pointer
+				MOVE.B	20(SP),D3				;get fHilite boolean
+				BSR 	SETWPORT				;get into the wmgrPort
+;
+				MOVE.B	WHilited(A3),D0 		;get current hilite state
+				EOR 	D3,D0					;compare with parameter
+				LSR 	#1,D0					;just consider low bit
+				BCC.S	SWDONE					;if so, nothing more to do
+				MOVE.B	D3,WHILITED(A3) 		;set the new state of the window
+;
+				BSR.S	ClipVStruct 			;clip to windows above us
+				BSR		CALLDWINDOW 			;invoke the windowProc to draw it
+;
+SWDone			
+				BSR 	RESTOREPORT 			;restore old grafPort
+				MOVEM.L (SP)+,D3-D4/A3-A4		;restore work registers
+				BRA 	SIXBYTEXIT				;standard exit saves code
+				EndProc
+				
+;
+; ClipVStruct and ClipGAbove are code saving utilities that set the clipping region to
+; exclude the windows above the on in A3.  ClipVStruct also clips to the window's
+; structure while ClipGAbove uses the gray region (the desk) instead
+;
+ClipVStruct 	Proc	Export
+				Export	ClipGAbove
+				
+				MOVE.L	StructRgn(A3),-(SP) 	;push the structure
+ClipCommon		
+				_SetClip						;clip to it
+				MOVE.L	A3,-(SP)				;push the window
+				_ClipAbove						;clipAbove does all the real work
+				RTS
+;
+ClipGAbove		MOVE.L	GrayRgn,-(SP)			;push the gray region
+				BRA.S	ClipCommon				;let common code do the rest
+				EndProc
+				
+
+;
+; PROCEDURE SizeWindow(window: WindowPtr; w,h: INTEGER; fUpdate: BOOLEAN);
+;
+;	Change the size of the window to the width/height specified by w,h.  If
+; fUpdate is TRUE, generate the appropriate update events
+;
+
+TitleLeft		EQU 	32
+
+SizeWindow		Proc	Export
+				Import	SizeGuts
+				Import	SetWPort
+				Export	TenBytExit
+				
+				MOVEM.L D3-D4/A3-A4,-(SP)		;save work registers
+				MOVE.L	22(SP),D3				;w and h = 0? (get width, too)
+				BEQ.S	SizeDone				;if so, don't do anything
+
+				MOVE.L	26(SP),A3				;get the window pointer
+
+				MOVE	22(SP),D4				;get the new height (already got width)
+
+				LEA 	PORTRECT(A3),A4 		;get a pointer to the portRect
+				ADD 	(A4)+,D4				;bottom := top + height
+				ADD 	(A4)+,D3				;right	:= left + width
+				MOVE.W	D4,(A4)+				;update bottom
+				MOVE.W	D3,(A4)+				;update width
+;
+; now that the portRect is set to the new size.  Update the screen if necessary
+;
+				TST.B	WVISIBLE(A3)			;is the window visible?
+				BEQ.S	SIZEDONE				;if so, we're done
+				BSR 	SETWPORT				;get into the window manager port
+				MOVE.L	A3,-(SP)				;push the window pointer
+				_SaveOld						;SaveOld(window)
+
+				MOVE.B	20(SP),D3				; pass update flag in D3				<9 Sep 85>
+				BSR.S	SizeGuts				; call code shared with zoomWindow
+
+				MOVE.L	A3,-(SP)				; push the window pointer 				<12May87 DAF>
+				_ActivatePalette				; and activate it's palette				<12May87 DAF>
+
+SizeDone		
+				MOVEM.L (SP)+,D3-D4/A3-A4		;recover registers
+TenBytExit		
+				MOVE.L	(SP)+,A0				;get return address
+				ADD 	#10,SP					;pop off the paramters
+				JMP 	(A0)					;return to caller
+				EndProc
+				
+; SizeGuts is code shared between SizeWindow and ZoomWindow.  The window's (A3) old
+; regions have been saved by _SaveOld.	This calculates the new regions and then
+; draws the new window, updating the clobbered regions as necessary, and generating
+; update events if D3 is TRUE.	Before exiting, it gets out of the window manager port
+; and back into the port saved in D4.
+
+SizeGuts		Proc	Export
+				Import	CallWCalc
+				Import	ClipVStruct
+				Import	CallDWindow
+				Import	RestorePort
+				
+				BSR 	CALLWCALC				; have window recalc its regions
+
+				BSR		ClipVStruct 			; clip to those above us
+				BSR 	CALLDWINDOW 			; tell window to draw itself
+
+				MOVE.L	A3,-(SP)				; push pointer to window
+				MOVE.B	D3,-(SP)				; push update flag
+				_DrawNew						; update the screen image
+
+				BSR 	RESTOREPORT 			; restore the port in D4
+				RTS
+				EndProc
+				
+
+; PROCEDURE ZoomWindow(window: windowPtr; partCode: Integer; front: BOOLEAN);
+;						36					34				  32
+; ZoomWindow handles resizing the window in response to a click in the zoom box.
+; It is usually called when the FindWindow classification code is "inZoomIn" or
+; "inZoomOut".	It resizes the window, leaving the local coordinates of the topLeft
+; of the portRect unchanged (thus PortBounds are changed).	It does not bring the
+; window to the front.
+
+; NOTE: This routine can only be called for window variation code 8 (hasZoomBox) or
+; it will dereference bogus data from the wDataHandle.	Also no provisions are made
+; for the zooming of invisible windows.
+
+ZoomWindow		Proc	Export
+				Import	SetWPort
+				Import	CallWCalc
+				Import	MoveGuts
+				Import	SizeGuts
+				Import	SelWin1
+				Import	TwoParmExit
+				
+				MOVEM.L D3-D6/A2-A4,-(SP)		; save work registers
+				BSR 	SETWPORT				; get into window manager port (save old in D4)
+				MOVE.L	36(SP),A3				; A3 = window pointer				<EHB 03Nov85>
+				BSR 	CALLWCALC				; have window recalc its regions	<EHB 29Aug85>
+												; this saves current size too		<EHB 29Aug85>
+				MOVE.L	A3,-(SP)				; push window pointer
+				_SaveOld						; save current structure & content regions
+												; DrawNew called by SizeGuts
+				MOVE.L	wDataHandle(A3),A2		; get the data handle
+				MOVE.L	(A2),A2 				; and point to the data (smallSize,bigSize:Rect)
+				CMPI.W	#inZoomIn,34(SP)		; was it zoom in?
+				BEQ.S	@1						; => yes, A2 points to smallSize
+				ADDQ	#8,A2					; else point A2 to bigSize
+@1
+				MOVE.L	StructRgn(A3),A4		; get structure region into A4
+				MOVE.L	(A2)+,D0				; get new topLeft for common code
+				BSR 	MoveGuts				; share code with MoveWindow
+
+; calculate new botRight by adding width and height to new topLeft
+
+				MOVE.W	(A2)+,D0				; get bottom of new rect
+				MOVE.W	(A2)+,D1				; get right of new rect
+				SUBQ	#8,A2					; rewind to beginning of rect
+				SUB.W	(A2)+,D0				; D0 = height
+				SUB.W	(A2)+,D1				; D1 = width
+				LEA 	PortRect(A3),A0 		; update portRect with new botRight
+				ADD.W	(A0)+,D0				; D0 = new bottom
+				ADD.W	(A0)+,D1				; D1 = new right
+				MOVE.W	D0,(A0)+				; set bottom
+				MOVE.W	D1,(A0)+				; set right
+
+; call code that is shared with SizeWindow to recalculate and draw
+; SizeGuts calls CALLWCALC which causes the window's position to be updated
+
+				MOVEQ	#1,D3					; pass update flag in D3
+				BSR.S	SizeGuts				; share code with SizeWindow
+
+				TST.B	32(SP)					; bring to front flag set?			<EHB 29Aug85>
+				BEQ.S	@2						; => no 							<EHB 29Aug85>
+				MOVE.L	A3,-(SP)				; push the window					<EHB 29Aug85>
+				MOVE.W	#$FFFF,DragFlag			; bring to front					<EHB 29Aug85><LW10>
+				BSR 	SelWin1 				; and select the window 			<EHB 29Aug85>
+				CLR.W	DragFlag				; <SM29> CSS
+@2
+				PEA 	PortRect(A3)			; invalidate the entire portRect
+				_InvalRect
+
+				MOVEM.L (SP)+,D3-D6/A2-A4		; restore registers
+				BRA 	TwoParmExit 			; and return
+				EndProc
+				
+;
+; FUNCTION TrackGoAway(window: windowPtr; thePt: Point): BOOLEAN;
+;
+;  TrackGoAway tracks a window's go away button.  It is usually called when the
+;  FindWindow classification code is "inGoAway".  The point parameter is usually
+;  the mousePoint attached with the mouseDown event (in global coordinates).
+;  TrackGoAway hilites/unhilites the go away button and returns true if the mouse
+;  went up in the goAway button and false otherwise.
+;
+
+TrackGoAway		Proc	Export
+				Import	SetWPort
+				Import	ClipVStruct
+				Import	CallWindow
+				Import	EORSymbol
+				Import	CallDragHook
+				Import	RestorePort
+				Import	TenBytExit
+				Export	TrackBox
+				
+				MOVE.L	(SP)+,A0				; get RTS
+				MOVE.W	#wInGoAway+2,-(SP)		; push "part code" to track
+				MOVE.L	A0,-(SP)				; put RTS back
+
+
+; FUNCTION TrackBox(window: windowPtr; thePt: Point; partCode: INTEGER): BOOLEAN;
+;						14				  10			 8					 18
+;
+; TrackBox tracks the part specified by partcode.  It is used to track both the goAway
+; box and the zoom box.  TrackBox calls the defProc to hilite/unhilite the specified part
+; and returns true if the mouse is released in the specified part.	Keeps part in D6.
+
+TrackBox
+				LINK	A6,#-4					;build a stack frame
+				MOVEM.L D3-D6/A3,-(SP)			;save some registers
+
+				BSR 	SetWPort				;remember old grafPort and set wmgrPort
+
+				LEA 	8(A6),A0				;get param addr in register
+				MOVE.W	(A0)+,D6				; keep part code in D6
+				SUBQ	#2,D6					; map to hit-test part number
+				MOVE.L	(A0)+,-4(A6)			;init mousePt
+				MOVE.L	(A0)+,A3				;get the window
+				CLR.W	(A0)					;assume result false
+
+				MOVEQ	#0,D5					;flag goAway button as un-hilited
+
+				BSR 	ClipVStruct 			;clip to those above us
+
+TrackGALoop
+				MOVEQ	#WHitMsg,D0 			;its a hit-test message
+				MOVE.L	-4(A6),D3				;get the mouse point
+				BSR 	CallWindow				;tell window to hit test itself
+
+				CMP 	D6,D0					; check the returned part
+				BEQ.S	@1						; if not our part, make it 0
+				MOVEQ	#0,D0					; otherwise, its zero
+
+@1				CMP 	D0,D5					;has it changed?
+				BEQ.S	NextTrkGA				;if not, nothing to do
+
+				MOVE	D0,D5					;remember the change
+				BSR.S	EORSymbol				;and reflect it on the screen
+
+; keep tracking until the mouse goes up
+
+NextTrkGA
+				PEA 	-4(A6)					;push mouse address
+				_GetMouse						;read the mouse
+
+; call the users hook routine, if installed
+
+				BSR 	CallDragHook			;call user if installed
+
+; loop till the mouse button goes up
+
+				CLR.W	-(SP)					;make room for result
+				_WaitMouseUp					;is it still down?
+				TST.B	(SP)+					;well, is it?
+				BNE.S	TrackGALoop 			;if so, continue to loop
+;
+; the mouse button went up so flag the result and unhilite it if we have to
+;
+				TST 	D5						;were we in the button?
+				BEQ.S	DoneGA					;if not, we're done
+				ADDQ.B	#1,18(A6)				;flag it true, we're in the button
+
+				BSR.S	EORSymbol				;unhilite the symbol
+
+DoneGA
+				BSR 	RestorePort 			;restore grafPort
+				MOVEM.L (SP)+,D3-D6/A3			;restore work registers
+				UNLK	A6
+				BRA 	TenBytExit
+				EndProc
+				
+;
+; EORSymbol is a utility that exclusive ors the goAway button into the proper
+; hilite state by invoking the windowProc to do the dirty work.
+;
+
+EORSymbol		Proc	Export
+				Import	CallWindow
+				MOVEQ	#WDrawMsg,D0			;the message is draw
+				MOVEQ	#0,D3					; the param to the window defproc is a long	<v1.6>
+												;	so make sure that this word param has a
+												;	clean hi word.
+				MOVE	D6,D3					; param is "GoAway"
+				BSR 	CallWindow				;call the window
+				RTS
+				EndProc
+				
+;
+; PROCEDURE SelectWindow(theWindow: windowPtr);
+;
+;	SelectWindow is called when the mouse button is clicked in a "behind"
+; window.  It unHilites the current FrontWindow, brings the new one to
+; the front and then hilites it.  It also posts activate/deactivate events.
+; "DoActivate" is an alternative entry point that doesn't bother with the
+; old top window at all.
+;
+
+SelectWindow	Proc	Export
+				Import	BTF1
+				Import	MakeDeactive
+				Import	__ActiveWindow
+				Export	SelWin1
+				Export	DoActivate
+								
+				CLR.W	DragFlag				;clear implicit parm to BTF					<LW10>
+SelWin1
+				SUBQ	#4,SP					;make room for FrontWindow result
+				JSR		__ActiveWindow			;find out the old frontWindow <SM16> FM	use ActiveWindow
+				MOVE.L	8(SP),-(SP) 			;push the new window
+				JSR		BTF1					;bring it to the front
+
+; We used to just assume that the BTF1 call made us the front window. When the			 <SM16> FM
+; Layer manager was introduced they started checking which widnow ended up in front		 <SM16> FM
+; after the BTF1 call with a call to __ActiveWindow.									 <SM16> FM
+				MOVE.L	8(SP),A0				;get the window in A0
+				MOVE.B	wVisible(A0),-(SP)		;save visible on stack
+				ST.B	wVisible(A0)			;make it appear visible for ActiveWindow
+
+				SUBQ.L	#4,SP					;Get the new frontwindow. This seems uncecessary <SM16> FM
+				JSR		__ActiveWindow			;but thats the way the patch worked.			 <SM16> FM				
+				MOVE.L	14(SP),A0				;get the window in A0
+				MOVE.B	4(SP),wVisible(A0)		;restore wVisible
+				MOVE.L	(SP)+,10(SP)			;its a side affect of layers.					 <SM16> FM
+				ADDQ	#2,SP					; clear saved visible flag off the stack
+
+				MOVE.L	(SP)+,D0				;get the oldFrontWindow
+				BEQ.S	DoActivate				;if NIL, don't bother
+				CMP.L	4(SP),D0				;is it the same one?
+				BEQ.S	SkipUnHilite			;if so, dont post events
+
+				JSR 	MakeDeactive			;go post the deactivate
+
+; Note: Move D0 to curActivate before checking for window to activate.	This clears
+; curActivate if there are no (visible) windows left.							<EHB 1/23/85>
+
+DoActivate
+				MOVE.L	4(SP),D0				;get the window to activate
+				MOVE.L	D0,curActivate			;post the activate event		<EHB 1/23/85>
+				BEQ.S	NoActivate				;if none, skip					<EHB 1/23/85>
+SkipUnHilite
+				MOVE.L	D0,-(SP)				;push the new window for HiliteWindow 	<12May87 DAF>
+
+				MOVE.L	(SP),-(SP)				;copy it for ActivatePalette (actually HiliteWindow)			<12May87 DAF>
+
+				ST		-(SP)					;push "TRUE"
+				_HiliteWindow					;hilite the new one
+
+				_ActivatePalette				;activate its palette			<12May87 DAF>
+
+NoActivate		MOVE.L	(SP)+,(SP)				;strip the parameter
+				RTS 							;return to caller
+				EndProc
+				
+;
+; PROCEDURE BringToFront(window);
+;
+;	bring the parameter window to the front of the list (right after the
+;	dialogWindow).
+;
+
+				BLANKS			ON
+				STRING			ASIS
+
+BringToFront	Proc	Export
+				Import	SetWPort
+				Import	GetNewRgn
+				Import	PortToBitMap
+				Import	NegWords
+				Import	DeleteWindow
+				Import	RestorePort
+				Export	BTF1
+				
+				CLR.W	DragFlag				;we want to paint						<LW10>
+
+BTF1			MOVEM.L D3-D6/A2-A4,-(SP)		;save some work registers
+				MOVE.L	32(SP),A3				;get the window pointer
+				BSR 	SETWPORT				;get into the wmgr port
+				LEA 	WindowList,A2			;keep windowList ptr in A2
+;
+; check to see if its already on front -- if so, ignore the call
+;
+				CMP.L	(A2),A3 				;is it the front one?
+				BEQ		BTFDone 				;if so, we're done                      <27oct85> BBM
+;
+; calculate the union of all windows in front of us and then subtract this
+; window from everyone who used to be on front
+;
+				BSR 	GETNEWRGN				;allocate "clobbered" region
+				MOVE.L	(SP)+,D3				;keep clobbered in D3
+				MOVE.L	(A2),A4 				;start with 1st window in list
+BTFLoop
+				CMP.L	A3,A4					;done yet?
+				BEQ.S	DONEUNION				;if so, exit loop
+				TST.B	WVISIBLE(A4)			;is current one visible
+				BEQ.S	NEXTBTF 				;if not, don't bother unioning
+;
+				MOVE.L	A4,A0					;get port pointer						<C106 EHB>
+				BSR		PortToBitMap				;convert to bit/pixmap pointer			<C106 EHB>
+				MOVE.L	BOUNDS(A0),D6			;get global topLeft of curWindow		<C106 EHB>
+				MOVE.L	VISRGN(A4),D5			;get visRgn handle of curWindow
+;
+; offset the visRgn of current window to global coordinates, subtract the
+; structRgn of the parameter window, then offset back to local coordinates
+;
+				MOVE.L	D5,-(SP)				;push the visRgn
+				MOVE.L	D6,-(SP)				;push the offset point
+				BSR		NEGWORDS				;negate offset
+				_OfsetRgn						;offset to global coordinates
+;
+				MOVE.L	D5,-(SP)				;push the visRgn
+				MOVE.L	STRUCTRGN(A3),-(SP) 	;push the theWindow^.structRgn
+				MOVE.L	D5,-(SP)				;result goes in visRgn
+				_DiffRgn						;visRgn := visRgn - structRgn
+;
+				MOVE.L	D5,-(SP)				;push the visRgn
+				MOVE.L	D6,-(SP)				;push the offset
+				_OfsetRgn						;back to local coordinates
+;
+; add the structRgn of the current window to clobbered
+;
+				MOVE.L	STRUCTRGN(A4),-(SP) 	;push curWindow^.structRgn
+				MOVE.L	D3,-(SP)				;push clobbered
+				MOVE.L	D3,-(SP)				;clobbered gets the result
+				_UnionRgn						;clobbered := clobbered + structRgn
+
+NextBTF 		
+				MOVE.L	NEXTWINDOW(A4),A4		;get next window
+				MOVE.L	A4,D0					;is it NIL?
+				BNE.S	BTFLOOP 				;loop till done
+;
+; now that we have clobbered built, splice the window out of the list, insert it
+; right behind the dialogWindow (i.e., the "front") and recalculate its visRgn
+;
+
+DoneUnion		
+				MOVE.L	A3,-(SP)				;push the window
+				BSR 	DELETEWINDOW			;splice it out of the list
+;
+; insert window as first one in list
+;
+				MOVE.L	(A2),NextWindow(A3)
+				MOVE.L	A3,(A2)
+;
+; redraw the window, clipped to the union of those in front of it
+;
+				TST.W	DragFlag				;test if from MoveOptimized				<LW10>
+				BNE.S	DontPaint				;if so, we're done
+
+				MOVE.L	STRUCTRGN(A3),-(SP) 	;push the structRgn of window
+				MOVE.L	D3,-(SP)				;push clobbered
+				MOVE.L	D3,-(SP)				;clobbered gets the result
+				_SectRgn						;make clobbered as small as we can
+				MOVE.L	A3,-(SP)				;push the window pointer
+				MOVE.L	D3,-(SP)				;push clobbered
+
+; No need to calculate structure regions in the bring to front case because the window isn't moving <SM16> FM
+				move.l	ExpandMem,a0						;<SM16> FM
+				st		ExpandMemRec.ancestorRgnsCalced(a0)	; set the one-shot to keep from recalcing ancestor rgns
+				_PaintOne						;paint the window, clipped to clobbered
+DontPaint
+; Use CalcVBehind instead of CalcVis because of layers. <SM16> FM
+				MOVE.L	A3,-(SP)				;push the window					<SM16> FM
+				MOVE.L	STRUCTRGN(A3),-(SP)		;for now, everything's clobbered 	<SM16> FM
+				_CalcVBehind					;recalculate its visible region		<SM16> FM
+
+				MOVE.L	D3,-(SP)				;all done with clobbered region
+				_DisposRgn						;so we can dispose it
+BTFDone 		
+				BSR		RESTOREPORT 			;set port back to what it was (was .S)	<DAF 08-Apr-86>
+				MOVEM.L (SP)+,D3-D6/A2-A4		;restore working registers
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS 							;return to caller
+				EndProc
+;
+; NEGWORDS is a short utility intended to save code.  It negates the two words on the
+; top of the stack
+;
+
+NegWords		Proc	Export
+				NEG 	4(SP)					;negate y coordinate
+				NEG 	6(SP)					;negate x coordinate
+				RTS
+				EndProc
+				
+;
+; PROCEDURE SendBehind(window,behind: windowPtr)
+;
+;	send a window behind another window, redrawing all exposed areas.  If
+; behind is NIL, send it to the back
+;
+; If SendBehind is actually moving a window to the front, we should paint starting with the window
+; that ends up behind the window we are moving instead of the window that was behind it before we
+; moved anything. To do this, we get the new “behind” window in A3, and then look through the list.
+; If we never see that window in A3, then we know we should start painting there, but if we do see
+; it, then we use the old code which paints from the old front window.
+
+SendBehind		Proc	Export
+				Import	SetWPort
+				Import	DeleteWindow
+				Import	InsertWindow
+				Import	RestorePort
+				Import	TwoParmExit
+				Import	__ActiveWindow
+				
+				MOVEM.L D3-D4/A2-A4,-(SP)			;save work registers
+				MOVE.L	28(SP),A3				;get window pointer
+				BSR 	SETWPORT				;get into the window mgr port
+;
+				SUBQ	#4,SP					;make room for result
+				JSR		__ActiveWindow			;figure out the frontmost window
+				CMP.L	(SP)+,A3				;is it this one?
+				BNE.S	GoSendIt
+;
+; we're sending the frontMost window behind so go find the next visible window
+; in the list and select it
+;
+				MOVE.L	A3,A0					;get frontWindow in A0
+
+@1				MOVE.L	NextWindow(A0),A0		;get the next window
+				MOVE.L	A0,D0					;is it NIL?
+				BEQ.S	GoSendIt				;if so, dont call selectWindow
+				TST.B	WVisible(A0)			;is it visible?
+				BEQ.S	@1						;if not, loop till we find one
+
+				MOVE.L	A0,-(SP)				;we found one!
+				_SelectWindow					;select it
+
+GoSendIt
+				MOVE.L	A3,-(SP)				;push the window
+				BSR 	DELETEWINDOW			;splice it out of the list
+				MOVE.L	STRUCTRGN(A3),D3		;get its structRgn into a register
+				
+				MOVE.L	NEXTWINDOW(A3),-(SP)	;save the window currently behind the one we're moving
+
+				MOVE.L	A3,-(SP)				;push the window
+				MOVE.L	32(SP),-(SP)			;push behind
+				BSR 	INSERTWINDOW			;insert it at the end of the list
+
+; Check is the window moved forward or backward in the list.
+				move.l	(sp),d0				; get the window that WAS behind the window we moved
+				bra.s	@start				; start with the NIL check
+@loop
+				cmp.l	d0,a3				; if we find the window that is behind 	<34><35>
+				beq		MovedBack			; we are moving window to the back
+				move.l	d0,a0
+				move.l	nextWindow(a0),d0
+@start
+				bne.s	@loop				; if we have another window, go looping
+
+
+; Since we moved the window forward, nothing needs to be repainted except for the window we
+; moved, which may now be exposed more. First, we calculate the visRgns of the moved window and all
+; the windows behind it using CalcVBehind and the strucRgn of the moved window. Then, we figure out
+; what part of the window was exposed by adding up all the strucRgns of the windows that it was
+; moved in front of. We then use PaintOne to paint the window, but we set the flag that prevents
+; CalcAncestorRgns, since this can never change the total region of windows in the layer.
+MovedForward
+				move.l	(sp)+,a4			; save old behind window in non-volatile register
+				move.l	a3,-(sp)			; calc the windows behind me
+				move.l	d3,-(sp)
+				_CalcVBehind
+
+				; Union strucRgns of all windows that used to be in front of the window that moved,
+				; but are now behind it. We can find these windows by starting behind where the
+				; window is now, and stopping when we get where it was before it moved.
+
+				move.l	nextWindow(a3),d0	; start behind us
+				beq.s	Done				; if nothing is behind us, we are done
+				move.l	d0,a2				; start with this window
+
+				subq	#4,sp
+				_NewRgn
+				move.l	(sp)+,d3			; get a new region for unioning
+
+@loop2
+				cmp.l	a2,a4				; check if we are done yet							<36><39>
+				beq.s	@doneUnionRgns		; if done => exit loop									<39>
+				move.l	structRgn(a2),-(sp)	; get the strucRgn
+				move.l	d3,-(sp)			; union with our region
+				move.l	d3,-(sp)			; destination in our region
+				_UnionRgn
+				move.l	nextWindow(a2),a2	; move to next window (will never be NIL before the end)
+				bra.s	@loop2				;														<39>
+@doneUnionRgns								;														<39>
+
+				; Now we have a region including all windows that used to cover the window that
+				; moved but don’t cover it any more. By calling PaintOne with this region, we redraw
+				; only the newly revealed part of the window that moved.
+
+				move.l	a3,-(sp)
+				move.l	d3,-(sp)			; paint the newly exposed part of the moved window
+				move.l	ExpandMem,a0
+				st		ExpandMemRec.ancestorRgnsCalced(a0)	; set the one-shot to keep from recalcing ancestor rgns
+				_PaintOne
+
+				move.l	d3,-(sp)
+				_DisposeRgn					; get rid of that region
+Done
+				bra		Exit 				;standard exit to save code
+
+; Moved the window backwards in the list. This is the old SendBehind code mostly
+
+MovedBack		
+				move.l	(sp),-(sp)				;2 copies for the next two calls…
+				MOVE.L	D3,-(SP)				;push the structRgn
+				_CalcVBehind					;recalc the visRgns of guys below
+				MOVE.L	D3,-(SP)				;push the structRgn
+				_PaintBehind					;redraw guys below us
+;
+Exit			BSR 	RestorePort 			;restore the users port
+				MOVEM.L (SP)+,D3-D4/A2-A4		;restore registers
+				BRA 	TwoParmExit 			;standard exit to save code
+				EndProc
+				
+;
+; PROCEDURE BeginUpdate(window: windowPtr);
+;
+;	prepare a window for updating by saving its visRgn and then intersecting it
+;	with its update region.  Remember the visRgn in global coordinates in case
+;	the user calls SetOrigin before calling EndUpdate.
+;
+
+BeginUpdate 	Proc	Export
+				Import	PortToBitMap
+				Import	NegWords
+				IMPORT	BeginUpdateOfLayersChildren
+				
+				MOVEM.L D3-D4/A3,-(SP)			;save working registers
+				MOVE.L	16(SP),A3				;get the windowPtr
+				
+				MOVE.L	A3,WMgrUpdate			; Copy the window pointer to a safe place.<SM16> FM
+				
+				MOVE.L	A3,-(SP)						; Check is this window is a layer <SM16> FM
+				JSR		BeginUpdateOfLayersChildren		; And update its children if so…  <SM16> FM
+
+				MOVE.L	A3,A0					;get port pointer						<C106 EHB>
+				BSR		PortToBitMap				;convert to bit/pixmap pointer			<C106 EHB>
+				MOVE.L	BOUNDS(A0),D3			;get dh,dv (topLeft of boundsRect)		<C106 EHB>
+				MOVE.L	VISRGN(A3),D4			;get the window's visRgn
+;
+				MOVE.L	D4,-(SP)				;push the visRgn
+				MOVE.L	D3,-(SP)				;push dh,dv
+				BSR		NEGWORDS				;negate offset (local -> global)
+				_OfsetRgn						;offset visRgn to global
+;
+; copy global version of visRgn into saveVisRgn
+;
+				MOVE.L	D4,-(SP)				;push visRgn
+				MOVE.L	SAVEVISRGN,-(SP)		;make a copy of the visRgn
+				_CopyRgn						;in saveVisRgn
+;
+				MOVE.L	D4,-(SP)				;push visRgn
+				MOVE.L	UPDATERGN(A3),-(SP) 	;push the update region
+				MOVE.L	D4,-(SP)				;the visRgn gets the result
+				_SectRgn						;intersect visRgn and updateRgn
+;
+				MOVE.L	D4,-(SP)				;push visRgn
+				MOVE.L	D3,-(SP)				;push dh,dv
+				_OfsetRgn						;convert visRgn back to local
+;
+				MOVE.L	UPDATERGN(A3),-(SP) 	;zero out the update region
+				_SetEmptyRgn					;zero it
+
+; this was STDEXITONE							;										<DAF>
+
+				MOVEM.L (SP)+,D3-D4/A3			;restore work registers
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS
+
+;
+; PROCEDURE EndUpdate(window: windowPtr);
+;
+;	 EndUpdate is called by an application after completing an update to restore
+;  the window's visRgn back to normal
+;
+
+EndUpdate		Proc	Export
+				Import	PortToBitMap
+				Import	__CalcVis
+
+; We should make sure that this endupdate call matches the BeginUpdate <SM16> FM
+; Check WMgrUpdate to do this… <SM16> FM
+
+				MOVE.L	WMgrUpdate, D0			
+				CMP.L	4(SP), D0				; Is it the right window?
+				BEQ.S	@gotRightWindow			; Just CalcVis if not.
+				JMP		__CalcVis				; exit now!
+
+@gotRightWindow
+				CLR.L	WMgrUpdate				; Clear the global.
+
+				MOVE.L	A3,-(SP)				;save work register
+				MOVE.L	8(SP),A3				;get the windowPtr
+				MOVE.L	SAVEVISRGN,-(SP)		;push saved visRgn handle
+				MOVE.L	(SP),-(SP)				;make a copy for later
+				MOVE.L	(SP),-(SP)				;and another one
+;
+; offset global visRgn back to local
+;
+				MOVE.L	A3,A0					;get port pointer						<C106 EHB>
+				BSR		PortToBitMap				;convert to bit/pixmap pointer			<C106 EHB>
+				MOVE.L	BOUNDS(A0),-(SP)		;push port.portBits.topLeft				<C106 EHB>
+				_OfsetRgn						;global -> local
+;
+				MOVE.L	VISRGN(A3),-(SP)		;push current visRgn handle
+				_CopyRgn						;restore window's real visRgn
+;
+				_SetEmptyRgn					;make saveVisRgn small to save space
+;
+				MOVE.L	(SP)+,A3				;restore work register
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS 							;return to caller
+				EndProc
+				
+;
+; PROCEDURE DragWindow(window: windowPtr; startPt: Point; boundsRect: Rect);
+;
+;	 Drag a gray outline of a window around, tracking the mouse until the button goes up.
+;	 Then use MoveWindow to move it to its new location
+;
+
+myKeyMap		EQU 	-36 					;place to hold keyMap
+WindowBounds	EQU 	-16 					;rectangle for bounds when dragging
+WindowFiller	EQU 	-8						;for historical reasons
+
+DragWindow		Proc	Export
+				Import	SetWPort
+				Import	ClipGAbove
+				Import	GetNewRgn
+				Import	PortToBitMap
+				Import	RestorePort
+				Import	TwelveBytExit
+				
+				LINK	A6,#-36 				;allocate stack frame
+				MOVEM.L D3-D6/A3-A4,-(SP)		;save work registers
+
+				SUBQ	#2,SP					;make room for result
+				_WaitMouseUp					;is mouse button stillDown?
+				TST.B	(SP)+					;well?
+				BEQ 	EXITDRAG				;if not, dont drag at all
+;
+; Set up window bounds and window slop rectangles based on the parameter boundsRect
+;
+				MOVE.L	8(A6),A0				;point to the users boundsRect
+
+				MOVE	(A0)+,D0				; get top
+				MOVE.W	MBarHeight,D1			; get height of menu bar			<EHB 5Aug85>
+				ADDQ	#4,D1					; plus 4							<5Aug85>
+				CMP.W	D1,D0					; is the top at height+4			<5Aug85>
+				BHS.S	SkipDrgPin				; if greater, we're cool
+				MOVE.W	D1,D0					; pin at height+4					<5Aug85>
+SkipDrgPin
+				LEA 	WindowBounds(A6),A1 	;point to the DragTheRgn bounds
+
+				MOVE	D0,(A1)+				; move in bounds top
+
+				MOVE.W	(A0)+,(A1)+ 			;move in bounds left
+				MOVE.L	(A0),(A1)				;move in bounds botRight
+;
+				MOVE.L	12(A6),D3				;get start point
+				MOVE.L	16(A6),A3				;get window
+				BSR 	SETWPORT				;get into the wmgrPort
+;
+				MOVE.L	GrayRgn,-(SP)			;push grayRgn
+				_SetClip						;clip to the gray region
+
+				PEA 	myKeyMap(A6)			;push pointer to keyMap
+				_GetKeys						;read the keyMap
+
+				MOVE.B	myKeyMap+6(A6),D6		;command key down?
+; Roll in patchDragGrayRgn from WindowMgrPatches.a 				<SM16> FM	
+; If the command key is down we want to clip above the window	<SM16> FM
+; we're dragging. If not we want to clip above the front most	<SM16> FM
+; window in this layer.											<SM16> FM
+
+				BMI.S	@commandKeyDown			;if so then clip above this window  <SM16> FM
+				MOVE.L	WindowList, A3			;otherwise just ClipAbove the first window <SM16> FM
+@commandKeyDown	
+				BSR 	ClipGAbove				;clip to windows above us <SM16> FM
+				MOVE.L	16(A6),A3				;get the window to drag back into A3 <SM16> FM
+				BSR 	GETNEWRGN				;allocate a region
+				MOVE.L	(SP),A4 				;call it bodyRgn and keep in A4
+				MOVE.L	STRUCTRGN(A3),-(SP) 	;copy the structure region
+				MOVE.L	A4,-(SP)				;into the body
+				_CopyRgn						;do the copy
+;
+												;room for result already on stack
+				MOVE.L	A4,-(SP)				;push the region
+				MOVE.L	D3,-(SP)				;push the mouse point
+				PEA 	WindowBounds(A6)		;push the boundsRect
+				MOVE.L	(SP),-(SP)				;its also the slopRect
+				CLR.W	-(SP)					;no axis constraints
+				CLR.L	-(SP)					;no action proc
+;
+				CLR.W	DragFlag				; not dragging control thumb		<SM29> CSS
+				_DragGrayRgn					;drag it until the mouse goes up
+
+				MOVE.L	(SP)+,D5				;get dV,dH
+				BEQ.S	DontMove				;if it didn't move, handle special
+				CMP.W	#$8000,D5				;was it aborted?
+				BEQ.S	DoneDrag				;if so, we're done
+;
+; figure out where to move the port to and move it
+;
+				MOVE.L	A3,-(SP)				;push the window for move call
+				MOVE.L	PORTRECT(A3),D0 		;get the port rect topLeft
+				MOVE.L	A3,A0					;get port pointer						<C106 EHB>
+				BSR		PortToBitMap				;convert to bit/pixmap pointer			<C106 EHB>
+				SUB.W	BOUNDS+2(A0),D0 		;compute global x position				<C106 EHB>
+				ADD 	D5,D0					;add in delta X
+				MOVE.W	D0,-(SP)				;push new x position
+				SWAP	D0						;get y in low part
+				SWAP	D5						;get deltaY in low part
+				SUB.W	BOUNDS(A0),D0			;compute global y position				<C106 EHB>
+				ADD 	D5,D0					;add in the y delta
+				MOVE.W	D0,-(SP)				;push new y position
+
+				TST.B	D6						;command key down?
+				SPL 	-(SP)					;if not, push TRUE (bring to front)
+				_MoveWindow 					;move it
+
+DoneDrag
+				 MOVE.L  A4,-(SP)				 ;push temp region
+				_DisposRgn
+;
+				BSR 	RESTOREPORT 			;restore original port
+
+ExitDrag		
+				MOVEM.L (SP)+,D3-D6/A3-A4		;restore register
+				UNLK	A6						;de-allocate stack frame
+				BRA 	TwelveBytExit			;standard exit saves code
+				
+;
+; handle the case where the window didn't move
+;
+
+DontMove
+				TST.B	D6						;command key down?
+				BMI.S	DoneDrag				;if so, we're done
+
+				MOVE.L	A3,-(SP)				;push the window
+				_SelectWindow					;select it
+				BRA.S	DoneDrag
+				EndProc
+
+DragRegion		Proc	Export
+				Export	DragGrayRgn
+				Export	DragTheRgn
+				Export	CallDragHook
+				Export	WMgrGray
+				
+				Import	GetNewRgn
+				
+WMgrGray		DC.W	$AA55,$AA55,$AA55,$AA55
+
+; alternate entry point to DragTheRgn that forces the drag pattern to gray
+
+DragGrayRgn
+				MOVE.L	WMgrGray,DragPattern	 ;copy into DragPattern
+				MOVE.L	WMgrGray+4,DragPattern+4 ;better copy both halves
+;
+;  FUNCTION DragTheRgn(theRgn,mousePt,boundsRect,slopRect,axis,actionProc): LongInt
+;
+;  Drag the region around until the mouse button goes up.  It respects the grafPort it
+;  is called from.	It returns deltaX,deltaY (distance between final point and initial one)
+;  which will be $8000 if the button goes up outside the boundsRect.  Don't drag the region
+;  out of the rect.  The axis parameter is a 16-bit integer; if zero, there are no
+;  constraints, if its one it can only be dragged horizontally, if two only vertically.
+;
+; Parameter Equates
+;
+;
+DragTheRgnFrame		RECORD	{A6Link},Decr
+DragResult			ds.l	1 					;long result -- amount moved
+DRgn				ds.l	1 					;region handle to input region
+DMPoint 			ds.l	1					;initial mouse point
+DBoundsRect 		ds.l	1					;the rect we can't leave
+DSlopRect			ds.l	1					;the rect for throwaway decision
+DAxis				ds.w	1					;integer specifying axis constraints
+DActionProc 		ds.l	1					;actionProc
+retAddr				ds.l	1
+A6Link				ds.l	1
+Padding				ds.w	1					;not used, but in original equates
+DSavePen			ds.b	psRec				;penState record (for wmgrPort)
+DSaveCPen			ds.b	psRec				;penState record (for wmgrCPort)
+OrigPort			ds.l	1					;incoming value of thePort
+IsWMgrPort			ds.w	1					;true if thePort is a wmgrPort
+FrameSize			equ		*
+					EndR
+
+				With DragTheRgnFrame
+DragTheRgn		LINK	A6,#FrameSize 			;make room for savePenState
+				MOVEM.L D3-D7/A3-A4,-(SP)		;reserve work registers
+				
+				MOVE.L	ExpandMem,A0			;get ExpandMem globals		<SM23>
+				ST		ExpandMemRec.emIsDragging(A0)	;we're dragging		<SM23>
+
+				LEA 	DMPoint(A6),A0			;point to parameters
+				MOVE.L	(A0)+,D3				;get the mousePt
+				MOVE.L	(A0)+,A3				;get the region handle
+				CLR.L	(A0)					;assume delta is zero
+
+;
+; save the penState before setting it to what we need for dragging
+;
+				PEA 	DSavePen(A6)			;push pointer to savePenState
+				MOVE.L	(SP),-(SP)				;dup for later restore
+				_GetPenState					;save the pen state
+;
+; set up the pen for dragging
+;
+				PEA 	DragPattern 			;XOR specified pattern
+				_PenPat
+				MOVE	#14,-(SP)				;set pen mode to notPatXor
+				_PenMode
+				move.l	OneOne,-(sp)
+				_PenSize						; Make sure that a thin outline is dragged
+				
+;
+; since FrameRgn is too slow, build a region that is just the outline so we
+; can paint it fast
+;
+
+				bsr		GetNewRgn
+				move.l	(sp)+,a4				; This is a scratch region for flicker free dragging
+				
+				MOVE.L	A3,-(SP)				;push full region on stack for later
+				BSR 	GETNEWRGN				;allocate another region
+				MOVE.L	(SP),D4 				;keep in D4 (leave on stack)
+				_CopyRgn						;copy full region to temp in D4
+
+				MOVE.L	D4,-(SP)				;push temp region
+				MOVE.L	ONEONE,-(SP)			;inset by 1
+				_InsetRgn
+				MOVE.L	A3,-(SP)				;push full region
+				MOVE.L	D4,-(SP)				;push inset one
+				MOVE.L	A3,-(SP)				;original one stays around
+				_DiffRgn						;turn it into a frame by subtracting
+
+				MOVE.L	D4,-(SP)				;get rid of temp region
+				_DisposRgn
+
+				MOVE.L	A3,-(SP)				;draw initial frame
+				bsr 	DrawDraggedRgn			;draw it					<SM29> CSS
+				MOVEQ	#-1,D5					;flag it as visible and active
+
+; so that we can use multiple screens, look to see if the bounds rect is derived from
+; screenbits.  If it is, then pin to the grayRgn instead of the boundsrect.  Also pin to
+; the grayRgn instead of the sloprect.  If bounds not screenbits, then just use provided
+; bounds and slop, but convert them to regions for ease of coding.
+
+				BSR 	GETNEWRGN				;;allocate bounds region
+				MOVE.L	(SP)+,D6 				;;keep in D6
+				BSR 	GETNEWRGN				;;allocate slop region
+				MOVE.L	(SP)+,D7 				;;keep in D7
+
+				MOVE.L	GRAFGLOBALS(A5),A0		;;point to grafGlobals
+				LEA		SCREENBITS+BOUNDS(A0),A0;;point to screenbits.bounds
+				MOVE.L	4(A0),-(SP)				;;push botRight
+				MOVE.L	(A0),-(SP)				;;push topleft
+				MOVE	MBarHeight,D0			;;get mbarHeight
+				ADD		D0,TOP(SP)				;;bump top by mbarheight
+				ADD		#30,TOP(SP)				;;and make room for ghost windows
+				MOVE.L	SP,-(SP)				;;point to rect
+				MOVE.L	#$00060006,-(SP)		;;inset bounds by six
+				_InsetRect
+
+				MOVE.L	4(SP),-(SP)				;;push botRight
+				MOVE.L	4(SP),-(SP)				;;push topLeft
+
+				CLR.B	-(SP)					;;prepare for boolean result
+				PEA		2(SP)					;;push srcrect1
+				MOVE.L	DBoundsRect(A6),-(SP)	;;push srcrect2
+				PEA		10(SP)					;;push dstrect = srcRect1
+				_SectRect						;;get intersection
+				TST.B	(SP)+					;;ignore result
+
+				CLR.B	-(SP)					;;prepare for boolean result
+				PEA		10(SP)					;;push our original inset
+				PEA		6(SP)					;;push result of intersection
+				_EqualRect						;;are they equal
+				TST.B	(SP)+					;;test result
+				ADD		#16,SP					;;strip 2 rectangles
+				BEQ.S	NotEqual				;;=>no, do pinning old way
+
+				MOVE.L	grayRgn,-(SP)			;;push grayRgn
+				MOVE.L	D7,-(SP)				;;push slopRgn
+				_CopyRgn						;;slopRgn := grayRgn
+				MOVE.L	D7,-(SP)				;;push slopRgn
+				MOVE.L	#$00040004,-(SP)		;;inset gray rgn by four
+				_InsetRgn
+
+				MOVE.L	D7,-(SP)				;;copy slopRgn
+				MOVE.L	D6,-(SP)				;;to boundsRgn
+				_CopyRgn						;;boundsRgn := grayRgn
+				BRA.S	DragLoop				;;=>dive into loop
+
+NotEqual		
+				MOVE.L	D7,-(SP)				;;push slopRgn
+				MOVE.L	DSlopRect(A6),-(SP)		;;push slopRect
+				_RectRgn						;;slopRgn := RectRgn(slopRect)
+
+				MOVE.L	D6,-(SP)				;;push boundsRgn
+				MOVE.L	DBoundsRect(A6),-(SP)	;;push boundsRect
+				_RectRgn						;;boundsRect := RectRgn(boundsRect)
+
+;
+; here is the main drag loop -- first read the mouse in our local coordinates
+;
+
+DragLoop
+				SUBQ	#6,SP					;make room for results
+				MOVE.L	SP,-(SP)				;push pointer to result buffer
+				_GetMouse						;read the current mouse position
+				MOVE.L	(SP),D4 				;remember pt in D4 (keep on stack)
+;
+;  see if the point is in the boundsRect; if it isn't, don't move the region
+;
+				MOVE.L	D6,-(SP)				;;push the bounds rgn
+				_PtInRgn						;;test if the point is inside the region
+				TST.B	(SP)+					;is it?	(moved out of conditional)		<C491/08Dec86> DAF
+				BEQ 	OutOfBounds 			;if not, don't move
+
+;
+; get y in low part of D1, x in low part of D4
+;
+
+DragInBounds
+				MOVE.L	D4,D1					;copy whole point
+				SWAP	D1						;get y in low part
+				CMP.L	D4,D3					;did it move?
+				BEQ.S	NOMOTION				;if not, skip
+;
+; it moved so compute dh,dv and move it
+;
+				MOVE.L	D4,-(SP)				;save current position
+				SUB 	D3,D4					;compute Dx
+				SWAP	D3
+				SUB 	D3,D1					;compute Dy
+;
+; if we constrained, don't allow any motion in the axis we're constrained to
+;
+				MOVE	DAxis(A6),D0			;any constraints?
+				BEQ.S	NConstraint 			;if not, skip
+				SUBQ	#1,D0					;horizontally?
+				BNE.S	@1						;if not, it must be vertical
+				CLR 	D1						;make v offset 0 (h only)
+				BRA.S	NConstraint
+@1				
+				CLR 	D4						;make h offset 0 (v only)
+;
+; update the continuous offset result
+;
+
+NConstraint
+				ADD 	D1,DragResult(A6)		;accumulate y offset
+				ADD 	D4,DragResult+2(A6) 	;accumulate x offset
+				
+;
+; Make a copy of the dragging region
+;
+
+				move.w	d1,-(sp)				;Save D1 (y delta) Sure wish there was a free register!	<SM39>
+				move.l	a3,-(sp)
+				move.l	a4,-(sp)
+				_CopyRgn
+				move.w	(sp)+,d1				;Restore D1 cuz CopyRgn doesn't preserve it Ernie!		<SM39>
+				
+;
+; offset the copy to new position and update the screen
+;
+
+				MOVE.L	a3,-(SP)				;push the region
+				MOVE.W	D4,-(SP)				;push dx
+				MOVE.W	D1,-(SP)				;push dy
+				_OfsetRgn						;offset to new position
+				
+				tst.w	d5						; See if it’s visible
+				bnz.s	@regionIsVisible		; If it is, do the Xor to do a combination erase/paint
+				move.l	a3,-(sp)				; The drag region just came back into boundRect, so it needs to be draw anew
+				bsr 	DrawDraggedRgn			; Doing the Xor would also redraw the region in it’s last visible location, leaving garbage on the screen <SM29> CSS
+				bra.s	@markOutlineVisible		; Just paint the region in it’s new position
+				
+@regionIsVisible
+				move.l	a4,-(sp)				; Push the region before it was offset
+				move.l	a3,-(sp)				; Push the region in it’s new location
+				move.l	a4,-(sp)				; Mess with the copy
+				_XorRgn							; Make a region that’s the difference between the two locations
+				move.l	a4,-(sp)				; Just paint this difference
+				bsr 	DrawDraggedRgn			; <SM29> CSS
+@markOutlineVisible
+				MOVEQ	#-1,D5					;mark it active again
+				MOVE.L	(SP)+,D3				;update new position
+NoMotion
+				MOVE.L	DActionProc(A6),D0		;get the actionProc
+				BSR		CallDrg1				;call it if we got one
+				BSR		CallDragHook			;call the user if she's installed
+;
+; wait at least 2 ticks to avoid disappearing
+;
+				MOVE.L	Ticks,D0
+				ADDQ.L	#2,D0					;bump it two ticks
+DragDelay		
+				CMP.L	Ticks,D0				;has ticks caught up yet?
+				BHI.S	DragDelay				;loop till it has			<14Jan86>
+;
+				SUBQ	#2,SP					;make room for function result
+				_WaitMouseUp					;is button stillDown?
+				TST.B	(SP)+					;examine result
+				BNE.S	DRAGLOOP				;loop if it is
+;
+;  the mouse went up so remove outline (if visible), restore pen and we're done
+;
+				TST 	D5						;is it visible?
+				BEQ.S	ItsClear				;if not, don't bother
+
+				MOVE.L	A3,-(SP)				;push region handle
+				bsr		DrawDraggedRgn			;remove outline of region				<SM29> CSS
+
+ItsClear
+				_SetPenState					;restore old pen state
+
+; This is probably not necessary, but to avoid compatibility problems,
+; make sure that the returned region is the (offset) frame of the original region.
+
+				MOVE.L	(A3),A0					;point at the region					<C624>
+				CMP		#$A,RgnSize(A0)			;is it rectangular?						<C624>
+				BNE.S	@NoRect					;=>no, not a rect						<C624>
+
+				MOVE.L	A3,-(SP)				;push full region on stack for later	<C624>
+				MOVE.L	D6,-(SP)				;push temp region						<C624>
+				_CopyRgn						;copy full region to temp in D4			<C624>
+
+				MOVE.L	D6,-(SP)				;push temp region						<C624>
+				MOVE.L	ONEONE,-(SP)			;inset by 1								<C624>
+				_InsetRgn
+				MOVE.L	A3,-(SP)				;push full region						<C624>
+				MOVE.L	D6,-(SP)				;push inset one							<C624>
+				MOVE.L	A3,-(SP)				;original one stays around				<C624>
+				_DiffRgn						;turn it into a frame by subtracting	<C624>
+
+@NoRect
+@99
+
+;
+; if the last point isn't inside the slopRect, make sure we return an offset of 0
+;
+				SUBQ	#6,SP					;make room for results
+				MOVE.L	SP,-(SP)				;push pointer to result buffer
+				_GetMouse						;read the current mouse position
+				MOVE.L	D7,-(SP) 				;push slopRect pointer
+				_PtInRgn						;is the point in the slopRect?
+
+				TST.B	(SP)+					;is it?
+				BNE.S	@3						;if so, skip zeroing offset
+;
+; flag it as aborted
+;
+				MOVE.L	#$80008000,DragResult(A6)  ;set delta to large neg number
+@3
+				MOVE.L	D7,-(SP)				;dispose of slop region
+				_DisposRgn
+				MOVE.L	D6,-(SP)				;dispose of bounds region
+				_DisposRgn
+				move.l	a4,-(sp)
+				_DisposRgn						; Dispose of secondary dragging region
+
+				MOVE.L	ExpandMem,A0			;get ExpandMem globals			<SM23>
+				CLR.B	ExpandMemRec.emIsDragging(A0)	;we're done dragging	<SM23>
+				
+				MOVEM.L (SP)+,D3-D7/A3-A4		;restore work registers
+				UNLK	A6						;deallocate stack frame
+				MOVE.L	(SP)+,A0				;get return address
+				ADD 	#22,SP					;strip parameters
+				JMP 	(A0)					;return to caller
+				
+;
+;  CallDragHook calls the user's drag hook routine, if one is installed
+;
+
+CallDragHook
+				MOVE.L	DragHook,D0 			;is there a hook routine?
+CallDrg1
+				BEQ.S	NoDHook 				;if not, don't bother
+				MOVE.L	D0,A0					;get the hook routine
+				JSR 	(A0)					;call it
+;
+NoDHook 		RTS 							;all done!
+				
+;
+; OutOfBounds is called from the main loop when the mousePt is outside of the
+; boundsRect.  If its outside the slopRect turn it off, if its inside, turn it on
+;
+
+OutOfBounds
+				SUBQ	#2,SP					;make room for result
+				MOVE.L	D4,-(SP)				;push the mouse point
+				MOVE.L	D7,-(SP)				;;push the slop region
+				_PtInRgn						;;is mouse in slop rgn
+				TST.B	(SP)+					;is it?
+				BNE.S	 InSlopRect 			;if it is, go handle it
+;
+; its not in the slopRect so make it invisible
+;
+				TST 	D5						;is it visble
+				BEQ.S	NoMotion				;if its already invisible, we're done
+				MOVEQ	#0,D5					;set its state to invisible
+GoPaintRgn
+				MOVE.L	A3,-(SP)				;push region again
+				bsr 	DrawDraggedRgn			;get rid of it <SM29> CSS
+
+@Fast			BRA.S	NoMotion				;all done
+				
+;
+; its in the slopRect, but not in the boundsRect.  Make it visible again if it was
+; invisible
+;
+
+InSlopRect
+				TST 	D5						;examine visible state
+				BNE.S	PinBounds				;if already visible, pin at bounds
+				MOVEQ	#1,D5					;flag it visible but frozen
+				BRA.S	GoPaintRgn				;if not, go paint it
+
+;
+; we're out of the bounds so fake up a mouse point that's inside the bounds to pin at
+; the edge
+;
+
+PinBounds
+				SUBQ	#4,SP					;make room for result
+				MOVE.L	DBoundsRect(A6),-(SP)	;push the boundsRect pointer
+				MOVE.L	D4,-(SP)				;push the point
+				_PinRect						;figure out inside point
+				MOVE.L	(SP)+,D4				;get the pinned point
+				BRA 	DragInBounds			;pretend it was inside
+				
+; <SM29> CSS The following is a new routine to paint the dragging region to fix the
+; scroll bar thumb appearing in yellow.
+
+DrawDraggedRgn
+				tst.w	DragFlag			; control manager dragging thumb?
+				bne.s	@dragThumb			; Yes.  Force black drag
+				
+; We’re doing normal outline dragging, so just paint the region.
+
+@paintnormal
+				move.l	4(sp),-(sp)			; get rgn to paint
+				_PaintRgn
+				move.l	(sp)+,(sp)			; strip parameter
+				rts
+
+; To get the thumb to show up in color against the scroll bar’s gray background,
+; force the region outline to draw in black.
+
+@dragThumb
+				move.l	ExpandMem,a0
+				move.L	ExpandMemRec.emControlHandle(a0),d1	; get control handle saved for us in _DragControl
+				beq.s	@paintnormal		; do the normal painting if there's no controldefhandle.  <LW11>
+				move.l	d1,a0
+				move.l	(a0),a0				; get the ptr to control record
+				move.l	contrlDefHandle(a0),d0 ; get the CDEF handle
+				_StripAddress
+				move.l	d0,a0
+				move.l	(a0),a0				; get the ptr to CDEF
+				cmp.l	#'CDEF',4(a0)		; just for yucks make sure this is a CDEF
+				bne.s	@paintnormal		; paint normal if our handle is bad
+				btst	#0,3(a0)			; Can CDEF handle this message?
+				beq		@paintnormal		; no --> normal paint
+				move.l	4(sp),d0			; get rgn to draw
+				clr.l	-(sp)				; make room for function result
+				clr.w	-(sp)				; zero variant
+				move.l	d1,-(sp)			; save control handle
+				move.w	#drawThumbOutlineMsg,-(sp)	; draw thumb rgn outline message
+				move.l	d0,-(sp)			; rgn to draw
+											; note: we don't need to lock this handle
+											; because the client (of the control) should
+											; already have locked it.
+				jsr		(a0)				; call the control
+				addq	#4,sp				; strip function result
+				move.l	(sp)+,(sp)			; strip parameter
+				rts
+				EndWith
+				EndProc
+;
+; PROCEDURE InvalRgn( badRgn: regionHandle);
+;
+;	 invalidate a region by adding it to the current window's update region.  The region
+;  is assumed to be in local coordinates
+;
+
+InvalRgn		Proc	Export
+				Export	IValCommon
+				Export	GoExit1
+				Import	PortToBitMap
+				Import	NegWords
+				
+				MOVEQ	#0,D0					;signal invalidate
+
+;
+;  common code for invalRgn and valRgn
+;
+
+IValCommon		
+				MOVEM.L D3-D5/A3,-(SP)			;save work registers
+				MOVE	D0,D5					;remember flag in D5
+				MOVE.L	GrafGlobals(A5),A0 		;get LisaGraf globals base
+				MOVE.L	THEPORT(A0),A3			;get current window
+				MOVE.L	20(SP),D4				;get region handle
+				MOVE.L	A3,A0					;get port pointer						<C106 EHB>
+				BSR		PortToBitMap				;convert to bit/pixmap pointer			<C106 EHB>
+				MOVE.L	BOUNDS(A0),D3			;get port bounds topLeft				<C106 EHB>
+				MOVE.L	D4,-(SP)				;push the regionHandle
+				MOVE.L	D3,-(SP)				;push topLeft
+				BSR 	NEGWORDS				;negate it
+				_OfsetRgn						;offset to global coordinates
+;
+				MOVE.L	UPDATERGN(A3),-(SP) 	;push update region
+				MOVE.L	D4,-(SP)				;push region to be unioned
+				MOVE.L	UPDATERGN(A3),-(SP) 	;result goes in update region
+				TST 	D5						;union or difference?
+				BNE.S	GODIFFIT
+				_UnionRgn						;union them together
+				BRA.S	SKIP1DIFFIT
+GoDiffIt		
+				_DiffRgn
+Skip1DiffIt 	
+				MOVE.L	D4,-(SP)				;push parameter region
+				MOVE.L	D3,-(SP)				;push portBounds
+				_OfsetRgn						;back to local coordinates
+GoExit1 		
+				MOVEM.L (SP)+,D3-D5/A3			;restore work registers
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS 							;return to caller
+				EndProc
+				
+;
+; PROCEDURE InvalRect(badRect: RECT);
+;
+;	 Invalidate a rectangular area by adding it to the current window's update region.
+;	 The rectangle is assumed to be in local coordinates
+;
+
+InvalRect		Proc	Export
+				Export	IRectCommon
+				Import	IValCommon
+				Import	GoExit1
+				
+				MOVEQ	#0,D0					;flag that its inval
+;
+; common code for inval/val rect
+;
+
+IRectCommon 	
+				MOVEM.L D2-D5/A3,-(SP)			;save work registers (& one extra)
+				MOVE	D0,D5					;remember flag in D5
+
+				_NewRgn 						;allocate a new region
+				MOVE.L	(SP),D4 				;keep rgnHandle in D4 (leave on stack, too)
+				MOVE.L	24(SP),-(SP)			;push badRect pointer
+				_RectRgn						;set the region to the rectangle
+				MOVE.L	D4,-(SP)				;push the region handle
+				MOVE	D5,D0					;get flag in D0
+				BSR.S	IVALCOMMON				;invalidate it
+;
+				MOVE.L	D4,-(SP)				;push region handle
+				_DisposRgn						;de-allocate it
+				BRA		GOEXIT1 				;standard exit saves code
+				EndProc
+				
+;
+; PROCEDURE ValidRgn(goodRgn: regionHandle);
+;
+;	 Validate a region by subtracting it from the current window's update region.
+;  The region is assumed to be in local coordinates.  It shares lots of common code
+;  with InvalidRgn
+;
+
+ValidRgn		Proc	Export
+				Import	IValCommon
+				
+				MOVEQ	#-1,D0					;flag it as a val call
+				BRA		IVALCOMMON				;let common code do the rest
+				EndProc
+
+;
+; PROCEDURE ValidRect(goodRect: RECT);
+;
+;	 Validate a rectangular area by subtracting from to the current window's update region.
+;  The rectangle is assumed to be in local coordinates.  It share lots of common code
+;  with InvalidRect.
+;
+
+ValidRect		Proc	Export
+				Import	IRectCommon
+				MOVEQ	#-1,D0					;flag it as a val call
+				BRA		IRECTCOMMON 			;let common code do the rest
+				EndProc
+				
+;
+; FUNCTION GrowWindow(window: windowPtr; mousePt: Point; bBox: Rect): LongInt;
+;
+;  GrowWindow is called when the mouse goes down in the grow icon of a window
+;  It drags out a flickering outline by calling the window definition procedure
+;  and returns the new size as the result of the function. the bBox specifies
+;  the min and max size the window is limited to
+;
+
+GWRect			EQU 	-8
+GWPenState		EQU 	-28
+GWSRect			EQU		-36						;;copy of size rect	<C491/08Dec86> DAF
+GWKeyMap		EQU		-72						;;key map			<C491/08Dec86> DAF
+GWPenCState		EQU		-92
+GWFrameSize		EQU		GWPenCState
+
+GrowWindow		Proc	Export
+				Import	WMgrGray
+				Import	SetWPort
+				Import	ClipGAbove
+				Import	PortToBitMap
+				Import	NegWords
+				Import	CallGrow
+				Import	GWCalcSize
+				Import	DeltaPoint
+				Import	GetPinMouse
+				Import	CallDragHook
+				Import	RestorePort
+				Export	TwelveBytExit
+				
+				LINK	A6,#GWFrameSize			;build stack frame
+				MOVEM.L D3-D7/A3-A4,-(SP)		;save work registers
+;
+;  save old grafPort in D4 and get into the window manager port
+;
+				BSR 	SetWPort				;get into wmgrPort
+				MOVE.L	12(A6),D3				;get the mouse point
+				MOVE.L	16(A6),A3				;get the window
+;
+; clip to the windows above the current one
+;
+				BSR 	ClipGAbove				;clip to windows above us
+;
+; preserve the current penState and then set up gray,notPatXor
+;
+				PEA 	GWPenState(A6)			;push pen save area address
+				MOVE.L	(SP),-(SP)				;dup for later restore
+				_GetPenState					;remember current state
+				_PenNormal						;reset pen to normal state
+				MOVE	#notPatXor,-(SP)		;push desired xfer mode
+				_PenMode						;set the mode
+				PEA 	WMgrGray				;push the pattern
+				_PenPat 						;set it
+
+
+;
+; build initial boundsRect and draw the initial grow outline
+;
+				LEA 	GWRect(A6),A4			;get window rect pointer
+				MOVE.L	PortRect(A3),(A4)		;copy topLeft
+				MOVE.L	PortRect+4(A3),4(A4)	;copy botRight, toop
+				MOVE.L	A4,-(SP)				;push a pointer to the rect
+				MOVE.L	A3,A0					;get port pointer						<C106 EHB>
+				BSR		PortToBitMap				;convert to bit/pixmap pointer			<C106 EHB>
+				MOVE.L	BOUNDS(A0),-(SP)		;push bitmap.bounds.topLeft				<C106 EHB>
+				BSR 	NegWords				;negate offset (local -> global)
+				_OffsetRect 					;offset rect to global
+				BSR		CallGrow				;draw the outline						<27oct85> BBM
+;
+; remember the initial size before we start
+;
+				BSR 	GWCalcSize				;calc the size of rect in A4
+				MOVE.L	D0,D6					;remember in D6
+;
+; compute offset from starting bottom right and keep in D5
+;
+				SUBQ	#4,SP					;make room for result
+				MOVE.L	D3,-(SP)				;push mouse pt
+				MOVE.L	BotRight(A4),-(SP)		;push bottom right
+				BSR 	DeltaPoint				;get the offset
+				MOVE.L	(SP)+,D5				;keep in D5
+;
+; here is the main loop -- read the mousePoint, compute difference from oldPoint.
+; If it moved, adjust the rectangle and redraw it.	Keep doing this until the
+; mouse button goes up.
+;
+GDragLoop
+				MOVE.L	D3,-(SP)				;remember old point
+				BSR		GetPinMouse 			;calculate the new bottom right 			<27oct85> BBM
+				MOVE.L	(SP),D0 				;recover old point
+				MOVE.L	D3,-(SP)				;push new point
+				MOVE.L	D0,-(SP)				;push old point
+				BSR 	DeltaPoint				;compute difference
+
+				MOVE.L	(SP)+,D7				;get the offset
+				BEQ.S	GDNextLoop				;if not, skip
+;
+; erase, set up new position, redraw
+;
+				BSR.S	CallGrow				;erase it
+				ADD.W	D7,Right(A4)			;add delta x to right
+				SWAP	D7						;get v delta
+				ADD.W	D7,Bottom(A4)			;add delta y to bottom
+				BSR		CallGrow				;redraw in new position
+;
+; call the user's hook routine (if installed) and then loop while the mouse button
+; is still down.
+;
+GDNextLoop
+				BSR 	CallDragHook			;call user if installed
+				CLR.W	-(SP)					;make room for result
+				_WaitMouseUp					;is it still down?
+				TST.B	(SP)+					;well, is it???
+				BNE.S	GDragLoop				;loop till it goes up
+;
+; the mouse button went up so get rid of the outline
+;
+				BSR		CallGrow			   ;undraw the outline
+;
+; now figure out the size of the rectangle and return that as the result
+;
+				BSR 	GWCalcSize				;calculate the new size in D0
+				CMP.L	D0,D6					;save as it used to be?
+				BNE.S	@1						;if not, we're cool
+				MOVEQ	#0,D0					;if so, return 0
+@1				MOVE.L	D0,20(A6)				;return new size as function result
+;
+; Ok, we're all done -- restore penState, port and work registers before returning
+;
+				_SetPenState					;remember current state
+;
+				BSR 	RestorePort 			;restore old grafPort
+;
+				MOVEM.L (SP)+,D3-D7/A3-A4		;restore work registers
+				UNLK	A6						;unbuild stack frame
+TwelveBytExit
+				MOVE.L	(SP)+,A0				;get return address
+				ADD 	#12,SP					;strip parameters
+				JMP 	(A0)					;return to caller
+;
+; CallGrow issues the Grow message to a window to tell it to draw its grow frame
+;
+
+CallGrow		Proc	Export
+				Import	CallWindow
+				
+				MOVE.L	D3,-(SP)				;preserve D3
+				MOVEQ	#WGrowMsg,D0			;get the grow message
+				MOVE.L	A4,D3					;the rectangle is the parameter
+				BSR 	CallWindow				;tell the window
+				MOVE.L	(SP)+,D3				;restore D3
+				RTS
+				EndProc
+				
+;
+; GetPinMouse returns the current mouse position in D3.  It sometimes lies
+; to make sure it never exceeds the bounds specified by the SizeRect.
+;
+
+GetPinMouse		Proc	Export
+				Import	DeltaPoint
+				Import	GWCalcSize
+				
+				MOVE.L	BotRight(A4),-(SP)		;remember botRight
+				SUBQ	#8,SP					;make room for mousePt, result
+				MOVE.L	SP,-(SP)				;push ptr to mousePt buffer
+				_GetMouse						;get the current mouse position
+
+; subtract base offset from mousePt
+
+				MOVE.L	D5,-(SP)				;push the base offset
+				BSR 	DeltaPoint				;subtract it
+
+				MOVE.L	8(A6),A0				;;point to size rect
+				LEA		GWSRect(A6),A1			;;point to our copy
+				MOVE.L	(A0)+,(A1)+				;;copy topleft
+				MOVE.L	(A0)+,(A1)+				;;copy botright
+
+				PEA 	GWKeyMap(A6)					;;push pointer to keyMap
+				_GetKeys								;;read the keyMap
+				TST.B	GWKeyMap+6(A6)					;;command key down?   			<C970/22Nov87> DAF
+				BPL.S	NoCmd							;;if not, restrict max size
+				MOVE.L	#$7FFE7FFE,GWSRect+BotRight(A6)	;;else open up max size
+
+NoCmd			MOVE.L	(SP)+,BotRight(A4)		;make it the new bottom right
+				BSR.S	GWCalcSize				;calculate the new size into D0
+				MOVE.L	(SP),BotRight(A4)		;restore original size
+
+				PEA		GWSRect(A6)				;;point to fudged sizeRect
+				MOVE.L	D0,-(SP)				;;push new size
+				_PinRect						;;and pin to fudged sizeRect
+
+				SWAP	D5						;get y offset
+				MOVE	Top(A4),D3				;get top value
+				ADD.W	(SP)+,D3				;compute pinned bottom
+				ADD.W	D5,D3					;add base offset
+				SWAP	D3						;get x
+				SWAP	D5
+				MOVE	Left(A4),D3 			;get left value
+				ADD.W	(SP)+,D3				;compute pinned right
+				ADD.W	D5,D3					;add base offset
+
+				RTS 							;return to caller
+				EndProc
+				
+;
+; GWCalcSize calculates the size of the rectangle pointed to by A4.  It returns
+; the size as a LisaGraf point in D0
+;
+
+GWCalcSize		Proc	Export
+				SUBQ	#4,SP					;make room for result
+				MOVE.L	BotRight(A4),-(SP)		;push bottom right
+				MOVE.L	TopLeft(A4),-(SP)		;push topLeft
+				BSR 	DeltaPoint				;subtract them
+				MOVE.L	(SP)+,D0				;get the result
+				RTS
+				EndProc
+
+;
+;  FUNCTION FindWindow(thePoint: Point;
+;					   VAR theWindow: WindowPtr): INTEGER;
+;
+;	FindWindow is the routine that correlates a mouse position with the logical
+;	data structure in that position.  It passes back the window pointer of the
+;	window the point is in as well as a classification code further classifying
+;	the position.
+;
+
+__FindLayer		Proc	Export
+				Import	CallMBarProc
+				Import	CallWindow
+				Import	TwoParmExit
+				
+				MOVEM.L D1/D3/A3,-(SP)			;save work registers			<23-Oct-85 EHB>
+;
+; assume classification code is zero (inDesk) and the windowPtr are NIL.
+;
+				LEA 	16(SP),A0				;point to window ptr var		<23-Oct-85 EHB>
+				MOVE.L	(A0)+,A1				;get pointer to windowPtr
+				CLR.L	(A1)					;make it NIL
+				MOVE.L	(A0)+,D3				;get the mouse point
+				CLR.W	(A0)					;set classification code to zero
+;
+; first check to see if the point is on the menu bar.  This routine is amended to call the
+;	menuBar defproc on nuMac or Aladdin.  It returns - for not in menubar,
+;	0 for in menubar, but not in title, or + for in menu Title.
+;
+
+MBarHitMsg		EQU		1						; temporary equate				<C424/18Nov86> DAF
+
+				MOVEQ	#MBarHitMsg,D0			; put hit message in D0			<C424/18Nov86> DAF
+				MOVE.L	D3,D1					; send point as parameter		<C424/18Nov86> DAF
+				JSR		CallMBarProc			; call menuBar defproc			<C424/18Nov86> DAF
+				TST.L	D0						; test the result				<C424/18Nov86> DAF
+				BMI.S	NotOnMBar				; if +, then not on bar			<C424/18Nov86> DAF
+
+;
+				MOVEQ	#inMenuBar,D0			;return "inMenuBar" classification code
+				BRA.S	GoDoneFW				;all done with findWindow
+;
+; scan through the windowList starting at the front to see which window the point is in.
+;
+
+NotOnMBar
+				MOVE.L	WindowList,A3			;alertWindow is the frontmost window
+;
+; here is the loop where we hit-test the point against all visible windows
+;
+FWLoop
+				MOVE.L	A3,D0					;is it NIL (the end of the list)?
+				BEQ.S	DoneFW1 				;if so, we're done (its inDesk)             <27oct85> BBM
+;
+				TST.B	WVisible(A3)			;is this window visible?
+				BEQ.S	NextFW					;if not, don't test it
+;
+;  first check to see if its in the structure region of the window
+;
+				CLR.W	-(SP)					;make room for function result
+				MOVE.L	D3,-(SP)				;push the point
+				MOVE.L	STRUCTRGN(A3),-(SP) 	;push the structure region
+				_PtInRgn						;is the point in the structure region?
+				TST.B	(SP)+					;examine result
+				BEQ.S	NextFW					;if its not, go examine next one
+;
+; its in the window somewhere so call the window definition procedure to classify it
+;
+				MOVEQ	#WHitMsg,D0 			;its a hit-test message
+				BSR 	CallWindow				;ask the window about it
+				TST.W	D0						;D0 has the result
+				BNE.S	FoundWindow 			;if its non-zero, we've found it!
+;
+; it isn't the current window so keep looking until we run off the end of the window list
+;
+
+NextFW
+				MOVE.L	NextWindow(A3),A3		;get the next window in the list
+				BRA.S	FWLoop					;loop till we find one
+;
+; at this point we've found the window the point is in.  Update the result and
+; return to the caller.
+;
+
+FoundWindow
+				MOVE.L	16(SP),A0				;get pointer to window result			<23-Oct-85 EHB>
+				MOVE.L	A3,(A0) 				;update window result
+;
+;  check for if its a system window (The kind is < 0)
+;
+				TST 	WindowKind(A3)			;check out the kind parameter
+				BPL.S	GoChkDrag				;if not a system(<0), skip
+				MOVEQ	#inSysWindow,D0 		;return "inSystemWindow"
+GoDoneFW		
+				BRA.S	DoneFWindow 			;we're done
+
+;
+; if its in the drag area or grow area of the window, no further classification needed
+;
+
+GoChkDrag		CMP 	#wInDrag,D0 			;is it in the content area?
+				BLT.S	ItsInContent			;if its in content, return that
+				BGT.S	itsInGrow				;if greater, its in grow area
+				MOVEQ	#inDrag,D0				;return "inDragArea"
+				BRA.S	DoneFWindow 			;we're done
+
+itsInGrow		ADDQ	#2,D0					;return "inGrowArea" or "inGoAway"
+				BRA.S	DoneFWindow
+;
+;  its in the content area of a user window so waltz through the controlList to see
+;  if its in any of the controls.  First get into the window's port and convert
+;  the mouse point into local coordinates
+;
+
+ItsInContent
+				MOVEQ	#inContent,D0
+DoneFWindow
+				MOVE	D0,24(SP)				;update classification code result	<23-Oct-85 EHB>
+				MOVEM.L (SP)+,D1/D3/A3			;restore work registers 			<23-Oct-85 EHB>
+				BRA 	TwoParmExit 			;standard exit saves code
+
+;
+; its in the desk, so if someones in the deskHook, return "inSysWindow"
+;
+
+DoneFW1
+				MOVE.L	DeskHook,D0 			;is someone installed in deskHook?
+				BEQ.S	DoneFWindow 			;if not, return "inDesk"
+				MOVEQ	#inSysWindow,D0 		;return "inSysWindow
+				BRA.S	DoneFWindow 			;all done
+				EndProc
+				
+;
+; PROCEDURE DrawGrowIcon(theWindow: WindowPtr);
+;
+;	DrawGrowIcon draws the grow icon in the window by asking the defProc to
+;	do it.
+;
+
+DrawGrowIcon	Proc	Export
+				Import	SetWPort
+				Import	CallWindow
+				Import	RestorePort
+				
+				MOVEM.L A3/D4,-(SP) 			;save work registers
+				MOVE.L	12(SP),A3				;get the window ptr
+				BSR 	SetWPort				;get in the window manager port
+
+				MOVEQ	#WGIconMsg,D0			;get message ID
+				BSR 	CallWindow				;invoke the defProc
+
+				BSR 	RestorePort 			;restore user's grafPort
+
+				MOVEM.L (SP)+,A3/D4 			;restore work registers
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS 							;return to caller
+				EndProc
+				
+;
+; procedure SetDeskCPat (newDeskPat : PixPatHandle);
+;
+; SetDeskCPat sets the low-memory location DeskCPat to point at the supplied pixPat,
+;	then causes a redraw of the desktop.  This change to the desktop cPat does not
+;	cross application boundaries, but DeskPatDisable does.
+;	Stack Fixed <C835/20Feb87> DAF
+;
+
+SetDeskCPat		Proc	Export
+
+				TST.L	4(SP) 					; is the newPat NIL?					<1.2>
+				BEQ.S	@TurnOff				; yes, so switch back to binary			<C666/22Jan87> DAF
+				MOVE.L	DeskCPat,D0				; get the current deskCPat				<1.2>
+				BEQ.S	@1						; if NIL, then continue					<1.2>
+				CMP.L	MinusOne,D0				; continue if uninitialized, too		<1.2>
+				BEQ.S	@1						;										<1.2>
+
+				MOVE.L	D0,-(SP)				; push old desk pix pat					<1.2>
+				_DisposPixPat					; flush the old one						<1.2>
+
+@1				MOVE.L	4(SP),DeskCPat			; set it								<1.2>
+
+				BSET	#7,pCDeskPat			; if you called this you must want the pixPat	<C666/22Jan87> DAF
+@DrawIt
+				CLR.L	-(SP)					; push a NIL pointer for DrawIt, make space for TurnOff	<C835/20Feb87> DAF <C841>
+				MOVE.L	grayRgn,-(SP)			; gray rgn is clobbered					<C491/08Dec86> DAF
+
+; No need to recalculate regions since we aren't moving any windows.
+				move.l	ExpandMem,a0
+				st		ExpandMemRec.ancestorRgnsCalced(a0)	; set the one-shot to keep from recalcing ancestor rgns
+				_PaintOne						; redraw the desktop
+				MOVE.L	(SP)+,A0				; get the return address
+				ADDQ	#4,SP					; flush the parameter
+				JMP		(A0)					; and return
+
+@TurnOff
+				SUBQ	#4,SP					; make room for GetPattern result		<C841/21Feb87> DAF
+				MOVE	#deskPatID,-(SP)		; push pattern ID of deskPattern		<C666/22Jan87> DAF
+				_GetPattern 					; tell resource manager to get it		<C666/22Jan87> DAF
+				MOVE.L	(SP)+,A0				; get the pattern handle				<C666/22Jan87> DAF
+				MOVE.L	(A0),A0 				; get pattern pointer					<C666/22Jan87> DAF
+				MOVE.L	(A0)+,DeskPattern		; init the deskPattern					<C666/22Jan87> DAF
+				MOVE.L	(A0),DeskPattern+4		; don't forget 2nd half of it			<C666/22Jan87> DAF
+				BCLR	#7,pCDeskPat			; disable the cPat						<C666/22Jan87> DAF
+				BRA.S	@DrawIt					; redraw the desktop					<C666/22Jan87> DAF
+				EndProc
+				
+;
+; procedure SetWinColor ( theWindow:windowPtr; newColorTable:CTabHandle );
+;
+;	This procedure changes the awCTable field of the theWindow's auxWinRec.
+;	If newColorTable is equal to the default record's CTabHandle, then
+;	the auxWinRec is deallocated.  If this window does not have an
+;	auxWinRec, then one is allocated at the head of the list.  If theWindow
+;	is NIL, then the default colors are changed.  If a record gets deallocated,
+;	it's colorTable is disposed unless it has it's resource bit set (then the
+;	app must take responsibility)
+;
+;	Most of this code is shared with the control manager.  Since the auxRec
+;	offsets are the same for both types of auxrecs, the code should be OK,
+;	even though the code uses the auxWinRec names.
+;
+
+SetWinColor		Proc	Export
+				Export	SetCtlColor
+				Import	GetAuxGuts
+				IMPORT	GetRearWindow
+				
+				MOVEM.L	A2/A3,-(SP)			;get some address registers
+				MOVE.L	AuxWinHead,A2		;get the list head
+				LEA		AuxWinHead,A3		;in case we need to deallocate
+				BSR		SetGuts				;bsr so that we can redraw on return		<C491/08Dec86> DAF
+				MOVE.L	16(SP),D0			;get windowPtr								<C687/24Jan87> DAF
+				BNE.S	GotWindow			; <SM16> FM Was the window NIL?
+				
+; <SM16> The RedrawAll code is used by SetCtlColor/SetWinColor for the case when the
+; <SM16> caller passes NIL as a control/window to indicate that they want to replace the
+; <SM16> default color table.
+
+				move.l	ExpandMem,a0						; <SM16>
+				st		ExpandMemRec.ancestorRgnsCalced(a0)	; <SM16> set the one-shot to keep from recalcing ancestor rgns
+
+RedrawAll		bsr		GetRearWindow		; <SM16> Returns rearmost window in A1
+				move.l	a1,-(sp)			; <SM16> Paint from the rearmost window on up
+				move.l	GrayRgn,-(sp)		; <SM16> Use the entire desktop as the clobbered region
+				_PaintOne					; <SM16> Draw all the windows
+				BRA		SetEnd
+				
+GotWindow		MOVE.L	D0,A2				; Put the window in A2
+				TST.B	portVersion(A2)		; is it a new window?				 <SM16> <1.5/23Jul89 DAF>
+
+				BPL.S	@1					; don't set bkColor in old windows			<1.5/23Jul89 DAF>
+				SUBQ	#4,SP				; make a placeholder for the current port	<C687/24Jan87> DAF
+				PEA		(SP)				; push pointer to placeholder				<C687/24Jan87> DAF
+				_GetPort					; get thePort								<C687/24Jan87> DAF
+				MOVE.L	A2,-(SP)			; make this port the current port			<C687/24Jan87> DAF
+				_SetPort					; set it									<C687/24Jan87> DAF
+
+				MOVE.L	16(SP),A0			; copy cTabHandle to A-reg					<C687/24Jan87> DAF
+				MOVE.L	(A0),A0				; get cTabPtr								<C687/24Jan87> DAF
+
+				MOVE.W	CTSize(A0),D1		; get the color table size					<C687/24Jan87> DAF
+				MULU	#CTEntrySize,D1		; convert to color table index				<C687/24Jan87> DAF
+@LegalIndex
+				CMP.W	#wContentColor,CTTable+value(A0,D1)	; is this the one?			<C687/24Jan87> DAF
+				BEQ.S	@FoundIt			; if equal, then done						<C687/24Jan87> DAF
+				SUB.W	#CTEntrySize,D1		; try the previous one						<C687/24Jan87> DAF
+				BGE.S	@LegalIndex			; loop while index positive					<C687/24Jan87> DAF
+				MOVEQ	#0,D1				; OK, use the first one						<C687/24Jan87> DAF
+@FoundIt
+				PEA		CTTable+rgb(A0,D1) 	; push the address of the color to use		<C687/24Jan87> DAF
+				_RGBBackColor				; set the background color					<C687/24Jan87> DAF
+				_SetPort					; restore thePort							<C687/24Jan87> DAF
+@1
+				TST.B	wVisible(A2)		;if not visible, all done					<C687/24Jan87> DAF
+				BEQ.S	SetEnd				;
+				MOVE.L	A2,-(SP)			;push windowPtr								<C687/24Jan87> DAF
+				MOVE.L	StructRgn(A2),-(SP)	;push structure rgn as clobbered			<C687/24Jan87> DAF
+				_PaintOne					;redraw it									<C491/08Dec86> DAF
+				BRA.S	SetEnd				;											<C491/08Dec86> DAF
+
+SetCtlColor
+				MOVEM.L	A2/A3,-(SP)			;get some address registers
+				MOVE.L	AuxCtlHead,A2		;get the list head
+				LEA		AuxCtlHead,A3		;in case we need to deallocate
+				BSR.S	SetGuts				;											<C491/08Dec86> DAF
+				MOVE.L	16(SP),D0			;<SM16> FM get the control handle						<C491/08Dec86> DAF
+
+;<SM16>FM  A NIL control handle means the caller wants to replace the default color table
+;<SM16>FM  We did that in SetGuts so now we should refresh all of the windows…
+				BEQ		RedrawAll			;<SM16> FM Go refresh all the windows
+				
+
+				MOVE.L	D0,A0				;<SM16> FM Get the control handle in A0
+				MOVE.L	(A0),A1				;get the control pointer					<C491/08Dec86> DAF
+				TST.B	contrlVis(A1)		;is it visible?								<C491/08Dec86> DAF
+				BEQ.S	SetEnd				;nope, so we're done						<C491/08Dec86> DAF
+				MOVE.L	A0,-(SP)			;push control handle						<C491/08Dec86> DAF
+				_Draw1Control				;redraw it									<C616/12Jan87> DAF
+SetEnd
+				MOVEM.L	(SP)+,A2/A3			;restore the saved registers
+				MOVE.L	(SP)+,A0			;get the return address
+				ADDQ	#8,SP				;flush the parameters
+				JMP		(A0)				;and go home
+
+SetGuts
+
+tWind			EQU		$18					;some equates for parameters
+nCTab			EQU		$14					; 	after LINK (don't forget the movem above!)
+
+				LINK	A6,#0				;no globals
+				CLR.L	-(SP)				;return AuxWinHandle here
+				CLR.W	-(SP)				;function return here
+				CLR.L	-(SP)				;NIL for default
+				PEA		6(SP)				;pointer to the placeholder
+				MOVE.L	A2,A1				;set up list head for GetAuxGuts
+				BSR		GetAuxGuts			;get the default record
+				ADDQ	#2,SP				;ignore boolean result
+				MOVE.L	(SP)+,A0			;get the default handle
+				MOVE.L	(A0),A0				;get a pointer
+				MOVE.L	awCTable(A0),A0		;get the cTabHandle								<1.5>
+				CMP.L	nCTab(A6),A0 		;if the same then deallocate					<1.5>
+				BEQ 	DeAlAux				;
+				CMP.L	#-1,nCTab(A6) 		;if -1, then allocate a rec with default table		<C591/04Jan87><C767> DAF<C767>
+				BEQ.S	SpecAlloc			;													<C591/04Jan87><C767> DAF
+				MOVE.L	A0,-(SP)			;save a reg (yuck, but registers are tight!)	<C687/24Jan87><C767> DAF
+				MOVE.L	nCTab(A6),A0		;get the new color table handle					<C687/24Jan87><C767> DAF
+				MOVE.L	(A0),A0				;get a pointer									<C687/24Jan87><C767> DAF
+				CMP.W	#-1,ctSize(A0)		;is ctSize -1?   								<C687/24Jan87><C767> DAF
+				MOVE.L	(SP)+,A0			;get the register back (don't change flags)		<C687/24Jan87><C767> DAF
+				BEQ.S	SpecAlloc32			;If so, alloc a rec with default table			<1.5 DAF>
+				CLR.L	-(SP)				;temp for returned handle
+				CLR.W	-(SP)				;for function return
+				MOVE.L	tWind(A6),-(SP)		;here's the ID field
+				PEA		6(SP)				;pointer to handle placeholder
+				MOVE.L	A2,A1				;set up list head (again!)
+				BSR 	GetAuxGuts			;get this record
+				MOVE.B	(SP)+,D0			;get the result (set flags)
+				MOVEA.L	(SP)+,A0			;get the auxrec handle too
+				BEQ.S	AllocAux			;if result FALSE, then allocate a new one
+
+				MOVE.L	(A0),A0				;dereference the handle
+				MOVE.L	nCTab(A6),awCTable(A0) ;and set the field						<1.5>
+SWCDone
+				UNLK	A6
+				RTS
+
+; if this routine is called in 24-bit mode, then it falls through to SpecAlloc and makes
+;	a new auxWinRec with a copy of the default colortable.  If it is called in 32-bit
+;	mode, then it finds the window's pre-existing auxWinRec (one is always guaranteed to
+;	exist) and sets it's colortable to be a copy of the default colortable handle.
+
+SpecAlloc32
+				TST.B	MMU32Bit			; are we in 32-bit mode?						<1.5/DAF>
+				BEQ.S	SpecAlloc			; no, so allocate a new record with a copy of the default colors <1.5/DAF>
+				MOVE.L	A0,nCTab(A6)		; stick the default colors in the stack frame	<1.5/DAF>
+				CLR.L	-(SP)				; return AuxWinHandle here						<1.5 DAF>
+				CLR.W	-(SP)				; leave room for return value here				<1.5/DAF>
+				MOVE.L	tWind(A6),-(SP)		; find this window								<1.5 DAF>
+				PEA		6(SP)				; point to placeholder							<1.5 DAF>
+				MOVE.L	A2,A1				; set up list head for GetAuxGuts (windows or controls)			<1.5 DAF>
+				BSR		GetAuxGuts			; get it (it will always be here in 32-bit mode)				<1.5 DAF>
+				ADDQ	#2,SP				; the result should have always returned true	<1.5/DAF>
+				MOVE.L	(SP)+,A0			; get the win/ctl rec handle					<1.5 DAF>
+				MOVE.L	(A0),A0				; get a pointer									<1.5 DAF>
+				MOVE.L	nCTab(A6),awCTable(A0) ;and set the default colortable (in nCTab) field			<1.5 DAF>
+				BRA.S	SWCDone				;												<1.5 DAF>
+
+; this routine is a little unsavory- it sticks the default cTabHandle (in A0) in the
+;	stack frame, then falls through to AllocAux.  This routine ALWAYS makes a new
+;	auxWinRec whose color table is the same as the default.
+
+SpecAlloc
+				MOVE.L	A0,nCTab(A6)		; stick the default colors in the stack frame	<1.5/DAF>
+
+; this utility allocates an auxRec at the beginning of the AuxWinList
+; 	remember that A2=(AuxListHead), A3=AuxListHead
+AllocAux
+				MOVE.L	#AuxWinSize,D0		;set up for newHandle
+				_NewHandle ,clear			;allocate a new record
+				MOVE.L	A0,(A3)				;put the new element at the head of the list
+				MOVE.L	(A0),A0				;dereference the new element
+				MOVE.L	A2,awNext(A0)		;reconnect the list						<1.5>
+				MOVE.L	nCTab(A6),awCTable(A0) ;attach the color table				<1.5>
+				MOVE.L	tWind(A6),D0		; get this in a reg						<1.4/DAF>
+				_StripAddress				;
+@1				
+				MOVE.L	D0,awOwner(A0) 		; put in the ID field					<1.5/DAF>
+				BRA.S	SWCDone
+
+; this utility deallocates an auxRec and its colortable.  Note that the offset to awNext
+;	is zero, so that the first dereference will work.
+
+DeAlAux
+				MOVE.L	A0,A2				;save the default CTabH in A2			<C591/04Jan87> DAF
+				MOVE.L	A3,A1				;prime the pointers
+@1				
+				MOVE.L	awNext(A1),D1		;get handle to next					<1.5>
+				MOVE.L	D1,A0				;get copy of handle (doesn't change flags)
+				BEQ.S	@4					;never delete the default record		<C407/16Nov86> DAF
+				MOVE.L	(A0),A0				;dereference
+				MOVE.L	awOwner(A0),D0		;get owner ID						<1.5>
+				CMP.L	tWind(A6),D0		;test for match
+				BEQ.S	@2					;eliminate when matched
+				MOVE.L	A0,A1				;copy current to previous
+				BRA.S	@1
+@2
+				MOVE.L	awNext(A0),-(SP)	; save link if we need to remove	<1.4/1.5>
+				MOVE.L	awCTable(A0),A0		;get handle to colortable			<1.5>
+				_HGetState					;get handle tag byte					<C491/08Dec86> DAF
+				BTST	#resource,D0		;is it a resource? Then don't dispose	<C491/08Dec86> DAF
+				BNE.S	@3					;if it is, don't dispose				<C612/11Jan87> DAF
+				_DisposHandle
+@3
+				TST.B	MMU32Bit			;are we running 32-bit?					<C666/22Jan87> DAF
+				BEQ.S	@10					;no, so dispose the record				<C591/04Jan87> DAF
+				MOVE.L	D1,A0				;move handle to an A-reg				<C591/04Jan87> DAF
+				MOVE.L	(A0),A0				;dereference it							<C591/04Jan87> DAF
+				MOVE.L	A2,awCTable(A0)		;put it in the auxRec					<1.5>
+				ADDA	#4,SP				;we won't link around this record		<1.4>
+				BRA.S	@4					;and continue
+@10
+				MOVE.L	D1,A0				;get handle to auxRec
+				_DisposHandle
+				MOVE.L	(SP)+,awNext(A1)	; remove the disposed record from the list	<1.4/1.5>
+@4
+				BRA 	SWCDone
+				EndProc
+				
+
+;
+; function GetAuxWin (theWindow:windowPtr; var AWHndl:AuxWinHandle) : boolean;
+;
+;	GetAuxWin finds the handle to the appropriate auxWinRec for the
+;	windowRec pointed to by theWindow.  If theWindow is NIL, the handle to
+;	the default record is returned.  The boolean returns TRUE if a unique
+;	AuxWinHandle for that windowPtr is found, FALSE if the default record
+;	handle is returned. {and TRUE if theWindow was NIL, but should I change that?}
+;
+;
+
+GetAuxWin		Proc	Export
+				Export	GetAuxCtl
+				Export	GetAuxGuts
+				
+				MOVE.L	AuxWinHead,A1		;get the list head
+				BRA.S	GetAuxGuts
+GetAuxCtl
+				MOVE.L	AuxCtlHead,A1
+GetAuxGuts
+				MOVE.B	#1,12(SP)			;set the boolean to TRUE
+				MOVE.L	8(SP),D0			;get the ID field
+				_StripAddress				; make it 32-bit OK
+@1				
+				MOVE.L	(A1),A0				;dereference to ptr
+				CMP.L	awOwner(A0),D0		;do they match?								<1.5>
+				BEQ.S	@3
+				MOVE.L	A1,D2				;save this handle (if returning default)
+				MOVE.L	awNext(A0),D1		;move down the chain (set flags)			<1.5>
+				MOVE.L	D1,A1				;copy to address register
+				BNE.S	@1					;if next = NIL, then at the end
+				TST.L	D0					;was it a default request?
+				BEQ.S	@3					;if so, then handle is OK
+				MOVE.B	#0,12(SP)			;set the boolean to FALSE
+				MOVE.L	D2,A1				;and put this handle back
+@3				
+				MOVE.L	4(SP),A0			;get a pointer to var result
+				MOVE.L	A1,(A0)				;save the result
+				
+; <SM16> The routines that need to get at a window’s color table generally call GetAuxWin first to
+; <SM16> get the color table handle. That makes this a good place to reload the color table if it’s
+; <SM16> been purged.
+
+				move.l	(A1), A0			; <SM16> FM Aux[Win|Ctl]Ptr in A0
+				move.l	awCTable(A0), A0	; <SM16> FM Color table handle (resource handle) in A0
+				tst.l	(A0)				; <SM16> FM is the master pointer NIL?
+				bnz.s	@exit				; <SM16> FM if so then we should reload the table
+				move.l	A0, -(SP)			; <SM16> FM push the resource handle
+				_LoadResource				; <SM16> FM try to get it back in memory
+
+@exit			MOVE.L	(SP)+,A0			;get the return address
+				ADDQ	#8,SP				;flush the parameters
+				JMP		(A0)				;and go home
+				EndProc
+				END
+

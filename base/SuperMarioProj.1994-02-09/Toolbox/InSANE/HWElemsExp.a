@@ -1,0 +1,468 @@
+;
+;	File:		HWElemsExp.a
+;
+;	Written by:	Apple Numerics Group, DSG
+;
+;	Copyright:	© 1985-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<SM2>	 2/3/93		CSS		Update from Horror:
+;		<H2>	 9/29/92	BG		Adding Jon Okada's latest fixes.
+;		  <1>	10/24/91	SAM/KSM	Rolled in Regatta file.
+;		
+;	Terror Change History:
+;
+;		 <1>	01/06/91	BG		Added to TERROR/BBS for the time.
+;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: 881ELEMSexp.a																  ;;
+;; Implementation of Exp for OmegaSANE.  Expects 881/882							  ;;
+;; Copyright Apple Computer, Inc. 1985-7,1989-93.									  ;;			
+;; All Rights Reserved.																  ;;
+;; Confidential and Proprietary to Apple Computer,Inc.								  ;;
+;;																					  ;;
+;; Written by Clayton Lewis, begun 15 March 89.										  ;;
+;; Based on Elems881, package code for Mac by Jerome Coonen,				 		  ;;
+;; as modified for MacII by Stuart McDonald.										  ;;
+;;																					  ;;
+;; Modification history:															  ;;
+;;    15 Mar 89	First paltry efforts												  ;;
+;;    20 Mar 89	Inclusion of 80/96 support											  ;;
+;;    12 May 89	Numeric values seem to work correctly in 80-bit mode				  ;;
+;;		  exceptions and 96-bit mode unchecked		 								  ;;
+;;    15 May 89	Folded in new 881ELEMScoeff.a file build jointly with Ali			  ;;
+;;    16 May 89	cleaning, exceptions working (funny behavior on denorms,			  ;;
+;;		  but FPSR is correct on routine exit)										  ;;
+;;    19 Jun 89	Exp1 alive and working well enough to pass to test suite			  ;;
+;;    21 Jun 89	First pass at all exponentials is done								  ;;
+;;    09 nov 89	fix the denormal to normal threshold ... ali						  ;;
+;;    14 nov 89	fixed the fscale problem when src >= 2^14 ... ali					  ;;
+;;    08 feb 90	fixed the fscale problem when src <= -2^14 ... ali					  ;;
+;;    29 may 90	a flag problem when arg is a large negative number ... ali			  ;;
+;;	  31 Mar 92 replaced FMOVECR instructions  ... JPO								  ;;
+;;				replaced FSCALE immed instruction  ... JPO							  ;;
+;;	  17 Apr 92 rewrote in order to replace FINT and FSCALE instructions  ... JPO	  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; The stack looks like:															  ;;
+;;			_______________________________________________							  ;;
+;;			|												|		  				  ;;
+;;			|       	address of input argument			|  - Long				  ;;
+;;			|_______________________________________________|						  ;;	
+;;			|												|						  ;;
+;;			|				return address					|  - Long				  ;;
+;;			|_______________________________________________|						  ;;
+;;			|												|		 				  ;;
+;;			|		    saved registers from control		| - SavedReg Words		  ;;
+;;			|_______________________________________________|						  ;;
+;;																					  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ENTRY POINT to Exp21 (x)
+;;   D1 must survive unchanged from ";set D1 here" to ";read D1 here"
+;;   to remember cheaply whether the integer part of the input argument is zero
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+RExp21x:
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Filter off special cases based on condition codes in FPSR
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+			FMOVE		FPSR,D0				; collect status bits from move of input data
+			ANDI.L		#ExcMask,D0			; apply the FPCC mask to pick off N,Z,I,NaN bits
+			LSL.L		#5,D0				; N ->Carry, Z ->bit 31, I ->bit 30, NaN ->bit 29
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; If D0 is not 0, then one of Z, I or NaN is set.
+	;;   Handle zeros, infinitites and NaNs elsewhere.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BNE			SpecialExp1Input
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Input is nonzero and finite
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			BFEXTU		(A0){1:15},D1		; get the exponent bits
+			CMP.W		#$3FBF,D1			; is it tiny enough [ |input| < 2.0^-64 ]?
+			BLT.W		Small21				;    yes, do quick approximation
+			
+			FCMP.S		#"$46800000",FP0	; overflow case [ input >= 16384.0 ]?
+			FBOGE.W		Overflow			;    yes
+			
+			FCMP.S		#"$C2800000",FP0	; will result round to -1.0 [ input < -64.0]
+			FBOLT.W		Neg1Inex			;	 yes
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;  Normal input is well within range of 16-bit integer storage.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			FMOVE.W		FP0,D1				; D1.W <- integer part	
+			FSUB.W		D1,FP0				; separate fractional part (in FP0)
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Exp1x exit code joins the code flow here
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+CommonBackEnd:
+			BSR			ExpApprox
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Continuation after ExpApprox
+	;;   scale by the integer part of the input argument unless that part is 0
+	;;   result obtained by:  scale(n,(2^frac - 1) + 1) - 1
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+			TST.W		D1					; no more work if integer part is zero, so test for it
+			BEQ.B		ResultDelivered
+	
+			FADD.W		#1,FP0				; FP0 <- 2^frac
+			CLR.L		-(SP)				; push significand of scale factor on stack
+			MOVE.L		#$80000000,-(SP)
+			SUBQ		#4,SP				; allow four bytes on stack for sign/exponent/pad
+			CMP.W		#$4000,D1			; upward double scaling required?
+			BLT.B		@LastScale			; no
+			
+			MOVE.W		#$7ffe,(SP)			; yes, scale y by 2^($3FFF)
+			FMUL.X		(SP),FP0
+			SUBI.W		#$3FFF,D1			; adjust n
+			
+@LastScale:
+			ADDI.W		#$3FFF,D1			; bias n to create exponent of factor
+			MOVE.W		D1,(SP)				; scale by 2^n, popping factor from stack
+			FMUL.X		(SP)+,FP0
+
+			FSUB.W		#1,FP0				; subtract 1.0 to obtain result
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Exit back to global control code for result delivery, exception processing,
+;;   cleanup and exit.  Expects value to return in FP0, exceptions to be cleared
+;;   in D0.lo, exceptions to be set in D0.hi.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ResultDelivered:
+			JMP			(A4)
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ENTRY POINT to Exp1 (x)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+RExp1x:
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Filter off special cases based on condition codes in FPSR
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			FMOVE		FPSR,D0			; collect status bits from move of input data
+			ANDI.L		#ExcMask,D0		; mask to show only four status bits
+			LSL.L		#5,D0			; N ->Carry, Z ->bit 31, I ->bit 30, NaN ->bit 29
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; If D0 is not 0, then one of Z, I or NaN is set.
+	;;   Handle zeros, infinitites and NaNs elsewhere.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BNE.S		SpecialExp1Input
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Input is nonzero and finite
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			BFEXTU		(A0){1:15},D1		; get the exponent bits
+			CMP.W		#$3FBF,D1			; is it tiny enough [ |input| < 2.0^-64 ]?
+			BLT.B		Smalle1				;    yes, do quick approximation
+			
+			FCMP.S		#"$46317218",FP0	; overflow case [ input >= 11356.52 ]?
+			FBOGE.W		Overflow			;    yes
+			
+			FCMP.S		#"$C2317218",FP0	; will result round to -1.0 [ input <= -44.36142]?
+			FBOLE.W		Neg1Inex			;	 yes
+			
+			BSR			Split				; split input into integral and fractional base-2 parts
+	
+			BRA.W		CommonBackEnd
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; COMMON ROUTINES
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Tiny input for Exp21 and Exp1
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Small21:
+			FMOVEM.X	FP0,-(SP)		; push input onto stack
+			FMOVE.X		FPKLOGE2,FP0	; overwrite FP0 with ln(2)
+			FMUL.X		(SP)+,FP0		; return input * ln(2)
+Smalle1:
+			LEA			-12(SP),SP		; reserve 12 bytes of stack for result
+			MOVE.L		#SetInexact,D0	; signal INEXACT at exit time
+			FMOVEM.X	FP0,(SP)		; write result to stack
+			TST.W		4(SP)			; if subnormal, signal UNDERFLOW at exit time
+			LEA			12(SP),SP		; fix up stack
+			BMI.B		@1
+			
+			ORI.L		#SetUFlow,D0
+@1:
+			JMP			(A4)			; go to exit routine set up in module header
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SpecialExp1Input - used by exp1 and exp21 to handle NaN, ∞, 0
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+SpecialExp1Input:
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; If D0 is negative, then Z is set.
+	;;   The input is ±0.  Return it also as output.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BMI.S		@1
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Check the NaN bit.  If set, just return the NaN.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BTST		#30,D0			; check explicitly for infinity
+			BEQ.S		@1
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; That leaves only infinities.  Leave +∞ alone, for -∞ return -1.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BCC.S		@1				; it's a positive infinity, just return it
+			FMOVE.W		#-1,FP0			; else negative infinity returns -1.0
+@1:
+			MOVEQ		#0,D0			; signal no exceptions in ExpExit code
+			JMP			(A4)			; go to exit routine set up in module header
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Neg1Inex - used by exp1 and exp21 to handle large (finite) negative input
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Neg1Inex:
+			FMOVE.W		#-1,FP0			; return -1.0
+			MOVE.L		#SetInexact,D0	; signal INEXACT
+			JMP			(A4)			; go to exit routine
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Overflow - used by all to handle overflow due to finite input
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Overflow:
+			FMOVE.S		#"$7F800000",FP0		; return +INF
+			MOVE.L		#SetInexact+SetOFlow,D0	; signal INEXACT and OVERFLOW
+			JMP			(A4)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; TinyExp - used by exp and exp2 to handle small magnitude input
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+TinyExp:
+			FMOVE.W		#1,FP0					; return 1.0
+			MOVE.L		#SetInexact,D0			; signal INEXACT
+			JMP			(A4)					; go to exit routine
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Flush0 - used by exp and exp2 to handle large (finite) negative input
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Flush0:
+			FMOVE.W		#0,FP0					; return 0.0
+			MOVE.L		#SetInexact+SetUFlow,D0	; signal INEXACT
+			JMP			(A4)					; go to exit routine
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SpecialExpInput - used by exp and exp2 to handle NaN, ∞, 0
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+SpecialExpInput:
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; If D0 is negative, then Z is set.
+	;;   The input is ±0.  Return 1.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BPL.S		@1				; skip zero code if Z is not set
+;			FMOVECR		#CONSTONE,FP0	;   else return +1 - DELETED <3/31/92, JPO>
+			FMOVE.W		#1,FP0			;   else return +1 		<3/31/92, JPO>
+			BRA.S		@2
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Check the NaN bit.  If set, just return the NaN.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@1
+			BTST		#30,D0			; check explicitly for infinity
+			BEQ.S		@2
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; That leaves only infinities.  Leave +∞ alone, for -∞ return 0.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BCC.S		@2				; it's a positive infinity, just return it
+;			FMOVECR		#CONSTZERO,FP0	; else negative infinity input, deliver 0 result - DELETED <3/31/92, JPO>
+			FMOVE.W		#0,FP0			; -INF input yields zero result 		<3/31/92, JPO>
+@2
+			MOVEQ		#0,D0			; signal no exceptions in ExpExit code
+			JMP			(A4)			; go to exit routine set up in module header
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ExpApprox, the heart of the computation for finite, normal values of the input after reduction
+;;   returns 2^x - 1 for x in FP0
+;;
+;; Note: expects FP status to be correct for the input argument in FP0
+;;
+;; FP0 contains a reduced value of the original input value x (fractional part or rem/ln(2))
+;; FP3 and D1 cannot be trashed
+;; Return result in FP0 and exceptions to be set/cleared during ProcExit in D0
+;;
+;; NOTE:  EXTENDED ARGUMENT IN FP0 (unchanged by PolyEval),
+;;	ADDRESS OF COEFF TABLE IN A0, RESULT IN FP1
+;;
+;; Compute x^2
+;; Call PolyEval with Exp21P coefficients and x^2 to get p(x^2)
+;; Get x * p(x^2) = t
+;; Call PolyEval with Exp21Q coefficients and x^2 to get q(x^2)
+;; Compute q-t, 2t and 2t/(q-t)
+;; set inexact and clear underflow
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ExpApprox:
+			FBEQ		@1				; zero in, zero out
+			FMOVE.X		FP0,FP2			; put x in FP2
+			FMUL.X		FP2,FP0			;   and x^2 in FP0
+	
+			LEA			EXP21P,A0		; call PolyEval, arg in FP0, coeff table ptr in A1
+			BSR			PolyEval		;   returning p(x^2) in FP1
+	
+			FMUL.X		FP1,FP2			; t = x*p(x^2) into FP2
+	
+			LEA			EXP21Q,A0
+			BSR			PolyEval		;   returning q(x^2) in FP1
+	
+			FSUB.X		FP2,FP1			; q - t
+;			FSCALE.B	#1,FP2			; 2t - DELETED <3/31/92, JPO>
+			FADD.X		FP2,FP2			; 2t		   <3/31/92, JPO>
+			FDIV.X		FP1,FP2			; 2t/(q-t)
+			FMOVE.X		FP2,FP0
+	
+			OR.L		#SetInexact,D0	; signal inexact at end of routine
+@1
+			RTS
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Split - used by exp(x) and exp1(x)
+;;   Normal input gets written as x = n*ln(2) + r by using remainder.
+;;   Then set a = r/ln(2)  and  n = (x - r)/ln(2)
+;;   exp(x) = 2^a * 2^n - 1 where 2^a is found by expapprox (plus 1) and 2^n by scaling
+;; Input:	FP0 <- x
+;; Output:	FP0 <- a, D1.W <- n, FPCC bits reflect status of a
+;; Uses:  FP1, FP3
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Split:
+			FMOVE.X		FPKLOGE2,FP1	; FP1 <- ln(2)
+			FMOVE		FP0,FP3			; copy of input argument
+			FREM		FP1,FP0			; FP0 <- x rem ln(2) = r
+			FSUB		FP0,FP3			; FP2 <- (x - r)
+			FDIV		FP1,FP3			; FP2 <- (x - r)/ln(2) = n
+			FMOVE.W		FP3,D1			; D1.W <- n (|n| < 2^15)
+			FDIV		FP1,FP0			; FP0 <- r/ln(2) = a
+	
+			OR.L		#SetInexact,D0	; Base e exponentials with nonzero finite input signal INEXACT
+	
+			RTS
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ENTRY POINT to Exp2 (x)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+RExp2x:
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Filter off special cases based on condition codes in FPSR
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			FMOVE		FPSR,D0			; collect status bits from move of input data
+			ANDI.L		#ExcMask,D0		; mask to show only four status bits
+			LSL.L		#5,D0			; N-bit -> Carry, Z-bit -> bit 31, I-bit -> bit 30, NaN-bit -> bit 29
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; If D0 is not 0, then one of Z, I or NaN is set.
+	;;   Handle zeros, infinitites and NaNs elsewhere.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BNE			SpecialExpInput
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Input is finite and nonzero
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BFEXTU		(A0){1:15},D1		; get the exponent bits
+			CMP.W		#$3FBF,D1			; is it tiny enough [ |input| < 2.0^-64 ]?
+			BLT.W		TinyExp				;    yes, do quick approximation
+			
+			FCMP.S		#"$46800000",FP0	; overflow case [ input >= 16384.0 ]?
+			FBOGE.W		Overflow			;    yes
+			
+			FCMP.S		#"$C6807E00",FP0	; will result underflow to 0.0 [ input < -16447.0]
+			FBOLE.W		Flush0				;	 yes
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;  Normal input is well within range of 16-bit integer storage.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			FMOVE.W		FP0,D1			; D1.W <- integer part	
+			FSUB.W		D1,FP0			; separate fractional part (in FP0)
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Exp(x) exit code joins the code flow here
+	;;   approximate exp(fractional part) with ExpApprox
+	;;   scale by the integer part of the input argument
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+BackEnd:
+			BSR			ExpApprox
+			FADD.W		#1,FP0				; magnitude to scale lies between (√2)/2 and √2
+
+			CLR.L		-(SP)				; push significand of scale factor on stack
+			MOVE.L		#$80000000,-(SP)
+			SUBQ		#4,SP				; allow four bytes on stack for sign/exponent/pad
+			CMP.W		#$4000,D1			; upward double scaling required?
+			BLT.B		@1					; no
+			
+			MOVE.W		#$7ffe,(SP)			; yes, scale y by 2^($3FFF)
+			FMUL.X		(SP),FP0
+			SUBI.W		#$3FFF,D1			; adjust n
+			BRA.B		@LastScale
+
+@1:
+			CMP.W		#$C001,D1			; downward double scaling required?
+			BGT.B		@LastScale			; no, single scaling with normal result
+			
+			BNE.B		@2					; yes
+			
+			FCMP.W		#1,FP0				; no, but check for underflow
+			FBOGE.W		@LastScale			;   no underflow
+			
+			BRA.B		@WillUnderflow		;   signal UNDERFLOW at exit
+
+@2:											; double scaling required			
+			MOVE.W		#$0001,(SP)			; yes, scale y by 2^-($3FFE) for barely normal result
+			FMUL.X		(SP),FP0
+			ADDI.W		#$3FFE,D1			; adjust n
+			BTST.L		#19,D0				; if known inexact value, signal UNDERFLOW at exit
+			BEQ.B		@LastScale
+			
+@WillUnderflow:			
+			OR.L		#SetUFlow,D0
+			
+@LastScale:
+			ADDI.W		#$3FFF,D1			; bias n to create exponent of factor
+			MOVE.W		D1,(SP)				; scale by 2^n, popping factor from stack
+			FMUL.X		(SP)+,FP0
+
+			JMP			(A4)				; exit to back-end processing
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ENTRY POINT to Exp (x)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+RExpx:
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Filter off special cases based on condition codes in FPSR
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			FMOVE		FPSR,D0			; collect status bits from move of input data
+			ANDI.L		#ExcMask,D0		; mask to show only four status bits
+			LSL.L		#5,D0			; N-bit -> Carry, Z-bit -> bit 31, I-bit -> bit 30, NaN-bit -> bit 29
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; If D0 is not 0, then one of Z, I or NaN is set.
+	;;   Handle zeros, infinitites and NaNs elsewhere.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BNE			SpecialExpInput
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Input is finite and nonzero
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			BFEXTU		(A0){1:15},D1		; get the exponent bits
+			CMP.W		#$3FBF,D1			; is it tiny enough [ |input| < 2.0^-64 ]?
+			BLT.W		TinyExp				;    yes, do quick approximation
+			
+			FCMP.S		#"$46317218",FP0	; overflow case [ input >= 11356.52 ]?
+			FBOGE.W		Overflow			;    yes
+			
+			FCMP.S		#"$C63220C5",FP0	; will result underflow to 0.0 [ input < -11400.19]?
+			FBOLE.W		Flush0				;	 yes
+			
+			BSR.W		Split				; split input into integral and fractional base-2 parts
+	
+			BRA.W		BackEnd				; branch to common processing
+

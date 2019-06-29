@@ -1,0 +1,162 @@
+;
+;	File:		puMedian.a
+;
+;	Contains:	Assembly routines for the median color finding algorithm for the picture utilities package.
+;
+;	Written by:	Dave Good. Some ideas stolen from Konstantin Othmer and Bruce Leak. Algorithm by Keith McGreggor.
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <6>	 9/21/90	DDG		Made changes from code review. Saved a few bytes of code.
+;		 <5>	 8/16/90	DDG		Added and cleaned up some comments.
+;		 <4>	  8/1/90	DDG		Changed the dispatch selector to go by ones instead of twos.
+;		 <3>	 7/30/90	DDG		Adding a dispatch routine to support the generic colorPickMethod
+;									model.
+;		 <2>	 7/29/90	DDG		Fixed header.
+;		 <1>	 7/29/90	DDG		First checked in using new structure.
+;
+;	To Do:
+;
+
+
+
+				MACHINE	MC68000
+				CASE	OBJ
+
+
+;••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+
+BoxInfo				RECORD  0
+
+count				ds.w  1
+
+minRed				ds.w  1
+maxRed				ds.w  1
+minGreen			ds.w  1
+maxGreen			ds.w  1
+minBlue				ds.w  1
+maxBlue				ds.w  1
+
+totalRed			ds.l  1
+totalGreen			ds.l  1
+totalBlue			ds.l  1
+
+padding1			ds.l  1
+padding2			ds.w  1
+sizeofBoxInfo
+
+					ENDR
+
+;••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+
+
+
+;••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+
+MedianDispatch	PROC  EXPORT
+
+				IMPORT  INITMEDIANMETHOD
+				IMPORT  RECORDMEDIANCOLORS
+				IMPORT  CALCMEDIANTABLE
+				IMPORT  KILLMEDIANMETHOD
+
+				lsl.l	#2,D0
+				jmp		dispatchTable(D0.w)			; jump into jump table
+
+dispatchTable
+				jmp		INITMEDIANMETHOD			; selector  0
+				jmp		RECORDMEDIANCOLORS			; selector  1
+				jmp		CALCMEDIANTABLE				; selector  2
+				jmp		KILLMEDIANMETHOD			; selector  3
+
+				ENDPROC
+
+;••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+;
+; This routine scans thru all the boxes in the passed array (boxInfoPtr), checking to see if their count is
+; greater than zero. If it is, then we have a color to return, so for each component, we divide the total by
+; the number of colors in this box to get the average component, then we smear the component out to fill a
+; full 16-bit range for the color table. If the count for a particular color is zero, then we return black for
+; that entry in the color table. Note that this will never happen until we have reached the end of the filled
+; boxes, so at that point all we really want to do is fill the rest of the returned color table with black.
+;
+
+FillMedianTable	PROC  EXPORT
+
+;----------------------------------------------------------------------------------------------------
+boxInfoPtr		EQU  A0
+resultPtr		EQU  A1
+
+colorsRequested	EQU  D0
+index			EQU  D1
+temp			EQU  D2
+five			EQU  D3
+ten				EQU  D4
+eleven			EQU  D5
+component		EQU  D6
+colorCount		EQU  D7
+
+registersUsed	REG  D3-D7
+regSize			EQU  20
+;----------------------------------------------------------------------------------------------------
+
+
+;----------------------------------------------------------------------------------------------------
+				WITH  BoxInfo
+
+				movem.l	registersUsed,-(SP)					;save our work registers
+
+				move.l	regSize+4(SP),boxInfoPtr			;copy our parameters into local variables (registers)
+				move.l	regSize+8(SP),resultPtr
+				move.l	regSize+12(SP),colorsRequested
+
+				clr.w	index								;this is our counter for the color’s value.
+				moveq	#5,five								;these are some constants that we want in registers
+				moveq	#10,ten
+				moveq	#11,eleven
+				bra.s	@enter								;enter the loop properly for the DBRA instruction.
+
+@loop			move.w	index,(resultPtr)+					;set the value for the current entry and move “resultPtr”
+				addq.w	#1,index							;..to the red component. Then increment “index”
+
+				move.w	count(boxInfoPtr),colorCount		;check the box count - if it is zero, then we are at
+				beq.s	@empty								;..the end of the unique colors, so clear the entry.
+
+				move.l	totalRed(boxInfoPtr),component		;get the total red value, divide by the color count,
+				bsr.s	smearAndCopy						;..smear it into a 16-bit color and put it in “resultPtr”
+				move.l	totalGreen(boxInfoPtr),component	;get the total green value, divide by the color count,
+				bsr.s	smearAndCopy						;..smear it into a 16-bit color and put it in “resultPtr”
+				move.l	totalBlue(boxInfoPtr),component		;get the total blue value, divide by the color count,
+				bsr.s	smearAndCopy						;..smear it into a 16-bit color and put it in “resultPtr”
+				bra.s	@next								;skip over the “clear” code.
+
+@empty			clr.l	(resultPtr)+						;clear both the red and green components at once
+				clr.w	(resultPtr)+						;clear the blue component
+
+@next			add.w	#sizeofBoxInfo,boxInfoPtr			;move to the next box in the array
+@enter			dbra	colorsRequested,@loop				;count down the number of colors and loop back
+
+				movem.l	(SP)+,registersUsed					;restore our work registers
+				rts											;C will clean up the stack
+
+				ENDWITH
+;----------------------------------------------------------------------------------------------------
+smearAndCopy	divu	colorCount,component				;divide the total by the number of colors in this box.
+				lsl.w	eleven,component					;smear the component into a 16-bit color, the same way
+				move.w	component,temp						;..that quickdraw does.
+				lsr.w	five,temp
+				or.w	temp,component
+				move.w	component,temp
+				lsr.w	ten,temp
+				or.w	temp,component
+				move.w	component,(resultPtr)+				;move the component into the result and increment the ptr
+				rts
+;----------------------------------------------------------------------------------------------------
+
+				ENDPROC
+
+;••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+
+				END

@@ -1,0 +1,228 @@
+;
+;	File:		ModalDialogMenuPatches.a
+;
+;	Contains:	Implementation to allow menu bar access during Modal Dialogs
+;
+;	Written by:	Darin Adler and Kevin MacDonell
+;
+;	Copyright:	© 1990-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<17>	12/17/92	JSM		Remove TheFuture conditionals.
+;		<16>	 6/11/92	JSM		Remove unneeded ROMBinds, add comment about
+;									ModalDialogSetFlagsAndAddFilter patch that was rolled into
+;									DialogMgr.a.
+;		<15>	 6/10/92	JSM		Move some routines common to both ROM and System to
+;									ModalDialogMenuExtensions.a from this file, ModalDialogMenuSetup
+;									and MDJGNEFilter are now just MakePatch macros referencing
+;									routines there. Add MakeInstall of InitDialogMgrGlobals for
+;									TheFuture so we don’t keep our globals in code space.
+;		<14>	 2/10/91	KSM		DBA,#80950: Fix to handle graying of Applications Menu properly.
+;		<13>	 1/21/91	DFH		(KSM) Process Menu is now called Application Menu.
+;		<12>	 1/18/91	KSM		<RLC> Change include of BalloonPACKEqu to BalloonsPriv.a.
+;		<11>	12/14/90	SMB		(csd) I forgot the approval signature for the previous change.
+;		<10>	12/14/90	SMB		Fixed bug #74905 by using new KeyScript verbs to disable/enable
+;									the About Keyboards… modal dialog to prevent enabling all the
+;									other menu items which may be disabled. Was using
+;									smKeyModalDialog & smKeyEnableKybds. Now using
+;									smKeyDisableAboutKybds & smKeyEnableAboutKybds, respectively.
+;		 <9>	 11/6/90	KSM		<rlc>Change PushMenuState to call ActiveWindowNeedsHelp and pass
+;									result to new version of SetSaveMenuEnableState.
+;		 <8>	10/29/90	KSM		<ngk>Update ModalDialog to set the "dontSwitch" and
+;									"systemhandlesMenus" bits in the dialog flags.  Optionally set
+;									the "nilFilterProc" flag.
+;		 <7>	 9/19/90	KSM		ModalDialog no longer uses the New Filter Proc automatically
+;									when passing NIL.
+;		 <6>	 9/16/90	KSM		Change ModalDialogMenuSetup to tell KeyScript menu to fix
+;									itself.
+;		 <5>	 8/16/90	RLC		Change call to _HMModalDialogMenuSetup to leave space for OsErr
+;									return.
+;		 <4>	 7/13/90	RLC		Change PopMenuState to be Proc Export instead of just Proc.
+;		 <3>	  7/2/90	KSM		Patch out ModalDialog to allow new standard filter proc.
+;		 <2>	  6/8/90	KSM		Update call to ModalDialogMenuSetup.
+;		 <1>	  6/1/90	KSM		First checked in.
+;		 <0.1>	  5/23/90	KSM		Converted to Linked Patches.  CallOld routines to assy.
+;		 <0>	  4/9/90	dba		new to the system today
+;
+
+		load	'StandardEqu.d'
+		include	'InternalMacros.a'
+		include	'LinkedPatchMacros.a'
+		include	'DialogsPriv.a'
+		include	'MenuMgrPriv.a'
+
+DEBUG	default		false						; Required for InternalMacros.a
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; InitDialogMgrGlobals - defined in DialogMgrExtensions.a
+;
+; allocate and initialize globals stored in emDialogGlobals
+;
+
+			import		InitDialogMgrGlobals
+			MakeInstall	InitDialogMgrGlobals,(Plus,SE,II,Portable,IIci)
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; ModalDialog — set up flags so we can recognize modal dialogs, and put in a new improved filter
+;
+; This patch makes ModalDialog use the new and improved Standard Filter Proc when the
+; caller passes NIL for the filter proc parameter.  It also set the magic flag to indicate
+; that this is a modal dialog.
+;
+; PROCEDURE ModalDialog(filterProc: ProcPtr; VAR itemHit: INTEGER);
+;
+; This patch has been rolled into DialogMgr.a.
+;
+
+ModalDialogSetFlagsAndAddFilter PatchProc _ModalDialog,(Plus,SE,II,Portable,IIci)
+
+			IMPORT	StdFilter				; from DialogDispatch.a
+
+itemHitPtr	EQU		4
+filterProc	EQU		itemHitPtr+4
+
+			subq	#4,sp					; Make room for result
+			_FrontWindow					; Find the front window
+			move.l	(sp)+,D0				; Is there one?
+			beq.s	@done
+			move.l	D0,A0					; Get window into addr reg.
+			; Modal Dialogs do not allow twitching and may handle system menus automatically
+			ori.b	#cannotTwitchOutOfDialogMask+systemHandlesMenusMask,wZoom(A0)
+
+			; If there was no filter proc specified, use the NEW default one
+			move.l	filterProc(sp),D0
+			bne.s	@done
+			lea		StdFilter,A1
+			move.l	A1,filterProc(sp)
+			bset	#emulateOrigFilterBit,wZoom(A0)	; They passed NIL, emulate ROM filter w/bug fix
+
+			; We just changed the status of this window, force it to be reanalyzed
+			moveq	#1,d0
+			move.l	d0,-(sp)				; WindowPtr of 1 means no window has been analyzed
+			IMPORT	SetAnalyzedWindow		; from ModalDialogMenuExtensions.a
+			jsr		SetAnalyzedWindow
+@done
+			jmpold
+
+			endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; ModalDialogMenuSetup - defined in DialogMgrExtensions.a
+;
+; PROCEDURE ModalDialogMenuSetup(nowModal: BOOLEAN);
+; nowModal: TRUE if set up for modal, FALSE if restore to normal
+;
+
+			import		ModalDialogMenuSetup
+			MakePatch	ModalDialogMenuSetup,_ModalDialogMenuSetup,(Plus,SE,II,Portable,IIci)
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; MDJGNEFilter - defined in DialogMgrExtensions.a
+;
+; Pass each event through our filter
+;
+; NOTE: We must reference MDJGNEFilter with a MakePatch, as it uses the peaOld macro.
+;
+
+			import		MDJGNEFilter
+			MakePatch	MDJGNEFilter,JGNEFilter,(Plus,SE,II,Portable,IIci)
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; PatchMDDrawMenuBar
+;
+; The saves menus state, calls old DrawMenuBar, then restores state
+;
+
+PatchMDDrawMenuBar PatchProc _DrawMenuBar,(Plus,SE,II,Portable,IIci)
+
+				import PushMenuState,PopMenuState
+
+				jsr		PushMenuState			; Potentially save off the menu state
+				jsrOld							; Call the old DrawMenuBar
+				jsr		PopMenuState			; Restore the menu state if it was saved
+				rts
+
+				endproc				
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; PatchMDMenuKey
+;
+; The saves menus state, calls old MenuKey, then restores state
+;
+
+PatchMDMenuKey	PatchProc _MenuKey,(Plus,SE,II,Portable,IIci)
+
+				import PushMenuState,PopMenuState
+
+				resultsStackFrame
+result			ds.l		1					; the menukey result
+				parametersStackFrame
+ch				ds.w		1					; the char to pass thru
+				endStackFrame
+
+				linkSave
+				jsr		PushMenuState			; Potentially save off the menu state
+				subq	#4,sp					; Make room for MenuKey result
+				move.w	ch(a6),-(sp)			; Push the character
+				jsrOld							; Call the old MenuKey
+				move.l	(sp)+,result(a6)		; Save off the result
+				jsr		PopMenuState			; Restore the menu state if it was saved
+				restoreUnlinkReturn
+
+				endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; PatchMDHiliteMenu
+;
+; The saves menus state, calls old HiliteMenu, then restores state
+;
+
+PatchMDHiliteMenu PatchProc _HiliteMenu,(Plus,SE,II,Portable,IIci)
+
+				import PushMenuState,PopMenuState
+
+				parametersStackFrame
+menuID			ds.w		1						; the menuID
+				endStackFrame
+
+				linkSave
+				jsr		PushMenuState			; Potentially save off the menu state
+				move.w	menuID(a6),-(sp)		; Push the parameter
+				jsrOld							; Call the old HiliteMenu
+				jsr		PopMenuState			; Restore the menu state if it was saved
+				restoreUnlinkReturn
+
+				endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; PatchMDMenuSelect
+;
+; The saves menus state, calls old MenuSelect, then restores state
+;
+
+PatchMDMenuSelect PatchProc _MenuSelect,(Plus,SE,II,Portable,IIci)
+
+				import PushMenuState,PopMenuState
+
+				resultsStackFrame
+result			ds.l		1					; the MenuSelect result
+				parametersStackFrame
+startPt			ds.l		1					; the start point
+				endStackFrame
+
+				linkSave
+				jsr		PushMenuState			; Potentially save off the menu state
+				subq	#4,sp					; Make room for result
+				move.l	startPt(a6),-(sp)		; Push the parameter
+				jsrOld							; Call the old MenuSelect
+				move.l	(sp)+,result(a6)		; Store the result
+				jsr		PopMenuState			; Restore the menu state if it was saved
+				restoreUnlinkReturn
+
+				endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+				end
+

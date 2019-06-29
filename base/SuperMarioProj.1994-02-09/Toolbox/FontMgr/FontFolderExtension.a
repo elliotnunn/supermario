@@ -1,0 +1,237 @@
+;
+;	File:		FontFolderExtension.a
+;
+;	Contains:	Code which opens fonts in the Font Folder and keeps them in
+;				the resource chain, and additional patches to make this work.
+;
+;	Written by:	Dean Yu
+;
+;	Copyright:	© 1991-1992 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM3>	 11/3/92	SWC		Replaced INCLUDEs with a LOAD of StandardEqu.d.
+;	   <SM2>	 6/09/92	CSS		Roll-in changes from Reality:
+;		<16>	 5/12/92	DTY		kFontsFolderType is defined in FoldersEqu.a now.
+;		<15>	  5/8/92	DTY		#1029162: The interface for OpenResFileUnderSystemMap
+;									has changed. Pass in fsCurPerm to the call now for the
+;									permission to open the font files with.
+;		<14>	  5/8/92	DTY		#1029253: After opening the fonts, expand the FCB array by the
+;									number of fonts opened.
+;		 <1>	 4/16/92	PN		first checked in
+;		<13>	 1/30/92	DTY		Change maxFontFiles to 128.
+;		<12>	 1/22/92	DTY		For each font file that’s opened, call _ResolveIDConflicts to
+;									make sure there are no duplicating resource IDs.
+;		<11>	 12/6/91	DTY		Remove the code that opens font files, and call _AddSuitcase
+;									instead.
+;		<10>	11/11/91	DTY		The code was actually stopping after it looked at 50 files, not
+;									after opening 50 files.
+;		 <9>	 11/5/91	DTY		Take out the code inserts a font resource map in the resource
+;									chain, and call _InsertFontMap instead.
+;		 <8>	 11/2/91	DTY		Take out the one deep patches now that the resource override
+;									stuff takes care of it all.
+;		 <7>	10/18/91	DTY		kCreateFolder is a byte value, not a word value.
+;		 <6>	10/16/91	DTY		Set the dontCountOrIndexDuplicatesBit and the twoDeepBit on the
+;									resource maps of the font files that are opened.
+;		 <5>	10/14/91	DTY		Remove _RealFont patch since all the work is now done inline
+;									inside the Font Manager.
+;		 <4>	 10/4/91	DTY		Add patches to one deep resource calls (_Get1Resource,
+;									_Count1Resources, _Get1IxResource, Get1NamedResource, and
+;									_Unique1ID) to do n-deep resource calls when looking for a font
+;									resource in the System file.
+;		 <3>	 9/30/91	DTY		Make the current zone the system zone so that all resource maps
+;									load into the system heap.
+;		 <2>	 9/23/91	DTY		Set the sysHeap bit for every resource in the map.  Also add a
+;									limit of 50 files to open.
+;		 <1>	 9/19/91	DTY		first checked in
+
+			LOAD		'StandardEqu.d'
+			include		'Folders.a'
+			include		'FileMgrPrivate.a'		; <SM2> CSS
+			include		'LinkedPatchMacros.a'	; <SM2> CSS
+			include		'ResourceMgrPriv.a'
+
+maxFontFiles		equ	128					; Open a maximum of 128 files
+isAlias				equ	15
+resolveSpecialFolderAliases	equ	0			; Bummers.  Not allowed to resolve aliases yet.
+
+
+;
+;	AddFontsToChain uses _FindFolder to get the Fonts Folder, then
+;	iterates through all the font files in this folder and adds them
+;	to the resource chain underneath the System resource map so everyone
+;	in the world and see these fonts.
+;
+
+AddFontsToChain		Proc	Export
+			Import	SetSysHeapBit
+			
+StackFrame		Record	0,Decr
+folderVRefNum	ds.w	1					; vRefNum of volume with Fonts Folder
+folderDirID		ds.l	1					; Dir ID of Fonts Folder
+fontFileName	ds.b	256					; Space for file name
+fontFileSpec	ds		FSSpec				; <11>
+catInfoRec		ds.b	ioHFQElSiz			; CInfoPBRec
+stackFrameSize	equ	*
+			EndR
+			
+			With	StackFrame
+			
+			link	a6,#stackFrameSize
+			movem.l	a2-a4/d3-d6,-(sp)		; <SM2> CSS
+			move.l	TheZone,-(sp)			; Save the current heap zone
+			move.l	SysZone,TheZone			; Make the system heap the current heap
+;
+; Find the Fonts Folder
+;
+			
+			subq	#2,sp
+			move.w	#kOnSystemDisk,-(sp)	; Look on the System disk
+			move.l	#kFontsFolderType,-(sp)	; Look for the Fonts Folder
+			move.b	#kDontCreateFolder,-(sp); <SM2> CSS <14> Don’t create it if it’s not there
+			pea	folderVRefNum(a6)
+			pea	folderDirID(a6)
+			_FindFolder						; Let _FindFolder do it’s thing.
+			tst.w	(sp)+					; Error?
+			bne	@exitAddFonts				; If anything goes wrong, bail
+			
+;
+; Tally the number of free FCBs there are before any font files are opened.  This is
+; the number of free FCBs we’ll want after all the font files are opened.
+;
+
+			moveq	#0,d6					; <SM2> CSS <14> Clear our counter of free FCBs
+			move.l	FCBSPtr,a1				; <SM2> CSS <14> point to base of FCB array
+			moveq.l	#0,d1					; <SM2> CSS <14> clear high word
+			move.w	(a1),d1					; <SM2> CSS <14> grab length of the array
+			lea.l	2(a1),a0				; <SM2> CSS <14> point to base of 1st FCB
+			add.w	d1,a1					; <SM2> CSS <14> point to end of FCB array
+@loop
+			suba.w	FSFCBLen,a1				; <SM2> CSS <14> point to beginning of previous FCB
+			tst.l	(a1)					; <SM2> CSS <14> is it free?
+			bnz.s	@notFree
+			addq	#1,d6					; <SM2> CSS <14> Found another free FCB
+@notFree
+			cmpa.l	a0,a1					; <SM2> CSS <14> are we done with the array?
+			bhi.s	@loop					; <SM2> CSS <14> as long as we're above the bottom now
+			
+			move.l	TopMapHndl,a2			; Save current top resource map
+			move.w	CurMap,d4				; And current file reference number
+
+;
+; Iterate through the files and add each file to the chain
+;
+
+			moveq	#1,d3					; File index
+			moveq	#0,d5					; <10> Opened file count
+@findFontFiles
+			lea	catInfoRec(a6),a0			; Get the parameter block
+			clr.l	ioCompletion(a0)
+			pea	fontFileName(a6)
+			move.l	(sp)+,ioNamePtr(a0)
+			move.w	folderVRefNum(a6),ioVRefNum(a0)
+			move.w	d3,ioFDirIndex(a0)		; File index
+			move.l	folderDirID(a6),ioDirID(a0)
+			_GetCatInfo						; Get information about a file
+			bne		@expandFCBArray			; <SM2> CSS If _GetCatInfo comes back with an error, we’re done
+			
+;
+; Check to see if this file is an alias.  If it is, resolve it
+;
+
+	if resolveSpecialFolderAliases then
+			btst	#isAlias,ioFlFndrInfo+fdFlags(a0)	; Check alias bit
+			beq.s	@notAlias				; This file isn’t alias
+			
+			subq	#2,sp
+			move.w	folderVRefNum(a6),-(sp)
+			move.l	folderDirID(a6),-(sp)
+			pea	fontFileName(a6)
+			pea	fontFileSpec(a6)
+			_FSMakeFSSpec
+			tst.w	(sp)+
+			bne.s	@exitAddFonts
+			
+			subq	#2,sp
+			pea	fontFileSpec(a6)
+			move.w	#-1,-(sp)				; Resolve chains
+			pea	targetType(a6)
+			pea	wasAliased(a6)
+			_ResolveAlias
+			tst.w	(sp)+					; Did the alias resolve?
+			bne.s	@tryNextFont			; Nope
+			lea		catInfoRec(a6),a0		; A0 is needed again
+	endif
+	
+;
+; See if this file is a font file type we recognise
+;
+
+@notAlias
+			lea		fileTypeTable,a1
+			move.l	ioFlUsrWds+fdType(a0),d1
+@fileTypeLoop
+			move.l	(a1)+,d0
+			beq.s	@tryNextFont
+			cmp.l	d1,d0 					; Is it a font file?
+			bne.s	@fileTypeLoop			; Nope
+
+;
+;	Add the file to the resource chain.
+;
+
+			subq	#2,sp					; <11>
+			move.w	folderVRefNum(a6),-(sp)	; <11>
+			move.l	folderDirID(a6),-(sp)	; <11>
+			pea	fontFileName(a6)			; <11>
+			pea	fontFileSpec(a6)			; <11>
+			_FSMakeFSSpec					; <11> Make an FSSpec for the file
+			tst.w	(sp)+					; <11> If an FSSpec couldn’t be created, too bad
+			bmi.s	@tryNextFont			; <11>
+	
+			subq	#2,sp
+			pea	fontFileSpec(a6)			; <11>
+			move.b	#fsCurPerm,-(sp)		; <SM2> CSS <15> Use whatever the current permissions are
+			_OpenResFileUnderSystemMap		; <11> Add the font file
+			move.w	(sp)+,d0
+			bmi.s	@tryNextFont			; <11> If result was negative, then something blew up and the file wasn’t added to the chain
+			subq	#2,sp					; <12>
+			move.w	d0,-(sp)				; <12>
+			_ResolveIDConflicts				; <12> Check for duplicate IDs in this file
+			addq	#2,sp					; <12> I couldn’t care less whether or not conflicts were taken care of at this point.
+			addq	#1,d5					; <10> Another file was opened.
+			
+@tryNextFont
+			move.l	a2,TopMapHndl			; Make the file that contains this InstallProc the top file
+			move.w	d4,CurMap				; and make it the current map
+			addq	#1,d3					; And go on to the next file
+			cmpi.w	#maxFontFiles,d5		; <10> See if 128 font files were opened.
+			ble.s	@findFontFiles			; Max of 128 font files
+
+;
+; Expand the FCB array so that there are as many free FCBs after opening the font files
+; as there were before they were opened.
+;
+
+@expandFCBArray
+			lea	catInfoRec(a6),a0			; <SM2> CSS <14>
+			move.w	d6,ioFCBBurst(a0)		; <SM2> CSS <14> There should be this many FCBs free after linked patches
+			move.w	d6,ioFCBGrow(a0)		; <SM2> CSS <14> And if there aren’t make sure there are.
+			_AllocateFCBs					; <SM2> CSS <14> Grow the FCB block
+			
+;
+; Git out of here
+;
+
+@exitAddFonts
+			move.l	(sp)+,TheZone			; Restore the original heap zone
+			movem.l	(sp)+,a2/d3-d5
+			unlk	a6
+			rts
+			String	Asis
+fileTypeTable
+			dc.b	'ffil', 'tfil', 'FFIL'
+			dc.l	0
+			EndProc
+			End
+			

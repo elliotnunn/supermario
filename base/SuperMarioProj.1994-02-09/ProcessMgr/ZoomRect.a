@@ -1,0 +1,175 @@
+;
+;	File:			ZoomRect.a
+;
+;	Contains:		A convenient window-zooming routine
+;
+;	Written by:		Phil Goldman
+;
+;	Copyright:		© 1986-1991 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <0>	 x/xx/87	PYG		New Today.
+;
+;--------------------------------------------------------------------
+
+;=====================================FUtil68K=====================================
+;
+;		PROCEDURE ZoomRect(VAR smallRect,bigRect: Rect; zoomUp: BOOLEAN);
+;
+;		Frees the passed dialog record (or 0 if none).
+;
+;=====================================FUtil68K=====================================
+
+				LOAD	'ProcessMgrIncludes.D'
+	
+zoomSteps		EQU 	12
+tickDelay		EQU		1								; 1*1/60 sec between rects
+
+; takes two rects in a2/a3 and blends into rect in a4
+; fract in d7, factor in d5.
+
+ZoomRect		PROC	EXPORT
+ZoomRectRegs	REG		d2-d7/a2-a4
+
+				link	a6,#-32 						; 4 rectangles
+				movem.l ZoomRectRegs,-(sp)				; save registers
+	
+				lea		-32(a6),a0
+				moveq	#7,d0
+nilRects	
+				clr.l	(a0)+							; zero out all the rects
+				dbra	d0,nilRects			
+	
+				subq.l	#4,sp
+				move.l	sp,-(sp)
+				_GetPort
+	
+				move.l	wmgrPort,-(sp)
+				_SetPort
+	
+				move.l	GrayRgn,a0						; get rgn hdl of gray rgn
+				move.l	(a0),a0							; hdl -> ptr
+				pea		rgnBBox(a0)						; push the rect
+				_ClipRect
+				
+				move.l	(a5),a0
+				pea 	gray(a0)
+				_PenPat
+				move.w	#notpatXor,-(sp)
+				_PenMode
+
+; see if going up or down (point a0 to starting rect)
+
+				tst.b	8(a6)							; up or down
+				beq.s	zoomDown
+zoomUp
+				subq.l	#4,sp
+				move.l	#$00050007,-(sp)				; 7/5
+				_FixRatio
+				move.l	(sp),d5 						; factor in d5 (leave on stack)
+	
+				move.l	#$271000B0,-(sp)				; 5/7 ^zoomSteps = 0.017638
+				_FixRatio
+				move.l	(sp)+,d7						; fract in d7
+				BRA.S	zoomStart
+
+zoomDown
+				subq.l	#4,sp
+				move.l	#$00070005,-(sp)				; 5/7
+				_FixRatio
+				move.l	(sp)+,d5						; factor in d5
+	
+				moveq	#1,d7							; fract is 1
+				swap	d7								; fract in d7
+
+zoomStart
+				moveq	#zoomSteps,d4					; counter
+				subq.l	#4,sp							; make room for result
+				_TickCount
+				move.l	(sp)+,d6						; sync with ticks
+zoomloop
+				lea 	-8(a6),a4						; start w/rect 4
+				move.l	10(a6),a3						; point to big rect
+				move.l	14(a6),a2						; point to small rect
+	
+				bsr.s	Blender 						; 4 halves of the rect
+				bsr.s	Blender
+				bsr.s	Blender
+				bsr.s	Blender
+	
+				pea 	-8(a6)							; frame newest
+				_FrameRect
+
+ticksSync	
+				cmp.l	Ticks,d6						; less than time we want?
+				bhs.s	ticksSync						; unsigned! wait
+	
+;				move.l	d0,d6							; save current time
+				addq.l	#tickDelay,d6					; wait until this time is by
+				
+				tst.l	-32(a6)							; oldest topLeft nil?
+				bne.s	@frameIt						; br if not
+				tst.l	-28(a6)							; botRight nil?
+				beq.s	@skipFrame						; br if so, skip empty rect
+
+@frameIt
+				pea 	-32(a6) 						; remove oldest
+				_FrameRect
+
+@skipFrame
+				lea 	-24(a6),a0						; rect1=rect2, etc.
+				lea 	-32(a6),a1
+				moveq	#24,d0
+				_BlockMove
+	
+				subq.l	#4,sp
+				move.l	d7,-(sp)						; bump interp.
+				move.l	d5,-(sp)
+				_FixMul
+				move.l	(sp)+,d7
+	
+				subq.w	#1,d4							; more to do?
+				bne.s	zoomLoop
+	
+				pea 	-32(a6) 						; remove oldest
+				_FrameRect
+	
+				pea 	-24(a6) 						; remove oldest
+				_FrameRect
+	
+				pea 	-16(a6) 						; remove oldest
+				_FrameRect
+	
+				_PenNormal
+				_SetPort
+
+noZoom
+				movem.l (sp)+,ZoomRectRegs				; and restore regs
+				unlk	a6								; get rid of frame ptr
+				move.l	(sp)+,a0						; get ret addr
+				add.l	#10,sp							; strip params
+				jmp		(a0)							; and return
+
+Blender
+				subq.l	#6,sp							; room for temp
+				move.l	d7,-(sp)
+				clr.w 	-(sp)							; zero fractional part
+				move.w	(a3)+,-(sp) 					; get big rect part
+				_FixMul
+				subq.l	#4,sp							; room for temp
+				clr.l	-(sp)							; make a $00010000 on the stack
+				addq.w	#1,(sp)
+				sub.l	d7,(sp) 						; subtract fract
+				clr.w 	-(sp)							; zero fractional part
+				move.w	(a2)+,-(sp) 					; get small rect part
+				_FixMul
+				move.l	(sp)+,d0
+				add.l	d0,(sp) 						; add the two
+				_FixRound
+				move.w	(sp)+,(a4)+ 					; stuff rect
+				rts
+	
+				ENDPROC									; ZoomRect
+
+				END

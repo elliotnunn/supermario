@@ -1,0 +1,473 @@
+;EASE$$$ READ ONLY COPY of file “RGNOP.m.a”
+; 1.1	CCH 11/11/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.2	CCH 10/12/1988 Changed “m.GrafType.a” to “GrafType.m.a”.
+; 1.1	MSH 5/18/88 Changed inclides to use m.GRAPHTYPES to work under EASE.
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+; File RgnOp.a
+;
+; Copyright Apple Computer, Inc.  1981-1986
+; All Rights Reserved
+;
+;
+; Modification History:
+; ------------------------------------------------------------------
+; C970	22Nov87		DAF		Changed buffer size calculation in setup to unsigned add from
+;							signed add.  This allows 2 16K regions to be operated on.
+;
+
+
+		BLANKS	ON
+		STRING	ASIS
+
+
+		INCLUDE  'GRAFTYPES.m.a'
+
+RgnOp	FUNC  EXPORT
+		IMPORT SectScan,DiffScan,UnionScan,XorScan,InsetScan,SETHSIZE
+;-------------------------------------------------------------------
+;
+;  FUNCTION RgnOp(rgnA,rgnB:   RgnHandle;
+;		  bufHandle:   Handle;
+;		  maxBytes:    INTEGER;
+;		  op,dh:	   INTEGER;
+;		  okGrow:	   BOOLEAN): INTEGER;
+;
+;  Computes the intersection, difference, union, or XOR of two regions,
+;  or the horizontal inset of one region, and stores the result as an
+;  unpacked array of sorted inversion points in bufHandle.	Returns the
+;  number of points as the function value.	BufHandle will be grown only
+;  if more space is needed needed and okGrow is true.
+;
+;  OP =  0: SECT
+;	 2: DIFF A-B
+;	 4: UNION
+;	 6: XOR
+;	 8: HORIZ INSET
+;
+;
+;  A6 OFFSETS OF PARAMETERS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	20				;TOTAL # BYTES
+RESULT			EQU 	PARAMSIZE+8 		;INTEGER, FUNCTION RESULT
+RGNA			EQU 	RESULT-4			;LONG, RGNHANDLE
+RGNB			EQU 	RGNA-4				;LONG, RGNHANDLE
+BUFHANDLE		EQU 	RGNB-4				;LONG, HANDLE TO POINT BUFFER
+MAXBYTES		EQU 	BUFHANDLE-2 		;WORD
+OP			EQU 	MAXBYTES-2			;WORD
+DH			EQU 	OP-2				;WORD
+OKGROW			EQU 	DH-2				;BOOLEAN
+
+SCAN1			EQU 	-4				;long
+SCAN2			EQU 	SCAN1-4 			;long
+SCAN3			EQU 	SCAN2-4 			;long
+SCAN4			EQU 	SCAN3-4 			;long
+SCAN5			EQU 	SCAN4-4 			;long
+NEXTA			EQU 	SCAN5-2 			;WORD
+NEXTB			EQU 	NEXTA-2 			;WORD
+VERT			EQU 	NEXTB-2 			;WORD
+BUFPTR			EQU 	VERT-4				;LONG, ^POINT
+BUFLIMIT		EQU 	BUFPTR-4			;LONG
+FAKEB			EQU 	BUFLIMIT-18 		;18 BYTE FAKE RGN DATA
+MASTERB 		EQU 	FAKEB-4 			;LONG
+FAKEA			EQU 	MASTERB-18			;18 BYTE FAKE RGN DATA
+MASTERA 		EQU 	FAKEA-4 			;LONG
+CASEJMP 		EQU 	MASTERA-4			;LONG
+SAVESTK 		EQU 	CASEJMP-4			;LONG
+VARSIZE 		EQU 	SAVESTK 			;TOTAL BYTES OF LOCALS
+
+
+
+		LINK	A6,#VARSIZE 		;ALLOCATE STACK FRAME
+		MOVEM.L D3-D7/A2-A4,-(SP)		;SAVE REGS
+		MOVE.L	SP,SAVESTK(A6)			;REMEMBER STACK PTR
+
+
+;------------------------------------------------------------
+;
+;  DE-REFERENCE RGNA AND RGNB AND OFFSET TO FIRST RGNDATA.
+;  IF EITHER IS RECTANGULAR, REPLACE IT WITH AN EXPANDED ONE.
+;
+		LEA 	MASTERA(A6),A2			;POINT TO FAKE AREA
+		LEA 	RGNA(A6),A0 		;POINT TO RGNA HANDLE
+		BSR 	EXPAND				;DE-REFERENCE AND EXPAND
+		MOVE.L	A0,A3				;SAVE RGNA DATA PTR IN A3
+		LEA 	RGNB(A6),A0 		;POINT TO RGNB HANDLE
+		BSR 	EXPAND				;DE-REFERENCE AND EXPAND
+		MOVE.L	A0,A4				;SAVE RGNB DATA PTR IN A4
+
+
+;-----------------------------------------------------------
+;
+;  SET UP A CASE JUMP BASED ON OP
+;
+		LEA 	SECTSCAN,A0
+		MOVE	OP(A6),D0
+		BEQ.S	CASEOK					;BR IF OP = SECT
+		LEA 	DIFFSCAN,A0
+		SUB 	#2,D0
+		BEQ.S	CASEOK					;BR IF OP = DIFF
+		LEA 	UNIONSCAN,A0
+		SUB 	#2,D0
+		BEQ.S	CASEOK					;BR IF OP = UNION
+		LEA 	XORSCAN,A0
+		SUB 	#2,D0
+		BEQ.S	CASEOK					;BR IF OP = XOR
+		LEA 	INSETSCAN,A0				;ELSE OP = INSET
+CASEOK	MOVE.L	A0,CASEJMP(A6)				;SAVE FOR LATER
+
+
+
+;-----------------------------------------------------------------
+;
+;  Calc bufSize based on StackAvail and allocate 5 scan buffers
+;
+		_StackAvail 				;get stack avail in D0.L
+		SUB.L	#1024,D0				;subtract slop factor
+		CMP.L	#200,D0 				;is result < 200 bytes ?
+		BGE.S	STKOK1					;no, continue
+		MOVE	#40,D0					;yes, make bufSize = 40 bytes
+		BRA.S	ALLOC					;and continue
+STKOK1	DIVS	#5,D0					;no, divide for 5 buffers
+		BVC.S	STKOK2					;overflow ?
+		MOVE	#30000,D0				;yes, use 30K bytes
+STKOK2	BCLR	#0,D0					;make bufSize even
+ALLOC	SUB 	D0,SP					;allocate one buffer
+		MOVE.L	SP,SCAN1(A6)				;remember buffer pointer
+		SUB 	D0,SP					;allocate one buffer
+		MOVE.L	SP,SCAN2(A6)				;remember buffer pointer
+		SUB 	D0,SP					;allocate one buffer
+		MOVE.L	SP,SCAN3(A6)				;remember buffer pointer
+		SUB 	D0,SP					;allocate one buffer
+		MOVE.L	SP,SCAN4(A6)				;remember buffer pointer
+		SUB 	D0,SP					;allocate one buffer
+		MOVE.L	SP,SCAN5(A6)				;remember buffer pointer
+
+
+
+;-----------------------------------------------------------
+;
+;  INIT ASSORTED POINTERS
+;
+		MOVE.L	BUFHANDLE(A6),A0			;GET BUFHANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE IT
+		MOVE.L	A0,BUFPTR(A6)				;BUFPTR := BUFSTART
+		AND 	#$FFF8,MAXBYTES(A6) 		;TRUNCATE TO A MULT OF 8 BYTES
+		CLR.L	D4							;zero hi-word of register		<C970/22Nov87> DAF
+		MOVE.W	MAXBYTES(A6),D4				;get long version of MaxBytes   <C970/22Nov87> DAF
+		ADD.L	D4,A0						;add MaxBytes to BufStart		<C970/22Nov87> DAF
+		MOVE.L	A0,BUFLIMIT(A6) 			;BUFLIMIT:=BUFSTART+MAXBYTES
+		MOVE.L	SCAN1(A6),A0
+		MOVE.L	A0,D4					;SCANA := @SCAN1
+		MOVE	#32767,D0
+		MOVE	D0,(A0) 				;INIT SCANA TO EMPTY
+		MOVE.L	SCAN2(A6),A0
+		MOVE.L	A0,D5					;SCANB := @SCAN2
+		MOVE	D0,(A0) 				;INIT SCANB TO EMPTY
+		MOVE.L	SCAN3(A6),A0
+		MOVE.L	A0,D6					;SCANC := @SCAN3
+		MOVE	D0,(A0) 				;INIT SCANC TO EMPTY
+		MOVE.L	SCAN4(A6),A0
+		MOVE.L	A0,D7					;TEMPSCAN := @SCAN4
+		MOVE	(A3)+,NEXTA(A6) 			;NEXTA := FIRST VERT IN A
+		MOVE	(A4)+,NEXTB(A6) 			;NEXTB := FIRST VERT IN B
+		CMP 	#8,OP(A6)				;IS OP = INSET ?
+		BNE.S	NXTVERT 				;NO, CONTINUE
+		MOVE	D0,NEXTB(A6)				;YES, NEXTB := 32767
+NXTVERT MOVE	NEXTA(A6),D0				;GET NEXT VERT IN A
+		CMP 	NEXTB(A6),D0				;WHICH COMES FIRST ?
+		BEQ.S	BOTH					;SAME, UPDATE BOTH RGNS
+		BGT.S	UPDATEB 				;B, UPDATE RGNB ONLY
+		BSR.S	UPDATEA 				;A, UPDATE RGNA ONLY
+		BRA.S	CALC					;CALC NEW C-SCAN
+
+
+UPDATEA MOVE	NEXTA(A6),VERT(A6)			;VERT := NEXTA
+		MOVE.L	A3,A0					;SRCA := PTRA
+		MOVE.L	D4,A1					;SRCB := SCANA
+		MOVE.L	D7,A2					;DSTC := TEMPSCAN
+		JSR 	XORSCAN 				;XORSCAN(PTRA,SCANA,TEMPSCAN)
+		MOVE.L	A0,A3					;BUMP PTRA TO END OF SCAN
+		MOVE	(A3)+,NEXTA(A6) 			;NEXTA := NEXT VERT
+		EXG 	D4,D7					;SWAP SCANA AND TEMPSCAN
+		RTS 					;RETURN TO LOCAL CALLER
+
+
+BOTH	CMP 	#32767,D0				;ARE BOTH VERTICALS 32767 ?
+		BEQ 	DONE					;YES, WE'RE ALL FINISHED
+		BSR.S	UPDATEA 				;UPDATE RGNA
+UPDATEB MOVE	NEXTB(A6),VERT(A6)			;VERT := NEXTB
+		MOVE.L	A4,A0					;SRCA := PTRB
+		MOVE.L	D5,A1					;SRCB := SCANB
+		MOVE.L	D7,A2					;DSTC := TEMPSCAN
+		JSR 	XORSCAN 				;XORSCAN(PTRB,SCANB,TEMPSCAN)
+		MOVE.L	A0,A4					;BUMP PTRB TO END OF SCAN
+		MOVE	(A4)+,NEXTB(A6) 			;NEXTB := NEXT VERT
+		EXG 	D7,D5					;SWAP SCANB AND TEMPSCAN
+
+;---------------------------------------------------------
+;
+;  CALCULATE SECT, DIFF, UNION, XOR, OR INSET INTO SCANC
+;
+CALC	MOVE.L	D4,A0					;POINT TO SCANA
+		MOVE.L	D5,A1					;POINT TO SCANB
+		MOVE.L	D7,A2					;POINT TO TEMPSCAN
+		MOVE	DH(A6),D2				;GET DH IN CASE INSET
+		PEA 	CHANGES 				;PUSH RETURN ADDR
+		MOVE.L	CASEJMP(A6),-(SP)			;PUSH CASE JUMP
+		RTS 					;DO CASE JSR
+
+
+;-------------------------------------------------------------
+;
+;  FIND ANY CHANGES NOT IN PREVIOUS SCANC, THEN UPDATE SCANC
+;
+CHANGES MOVE.L	D7,A0					;GET TEMPSCAN
+		MOVE.L	D6,A1					;GET SCANC
+		MOVE.L	SCAN5(A6),A2				;GET OUTPUT SCAN
+		JSR 	XORSCAN 				;XorScan(tempScan,scanC,@SCAN5);
+		EXG 	D7,D6					;SWAP TEMPSCAN AND SCANC
+
+		MOVE.L	SCAN5(A6),A0				;POINT TO OUTPUT SCAN
+		MOVE.L	BUFPTR(A6),A1				;POINT TO DST POINT BUFFER
+		MOVE.L	BUFLIMIT(A6),A2 			;GET BUFLIMIT
+		MOVE.L	VERT(A6),D0 			;GET VERT COORD IN HI WORD
+		BRA.S	OUTTEST 				;GO TO LOOP START
+OUTLOOP MOVE.W	(A0)+,D0				;GET LEFT HORIZ COORD
+		MOVE.L	D0,(A1)+				;PUT LEFT POINT
+		MOVE.W	(A0)+,D0				;GET RIGHT HORIZ COORD
+		MOVE.L	D0,(A1)+				;PUT RIGHT POINT
+OUTTEST CMP.L	A2,A1					;IS BUFPTR >= BUFLIMIT ?
+		BLO.S	SIZEOK					;NO, CONTINUE
+
+
+;-----------------------------------------------------------
+;
+;  THE POINT BUFFER IS FULL, GROW IT IF OKGROW IS TRUE
+;
+		TST.B	OKGROW(A6)				;ARE WE ALLOWED TO GROW ?
+		BEQ 	ABORT					;NO, ABORT RGNOP
+		MOVE.L	A0,D1					;YES, SAVE OUTPUT SCAN PTR
+		MOVE.L	RGNA(A6),A0 			;GET RGNA MASTER
+		SUB.L	(A0),A3 				;MAKE RGNA PTR RELATIVE
+		MOVE.L	RGNB(A6),A0 			;GET RGNB MASTER
+		SUB.L	(A0),A4 				;MAKE RGNB PTR RELATIVE
+		MOVE.L	BUFHANDLE(A6),A0			;GET BUFHANDLE
+		SUB.L	(A0),A1 				;MAKE BUFPTR RELATIVE
+		SUB.L	(A0),A2 				;MAKE BUFLIMIT RELATIVE, = SIZE
+		ADD 	#256,A2 				;BUMP BUFLIMIT 256 BYTES
+		MOVEM.L D0-D2/A0-A2,-(SP)			;SAVE REGS
+		MOVE.L	A0,-(SP)				;PUSH BUFHANDLE
+		MOVE.W	A2,-(SP)				;PUSH NEW BYTECOUNT
+		JSR 	SETHSIZE 				;GROW POINT BUFFER
+		MOVEM.L (SP)+,D0-D2/A0-A2			;RESTORE REGS
+		MOVE.L	RGNA(A6),A0 			;GET RGNA MASTER
+		ADD.L	(A0),A3 				;MAKE RGNA UN-RELATIVE
+		MOVE.L	RGNB(A6),A0 			;GET RGNB MASTER
+		ADD.L	(A0),A4 				;MAKE RGNB UN-RELATIVE
+		MOVE.L	BUFHANDLE(A6),A0			;GET BUFHANDLE
+		ADD.L	(A0),A1 				;MAKE BUFPTR UN-RELATIVE
+		ADD.L	(A0),A2 				;MAKE BUFLIMIT UN-RELATIVE
+		MOVE.L	A2,BUFLIMIT(A6) 			;UPDATE BUFLIMIT
+		MOVE.L	D1,A0					;RESTORE OUTPUT SCAN PTR
+
+
+SIZEOK	CMP 	#32767,(A0) 			;END OF SCAN MARKER ?
+		BNE 	OUTLOOP 				;NO, GO FOR MORE
+		MOVE.L	A1,BUFPTR(A6)				;UPDATE BUFPTR
+		BRA 	NXTVERT 				;LOOP FOR NEXT VERT
+
+
+;------------------------------------------------------------------------
+;
+;  LOCAL ROUTINE TO EXPAND A RECTANGULAR REGION TO ITS INVERSION POINTS.
+;  ENTER WITH ADDR OF RGNHANDLE IN A0, ADDR OF FAKE MASTER IN A2.
+;  RETURNS IN A0 DE-REFERENCED POINTER BUMPED TO FIRST RGNDATA,
+;  AND A2 BUMPED TO NEXT AVAILABLE FAKE MASTER.
+;
+EXPAND	MOVE.L	(A0),A1 				;GET RGNHANDLE
+		MOVE.L	(A1),A1 				;DE-REFERENCE HANDLE
+		CMP 	#10,RGNSIZE(A1) 			;IS REGION RECTANGULAR ?
+		BNE.S	NOTRECT 				;NO, DON'T EXPAND IT
+		MOVE.L	A2,(A0) 				;POINT HANDLE TO FAKE MASTER
+		LEA 	-6(A2),A0				;POINT 10 BYTES BEFORE DATA
+		MOVE.L	A0,(A2)+				;FILL IN FAKE MASTER
+		MOVE.L	RGNBBOX+TOPLEFT(A1),(A2)+		;PUT TOP V AND LEFT H
+		MOVE	RGNBBOX+RIGHT(A1),(A2)+ 		;PUT RIGHT HORIZ
+		MOVE	#32767,D0
+		MOVE	D0,(A2)+				;PUT HORIZ TERMINATOR
+		MOVE	RGNBBOX+BOTTOM(A1),(A2)+		;PUT BOTTOM VERT
+		MOVE	RGNBBOX+LEFT(A1),(A2)+			;PUT LEFT HORIZ
+		MOVE	RGNBBOX+RIGHT(A1),(A2)+ 		;PUT RIGHT HORIZ
+		MOVE	D0,(A2)+				;PUT HORIZ TERMINATOR
+		MOVE	D0,(A2)+				;PUT VERT TERMINATOR
+		MOVE.L	A0,A1					;PUT FAKE RGNPTR IN A1
+NOTRECT LEA 	RGNDATA(A1),A0				;OFFSET TO FIRST REGION DATA
+		RTS 					;AND RETURN
+
+
+ABORT	MOVE.L	A1,BUFPTR(A6)				;UPDATE BUFPTR
+DONE	MOVE.L	BUFPTR(A6),D0				;GET BUFPTR
+		MOVE.L	BUFHANDLE(A6),A0			;GET BUFHANDLE
+		SUB.L	(A0),D0 				;BYTES USED = BUFPTR - BUFSTART
+		LSR 	#2,D0					;DIV BY 4 FOR NPOINTS
+		MOVE	D0,RESULT(A6)				;RETURN NPOINTS
+		MOVE.L	SAVESTK(A6),SP				;STRIP SCAN BUFFERS
+		MOVEM.L (SP)+,D3-D7/A2-A4			;RESTORE REGS
+		UNLINK	PARAMSIZE,'RGNOP   '
+
+
+
+SectScan PROC  EXPORT	
+		EXPORT DiffScan,UnionScan
+;---------------------------------------------------------
+;
+;  PROCEDURE SectScan(srcA,srcB,dstC: ScanPtr);
+;
+;  Calculate the intersection, difference, or union of two inversion scans.
+;
+;  Each input scan is a sorted array of integers terminated by 32767.
+;  The output scan contains the inversion coordinates for the result.
+;
+;  INPUTS:		A0 SRCA
+;			A1 SRCB
+;			A2 DSTC
+;
+;  CLOBBERS D0-D3, A0-A2
+;
+SECT	CLR 	D2					;RESET ASTATE OFF
+		CLR 	D3					;RESET BSTATE OFF
+		BRA.S	SHARE					;SHARE CODE
+DIFFSCAN CLR	D2					;RESET ASTATE OFF
+		BRA.S	UNION2					;SHARE CODE
+UNIONSCAN MOVEQ #-1,D2					;SET ASTATE ON
+UNION2	MOVEQ	#-1,D3					;SET BSTATE ON
+
+SHARE	MOVE	(A0)+,D0				;GET NEXTA
+		MOVE	(A1)+,D1				;GET NEXTB
+NEXT	CMP 	D1,D0					;IS NEXTA < NEXT B ?
+		BLT.S	ALESS					;YES, BRANCH
+		BGT.S	BLESS					;BR IF NEXTB IS LESS
+EQUAL	CMP 	#32767,D0				;ARE WE AT THE END ?
+		BEQ.S	DONE					;YES, QUIT
+		CMP 	D3,D2					;ARE ASTATE AND BSTATE SAME ?
+		BNE.S	SKIP0					;NO, SKIP
+		MOVE	D0,(A2)+				;YES, PUT CHANGE
+SKIP0	MOVE	(A0)+,D0				;GET NEW NEXTA
+		NOT 	D2					;TOGGLE ASTATE
+		MOVE	(A1)+,D1				;GET NEW NEXTB
+		NOT 	D3					;TOGGLE BSTATE
+		BRA 	NEXT					;LOOP FOR MORE
+ALESS	TST 	D3					;TEST BSTATE
+		BEQ.S	SKIP1					;SKIP IF NOT TRUE
+		MOVE	D0,(A2)+				;PUT NEXTA
+SKIP1	MOVE	(A0)+,D0				;GET NEW NEXTA
+		NOT 	D2					;AND TOGGLE ASTATE
+		BRA 	NEXT					;LOOP FOR MORE
+BLESS	TST 	D2					;TEST ASTATE
+		BEQ.S	SKIP2					;SKIP IF NOT TRUE
+		MOVE	D1,(A2)+				;PUT NEXTB
+SKIP2	MOVE	(A1)+,D1				;GET NEW NEXTB
+		NOT 	D3					;AND TOGGLE BSTATE
+		BRA 	NEXT					;LOOP FOR MORE
+DONE	MOVE	#32767,(A2)+				;PUT END MARKER INTO DST
+		RTS
+
+
+InsetScan PROC	EXPORT	
+		EXPORT	XorScan
+;---------------------------------------------------------
+;
+;  PROCEDURE InsetScan(src,dst: ScanPtr; dh: INTEGER);
+;
+;  Horizontally inset an inversion scan by dh;
+;
+;  The input scan is a sorted array of integers terminated by 32767.
+;  The output scan contains the inversion coordinates for the inset.
+;
+;  INPUTS:		A0 SRC
+;			A2 DST
+;			D2 DH
+;
+;  CLOBBERS D0-D1/A0-A2
+;
+		TST 	D2					;IS DH NEG ?
+		BLT.S	OUTSET					;YES, OUTSET
+
+;---------------------------------------------------------------
+;
+;  GET EACH PAIR OF COORDS, INSET THEM, AND CANCEL IF THEY CROSS.
+;
+INSET	CMP 	#32767,(A0) 			;CHECK FOR TERMINATOR
+		BEQ.S	DONE					;QUIT WHEN FOUND
+		MOVE	(A0)+,D0				;GET LEFT COORD
+		MOVE	(A0)+,D1				;GET RIGHT COORD
+		ADD.W	D2,D0					;ADD DH TO LEFT
+		SUB.W	D2,D1					;SUB DH FROM RIGHT
+		CMP 	D1,D0					;IS LEFT >= RIGHT ?
+		BGE.S	INSET					;YES, SKIP BOTH
+		MOVE	D0,(A2)+				;PUT LEFT COORD TO DST
+		MOVE	D1,(A2)+				;PUT RIGHT COORD TO DST
+		BRA.S	INSET					;LOOP ENTIRE SCAN
+
+
+;------------------------------------------------------------------
+;
+;  GET EACH PAIR OF COORDS, OUTSET THEM, AND CANCEL IF THEY CROSS.
+;
+OUTSET	MOVE	#-32767,A1				;OLDRIGHT := -32767
+		BRA.S	START					;GO TO LOOP START
+OUTLOOP MOVE	(A0)+,D0				;GET LEFT COORD
+		MOVE	(A0)+,D1				;GET RIGHT COORD
+		ADD 	D2,D0					;ADD DH TO LEFT
+		SUB 	D2,D1					;SUB DH FROM RIGHT
+		CMP 	A1,D0					;IS LEFT <= OLDRIGHT ?
+		BGT.S	OUTOK					;NO, CONTINUE
+		SUB 	#2,A2					;YES, OVER-WRITE PREVIOUS RIGHT
+		BRA.S	OUTOK2					;AND CONTINUE
+OUTOK	MOVE	D0,(A2)+				;PUT LEFT COORD
+OUTOK2	MOVE	D1,(A2)+				;PUT RIGHT COORD
+		MOVE	D1,A1					;OLDRIGHT := RIGHT
+START	CMP 	#32767,(A0) 			;CHECK FOR TERMINATOR
+		BNE 	OUTLOOP 				;AND LOOP ENTIRE SCAN
+
+DONE	MOVE	#32767,(A2)+				;PUT TERMINATOR
+		RTS
+
+
+;--------------------------------------------------------------
+;
+;  LOCAL PROCEDURE XorScan(srcA,srcB,dstC: ScanPtr);
+;
+;  Form the exclusive-or of two inversion scans.
+;
+;  Each input scan is a sorted array of integers terminated by 32767.
+;  The output scan conatins all input coordinates from each, but
+;  with duplicate pairs cancelled.	It also is terminated by 32767.
+;
+;  INPUTS:		A0 SRCA
+;			A1 SRCB
+;			A2 DSTC
+;
+;  CLOBBERS D0-D1, A0-A2
+;
+EQUAL	CMP 	#32767,D0				;ALL DONE ?
+		BEQ.S	DONE					;YES, QUIT
+XorScan MOVE	(A0)+,D0				;GET NEXT A
+		MOVE	(A1)+,D1				;GET NEXT B
+NEXT	CMP 	D1,D0					;WHICH IS LESS, A OR B ?
+		BEQ.S	EQUAL					;THE SAME, SO CANCEL
+		BLT.S	ALESS					;A IS LESS
+BLESS	MOVE	D1,(A2)+				;PUT B TO DST
+		MOVE	(A1)+,D1				;GET NEXT B
+		BRA.S	NEXT					;LOOP FOR MORE
+ALESS	MOVE	D0,(A2)+				;PUT A TO DST
+		MOVE	(A0)+,D0				;GET NEXT A
+		BRA.S	NEXT					;LOOP FOR MORE
+
+
+		END 
+
+

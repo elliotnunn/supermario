@@ -1,0 +1,420 @@
+;
+;	File:		Balloonptch28.a
+;
+;	Contains:	Main and Pack14 caller for Help Manager ptch 28
+;
+;	Written by:	Randy Carr
+;
+;	Copyright:	© 1989-1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<38>	  7/8/92	JSM		Move HelpMgrInstall, Pack14Entry, ptchHMUpdateHelpMenu,
+;									ptchHMGetHelpGlobal, ptchHMGetBalloons, and ptchHMSetHelpGlobal
+;									to BalloonExtensions.a, add comments about patches rolled into
+;									DeskMgr.a.
+;		<37>	  4/7/92	JSM		Use emPack14Globals instead of emPackGlobals+28.
+;		<36>	 2/11/91	RLC		dc,#82023 Fix HiliteMenu(0) bug for the help menu [GO5
+;									approved].
+;		<35>	 1/18/91	KSM		<RLC> Change include of BalloonPACKEqu to BalloonsPriv.a.
+;		<34>	  1/7/91	JDR		(dba) Changing the includes of Icons.a to IconUtilsPriv.a.
+;		<33>	12/14/90	RLC		<ksm> Fix patch to _MenuSelect to respect the flags in the help
+;									menu. Do this by returning hiword = help menu ID, lowword = item
+;									number from call to _SystemMenu only if in the help menu. In
+;									this way, the menu flags are respected, because _SystemMenu
+;									would never have been called if the item wasn't available.
+;	   <31+>	 10/5/90	RLC		<ksm> Toss code that used to be the patch to _InitWindows. Change
+;									the patch to _ShowHide to reference the hmgTitleBalloon global
+;									instead of the hmgContentWindow global.
+;		<31>	 9/30/90	RLC		Change reference from hmgLastWindow to hmgContentWindow to keep
+;									the confusion level lower.
+;	   <29+>	 9/23/90	RLC		Remove patch to InitWindows as we've relocated the code to
+;									allocate the layer & help window when balloon help actually goes
+;									on.
+;		<29>	 9/13/90	RLC		Change HMGlobals to be a ptr instead of a handle, as it gets
+;									allocated at init time (early) and preallocation of a master
+;									ptr; Update all references to the hmGlobalHandle to hmGlobalPtr.
+;		<28>	 8/31/90	RLC		Match up those equates again, make patch to OSEventAvail not be
+;									reentrant for those calls to _StillDown (which calls
+;									OSEventAvail).
+;	   <26+>	 8/21/90	RLC		Add a patch to OSEventAvail.
+;	   <25+>	 8/16/90	RLC		Convert to use PackHelper (Dispatcher) to get good at HLock &
+;									HUnlocking package.
+;	   <24+>	  8/6/90	RLC		Add code to do InitHelpMenu here instead of ProcessMgr.
+;		<24>	 7/18/90	RLC		Fix export of STDEntry & STDExit.
+;		<23>	 7/13/90	RLC		Shorten calls to ptchHMGetBalloons to access global directly,
+;									add patch to _ShowHide to improve performance to system
+;									balloons.
+;		<22>	  7/2/90	RLC		Remove normalizing in return from MenuSelect in help menu.
+;	   <20+>	 6/26/90	RLC		Shorten some code.
+;	   <19+>	 6/14/90	RLC		Add support for first time (“Balloons On”) balloon.
+;		<19>	  6/7/90	EMT		Removed IsThisAModalDialog since it's defined in
+;									ModalDialogMenuPatches.
+;		<18>	  6/7/90	VL		Add HelpMgrInstall. Change patch routines to use linked patch
+;									macros. Remove obsolete routines (ptchHMRetrievePatchChain and
+;									ptchHMInstallPatches).
+;	   <16+>	  6/1/90	RLC		Add a call in HMInitWindowsPatch to retrieve the Help font and
+;									size from Script Mgr.
+;	   <15+>	 5/29/90	RLC		Fix patch to _AppendMenu to support multiple items from
+;									application.
+;	   <14+>	  5/4/90	RLC		Try the _Clearmenubar patch again
+;		<14>	  5/4/90	RLC		Quik fixes.
+;		<14>	  5/4/90	RLC		Shorten some patches.
+;		<13>	  5/4/90	RLC		Fix bug in AppendMenu code that doesn't append to help menu.
+;		<12>	 4/22/90	dba		fix patch to MenuSelect so it doesn’t return anything when one
+;									of Help’s own menus is selected
+;	   <10+>	 4/10/90	KSM		Whack out the extraneous patches.
+;		<9+>	  4/5/90	RLC		Add new private: HMExtractHelpMsg to generically extract a help
+;									msg.
+;		<8+>	 3/29/90	RLC		Track appends to help menu correctly during twitches.
+;		<7+>	 3/23/90	RLC		something
+;		<6+>	 3/19/90	RLC		Change help menu to use Show/Hide strings instead of CheckItem.
+;		<5+>	  2/5/90	RLC		Add a patch to _InsertMenu.
+;		<4+>	  2/2/90	RLC		Fix selector error code return.
+;		<3+>	 1/31/90	RLC		Fix menu hiliting for Help menu.
+;		<2+>	 1/30/90	RLC		Fix HiliteMenu(0) condition for mousedowns in HelpMenu.
+;		<1+>	 1/12/90	RLC		Fix low memory conditions and bad calling conventions to
+;									package.
+;	   <1.1>	 11/7/89	RLC		Changed patch to _IsDialogEvent to handle tracking of Help Icon
+;									in modaldialogs.
+;	   <1.0>	 11/2/89	RLC		Created Today.
+;
+;						TITLE		'Balloonptch28.a - Help Manager'
+
+	IF &TYPE('HelpMgrTesting')='UNDEFINED' THEN
+HelpMgrTesting			EQU 0
+	ENDIF
+
+HelpIncludeHelpIcon		EQU	0
+
+			PRINT	PUSH,OFF
+
+			LOAD	'StandardEqu.d'
+			INCLUDE 'LinkedPatchMacros.a'			; linked patch stuff
+			INCLUDE 'InternalMacros.a'				; darin stuff
+			INCLUDE	'BalloonsPriv.a'				; my private help manager equates
+
+			PRINT	POP
+;
+; Macro to put in debug symbols for MacsBug
+;
+			IF HelpMgrTesting THEN
+			MACRO
+				DoDebugSymbols &name
+				DC.B	$80 + &LEN(&name), '&name'
+				DC.W	$0000
+			ENDM
+			ENDIF
+
+			ROMs		Plus,SE,II,Portable,IIci
+
+;
+;	PROCEDURE HMModalDialogPatch;
+;
+;	This code is patched in to _ModalDialog trap so that we can track the
+;	mouse going down over our Balloon Help Icon in the dialog template handle.
+;
+
+HMModalDialogPatch	PatchProc	_ModalDialog
+				IMPORT	ptchHMGetBalloons
+
+				JSR		ptchHMGetBalloons			; what is the state of What Is? mode?
+				BEQ.S	@BalloonsOff				; no, let's not scan for a content window
+
+				SUBQ	#2,SP						; make space for OsErr
+				_HMTrackModalHelpItems
+				TST		(SP)+						; toss result
+@BalloonsOff
+				jmpOld								; jump to next in patch chain
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	HMModalDialogPatch	; label for MacsBug
+		ENDIF
+
+		ENDP			; HMModalDialogPatch
+
+;
+;	PROCEDURE HMShowHidePatch;
+;
+;	This code is patched in to _ShowHide trap so that get better response times
+;	when windows come and go.
+;
+;
+HMShowHidePatch	PatchProc	_ShowHide
+				IMPORT	ptchHMGetBalloons
+
+				MOVE.L	A1,-(SP)					; we have to save this register (Why?, I don't know)
+
+				JSR		ptchHMGetBalloons			; what is the state of What Is? mode?
+				BEQ.S	@BalloonsOff				; EQ means no, so, let's not do anything.
+
+				SUBQ	#2,SP						; room for Boolean
+				_HMIsBalloon						; was there a Balloon up?
+				TST.B	(SP)+
+				BEQ.S	@BalloonsOff				; EQ means no, so, let's exit now
+
+				MOVE.L	ExpandMem,A0						; point to the expand mem ptr
+				MOVE.L	ExpandMemRec.emHelpGlobals(A0),A0	; A0 = global ptr
+
+						; note: 10 = 6 + A1 saved on stack
+				MOVE.L	10(SP),D0					; get the ShowHide WindowPtr that was passed
+
+				CMP.L	hmgWindow(A0),D0			; was it our balloon window?
+				BEQ.S	@BalloonsOff				; yes, ignore _ShowHide calls with the balloon window
+
+				MOVE	hmgTitleBalloon(A0),D0		; see if one of the menu bar title balloons was up (<>0)
+				BNE.S	@BalloonsOff				; NE means one was so just exit the patch
+
+				TST.B	8(SP)						; true if the window is becoming active
+				BNE.S	@BalloonsOff				; NE means that somebody called ShowHide
+													;	to show a currently showing window
+@DifferentLastWindow
+
+				SUBQ	#2,SP						; remove any balloons that might have been up
+				_HMRemoveBalloon					; do the remove
+				ADDQ.L	#2,SP						; toss result
+@BalloonsOff
+				MOVE.L	(SP)+,A1					; restore the return address that was in A1 (Why?, I don't know)
+				jmpOld								; jump to next in patch chain
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	HMShowHidePatch		; label for MacsBug
+		ENDIF
+
+		ENDP			; HMShowHidePatch
+
+;
+;	PROCEDURE HMIsDialogEventPatch;
+;
+;	This code is patched in to _IsDialogEvent trap so that we can track the
+;	mouse over each dialog item in a dialog template handle.
+;
+;
+HMIsDialogEventPatch	PatchProc	_IsDialogEvent
+				IMPORT	ptchHMGetBalloons
+
+		IF HelpIncludeHelpIcon THEN
+				IMPORT	ptchTrackHelpIcon
+
+				JSR		ptchTrackHelpIcon
+		ENDIF
+
+				JSR		ptchHMGetBalloons			; what is the state of What Is? mode?
+				BEQ.S	@BalloonsOff				; no, let's not scan for a content window
+
+				SUBQ	#2,SP						; make space for OsErr
+				_HMTrackModalHelpItems
+				TST		(SP)+						; toss result
+@BalloonsOff
+				jmpOld								; jump to next in patch chain
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	HMIsDialogEventPatch		; label for MacsBug
+		ENDIF
+
+		ENDP			; HMIsDialogEventPatch
+
+;
+;
+;	PROCEDURE HMSystemTaskPatch;
+;
+;	This code is patched in to _SystemTask trap so that we can track autocontents
+;
+;	This patch has been rolled into DeskMgr.a.
+;
+
+HMSystemTaskPatch PatchProc _SystemTask
+			IMPORT	ptchHMGetBalloons
+
+			JSR		ptchHMGetBalloons			; what is the state of What Is? mode?
+			BEQ.S	@BalloonsOff				; no, let's not scan for a content window
+
+			SUBQ	#2,SP						; make room for a dummy OsErr
+			_HMBalloonBulk
+			ADDQ	#2,SP						; toss result (for now)
+
+@BalloonsOff
+			jmpOld								; jump to next in patch chain
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	HMSystemTaskPatch		; label for MacsBug
+		ENDIF
+
+		ENDP					; end of system task patch code
+;
+;	PROCEDURE HMOSEventAvailPatch;
+;
+;	This code is patched in to _OSEventAvail trap so that we can track autocontents
+;
+;
+HMOSEventAvailPatch PatchProc _OSEventAvail
+			IMPORT	ptchHMGetBalloons
+			IMPORT	ptchHMCallTrackerInContext
+
+			MOVEM.L	A0-A1/D0-D2,-(SP)					; we need to save these regs
+
+			MOVE.L	ExpandMem,A0						; point to the expand mem ptr
+			MOVE.L	ExpandMemRec.emHelpGlobals(A0),A0	; A0 = global ptr
+			TST.B	hmgWhatIs(A0)						; is Balloon help mode on?
+			BEQ.S	@DoNothing							; no, let's not scan for a content window
+
+			TST.W	hmgOSEventReentrantCount(A0)		; test the reentrant count
+			BNE.S	@DoNothing							; do nothing on the reentrant case
+
+			ST		hmgOSEventReentrantCount(A0)		; say that we're busy
+			JSR		ptchHMCallTrackerInContext
+
+@DoNothing
+			MOVEM.L	(SP)+,A0-A1/D0-D2					; restore 'em
+			jmpOld										; jump to next in patch chain
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	HMOSEventAvailPatch		; label for MacsBug
+		ENDIF
+
+		ENDP					; end of OSEventAvail patch code
+
+;
+;	PROCEDURE HMMenuSelectPatch;
+;
+;	This code is patched in to _MenuSelect trap so that we can track the help menu.
+;
+;
+HMMenuSelectPatch PatchProc _MenuSelect
+				IMPORT	ptchHMUpdateHelpMenu
+				IMPORT	ptchHMToggleWhatIs
+				IMPORT	ptchHMShowHelpAboutDialog
+
+				resultsStackFrame
+result			ds.l		1					; the MenuSelect result
+				parametersStackFrame
+startPt			ds.l		1					; the start point
+				endStackFrame
+
+			linkSave A2
+
+			MOVE.L	MenuList,D0					; check if menu list is nil.
+			BEQ.S	@CallOldCode				; if NIL just call the old trap
+
+			JSR		ptchHMUpdateHelpMenu		; update the menu checked status
+
+			MOVE.L	ExpandMem,A2						; <33> point to the expand mem ptr
+			MOVE.L	ExpandMemRec.emHelpGlobals(A2),A2	; <33> A2 = global ptr
+			CLR.W	hmgSystemMenuID(A2)			; <33> clear the last system menu ID
+			CLR.W	hmgSystemMenuItem(A2)		; <33> clear the last system menu item
+			ST		hmgInMenuSelectFlag(A2)		; <33> say that we're in MenuSelect
+@CallOldCode
+			SUBQ	#4,SP						; room for MenuSelect longInt result
+			MOVE.L	startPt(A6),-(SP)			; copy then startPt parameter
+			jsrOld								; call next in patch chain
+
+			MOVE.L	(SP)+,D0					; get the result of the _MenuSelect call
+
+			SWAP	D0							; put menu ID in low word for test
+			TST.W	D0							; was the menu ID non-zero?
+			BNE.S	@NormalMenuSelect			; yes, so just return result of _MenuSelect
+
+			MOVE.W	hmgSystemMenuID(A2),D1		; return the last system menu ID
+			BEQ.S	@NormalMenuSelect			; if zero then the menu wasn't the help menu
+
+			SWAP	D1							; put menu ID in hiword
+			MOVE.W	hmgSystemMenuItem(A2),D1	; return the last help menu item
+
+@HandleHelpMenu
+			CMP		#kHMAboutHelpItem,D1		; was it the about item
+			BNE.S	@TryShowBalloonsItem		; no, check for Show/Hide Balloons item
+
+			JSR		ptchHMShowHelpAboutDialog	; show the about dialog
+			BRA.S	@HelpMenuHandled			; exit w/ zeroed menu result long
+
+@TryShowBalloonsItem
+			CMP.W	#kHMShowBalloonsItem,D1		; was the selection Show/Hide Balloons??
+			BNE.S	@DoneHelpMenu				; no, it was some other item
+
+			JSR		ptchHMToggleWhatIs			; toggles state of "Show Balloons" global,
+			BRA.S	@HelpMenuHandled			; exit w/ zeroed menu result long
+
+@DoneHelpMenu
+			MOVE.L	D1,D0						; put the setup menu result in D0 for result(A6)
+			BRA.S	@CorrectedResult			; exit
+
+@HelpMenuHandled
+			MOVEQ	#0,D0						; say that hi and lo words are zero
+@NormalMenuSelect
+			SWAP	D0							; put item number back in lo word
+@CorrectedResult
+			MOVE.L	D0,result(A6)				; stuff the non-corrected result
+
+			CLR.W	hmgInMenuSelectFlag(A2)		; <33> say that we're out of MenuSelect
+
+			restoreUnlinkReturn
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	HMMenuSelectPatch		; label for MacsBug
+		ENDIF
+
+		ENDP
+;
+;
+;	PROCEDURE HMSystemMenuPatch;
+;
+;	This code is patched in to _SystemMenu trap so that we can track the help menu.
+;
+;	This patch has been rolled into DeskMgr.a.
+;
+HMSystemMenuPatch PatchProc _SystemMenu
+
+			MOVE.L	4(SP),D0							; get menuResult in D0
+
+			SWAP	D0									; put the menu ID in the lower word
+			CMP.W	#kHMHelpMenuID,D0					; is it our help menu ID?
+			BNE.S	@HelpMenuHandled					; no, just return to _SystemMenu chain
+
+			MOVE.L	ExpandMem,A0						; point to the expand mem ptr
+			MOVE.L	ExpandMemRec.emHelpGlobals(A0),A0	; A0 = global ptr
+
+			MOVE.W	#kHMHelpMenuID,hmgSystemMenuID(A0)	; set the global system menu ID to our help menu ID
+
+			SWAP	D0									; fix menuResult, so the item is in low word
+			MOVE.W	D0,hmgSystemMenuItem(A0)			;	and put the item into our system menu item global
+			
+			CLR.W	-(SP)								; <36> (#82023) do a HiliteMenu(0); for apps that only call this
+			_HiliteMenu									;	for their own menus [Nisus, Quicken, Adobe apps, etc.]
+
+@HelpMenuHandled
+			jmpOld										; jump to next in patch chain
+
+		IF HelpMgrTesting THEN
+			DoDebugSymbols	HMSystemMenuPatch			; label for MacsBug
+		ENDIF
+
+		ENDP
+;
+;
+;	PROCEDURE HMClearMenuBarPatch;
+;
+;	This code is patched in to _ClearMenuBar trap so that we always hide balloons on launches & mbar switches
+;
+;
+HMClearMenuBarPatch PatchProc _ClearMenuBar
+			IMPORT	ptchHMGetBalloons
+
+			JSR		ptchHMGetBalloons					; what is the state of What Is? mode?
+			BEQ.S	@BalloonsOff						; EQ means no, so, let's not do anything.
+
+			SUBQ	#2,SP								; remove any balloons that might have been up
+			_HMRemoveBalloon							; do the remove
+			TST.W	(SP)+								; toss result
+
+@BalloonsOff
+			jmpOld										; jump to next in patch chain
+
+
+		IF HelpMgrTesting THEN
+				DoDebugSymbols	HMClearMenuBarPatch		; label for MacsBug
+		ENDIF
+
+		ENDP
+
+
+			END

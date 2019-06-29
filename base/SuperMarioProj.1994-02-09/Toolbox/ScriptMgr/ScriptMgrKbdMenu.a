@@ -1,0 +1,1949 @@
+;
+;	File:		ScriptMgrKbdMenu.a
+;
+;	Contains:	Initialization of the new Keyboard Menu in the System Menu bar.
+;
+;	Written by:	SMB	Sue Bartalo
+;
+;	Copyright:	© 1990-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<43>	  4/2/93	YK		Initialize D0 to zero before getting a length byte into the
+;									lowest byte.
+;		<42>	 3/27/93	YK		Use system script font for ‘About Keyboards…’ menu item.
+;		<41>	 1/19/93	PKE		Update include file names: PackMacs.a->Packages.a. No effect on
+;									objects.
+;		<40>	 6/26/92	SMB		#1033660,<kst>: When we realized that Simplified Chinese
+;									TSM-style IMs were not getting correctly installed as a result
+;									of a flag value being defined incorrectly, we discovered some
+;									other minor bugs: extra TSM-style IMs were getting installed
+;									because the inputMethodCount also reflected the old-style IM
+;									count. Will now use this only for the count of TSM-style IMs and
+;									will use CJKcount to determine if any input methods are
+;									installed as appropriate (in BuildKCHRTable, etc.)
+;		<39>	 6/18/92	csd		#1030826 <SMB>: Fixed a bug in BuildIMTable where register d5
+;									was being initialized too late. It would get used with garbage
+;									in it if there were no input methods installed.
+;		<38>	 6/17/92	SMB		#1030826,<ha>: Check if an old-style IM is "ready" before
+;									installing it and if not, am updating the KCHR count and IM
+;									count appropriately. Now using STR# (kKeyboardMenuItemsID)
+;									instead of STR# (kKeyboardMenuID) Now using intfName instead of
+;									intfFile for the IM name in the menu.
+;		<37>	 5/31/92	FM		Removed obsolete conditional ScriptMgrKeyboardMenu.  I would
+;									like to remove DoCmdKeyEquivalents too but I guess I'll wait on
+;									that.
+;		<36>	 5/12/92	SMB		#1026017,<pke>: Removed code that error exited if 'kcs4' is not
+;									available. If 'kcs4' icon is not available will simply use
+;									'kcs#' icon. Also, fixed stupid code in RebuildKeybdMenu that
+;									causes rebuilding of menu d.s. to crash when a menu isn't
+;									available. #1029051, 1029243, 1024274 also.
+;		<35>	  4/8/92	SMB		#1026904,<ys>: #1026904,<ys>: Must set ResLoad to true around
+;									call to localGetIndString for the ‘About Keyboards…’ string. The
+;									resource was getting purged so was using an empty handle; also
+;									changed the localGetIndString code to test the dereferenced
+;									handle and to do a LoadResource if the handle was empty (for
+;									correctness). This removes the dependency on ResLoad being true.
+;		<34>	  4/6/92	SMB		#1024274,<pke>: General cleanup: remove hardcoding of "About
+;									Keyboards…" added in <33> when the resource isn't available. Now
+;									getting "About Keyboards…" using GetIndString; removed
+;									unnecessary code. Since using "oldJIMCount" for a test rather
+;									than for a count, now setting a bit "HaveOldJapanIMbit" in
+;									CJKcount instead. No longer testing for existance of component
+;									mgr (it exists). Fixed bug in AddMenuItem where old-style IM
+;									itemRsrcID was getting written to script word instead of
+;									language word of scriptLangRec. In AddMenuItem, need to call
+;									SetScript with secret script flag 'kUsingOldInputMethodVerb'
+;									when old-style IM becomes the default (after call to InformTSM).
+;									In RebuildKeybdMenu, the equ for frame size was above the local
+;									variable menuH, so the link instruction wasn't actually grabbing
+;									enough stack space. Fixed now; been around since the routines
+;									inception. (also, probably the writing to 0 bug: 1024274).
+;		<33>	 2/22/92	KST		Fixed 2 bugs related to "menuItemStringHdl": 1. If we can't get
+;									the resource, menuItemStringHdl was not cleared. 2. Need to make
+;									menuItemStringHdl non-purgeable because the code set ResLoad to
+;									false. Bad thing happened when the resource got purged.
+;		<32>	 2/22/92	KST		Rewrite code to get IconSuite from Component. Changed TSM design
+;									and removed "GetKeyboardIconSuite" call. Also add a field
+;									"oldJIMCount" in the stack frame to keep the old Japanese input
+;									method count.
+;		<31>	 2/19/92	KST		Fixed a bug in "MakeIMIconSuite" which trashes A3.
+;		<30>	 2/11/92	DCL		Changed the name of TSMEqu.[aph] to TextServices.[aph] for
+;									better read-ability.
+;		<29>	 2/10/92	KST		We now consolidate all default input methods info in one
+;									resource managed by TSM. So keyboard menu should get this info
+;									from TSM by calling GetDefaultInputMethod at boot time.
+;		<28>	 1/30/92	JH		Right before the loop which starts at label @OldIMLoop the
+;									intfArray handle is dereferenced and the first long is moved
+;									into d4. There needs to be a check to see if that first long is
+;									0. So adding a beq.s to NoMoreIMs.
+;		<27>	 1/16/92	pvh		In OldIMLoop, clear D0 before using it to hold a long word value
+;									for _BlockMove (D0 had residual trash in the upper word byte
+;									causing _BlockMove to hose memory). D1 also held the bogus D0
+;									value too.
+;		<26>	 1/16/92	DTY		Double check the handle to Japanese system globals to make sure
+;									there actually is a handle. If there is no handle, assume there
+;									are no old Japanese input methods.
+;		<25>	 1/15/92	SMB		Adding code to support old Input Methods… want old-style
+;									(pre-7.0) Japanese input methods in the kbd menu. Cleanup stack
+;									problem in MakeKCHRIconSuite & MakeIMIconSuite.
+;		<24>	 1/13/92	SMB		Word-align menuFrame again: eliminate tempTwo field since meant
+;									to replace it with CJKcount in last checkin.
+;		<23>	 1/10/92	SMB		#1013637: be sure a script is enabled and not just installed.
+;									Now adding KCHRs for double-byte scripts when no input methods
+;									are available.
+;		<22>	12/13/91	DTY		#1018116: BuildIMTable will trash the system heap when it tries
+;									to add information about components to the end of the installed
+;									items record but there were no components in the system.  Bad
+;									form, Boss!  ;)
+;		<21>	12/11/91	SMB		Rewrite to include Input Methods as well as KCHRs. Renamed
+;									AuxKeyboardMenuInfo members and KCHRInstalledRec (is now
+;									ItemInstalledRec) with new names. Bug #1013637 fixed - don't
+;									show inputs in menu if their script is installed but not
+;									enabled. Renamed scriptRecord's scriptKCHRCount member to
+;									scriptInputCount.
+;		<20>	 11/8/91	SMB		#1015613 (for CubeE & Bruges) - Fix bug that shows up when an
+;									application has no menu bar. We really want to use the system
+;									menu bar (SystemMenuList) and not the current menu bar which may
+;									be an application's menu bar.
+;		<19>	 2/11/91	PKE		smb,#PKE-Sys-020: RebuildKeybdMenu should perform some disposing
+;									and rebuilding even without a Keyboard menu, so we update if
+;									Mover has updated the keyboard layouts. Otherwise user can't
+;									switch to layouts they moved in, or code will try to switch to
+;									layouts that have been moved out. Note: this fix also requires
+;									the previous bug fix in <18>.
+;		<18>	 2/11/91	PKE		smb,#PKE-Sys-021: RebuildKeybdMenu (called by Mover) trashes a2
+;									and d3 (because it doesn't do proper setup and cleanup for its
+;									call to InitKeybdMenu).
+;		<17>	 1/27/91	PKE		stb,#PKE-Sys-016: (Whiteboard bug in 800K install, with no keybd
+;									icons) InitKeybdMenu error handling code was putting menuH
+;									handle for DisposHandle on the stack instead of in a0, thus
+;									messing up the stack and trashing regs across InitKeybdMenu.
+;									Once menuH was being put in the right place, then another
+;									problem had to be fixed: it was not valid if there was no menu.
+;		<16>	 1/22/91	SMB		(csd) When no kcs resources are installed, needed to pop a3 off
+;									the stack before an error exit (actually we just don't display a
+;									keyboard menu. See branches to @ErrCleanup & @StkCleanup.
+;		<15>	  1/7/91	SMB		(JDR) Need to modify to always have the Keyboard menu structures
+;									so the KeyScript verb "NextKeybdInScript" is meaningful (and
+;									functions!). Now testing smgrKbdMenuAvail in order to do the
+;									right thing when a menu does/doesn't exist! In RebuildKeybdMenu
+;									set script manager munged count to tell the Keybd CDEV to
+;									rebuild it's list of KCHRs. Renamed Icons.a to IconUtilsPriv.a.
+;		<14>	12/15/90	SMB		(gbm) Modified to use the 'kcs4' icon if the 'kcs8' is missing,
+;									and to guarantee fetching resources from the system resource
+;									file. Used 'extra' byte in local frame for a new flag,
+;									usingGenericIcon. Modified use of ResLoad to be a byte op and
+;									not a word op. Fixed bug in SortKCHRs by looping in the
+;									outerloop through KCHRcount-1 KCHR in the buffers (instead of
+;									the KCHRcount-2 KCHRs). This was causing a KCHR to not be
+;									included in the menu but it would show in the Keybd CDEV since
+;									it was in the system file.
+;		<13>	10/30/90	SMB		NEEDED for 7.0b2: restore ResLoad before calling SortKCHRs since
+;									_IUTextOrderSys depends on certain resources being in the system
+;									heap.
+;		<12>	  9/1/90	SMB		Rearranged initial conditions for displaying a menu. Bug fix: if
+;									only 1 KCHR then don't need to sort in SortKCHRs.
+;		<11>	 8/10/90	SMB		Removed the KeyScript call to re-enable the keyboards since
+;									Mover is now making the call. Added ‘About Keyboards’ support
+;									now.
+;		<10>	  8/7/90	SMB		Adding guts to RebuildKeybdMenu. Added call to IUTextOrderSys to
+;									sort the KCHRs alphabetically based on the 'itlm'. Changed
+;									script's default KCHR indicator to be localizable in the STR#
+;									resource for the kbd menu. Adding ‘About Keyboards…’ (but
+;									conditionalized out until later.) Temporarily making a KeyScript
+;									call to re-enable the keyboards if in RebuildKeybdMenu if they
+;									were disabled.
+;		 <9>	 7/16/90	PKE		Use new name for field in ExpandMemRec: emItlCache2Ptr is now
+;									emItlSysCachePtr. Renamed Cache2Rec to NewItlCacheRec.
+;		 <8>	 6/22/90	SMB		Conditionalizing out more code that expects the Next Keyboard
+;									and Next Script menu items to exist. Using flag
+;									DoCmdKeyEquivalents.
+;		 <7>	 6/13/90	PKE		Put in framework for private RebuildKeybdMenu routine called by
+;									Mover. This call lets us know that keyboards have been moved
+;									into or out of the System file.
+;		 <6>	 6/13/90	SMB		Removing the Next Keyboard and Next Script menu items until
+;									their command key equivalents can be displayed in the menu.
+;		 <5>	  6/5/90	SMB		Fixed odd address problem that occurred when initializing the
+;									menuTitleString and DisabledDashSep by adding a dummy member to
+;									the Strings record. Also cleaned up some inefficient code and
+;									initialized a register! Disabled cmd key equivalents for Next
+;									Keyboard and Next Script menu items.
+;		 <4>	  6/1/90	SMB		Extended Keyboard Menu to display using sorted script list
+;									(itl2Cache), and added Next Keyboard and Next Script menu items,
+;									as well as disabled dividing lines between scripts. Also testing
+;									itlc showIcon flag to determine whether or not to display the
+;									keyboard menu.
+;		 <3>	 5/31/90	SMB		Renaming IconUtils.a to Icons.a.
+;		 <2>	 5/13/90	SMB		Adding InitKeyboardMenu guts!
+;		 <1>	  5/5/90	PKE		Added a butchered version of Sue’s new file with a temporary
+;									stub for InitKeybdMenu routine. Sue will fill this in later.
+;___________________________________________________________________________________________________
+;	To Do:
+;	• Update use of d4 (was KCHRcount, is now total menu contents count) to be a long instead of a word
+;	• If can't get a handle to use for the name of an IM (see @GetIMInfo) need to zero-out the itemInfo 
+;		field and set update the count correctly.  May need to do better error-handling after
+;		_GetComponentInfo too.
+;	• clean up componentFlags and componentFlagsMask: should the componentFlags be #$00008F00 instead?
+;	• search for <??>
+;	• make RebuildKeybdMenu its own proc and move localGetIndString above it.
+;	• Are the menuitems numbered correctly if no kbd menu is desired and the About menu 
+;	item isn't there? Should check ScriptMgrKeyGetSet for all of this as well.
+;	• what to do about err result from _DisposeIconSuite? already deleted menu items if a menu exists
+;		and possibly already deleted icon suites so these leave the menu in a bad state.
+;___________________________________________________________________________________________________
+
+		load	'StandardEqu.d'					; Private.a, ScriptEqu.a, ...
+		include 'ScriptPriv.a'
+		include	'Packages.a'					;							<10><41>
+		include 'IconUtilsPriv.a'				;							<15>
+		include	'IntlUtilsPriv.a'				;							<10>
+		include	'MenuMgrPriv.a'					;							<20>
+		include 'TextServices.a'				;							<21> <29>
+		include 'TSMPrivate.a'					;							<29>
+		include	'Components.a'					;							<21>
+		include 'GestaltEqu.a'					;							<21>
+
+		string	pascal
+
+		proc
+		export	InitKeybdMenu
+		export	RebuildKeybdMenu				;							<7>
+		import	StdUnlink						; std unlink & exit			<1>
+
+;-------------------------------------------------------------------------------
+;	FUNCTION InitKeybdMenu: OSErr;
+;-------------------------------------------------------------------------------
+
+menuFrame			record	{a6link},decr
+result				ds.w	1		; OSErr result code.					<1>
+menuArgs			equ		*-8		; size of arguments.					<1>
+selector			ds.l	1		; ScriptMgr selector on stack			<1>
+return				ds.l	1		; return address.						<1>
+a6link				ds.l	1		; old link pointer
+rebuildFlag			ds.b	1		; indicates rebuilding so don't call _InsertMenu <10>
+					ds.b	1		; unused								<21><34>
+byteAvail			ds.b	1		; word-aligning the stack: use me		<25>
+CJKcount			ds.b	1		; Using low 5 bits: which dbl-byte scripts have an IM: 0 => no IM, ow 1	<23>
+									; xxxOCCJK
+KCHRcount			ds.w	1		; number of KCHRs installed				<10><21>
+TSMInputMthdCount	ds.l	1		; input method count (old & new)		<21> renamed <25> renamed again (added 'TSM') <40>
+menuH				ds.l	1		; menuHandle
+ScriptOrderPtr		ds.l	1		; ptr to ordering of scripts (in emItlSysCache)
+ItemInstalledRecPtr	ds.l	1		; ptr to ItemInstalledRec
+ItemOffsetsPtr		ds.l	1		; ptr to record of offsets of ItemInstalledRec for sorting
+KeyboardMenuPtr		ds.l	1		; ptr to AuxKeyboardMenuInfo record
+menuItem			ds.w	1		; menuItem number
+defaultMark			ds.w	1		; marker for default KCHR in each script
+scriptCount			ds.b	1		; number of scripts still to process	<10>
+usingGenericIcon	ds.b	1		; T=> using a generic icon				<14>
+scriptLangRec		ds.l	1		; contains the script (w) & language (w) <21>
+compID				ds.l	1		; component identifier					<21>
+NextItemString		ds.b	256
+CompDesc			ds		ComponentDescription		;					<21>
+menuLocals			equ		*		; size of locals
+					endr
+
+; definitions for creating an IconSuite of small color icons for scripts.
+		string	asis
+kcsTable			dc.l	'kcs#',Small1BitMask,'kcs4',Small4BitData,'kcs8',Small8BitData
+
+		string	pascal
+
+NumItemsAfterKCHRs	equ		2		; Next Keyboard and Next Script
+
+KeyboardMenuRegs	reg		d2-d4/a2-a4	
+		
+;***********************************************************************************************
+
+InitKeybdMenu	
+		with	menuFrame,ItemInstalledRec
+		link	a6,#menuLocals
+		clr.w	result(a6)					; initialize to return noErr
+
+;-----------------------------------------------------------------------------------			<10>
+;	INITIALIZATIONS
+;-----------------------------------------------------------------------------------			<10>
+		movem.l	KeyboardMenuRegs,-(sp)
+
+; get # of enabled scripts																		<4>
+		with SmgrRecord
+		GetSMgrCore	a2
+		st		smgrKbdMenuAvail(a2)		; assume want menu to display						<15>
+		cmp.b	#1,smgrEnabled(a2)			; > 1 script enabled?								<12>
+		bhi.s	@HaveMenuStatus				; yep, display menu									<12>
+		
+; otherwise, check itlc flag (smfShowIcon) to determine whether or not to show the menu			<4>
+		move.l	smgrGenFlags(a2),d0			;													<5>
+		btst.l	#smfShowIcon,d0				; bit 31 ON => show icon even if only one script 	<5>
+		bne.s	@HaveMenuStatus				;													<15>
+		sf		smgrKbdMenuAvail(a2)		; don't want menu to display						<15>
+		clr.l	menuH(a6)					; set menu handle to NIL							<17>
+@HaveMenuStatus		
+		move.b	smgrEnabled(a2),scriptCount(a6)	; save count									<12>
+		endWith								;													<12>
+
+; setup for resource fetch from the system file													<14>
+		subq.w	#2,sp						; storage for current resource file					<14>
+		_CurResFile							; 													<14>
+		move.w	#0,-(sp)					; use system resource file							<14>
+		_UseResFile							;													<14>
+
+		move.b	ResLoad,-(sp)				;													<14>
+		st		ResLoad						; set to true										<14>
+
+; setup defaultMark for the menu
+		move.w	#KeybdDefaultMrk,defaultMark(a6)	; initialize to empty, 0x00
+		pea		NextItemString(a6)			; ptr to Str255										<34>
+		move.w  #kKeyboardMenuItemsID,-(sp)	; strListID											<34><38>
+		move.w	#DefMarkIndex,-(sp)			; string index										<34>
+		import	localGetIndString			;													<34>
+		bsr		localGetIndString			; making a pString (rather than a ptr to text)													<34>
+		sf		ResLoad						; reset to F										<14>
+
+		tst.b	NextItemString(a6)			; do we have a string?								<34>
+		beq.s	@useDefMarker				; if empty, use default marker						<32>
+; fetch the localized character
+		move.b	NextItemString+1(a6),defaultMark+1(a6)	; write out the default marker byte	(skip length)	<34>
+@useDefMarker
+
+; Test if menu already exists so know if called from RebuildKeybdMenu					 		<10>
+		sf		rebuildFlag(a6)				; assume first time									<10>
+; Use the system menuBar and not the application menuBar in case appl doesn't have a menuBar (GetMHandle would fail).	<20>
+		move.l	MenuList,-(sp)				; save the current menuList since it may be an apps menu <20>
+		move.l	SystemMenuList,MenuList		;													<20>
+		subq	#4,sp						; result											<10>
+		move.w	#kKeyboardMenuID, -(sp)		; menuID											<10>
+		_GetMHandle							;													<10>
+		move.l	(sp)+,menuH(a6)				;													<10>
+		move.l	(sp)+,MenuList				; restore the menuList								<20>
+		tst.l	menuH(a6)					;													<10>		
+		beq.s	@NewMenu
+; If menu already exists then called from RebuildKeybdMenu					 					<10>
+		st		rebuildFlag(a6)				; don't do _InsertMenu								<10>
+
+;-----------------------------------------------------------------------------------
+;	MENU setup
+;-----------------------------------------------------------------------------------
+
+@NewMenu
+		bsr		CountMenuContents			; returns d4.l = to total # of installed inputs
+		
+; Allocate ItemInstalledRec table for # of installed KCHRs and Input Methods:
+		move.l	d4,d0						; total number of KCHRs and Input Methods			<21>
+		mulu	#ItemInstalledRecSz,d0
+		_NewPtr ,SYS,CLEAR
+		move.l	a0,ItemInstalledRecPtr(a6)
+		move.l	a0,a4
+
+		with smgrRecord,ScriptRecord,itlbRecord,ItemInstalledRec,AuxKeyboardMenuInfo
+;-----------------------------------------------------------------------------------
+		bsr		BuildIMTable				; Init the ItemInstalledRec table for input methods	<21>
+		bsr		BuildKCHRTable				; Init the ItemInstalledRec table for KCHRs			<21>
+;-----------------------------------------------------------------------------------
+		st		ResLoad						; must be T for _IUTextOrderSys						<14>
+		bsr		SortItems					; sort the Items 									<10>
+		sf		ResLoad						; reset to F										<14>
+;-------------------------------------------
+
+; Allocate AuxKeyboardMenuInfo record for IconSuite handles for MF and other info for SystemMenu patch
+		move.w	d4,d0						; total number of inputs
+		add.b	scriptCount(a6),d0			; # of scripts = # of disabled (separating) lines
+
+			IF DoCmdKeyEquivalents THEN				; 											<8>
+			; Allocate space for empty entry (so can index by menu item #) and entries for items
+			; beyond KCHRs (so that the iconSuiteH is 0). NumItemsAfterKCHRs=0 if no cmd key items
+			; so would only +1. Added above in disabled line count								<8>
+			add.w	#(1+NumItemsAfterKCHRs),d0		; 1=dummy entry
+			ENDIF
+
+		add.w	#2,d0						; for "About Keyboards…" & disabled line items		<11>
+		mulu	#AuxMenuInfoSize,d0
+		_NewPtr	,SYS,CLEAR
+		move.l	a0,KeyboardMenuPtr(a6)
+		GetSmgrCore a1						; get script manager core.
+		move.l	a0,smgrKeyboardMenuPtr(a1)	; save in Smgr Record for MF
+		move.l	a0,a2
+; in order to index by menuItem # (not 0-based), must have a dummy entry at the beginning
+		add.w	#AuxMenuInfoSize,a2			; point past empty entry to storage for 1st menuItem.
+
+;-----------------------------------------------------------------------------------			<10>
+;	Make a menu now…
+;-----------------------------------------------------------------------------------			<10>
+
+; Test if a menu is desired: if not, must still build menu d.s. so that the command-key 		<15>
+; equivalent, cmd-opt-space bar (to switch between keybds. in a script) works.	 				<15>
+		move.w	#1,menuItem(a6)				; initialize earlier for bra						<15>
+		tst.b	smgrKbdMenuAvail(a1)		; do we want to display a menu?						<15>
+		beq.s	@BuildMenuRec				;													<15>
+; Do we already have a menu? (are we called from RebuildKeybdMenu?)
+		tst.b	rebuildFlag(a6)				; do we already have a menu?						<21>
+		bne.s	@GotMenuH					; bra if so											<21>
+
+; Add a new menu for the Keyboard Menu
+		subq	#4,sp						; result: menuHandle
+		move.w	#kKeyboardMenuID, -(sp)		; menuID
+		pea		#'Susan'					; pString											<21>
+		_NewMenu
+		move.l	(sp)+,menuH(a6)
+@GotMenuH
+
+; Add the About Keyboards… menuitem followed by a disabled line									<10>
+		st		ResLoad						; set to true										<35>									<14>
+		pea		NextItemString(a6)			; ptr to Str255										<34>
+		move.w  #kKeyboardMenuItemsID,-(sp)	; strListID											<34><38>
+		move.w	#AboutKybdsIndex,-(sp)		; string index										<34>
+		import	localGetIndString			;													<34>
+		bsr		localGetIndString			;													<34>
+		sf		ResLoad						; reset to false									<35>
+		tst.b	NextItemString(a6)			; do we have the string								<34>
+		beq.s	@BuildMenuRec				; no, don't add AboutKeyboards…						<34>
+
+; name the menu item
+		move.l	menuH(a6),-(sp)
+		pea		NextItemString(a6)			; name of this KCHR: pString
+		move.w	menuItem(a6),-(sp)			; insert ‘after’ this menuItem
+		_InsMenuItem
+		move.l	menuH(a6),-(sp)
+		move.w	#1,-(sp)					; the first item has a script code.		<42>
+		move.w	#$1C,-(sp)
+		_SetItemCmd
+		move.l	menuH(a6),-(sp)
+		move.w	#1,-(SP)
+		move.w	#smSystemScript,-(sp)		; the script code is the sytem script	<42>
+		_SetItmIcon
+		add.w	#1,menuItem(a6)
+		add.w	#AuxMenuInfoSize,a2			; point past 1st menuItem now
+		bsr		AddDisabledLine				; separate scripts by a disabled line				<8>
+
+;---------------------------------------------------------------------------
+;	Add the menu guts…
+;---------------------------------------------------------------------------
+@BuildMenuRec								;													<15>
+		move.l	ItemInstalledRecPtr(a6),a4	; reset to first KCHR’s info						<10>	
+		move.l	ItemOffsetsPtr(a6),a3		; reset ptr
+		move.w	(a3)+,d0					; get offset to KCHR info for this item				<10>
+		add.w	d0,a4
+;-------------------------------------------
+; Currently:
+; a2 = ptr to AuxKeyboardMenuInfo (storage for aux menu info for each input)
+; a3 = ItemOffsetsPtr
+; a4 = ptr to ItemInstalledRec
+; d3 = current script #
+; d4 = total number of inputs
+; d5 = total num of input items thus far in this script
+;--------------------------------------------
+; Time to build each menu item and it's auxilliary menu information record
+; For each enabled script, loop for the input items and add menu items for each one
+
+;--------------------
+;	Scripts loop…
+;--------------------
+@EnabledScriptLoop
+		subq.b	#1,scriptCount(a6)			; decr enabled script count
+		moveq	#0,d5						; initialize script's input item count to 0
+		move.w	ItemScript(a4),d3			; script code
+		
+; be sure this script is enabled (bug #1013637)													<21>
+		GetSMgrCore	a0
+		move.w	d3,d0
+		lsl.w	#2,d0						; long word offset
+		move.l	smgrEntry(a0,d0.w),a0		; script record of installed script
+		
+; loop until cross a script boundary in the KCHR table
+;-------------------------------
+;	Items_within_a_script loop…
+;-------------------------------
+@ScriptItemsLoop	
+		; if script not enabled, loop for next input. (a0 set above)
+		tst.b	scriptEnabled(a0)			; script enabled?
+		beq.s	@NextInput					; bra to fetch next input item if not a valid script
+
+; find out the type of input to build the iconsuite
+		move.b	itemInpuType(a4), itemType(a2)	; type of input								<25>
+		beq.s	@KCHRinput						; bra if this is a KCHR						<25>
+		cmp.b	#TSMIMitem, itemInpuType(a4)	; is this a new-style input method?			<25>
+		bne.s	@OldIM							; no, is an old-style input method			<34>- replaced 2 branches
+
+@NewIM
+; this input type is a TSM-style IM
+		move.l	itemInfo(a4), auxItemInfo(a2)	; store the component identifier here 		<21>
+		bra.s	@IMIconSuite					;											<25>
+@OldIM
+		move.w	itemResID(a4),itemRsrcID(a2)	; save id in AuxKeyboardMenuInfo record
+		move.l	#0, auxItemInfo(a2)				; NIL indicates it's not a new-style IM		<25>		
+@IMIconSuite
+		bsr		MakeIMIconSuite					; 											<21>
+		bra.s	@Add2Menu
+		
+@KCHRinput
+; this input type is a KCHR
+		move.w	itemResID(a4),itemRsrcID(a2)	; save id in AuxKeyboardMenuInfo record
+		movem.l	d2/d3,-(sp)						; save										<36>
+		move.w	itemRsrcID(a2),d2				; store the desired KCHR icon ID			<36>
+		move.w	#kKeyboardMenuID,d3				; store the default KCHR icon ID			<36>
+		sf		usingGenericIcon(a6)			; initial assumption						<36>
+		bsr		MakeIconSuite					;											<36>
+		movem.l	(sp)+,d2/d3						; restore									<36>
+		move.l	#0, auxItemInfo(a2)				; NIL indicates it's not a new-style Input Method		
+
+@Add2Menu
+; create a new menuItem and save the item order w/in the script in the AuxKeyboardMenuInfo record
+		bsr		AddMenuItem					; preserves a0
+
+;--------------------------------------------
+@NextInput
+; Get next input!
+		sub.w	#1,d4						; are we out of inputs/menuItems to add?
+	IF NOT DoCmdKeyEquivalents THEN			; bra if done									<8>
+		beq.s	@SetTitle					;									 			<3>;temporary<6>
+	ELSE
+		beq		@SetCmdKeyEquiv				; add Next Keyboard and Next Script 			<3>;temporary<6>
+	ENDIF
+		add.w	#AuxMenuInfoSize,a2			; point to storage for next menuItem.
+
+; Loop on next input in this script?
+		move.l	ItemInstalledRecPtr(a6),a4	; reset to first KCHR’s info						<10>	
+		move.w	(a3)+,d0					; get offset to KCHR info for this item
+		add.w	d0,a4
+		move.w	ItemScript(a4),d0
+		cmp.w	d3,d0						; cmp to current script
+		beq.s	@ScriptItemsLoop			; get next KCHR for this script
+
+; Crossed a script boundary		
+	IF NOT DoCmdKeyEquivalents THEN			; 												<8>
+		tst.b	scriptCount(a6)				; more enabled scripts?							<8>
+		beq.s	@SetTitle					; don’t add disabled line after last KCHR		<8>
+		; if script not enabled, don't add a line. (a0 set above at @EnabledScriptLoop)		<23>
+		tst.b	scriptEnabled(a0)			; script enabled?								<23>
+		beq		@EnabledScriptLoop			; bra to fetch next input item if not a valid script <23>
+		bsr		AddDisabledLine				; separate scripts by a disabled line			<8>
+											; a2 incremented for next menuitem's info		<32>
+		bra		@EnabledScriptLoop			;												<8>
+	ELSE
+			; Not really a routine- just a place I've moved the code to get it out of the
+			; middle of here. Should be put back here if we want to use it.
+			bsr		AddCmdKeyMenuItems	
+	ENDIF									;												<6>
+
+;------------------------------------------------------------------------------------------
+;	FINALIZATION
+;------------------------------------------------------------------------------------------
+
+; change the title of the menu to the icon of the system script’s keybd by stuffing 
+; the iconSuite handle into the string posn holder "Susan"
+@SetTitle
+		GetSmgrCore a3								; get script manager core.				<15>
+		tst.b	smgrKbdMenuAvail(a3)				; do we want to display a menu?			<15>
+		beq.s	@Cleanup							;										<15>
+		move.l	menuH(a6),a0
+		move.l	(a0),a0								; deref
+; stuff the length (5 bytes) and special byte into the name: 01 indicates a handle is following
+		move.w	#$0501, menuData(a0)				;										<21>
+		
+; stuff the system script's iconSuite handle into the name
+ 		move.l	KeyboardMenuPtr(a6),a1
+
+; get item # of default script's KCHR														<10><15>
+		move.w	smgrSysScript(a3),d0				;										<10>
+		lsl.w	#2,d0								; long word offset						<10>
+		move.l	smgrEntry(a3,d0.w),a3				; script record							<10>
+		clr.w	d0									;										<10>
+		move.b	ScriptKeysItemNum(a3),d0			;										<10>
+		mulu.w	#AuxMenuInfoSize,d0					; offset into AuxMenuInfoRec			<10>
+		add.w	d0,a1								;										<3><10>
+		move.l	iconSuiteH(a1),menuData+2(a0)		; now at system script entry			<3>
+		endwith		; with smgrRecord,ScriptRecord,itlbRecord,ItemInstalledRec,AuxKeyboardMenuInfo
+
+		tst.b	rebuildFlag(a6)						; if rebuilding don’t insert menu		<10>
+		bne.s	@CleanUp							;										<10>
+		
+; insert the menu now!		
+		move.l	menuH(a6),-(sp)
+		move.w	#0,-(sp)
+		_InsertMenu
+
+@Cleanup
+		move.b	(sp)+,ResLoad						;										<14>
+; restore previous (current) resource file													<14>
+		_UseResFile									; current resource file ID on stack		<14>
+
+		move.l	ItemInstalledRecPtr(a6),a0
+		_DisposPtr
+		tst.w	result(a6)
+		bne.s	@done								; don't overwrite with potential DisposPtr error
+		tst.w	d0
+		beq.s	@done
+		move.w	d0,result(a6)						; will override DisposHandle error if one existed
+		move.l	ItemOffsetsPtr(a6),a0
+		_DisposPtr
+		tst.w	result(a6)
+		bne.s	@done								; don't overwrite with potential DisposPtr error
+		tst.w	d0
+		beq.s	@done
+		move.w	d0,result(a6)						; will override DisposHandle error if one existed
+
+@done	
+		movem.l	(sp)+,KeyboardMenuRegs
+		move.w	#menuArgs, d0						; for StdUnlink: number of bytes to clean up
+		bra		StdUnlink							; standard exit
+		endwith										; menuFrame,ItemInstalledRec
+
+;formFeed
+;-----------------------------------------------------------------------------------
+;	Utility CountMenuContents																	<21>
+;
+;	---- Input
+;	a6 	stack frame, menuFrame
+;
+;	---- Output
+;	d4	total # of _installed_ ‘KCHR’s, Input Methods, (menu items).
+;-----------------------------------------------------------------------------------
+
+CountMenuContents
+		with	menuFrame,ItemInstalledRec,smgrRecord,scriptRecord,ScriptSystemGlobals,intfRecord
+		moveq	#0,d4
+		clr.b	CJKcount(a6)				; initialize to no input methods available	<34>
+		move.l	d4, TSMInputMthdCount(a6)	; initialize								<25> <32>
+; determine # of KCHR resources in the System file
+		subq	#2,sp						; result
+		move.l	#'KCHR',-(sp)				; resource type
+		_Count1Resources					; get the number of KCHRs
+		move.w	(sp)+,d4
+		move.w	d4,KCHRcount(a6)			; save for KCHR search						<10>
+
+;----------------------------------------------------------------------------------	
+; count # of old Japanese input methods in the System									<25>
+		GetSMgrCore	a0						; get Script Mgr core						<25>
+		move.l	smgrEntry+(smJapanese*4)(a0),d0	; get handle to the Japanese system globals	<25> <26><34>
+		bz.s	@GetNewIMs					; No handle, so assume no old input method.  Go find some new ones.  <26>
+		move.l	d0,a0						;											<26>
+		tst.b	scriptEnabled(a0)			; script enabled?							<25>
+		beq.s	@GetNewIMs					; no Japanese script so get only new IMs now	<25>
+; get handle to table of input methods
+		move.l	intfArray(a0),a0			; load table handle							<25>
+		move.l	(a0),a0						; load table pointer						<25>
+		move.l	(a0),d0						; get table length => # of old input methods<25>
+		beq.s	@GetNewIMs					; No old input methods.  Go find some new ones.  <34>
+		add.l	d0,d4						; use reg instead of mem loc for setting d4	<32>
+		bset.b	#HaveOldJapanIMbit,CJKcount(a6)	; use bit 5 to indicate a JIM exists	<34>
+;----------------------------------------------------------------------------------	
+
+@GetNewIMs
+; set up component description record													<21>
+		move.l	#kTextService, CompDesc.componentType(a6)	; text service interface type
+		move.l	#kInputMethodService, CompDesc.componentSubType(a6)	; specific text service
+		move.l	#0, CompDesc.componentManufacturer(a6)
+
+; get the grand total of IMs for a comparison with the compiled total of IMs			<40>
+		move.l	d3,-(sp)					; save										<40>
+		move.l	#AllFlags, CompDesc.componentFlags(a6)		; all scripts, languages & takes active key events	<40>
+		move.l	#ActiveEventMask, CompDesc.componentFlagsMask(a6)	; only care about the active event			<40>
+		subq	#4,sp						; result									<40>
+		pea		CompDesc.componentType(a6)	; count components of this desc 			<40>
+		_CountComponents																<40>
+		move.l	(sp)+,d3					; save result								<40>
+
+		
+;----------------------------------------------------------------------------------		<23>
+; Determine # of input methods in the System but need to know which scripts have them. So,
+; do a separate count for each double-byte script and set a bit in the CJKcount byte field of
+; menuFrame that indicates whether or not an input method exists for the script.  Bits 0 - 4 are
+; set thus: (CCJK): bit 4 = simpChinese, bit 3 = tradChinese, bit 2 = Japanese, bit1 = Korean	<23>
+; Bit 5 is set above if an old-style Japanese IM is available.							<34>
+;----------------------------------------------------------------------------------		<23>
+
+		move.w	d2,-(sp)					; save around calls to CountDblByteIMs		<25>
+		move.l	#ScriptActiveEventMask, CompDesc.componentFlagsMask(a6)	; now care about the script	& active event <23>
+
+; count # of simplified Chinese Input Methods in the System								<23>
+		move.l	#SimpChineseFlags, d0		; simpChinese script & takes active key events
+		move.b	#HaveSimpChineseIMbit,d2
+		bsr		CountDblByteIMs				;											<25>
+		
+; count # of traditional Chinese Input Methods in the System							<23>
+		move.l	#TradChineseFlags, d0		; tradChinese script & takes active key events
+		move.b	#HaveTradChineseIMbit,d2
+		bsr		CountDblByteIMs				;											<25>
+
+; count # of Japanese Input Methods in the System										<23>
+		move.l	#JapaneseFlags, d0			; Japanese script & takes active key events
+		move.b	#HaveJapaneseIMbit,d2
+		bsr		CountDblByteIMs				;											<25>
+
+; count # of Korean Input Methods in the System											<23>
+		move.l	#KoreanFlags, d0			; Korean script & takes active key events
+		move.b	#HaveKoreanIMbit,d2
+		bsr		CountDblByteIMs				;											<25>
+
+; compare grand total of IMs to compiled total to see if more exist beyond specifics above	<40>
+		cmp.l	TSMInputMthdCount(a6),d3	; are the totals the same					<40>
+		ble.s	@TSMCountOK					; if so, done								<40>
+		sub.l	TSMInputMthdCount(a6),d4	; remove compiled totals from total count of KCHRs and IMs	<40>
+		move.l	d3,TSMInputMthdCount(a6)	; use grand total of IMs instead of compiled<40>
+		add.l	d3,d4						; add grand total instead					<40>
+@TSMCountOK		
+		
+		move.w	(sp)+,d2					; restore									<25>
+		move.l	(sp)+,d3					; restore									<25>
+		rts
+		endWith								; menuFrame,ItemInstalledRec,smgrRecord,scriptRecord,ScriptSystemGlobals,intfRecord
+		
+;formFeed
+;-----------------------------------------------------------------------------------
+;	BuildKCHRTable
+;	Initialize the ItemInstalledRec table for the KCHRs
+;	Adjusts input count for KCHRs in a double-byte script: will add KCHRs for 
+;	double-byte scripts with no input methods.
+;
+;	---- Input
+;	a4	ItemInstalledRecPtr(a6)
+;	d4	total count of installed KCHRs & IMs
+;
+;	---- Register usage
+;	d3	loop counter
+;	d5	KCHRs in a double-byte script
+;
+;	---- Output
+;	a4	ItemInstalledRecPtr(a6) is pointing to next available space
+;-----------------------------------------------------------------------------------
+BuildKCHRTable
+		with menuFrame,ItemInstalledRec
+; Build table for all KCHRs' res handles, ids, and scripts (whether belong to an enabled script or not)
+		moveq	#0,d5						; assume no KCHRs in a double-byte script
+		move.l	d4,-(sp)					; save total count
+		move.w	KCHRcount(a6),d4			; only want KCHRs
+		moveq	#1,d3						; start indexing with first ind resource
+@GetKCHRLoop
+		subq	#4,sp						; result
+		move.l	#'KCHR',-(sp)				; resource type
+		move.w	d3,-(sp)					; push the index value
+		_Get1IxResource
+		move.l	(sp),itemHandle(a4)
+		
+; get the KCHR ID corresponding to the KCHR handle		---------------------------------------	<10>
+		pea		itemResID(a4)				; get the ID
+		clr.l	-(sp)						; don’t need type
+		pea		itemName(a4)				; push ptr to name string
+		_GetResInfo							; get the name, etc.
+
+; get the script # from the ‘KCHR’ ID: (KCHR id - #16384)/#512 + 1
+		move.l	#smRoman,d1					; initialize to Roman script
+		move.w	itemResID(a4),d0
+		sub.w	#smFondStart,d0				; beginning of non-Roman resource IDs (zero base KCHR #) 
+		bmi.s	@HaveScript
+		moveq	#9,d1						; shift amt
+		lsr.w	d1,d0						; get into script range (div by 2^9)
+		addq.w	#1,d0						; get real script #
+		move.w	d0,d1						; move script to d1 for test
+
+;--------------------------------------------------					<23>		
+; if the script is a double-byte script and no IM components are available, add the KCHRs
+; if the appropriate bit is set in CCJKcount(a6) then have IMs for the script.
+		tst.b	CJKcount(a6)				; are there any input methods?				<40>
+		bz.s	@HaveScript					; no, so add these KCHRs.
+
+; are we the simplified Chinese (19) script?
+		cmp.w	#smSimpChinese,d0			
+		bgt.s	@HaveScript					; bra if not a double-byte script
+		bne.s	@TestKorean					; not simp. Chinese but maybe another dbl-byte script
+;yep so check if any simplified Chinese IMs												<23>
+		btst.b	#HaveSimpChineseIMbit, CJKcount(a6)		;								<25>
+		beq.s	@HaveScript					; no IMs so add KCHRs for this script					
+		bra.s	@dbKCHRCount
+
+@TestKorean
+; are we the Korean script?
+		cmp.w	#smKorean,d0			
+		bne.s	@TestTradChinese
+;yep so check if any Korean IMs															<23>
+		btst.b	#HaveKoreanIMbit, CJKcount(a6)		;									<25>
+		beq.s	@HaveScript					; no IMs so add KCHRs for this script					
+		bra.s	@dbKCHRCount
+
+@TestTradChinese
+; are we the traditional Chinese script?
+		cmp.w	#smTradChinese,d0			
+		bne.s	@TestJapanese
+;yep so check if any traditional Chinese IMs											<23>
+		btst.b	#HaveTradChineseIMbit, CJKcount(a6)		;								<25>
+		beq.s	@HaveScript					; no IMs so add KCHRs for this script					
+		bra.s	@dbKCHRCount
+
+@TestJapanese
+; are we the Japanese script?
+		cmp.w	#smJapanese,d0			
+		bne.s	@HaveScript					; not a double-byte script
+;yep so check if any Japanese IMs														<23>
+		btst.b	#HaveJapaneseIMbit, CJKcount(a6)		;								<25>
+		bne.s	@dbKCHRCount				; TSM-style JIMs exist so don't add KCHRs
+		btst.b	#HaveOldJapanIMbit, CJKcount(a6)	; any old-style JIMs?				<34>
+		beq.s	@HaveScript					; no IMs so add KCHRs for this script		<34>
+		; fall into @dbKCHRCount
+;--------------------------------------------------						<23>
+@dbKCHRCount
+		add.w	#1,d5						; count of unincluded KCHRs in a double-byte script
+		bra.s	@GetNextKCHR
+		
+@HaveScript
+		move.w	d1,itemScript(a4)
+; end of changes here									--------------------------------------- <10>
+		move.l	#0,itemInfo(a4)				; NIL means not an Input Method (for now)	<21>
+		move.b	#KCHRitem, itemInpuType(a4)	; this is a KCHR							<25>
+		add.w	#ItemInstalledRecSz,a4
+@GetNextKCHR
+		addq	#1,d3						; bump the index
+		cmp		d4,d3						; compare with the count
+		ble		@GetKCHRLoop				; loop if more to do
+		move.l	(sp)+,d4					; restore total
+		sub.w	d5,d4						; adjust to not include KCHRs in a double-byte script
+		sub.w	d5,KCHRcount(a6)			; adjust total KCHR count					<38>
+		rts									
+		endWith								; menuFrame,ItemInstalledRec
+		
+;formFeed
+;-----------------------------------------------------------------------------------
+;	BuildIMTable																					<21>
+;	Initialize the ItemInstalledRec table for the Input Methods, both TSM-style and old-style
+;
+;	---- Input
+;	a4	ItemInstalledRecPtr(a6) is pointing to next available space (beyond KCHRs)
+;	d4	total count of installed input methods
+;
+;	---- Register usage
+;	d3	loop counter
+;	d5	6.x-style IMs not installed
+;	a0,a1
+;
+;	---- Output
+;	a4	ItemInstalledRecPtr(a6) is pointing beyond Input Methods
+;-----------------------------------------------------------------------------------
+BuildIMTable
+		with	menuFrame,ItemInstalledRec, smgrRecord, scriptRecord, ScriptSystemGlobals, intfRecord
+		move.l	d4,-(sp)					; save total count
+		moveq	#0,d5						; assume no IMs that won't install			<38><39>
+		move.l	TSMInputMthdCount(a6),d4	; only want TSM-style input methods
+		bz		@DoOldIMs					; if no TSM-style input methods at all, check for old-style IMs		<40>
+		moveq	#1,d3						; start indexing with first ind resource
+;--------------------------------------------------------------------------------------------
+
+; set up component description record to only fetch input methods for CJK scripts
+		move.l	#kTextService, CompDesc.componentType(a6)		; text service interface type
+		move.l	#kInputMethodService, CompDesc.componentSubType(a6)		; specific text service
+		move.l	#0, CompDesc.componentManufacturer(a6)
+		move.l	#$FFFFFFFF, CompDesc.componentFlags(a6) 
+		move.l	#$00008000, CompDesc.componentFlagsMask(a6)	; we care about 2-byte scripts & taking active key events
+															; smJapanese = 1, smTradCh = 2, smKorean = 3, smSimpCh = $19
+; initial search: get TSM-style IM and then old-style IM…
+		subq	#4,sp						; result: component identifier
+		move.l	#0,-(sp)					; initial component of NIL => search all components
+		pea		CompDesc(a6)				; find components of this desc 
+		_FindNextComponent
+		move.l	(sp), itemInfo(a4)			; component identifier: use as input on next call
+		move.l	(sp)+, compID(a6)			; need for next FindNextComponent call
+		cmp.l	#0, itemInfo(a4)			; 0 => no more matching components
+		beq		@DoOldIMs					;											<25>
+		bra.s	@GetIMInfo
+		
+@GetIMLoop
+		subq	#4,sp						; result: component identifier
+		move.l	compID(a6),-(sp)			; start search after this component
+		move.l	#0, CompDesc.componentManufacturer(a6)
+		move.l	#$FFFFFFFF, CompDesc.componentFlags(a6) 
+		move.l	#$00008000, CompDesc.componentFlagsMask(a6)	; we care about 2-byte scripts & taking active key events
+
+		pea		CompDesc(a6)				; find components of this desc
+		_FindNextComponent
+		move.l	(sp), itemInfo(a4)			; component identifier: use as input on next call	
+		move.l	(sp)+, compID(a6)			; need for next FindNextComponent call
+		cmp.l	#0, itemInfo(a4)			; 0 => no more matching components
+		beq.s	@DoOldIMs					;											<25>
+
+@GetIMInfo
+; must create a handle for the name
+		moveq	#0,d0						; 0 length
+		_NewHandle
+		bne.s	@DoOldIMs					; error in d0 (CCs set)						<25>
+		move.l	a0,itemHandle(a4)
+		; <??> should I branch to @NoMoreIMs?? not getting a handle may preclude other work being done…
+		; <??> should 0-out the itemInfo field and update the count to reflect a nil handle!!
+
+; get name
+		subq	#2,sp						; OSErr result
+		move.l	itemInfo(a4),-(sp)			; get more info on this component
+		pea		CompDesc(a6)				; VAR: component description space
+		move.l	itemHandle(a4),-(sp)		; name handle: receives component name
+		move.l	#0,-(sp)					; NIL => don't care about component's info string
+		move.l	#0,-(sp)					; NIL => for now don't care about the icon since really want an IconSuite
+		_GetComponentInfo
+		tst.w	(sp)+
+		bne.s	@DoOldIMs					; bra if error (invalidComponentID)			<25>
+
+; now save name 
+		move.l	itemHandle(a4),a0			; double deref handle
+		move.l	(a0),a0						; pointer to name
+		lea		itemName(a4),a1				; ptr to name space on stack
+		moveq	#0,D0						; clear high bytes for BlockMove
+		move.b  (a0)+,d0					; get the length of this string
+		move.b	d0,(a1)+					; store the length in the string (make a pString!)
+		move.w  d0,d1						; save the length
+		_BlockMove							; copy it into theString
+		clr.b   0(a1,d1)					; set terminator byte
+
+		move.l	itemHandle(a4),a0			; get rid of handle now
+		_DisposeHandle
+; inicate a new input method
+		move.b	#TSMIMitem, itemInpuType(a4)	; this is a new IM						<25>
+
+; get script		
+		move.l	CompDesc.componentFlags(a6),d0
+		and.l	#ScriptMask, d0				; only care about script code in low word
+		lsr.w	#8,d0						; shift script to low nibble
+		move.w	d0,itemScript(a4)
+
+		add.w	#ItemInstalledRecSz,a4
+		addq	#1,d3						; bump the index
+		cmp		d4,d3						; compare with the count
+		ble		@GetIMLoop
+
+;--------------------------------------------------------------------------------------------
+@DoOldIMs
+; now get old input methods
+		btst.b	#HaveOldJapanIMbit,CJKcount(a6)	; optimized: is there an old JIM		<34>
+		beq.s	@NoMoreIMs					; no, so done								<32>
+		GetSMgrCore	a1						; get Script Mgr core						<25>
+		move.l	smgrEntry+(smJapanese*4)(a1),a1	; get handle to the Japanese system globals	<25> <26><34>
+
+		move.l	a2,-(sp)					; save										<25>
+		move.l	a1,a2		
+; get handle to table of input methods
+		move.l	intfArray(a2),a2			; load table handle							<25>
+		move.l	(a2),a2						; load table pointer						<25>
+		move.l	(a2)+,d4					; get # of old input methods				<25>
+		beq.s	@RestoreA2					; if there aren't any restore a2 and get out!!!!	<28> 
+		
+@OldIMLoop
+; pointer to next input method is in a2
+		move.l	(a2)+,a0					; input method source
+; check if this input method is "ready" before installing it							<38>
+		btst.b	#intfFReady-8,intfFlags(a0)	; is the IM ready?							<38>
+		bne.s	@InstallIM					; yes, install it							<38>
+		add		#1,d5						; no, so be sure to decrement totals		<38>
+		bra.s	@GetNextIM					; fetch the next one						<38>
+			
+@InstallIM
+; get ID and save
+		move.w	intfID(a0),itemResID(a4)	; store the ID here							<25>
+; get and save name
+		lea		intfName(a0),a0				; changed from intfFile to intfName			<38>
+		lea		itemName(a4),a1				; ptr to name space on stack
+		clr.l	d0							; clear this space!							<27>
+		move.b  (a0)+,d0					; get the length of this string
+		move.b	d0,(a1)+					; store the length in the string (make a pString!)
+		move.w  d0,d1						; save the length
+		_BlockMove							; copy it into theString
+		clr.b   0(a1,d1)					; set terminator byte
+; get script	
+		move.w	#smJapanese,itemScript(a4)	; the only old-style input method supported <25>
+
+; indicate an old input method
+		move.l	#0, itemInfo(a4)
+		move.b	#oldIMitem, itemInpuType(a4)	; this is an old IM						<25>
+
+		add.w	#ItemInstalledRecSz,a4		; point to next storage place				<25>
+
+@GetNextIM
+		subq	#1,d4						; if non-zero, loop for the next IM			<25>
+		bne.s	@OldIMLoop
+;--------------------------------------------------------------------------------------------
+@RestoreA2									; added new label for branch we take if there aren't any old IMs <28>
+		move.l	(sp)+,a2					; restore									<25>
+@NoMoreIMs
+		move.l	(sp)+,d4					; restore total
+		sub.w	d5,d4						; adjust total kbd & IM count				<38>
+		rts									
+		endWith								; menuFrame,ItemInstalledRec,smgrRecord,scriptRecord,ScriptSystemGlobals,intfRecord
+
+;formFeed
+;-----------------------------------------------------------------------------
+;	MakeIconSuite
+;
+;	---- Input
+; 	a2  ptr to AuxKeyboardMenuInfo (storage for each KCHR’s iconSuiteH)
+;	d2	ID of kcs icon suite
+;	d3	default input icon ID (either kKeyboardMenuID or kDefaultIMIconID)
+;	a6	stack frame, menuFrame
+;	usingGenericIcon(a6) flag set as desired on entry
+
+;	---- Register usage
+;	a3	kcsTable: array of icon resource types
+;	d6	loop counter
+;
+;	---- Output
+;	iconSuite created and handle stored in AuxKeyboardMenuInfo
+;	result(a6) set appropriately
+;-----------------------------------------------------------------------------
+
+MakeIconSuite
+
+iconSuiteRegs	reg		a0/a3/d6
+
+		with menuFrame, AuxKeyboardMenuInfo
+		movem.l	iconSuiteRegs,-(sp)			; save ptr to script record	and a3
+; create an empty icon suite
+		sub.w	#2,sp
+		pea		iconSuiteH(a2)				; storage for this iconSuite
+		_NewIconSuite
+		move.w	(sp)+,d0
+		move.w	d0,result(a6)				; save (shouldn't affect CCs)
+		bne.s	@Done						; error exit really								<23>		
+
+; get a handle to each script’s small icon resource (‘kcs#’,‘kcs4’,‘kcs8’) and stuff in the icon suite
+		lea		kcsTable,a3
+		move.l	#2,d6						; loop through for each small icon type (0 based)
+@KcsLoop
+		subq	#6,sp						; results for next 2 trap calls: resource handle & OSErr
+		tst.b	usingGenericIcon(a6)		; do we want to or have we already used the generic icon?		<14>
+		bne.s	@UseGeneric					; yes, so keep using it.						<14>
+		move.l	(a3),-(sp)					; get small color icon resource type (‘kcs#’,‘kcs4’,‘kcs8’)
+		move.w	d2,-(sp)					; the icon id
+		_Get1Resource
+		tst.l	(sp)
+		bne.s	@GotResource
+
+; if the 'kcs#' is missing for this icon then use generic icon								<14>
+		cmp.l	#'kcs#',(a3)				; is this a 'kcs#' that's missing?				<14>
+		bne.s	@GotResource				; if not, use 'kcs#' icon on color machine
+		
+; use the generic small icons since no icon exists for this KCHR
+; result space already on the stack
+		st		usingGenericIcon(a6)		; using generic icon for this KCHR				<14>
+@UseGeneric									;												<14>
+		move.l	(a3),-(sp)					; get small color icon resource type
+		move.w	d3,-(sp)					; the generic icon id is different for KCHRs and IMs
+		_Get1Resource
+		; if 'kcs4' is missing use 'kcs#' icon by passing NIL as the resource ID
+		; if 'kcs8' is missing use 'kcs4' icon by passing NIL as the resource ID
+		bra.s	@AddIcon
+		
+@GotResource
+		cmp.b	#TSMIMitem,itemType(a2)		; is this a TSM-style input method?
+		bne.s	@AddIcon					; if not, skip detachment of resource
+; if we load the icon from component's resfile, then detach the resource, make a handle
+; and keep it around 
+		move.l	(sp),-(sp)					; push the handle
+		_DetachResource						;  this resource has to be detatched
+		movea.l	(sp),a0						; a0 = handle
+		_HNoPurge							;  this handle cannot be purgeable
+
+@AddIcon
+		add.l	#4,a3						; point past small color icon type
+; result space and resource handle are on the stack already 
+		move.l	iconSuiteH(a2),-(sp)
+		move.l	(a3)+,-(sp)					; IconUtils expects specific types (Small1BitMask,Small4BitData,Small8BitData)
+		_AddIconToSuite 
+		move.w	(sp)+,d0					; set CCs
+		move.w	d0,result(a6)				; save but doesn't affect CCs
+		bne.s	@Done						; cleanup stack and error exit					<16>
+		dbra	d6,@KcsLoop
+
+@Done
+		movem.l	(sp)+,iconSuiteRegs			; restore ptr to script record and a3				<23>
+		rts
+		endwith								; menuFrame
+		
+;formFeed
+;-----------------------------------------------------------------------------
+;	MakeIMIconSuite
+;	Complete rewrite to use the new way of fetching iconSuite for Input Methods.			<32>
+;	We're not using "GetKeyboardIconSuite" anymore. We get the icon resources directly from		<32>
+;	Component resource file. By doing this, we don't need to open each Input Method.		<32>
+;	If a TSM-styled Input Methods does not have icon resource, then we'll use				<32>
+;	generic keyboard icon to make an iconSuite.												<32>
+;	Got a facelift to use common routine MakeIconSuite										<36>
+;	---- Input
+; 	a2	ptr to AuxKeyboardMenuInfo (storage for each KCHR’s iconSuiteH)
+;	a4	ptr to ItemInstalledRec
+;	a6	stack frame, menuFrame
+;
+;	---- Register usage
+;	d2
+;	d3
+;	d4	resFile open flag for TSM-style IMs (0 => component resfile is not open)
+;		d4.w > 0 means component resfile is open
+;	d5	d5.b = saved resload flag
+;	d6	d6.w = 0 means resource chain has not altered, otherwise = current resfile
+;
+;	---- Output
+;	iconSuite created and handle stored in AuxKeyboardMenuInfo
+;-----------------------------------------------------------------------------
+MakeIMIconSuite
+
+IMiconSuiteRegs	reg		d2-d6/a0
+
+		with menuFrame, AuxKeyboardMenuInfo, ItemInstalledRec
+		movem.l	IMiconSuiteRegs,-(sp)		; save
+		move.w	itemRsrcID(a2),d2			; store the desired old-style IM icon ID
+		move.w	#kDefaultIMIconID,d3		; store the default IM icon ID
+		st		usingGenericIcon(a6)		; initial assumption if old-style IM
+		moveq	#0,d4						; component resfile not open flag
+		move.w	d4,d6						; d6.w = 0 means resource chain has not altered
+		move.b	ResLoad,d5					; d5.b = saved resload flag
+		cmp.b	#oldIMitem,itemType(a2)		; is this an old-style input method?
+		beq.s	@doIt						; yes, so use the default icon
+		
+; have a TSM-style input method: get the icon resource ID for the IM
+		sf		usingGenericIcon(a6)		; initial assumption if TSM-style IM
+
+		clr.w	result(a6)					; default = no error
+; save current res file before opening the component res file
+		subq.l	#2,sp						; room for result
+		_CurResFile							; get current res file
+		move.w	(sp)+,d6					; d6 = current resfile
+	
+		subq	#2,sp						; room for refnum
+		move.l	auxItemInfo(a2),-(sp)		; component identifier
+		_OpenComponentResFile				; open the resfile
+		move.w	(sp)+,d4					; get the refnum
+		ble.s	@UseGeneric					; can't open so use default IM icon
+		
+; crummy assumption about the resource icon ID being at the bottom of the script range but 
+;	it has to be this way for TSM (per John and Kenny)… note the detachment of the resource
+;	in MakeIconSuite for this mess…
+		move.w	ItemScript(a4),d2			; use script code to ...
+		subq	#1,d2						;	calculate the ...
+		lsl.w	#8,d2						;	resource id
+		add.w	d2,d2						; (code-1)*512
+		add.w	#smFondStart,d2				; d2.w = resource id
+		
+		subq	#4,sp						; results for resource handle
+		move.l	#'kcs#',-(sp)				; get small keyboard icon resource type
+		move.w	d2,-(sp)					; icon resource id
+		_Get1Resource
+		move.l	(sp)+,d0					; do we get the icon?
+		beq.s	@noResource					; no
+		
+; if we are loading from component's resfile, better set resload to true ...
+		st		ResLoad						; set to true
+		bra.s	@doIt						; yes, use common code
+		
+; if we can't load the resource, then close the resfile and use the generic small 
+;	icons since no icon exists for this IM
+@noResource
+		sub.w	#2,sp						; room for result
+		move.w	d4,-(sp)					; refnum
+		_CloseComponentResFile
+		tst.w	(sp)+						; pop result
+		moveq	#0,d4						; d4 = 0 means component resfile is not open
+		; fall into generic icon path
+@UseGeneric
+		st		usingGenericIcon(a6)		; initial assumption
+@doIt
+		bsr		MakeIconSuite
+
+; done, so cleanup
+		tst.w	d4							; is resfile open?
+		ble.s	@ResChainAltered			; no
+		sub.w	#2,sp						; room for result
+		move.w	d4,-(sp)					; refnum
+		_CloseComponentResFile
+		tst.w	(sp)+						; pop result
+
+@ResChainAltered
+		tst.w	d6							; have we changed resource chain?
+		beq.s	@RestoreResLoad				; no
+		move.w	d6,-(sp)					; refnum on stack
+		_UseResFile							; restore res file
+		
+@RestoreResLoad
+		move.b	d5,ResLoad					; restore state
+		movem.l	(sp)+,IMiconSuiteRegs
+		rts
+		endwith								; menuFrame
+
+;formFeed
+;-----------------------------------------------------------------------------
+;		AddMenuItem
+;
+; 		Add this new menuItem (a KCHR) to the Keyboard Menu.
+;		Called from InitKeyboardMenu.
+; 		Using the a6 link from InitKeyboardMenu.
+;
+;		---- Input
+;		d3 = script #
+;		d5 = total num of inputs thus far in this script
+; 		a2 = ptr to AuxKeyboardMenuInfo (storage for each KCHR’s iconSuiteH)
+; 		a4 = ptr to ItemInstalledRec
+;		a6 = stack frame, menuFrame
+;
+; 		Register usage:
+; 		d3 = menuItem (total # of KCHRs)
+; 		d4 = system keyscript
+;		d5 = total num of KCHRs thus far in this script (incr here!)
+; 		a2 = ptr to AuxKeyboardMenuInfo (storage for each KCHR’s iconSuiteH)
+; 		a3 = ptr to script mgr record & then, script record
+;
+;		trashes a1				<#29>
+;-----------------------------------------------------------------------------
+AddMenuItem
+
+		with menuFrame, ItemInstalledRec, AuxKeyboardMenuInfo
+AddMenuRegs	reg	d3/d4/a0/a2-a4				; save a0, too											<23>
+
+		movem.l	AddMenuRegs,-(sp)
+		
+; initializations
+		with	smgrRecord
+		GetSMgrCore	a3		
+		move.w	smgrKeyScript(a3),d4		; get default keyscript
+		lsl.w	#2,d3						; long word offset
+		move.l	smgrEntry(a3,d3.w),a3		; script record
+		move.w	menuItem(a6),d3				; item # (also, indicates the total # of inputs)
+
+; if there's no menu then don't set item info														<15> 
+		GetSMgrCore	a1						;														<15>
+		tst.b	smgrKbdMenuAvail(a1)		;														<15>
+		beq.s	@savePosn					;														<15>
+		endWith
+
+; name the menu item
+		move.l	menuH(a6),-(sp)
+		pea		itemName(a4)				; name of this KCHR: pString
+		move.w	d3,-(sp)					; insert ‘after’ this menuItem
+		_InsMenuItem
+	
+; set script in the item by setting the cmd to be $1C and the icon to the script #
+		move.l	menuH(a6),-(sp)
+		move.w	d3,-(sp)
+		move.w	#scriptMenuCmd,-(sp)		; indicates scripted text	
+		_SetItemCmd
+		
+		move.l	menuH(a6),-(sp)
+		move.w	d3,-(sp)
+		move.w	itemScript(a4),-(sp)
+		_SetItmIcon
+
+@savePosn
+; set input count (also is the ordering within its script in the menu) in the AuxKeyboardMenuInfo record
+		with	ScriptRecord, smgrRecord
+		add.w	#1,d5
+		move.w	d5,itemScriptPosn(a2)
+		move.b	d5,scriptInputCount(a3)		; save the script's input (KCHR or Input Method) count
+
+; if this is the script's default then save its item #: process by type of input: KCHR, old-style IM, new-style IM
+		cmp.b	#TSMIMitem, itemType(a2)	; 														<25>
+		blt		@KCHRinput					; KCHR item												<25>
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; < Begin new #29 > for CJK script .....
+; At boot time, we need to mark default input method for each script, and check mark the item in the menu,
+; get the default input method for this script from TSM to compare against this item.		-- <KST #29>
+
+; need the default language for this script
+		subq	#4,sp						; result
+		move.w	itemScript(a4),-(sp)		; script
+		move	#smScriptLang,-(sp)			; verb: I want the default lang from the 'itlb'
+		_GetScript
+		move.l	(sp)+,scriptLangRec(a6)		; default langCode (only want low word)
+		move.w	itemScript(a4),scriptLangRec(a6)	; scriptCode in high word
+		
+; now get the default input method: the component identifier for TSM-style IMs or
+; the FEF ID for old-style IMs
+		subq	#2,sp						; OSErr result
+		pea		compID(a6)					; returns default component identifier here
+		pea		scriptLangRec(a6)			; wants a ptr to this record
+		_GetDefaultInputMethod				; need to preserve a2/a3/d3/d4 ....
+		move.w	(sp)+,d0					; result
+		beq.w	@newDefIM					; noErr => use TSM-style IM as default
+
+; Default isn't TSM-style so continue checking…  => is an old-style Japanese IM
+
+; Now test if the default is the old-style IM (should be unless there is a problem since we've
+; just tested for TSM-style default…)
+		cmp.w	#tsmInputMethodIsOldErr,d0	; is this the special error?
+		beq.s	@oldDefIM					; yes
+
+; Here w/ a non-zero result (tsmInputMethodNotFoundErr) => no default IM found and no-TSM IM available
+; So, if this is an old-style IM, use it as the default if another one hasn't already been set.
+		cmp.b	#oldIMitem,itemType(a2)		; is this old?
+		bne		@done						; No: nothing we can do. Sorry. (this shouldn't ever happen)
+		
+; Have we done this already?
+		tst.b	ScriptKeysItemNum(a3)		; assume it was initially cleared	<34> - should be a byte op
+		bne		@done						; yes, don't do it again
+		
+; OK, this old-style IM is going to be the default now. We better inform TSM about it…
+;	 _InformTSM will set the default IM with this FEP ID (can't call _SetDefaultInputMethod
+;	 since it's only valid for TSM-style IMs. However, note (as seen above) that 
+;	 _GetDefaultInputMethod will return information about an old-style default IM. Strange but true;
+;	 a kludge to allow old-style JIMs to still work w/ TSM.)
+
+		move.w	itemRsrcID(a2),d0			; this is the FEP ID
+		move.w	d0,scriptLangRec+2(a6)		; TSM needs script and id			<34> - store the ID in language word				
+		subq	#2,sp						; OSErr result								
+		move.w	#kMsgChangeToOldJIM,-(sp)	; message number							
+		pea		scriptLangRec(a6)			; wants a ptr to this record as the message's parameter				
+		_InformTSM							; hey, we are using the old-style IM now
+		tst.w	(sp)+						; ignore error
+
+; set secret script flag that says we are using old-style input method			<34>
+		subq	#2,sp						; result							<34>
+		move.w	#smJapanese,-(sp)			; script							<34>
+		move	#kUsingOldInputMethodVerb,-(sp)		; verb: are we using an old IM?		<34>
+		move.l	#UsingOldStyleIM,-(sp)		; TRUE								<34>
+		_SetScript
+		tst.w	(sp)+						; ignore OSErr						<34>
+		bra.s	@SaveItemNum				; and save the item num
+
+;------------------------------------------------------------------------------------------ 	
+@oldDefIM									; default is old-style IM
+		cmp.b	#oldIMitem, itemType(a2)	; is this old?
+		bne		@done						; no
+		
+		move.w	compID+sidFEPID(a6),d0		; saved in low word of long
+		cmp.w	itemRsrcID(a2),d0			; is this item the default component for this script?
+		bne.s	@done						; no
+
+; this is the default old-style IM so use it
+		Import	GetKanjiUserIDIntf			; call local version of UserIDIntf		
+		move.w	d0,-(sp)					; pass input method ID of new item
+		jsr		GetKanjiUserIDIntf
+		GetSMgrCore	a1								; get Script Mgr core
+		move.l	smgrEntry+(smJapanese*4)(a1),a1		; load doubleTalkRecord for Japanese.
+; if an error occured, didn't active old-style IM so don't make secret SetScript call.
+		tst.w	ScriptSystemGlobals.FISError(a1)	; bad index?
+		bne.s	@done								; yes -> bail.
+
+	; we have a problem here. If the old default IM is not in the system ......
+	;; what to do if we failed ???? <??> how could it get registered as the default if
+	;; it's not in the system???
+	
+; set secret script flag that says we are using old-style input method
+;	We make this call to tell TSM about this situation - it knows that an old-style IM
+;	is the default but this flag hasn't been set yet. Without it set, patches won't get
+;	loaded to support the old-style IMs. At boot time DoubleTalk clears this. Patches loaded 
+;	after DoubleTalk depend on it. Set it. (details, details…)
+		subq	#2,sp								; result
+		move.w	#smJapanese,-(sp)					; script
+		move	#kUsingOldInputMethodVerb,-(sp)		; verb: are we using an old IM?
+		move.l	#UsingOldStyleIM,-(sp)				; TRUE	
+		_SetScript
+		tst.w	(sp)+								; result OSErr
+		bne.s	@done
+		bra.s	@SaveItemNum				;
+
+;------------------------------------------------------------------------------------------ 	
+@newDefIM									; default is TSM-style IM
+		cmp.b	#TSMIMitem, itemType(a2)	; is this new?
+		bne.s	@done						; no,
+		move.l	auxItemInfo(a2),d0			; compare to the default
+		cmp.l	compID(a6),d0				; is this item the default component for this script?
+		bne.s	@done						; no 
+		bra.s	@SaveItemNum				;
+
+; < End new #29 >
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;------------------------------------------------------------------------------------------ 		<21>
+
+@KCHRinput
+		move.w	itemRsrcID(a2),d1			; get the first KCHR ID
+		cmp.w	scriptBundle.itlbKeys(a3),d1
+		bne.s	@done
+;------------------------------------------------------------------------------------------ 		<21>
+
+@SaveItemNum
+		move.b	d3,ScriptKeysItemNum(a3)	; save item # of script's default KCHR
+		GetSMgrCore	a1						;														<15>
+		tst.b	smgrKbdMenuAvail(a1)		;														<15>
+		beq.s	@done						;														<15>
+		endwith
+
+; default KCHR’s name gets a default mark that's localizable in the STR# resource for the kbd menu
+		move.l	menuH(a6),-(sp)
+		move.w	d3,-(sp)
+		move.w	defaultMark(a6),-(sp)		; this is the script's default KCHR
+		_SetItmMark
+
+; Add ‘√’mark to the system KCHR
+ 		cmp.w	itemScript(a4),d4			; is this the system KCHR?
+		bne.s	@done
+; system KCHR gets ‘√’ mark and its icon gets put into menu name
+		move.l	menuH(a6),-(sp)
+		move.w	d3,-(sp)
+		move.w	#checkMark,-(sp)
+		_SetItmMark
+		
+@done
+		add.w	#1,menuItem(a6)				; next item #
+		movem.l	(sp)+,AddMenuRegs
+		rts
+		endWith
+
+
+	
+;------------------------------------------------------------------------------------------ <3>
+;	Utility AddDisabledLine
+;	Add disabled grey line
+;
+;	---- Input
+; 	a2  ptr to AuxKeyboardMenuInfo (storage for each KCHR’s iconSuiteH)
+;	a6	stack frame, menuFrame
+;
+;	---- Output
+;	menuItem count incremented
+;	a2 incremented for next menuitem's info
+;------------------------------------------------------------------------------------------
+AddDisabledLine
+	
+		with menuFrame, AuxKeyboardMenuInfo
+		move.l	menuH(a6),-(sp)				; menu handle
+		pea		#'(-'						; pString										<21>
+		move.w	menuItem(a6),-(sp)			; insert ‘after’ this menuItem
+		_InsMenuItem
+		add.w	#1,menuItem(a6)				; next item #
+; stuff a null handle in the menu item's position in the KeyboardMenu record.
+		add.w	#AuxMenuInfoSize,a2			; point to storage for next menuItem.
+		rts
+		endwith
+
+
+;formFeed
+;------------------------------------------------------------------------------------------ <10>
+;	Utility SortItems
+;
+;	Sort the installed items by script and name using the Script Manager routine IUTextOrderSys,
+;	which sorts using the script ordering specified in ‘itlm’.
+;	To save moving a lot of data around, we will sort the indices of the ItemInstalledRec array 
+;	and fetch the data later.
+;
+; 	This is a straight selection algorithm (simple idea but....)
+;	Search for the smallest KCHR # and exch it w/ the first KCHR # in the list.
+;	Repeat w/ n-1, n-2, etc. items.
+;	d0 & d1 are loop counters (indexes for each KCHR comparison)
+;	d2 & d3 contain the results of the comparisons
+;
+;	---- Straight selection algorithm ---------------
+;	for d0:= 0 to KCHRcount-1 do
+;		d2:= d0
+;		d3:= offset[d0]
+;		for d1:= d0+1 to KCHRcount-1 do 
+;			if name[d1] < name[d3] then
+;				d2:= d1
+;				d3:= offset[d2]
+;			end
+;		end
+;		offset[d2]:= offset[d0]
+;		offset[d0]:= d3
+;	end
+;
+;	---- Input
+;	d4 	KCHRcount
+;	a6	stack frame, menuFrame
+;
+;	---- Register usage -----------------------------
+;	d0-d2 are index counters
+;	d3  storage of the least KCHR #
+; 	d4	Input count	(inner loop terminator)
+;	d5,d6	length of names, misc temp uses
+;	d7	outer loop terminator
+; 	a2	bPtr
+;	a3	ItemOffsetsPtr
+;	a4	aPtr
+;------------------------------------------------------------------------------------
+SortItems
+
+		with menuFrame, ItemInstalledRec, AuxKeyboardMenuInfo
+SortRegs	reg	d3-d7/a3
+; initializations
+		move.l	ItemInstalledRecPtr(a6),a4
+		movem.l	SortRegs,-(sp)
+
+; allocate record for offsets of ItemInstalledRec to be sorted
+		moveq	#0,d0
+		move.w	d4,d0						; total number of installed items
+		add.w	d0,d0						; double for # of installed items
+		_NewPtr ,SYS,CLEAR
+		move.l	a0,ItemOffsetsPtr(a6)
+
+; build record of offsets
+		move.w	#0,d0						; index
+		move.w	d4,d1						; loop terminator
+		bra.s	@CheckZero
+@FillArray
+		move.w	d0,(a0)+					; save offset
+		add.w	#ItemInstalledRecSz,d0		; incr to next offset
+@CheckZero
+		dbra.w	d1,@FillArray
+;-------
+		cmp.w	#1,d4						; do we have more than 1 KCHR?					<12>
+		ble		@DoneSort					; nope: don’t sort								<12>
+		move.l	ItemOffsetsPtr(a6),a3		; reset ptr
+		move.l	a4,a2						; copy of ptr to KCHR info for sorting (a4=aPtr, a2=bPtr)
+; initialize for outer loop
+		move.w	#0,d0						; initialize outer loop controller to 0
+		move.w	d4,d7						; terminator for outerloop
+		sub.w	#1,d7						; KCHRcount-1 (instead of -2)					<14>
+		
+@OuterLoop
+; for d0:= 0 to KCHRcount-1 do
+;	d2:= d0
+;	d3:= offset[d0]							; least index
+
+		move.w	d0,d2						; d2:= d0
+		move.w	d0,d3
+		add.w	d3,d3						; pt to correct offset in KCHROffsets record
+
+; initialize for inner loop
+		move.w	d0,d1
+		addq.w	#1,d1
+		move.l	ItemInstalledRecPtr(a6),a2
+		move.w	d1,d5
+		add.w	d5,d5						; get to correct place in offset array
+		move.w	0(a3,d5),d5					; get offset amount for this next element
+		add.w	d5,a2
+@InnerLoop
+;	for d1:= d0+1 to KCHRcount-1 do
+;		if name[d1] < name[d3] then
+;			d2:= d1
+;			d3:= offset[d2]					; new least index
+;		end
+;	end
+
+;		if name[d1] < name[d3] then		(	now compare scripted names)
+; a4 = KCHR a (aPtr, aLen, aScript)
+; a2 = KCHR b (bPtr, bLen, bScript)
+		movem.l	d0-d2,-(sp)
+		moveq	#0,d5
+		move.b	itemName(a4),d5				; aLen
+		moveq	#0,d6
+		move.b	itemName(a2),d6				; bLen
+		sub.w	#2,sp						; result
+		pea		itemName+1(a4)				; aPtr
+		pea		itemName+1(a2)				; bPtr
+		move.w	d5,-(sp)					; aLen
+		move.w	d6,-(sp)					; bLen
+		move.w	itemScript(a4),-(sp)		; aScript
+		move.w	itemScript(a2),-(sp)		; bScript
+		move.w	#iuScriptDefLang,-(sp)		; aLang => script's default lang
+		move.w	#iuScriptDefLang,-(sp)		; bLang => script's default lang
+		_IUTextOrderSys
+		move.w	(sp)+,d0					; set CCs
+		movem.l	(sp)+,d0-d2
+		ble.s	@GetNextID					; aPtr is <= bPtr so don't exchange
+		
+		move.w	d1,d2
+		move.w	d2,d3						; d3:= new least index
+		add.w	d3,d3						; pt to correct offset in KCHROffsets record
+		move.l	a2,a4						; update aPtr to be the least KCHR (which is bPtr in this case)
+
+@GetNextID
+
+		addq.w	#1,d1						; for d1:= d0+1 to KCHRcount do
+; incr for fetch of next itemName (using current sort order)
+		move.l	ItemInstalledRecPtr(a6),a2
+		move.w	d1,d5
+		add.w	d5,d5						; get to correct place in offset array
+		move.w	0(a3,d5),d5					; get offset amount for this next element
+		add.w	d5,a2
+		cmp.w	d1,d4						; KCHRcount-1
+		bhi.s	@InnerLoop
+		
+; swap this pass' least KCHR name with the KCHR name in the current position
+;	offset[d2]:= offset[d0]
+;	offset[d0]:= d3
+
+		move.w	d0,d5						; this is the index of the higher KCHR name
+		add.w	d5,d5
+		move.w	d2,d6						; this is the index of the least KCHR name
+		add.w	d6,d6
+		move.w	0(a3,d3),d3
+		move.w	0(a3,d5),0(a3,d6)			; this is the highest index for this pass
+		move.w	d3,0(a3,d5)					; this is the least index for this pass
+		
+; loop again?	
+		addq.w	#1,d0						; for d0:= 1 to KCHRcount-1 do
+; set ptr to next ‘KCHR a’
+		move.l	ItemInstalledRecPtr(a6),a4
+		move.w	d0,d5
+		add.w	d5,d5						; get to correct place in offset array
+		move.w	0(a3,d5),d5					; get offset amount for this next element
+		add.w	d5,a4
+; set ptr to next ‘KCHR b’
+		move.l	a4,a2						; just copy; incremented above
+; are we done?
+		cmp.w	d0,d7
+		bhi		@OuterLoop
+		
+	IF DoCmdKeyEquivalents THEN				; 												<10>
+			; finally, move the system script's default KCHR to the top of the menu.
+				with SmgrRecord
+				GetSMgrCore	a0
+				move.w	smgrKeyScript(a0),d3		; get default keyscript
+				move.l	ItemInstalledRecPtr(a6),a4	; 
+				move.w	#0,d0						; offset of default KCHR in KCHROffsets array
+			@InxLoop
+				move.w	d0,d1
+				add.w	d1,d1						; index into KCHROffsets array
+				add.w	#1,d0
+				move.w	0(a3,d1),d2					; get index into ItemInstalledRec
+				cmp.w	itemResID(a4,d2),d3			; is this the default KCHR?
+				bne.s	@InxLoop
+			
+			; have the default KCHR index now so shove the system script's KCHRs down a position
+				sub.w	#1,d0						; incremented above
+			
+				move.w	d0,d4						; loop terminator (shift until this point)
+				move.w	#0,d1
+				move.w	(a3),d2						; holding cell for initial posn in array
+				add.w	d1,d1
+			@ShoveLoop
+				add.w	d4,d4
+				move.w	0(a3,d4),0(a3,d1)			; move em
+			
+				sub.w	#1,d0
+				bls.s	@FinalMove					; move initial KCHR into its new home
+				move.w	d4,d1
+				move.w	d0,d4
+				bra.s	@ShoveLoop		
+			@FinalMove
+				move.w	d2,0(a3,d4)					; finis! mission accompli!
+				endwith
+	ENDIF
+
+@DoneSort	
+		movem.l	(sp)+,SortRegs
+		rts
+; end
+		endwith
+
+
+;formFeed
+;------------------------------------------------------------------------------------------ <25>
+;	Utility CountDblByteIMs
+;
+;	Count the # of TSM style Input Methods in the System for a specific double-byte script 
+;	and set a bit in the byte CJKcount(a6) that indicates whether or not an input method 
+;	exists for the script.  Bits 0 - 4 are set thus: (CCJK): bit 4 = simpChinese, 
+;	bit 3 = tradChinese, bit 2 = Japanese, bit1 = Korean.  Also updating the total # of 
+;	input methods in d4 and TSMInputMthdCount(a6).
+;
+;	Input
+;	a6	stack frame, menuFrame
+;	d0	flags that indicate the script and the active key event bit
+;	d2	bit to set in the byte CJKcount(a6)
+;	d4	current count of inputs (KCHRs, input methods, etc.)
+;
+;	Uses
+;	d0	result from _CountComponents
+;
+;	Output
+;	d4						updated count of inputs (KCHRs, input methods (old-style and TSM-style), etc.)
+;	TSMInputMthdCount(a6) 	updated count of TSM-style input methods
+;------------------------------------------------------------------------------------------ <25>
+
+CountDblByteIMs
+		with	MenuFrame
+		move.l	d0, CompDesc.componentFlags(a6)		; desired script & takes active key events
+		subq	#4,sp						; result
+		pea		CompDesc.componentType(a6)	; count components of this desc 
+		_CountComponents
+		move.l	(sp)+,d0
+		bz.s	@noIMs
+		bset.b	d2,CJKcount(a6)
+		add.l	d0,d4						; can there really be a longInt worth of components???
+		add.l	d0,TSMInputMthdCount(a6)
+@noIMs
+		rts
+		endWith
+		
+;formFeed
+;------------------------------------------------------------------------------------------	<7>
+;	FUNCTION RebuildKeybdMenu: OSErr;
+;------------------------------------------------------------------------------------------
+;
+; RebuildKeybdMenu is called by Mover to let us know that keyboards have
+; been moved into or out of the System file, so we need to rebuild the
+; keyboard menu.
+;
+;------------------------------------------------------------------------------------------
+			
+rkmFrame	record	{a6link},decr
+result		ds.w	1						; OSErr result code.
+rkmArgs		equ		*-8						; size of arguments.
+selector	ds.l	1						; selector
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6
+; insert any local variables here
+menuH		ds.l	1						;												<21>
+rkmLocals	equ		*						; size of local variables
+			endr
+
+RebuildKeybdMenu
+			with	rkmFrame,smgrRecord, AuxKeyboardMenuInfo	;
+			link	a6,#rkmLocals			; link the stack.
+			move.w	#noErr,result(a6)		; initialize noErr								<36>
+			
+; delete the old ptr to AuxKeyboardMenuInfo record so can store a new one					<10>
+			movem.l	a2/d3,-(sp)
+			GetSMgrCore	a0
+; set munged count to tell the Keybd CDEV to rebuild it's list of KCHRs						<15>
+			add.w	#1,smgrMunged(a0)		;												<15>
+			move.l	smgrKeyboardMenuPtr(a0),a2
+			tst.b	smgrKbdMenuAvail(a0)	;												<15>
+			bne.s	@gotMenu				; got menu, so use info from it					<19>
+; Get number of valid AuxKeyboardMenuInfo records into d3. If Keyboard menu is not			<19>
+; up, we have a Roman-only system, so use KCHR count for Roman.								<19>
+			with	ScriptRecord					;										<19>
+			move.l	smgrEntry+(smRoman*4)(a0),a0	;										<19>
+			moveq	#0,d3							; for wordizing							<19>
+			move.b	scriptInputCount(a0),d3	; initialize item count to script's KCHR count	<19>
+			bra.s	@DelIconSuiteLoop		;												<19><36>
+			endwith							; ScriptRecord									<19>
+
+@gotMenu									;												<19>
+; Dispose of menu items & iconSuite handles for each menu item								<10>
+
+; If an application doesn't have a menuBar then _GetMHandle will fail. What we 				<20>
+; really want is to use the system menuBar and not the application menuBar.					<20>
+			move.l	MenuList,-(sp)			; save the current menuList since it may be an apps menu <20>
+			move.l	SystemMenuList,MenuList		;											<20>
+
+			subq	#6,sp					; result for _GetMHandle & _CountMItems calls
+			move.w	#kKeyboardMenuID, -(sp)	; menuID
+			_GetMHandle
+			tst.l	(sp)
+			beq.s	@RestoreStack
+
+			move.l	(sp),menuH(a6)			; want it for deletion of menuItems				<21>
+			; leave menu handle on stack
+; get # of menu items
+			_CountMItems
+			move.w	(sp)+,d3				; 												<36>
+			move.l	(sp)+,MenuList			; restore the menuList							<20>
+			move.w	d3,-(sp)				; save back on stack for next loop				<36>
+			
+; delete all the existing menu items (only if a menu exists!!!)								<36>
+@DelMenuItemLoop
+			move.l	menuH(a6),-(sp)			;												<21>
+			move.w	d3,-(sp)				; item number									<21>
+			_DelMenuItem					;												<21>
+			dbra.w	d3,@DelMenuItemLoop
+			move.w	(sp)+,d3				; initialize again for iconSuite loop			<36>
+
+@DelIconSuiteLoop
+; delete all the iconSuites
+			tst.l	iconSuiteH(a2)
+			beq.s	@NextItem
+			sub.w	#2,sp
+			move.l	iconSuiteH(a2),-(sp)	; storage for this iconSuite
+			move.w	#$00,-(sp)				; dispose data flag = False
+			_DisposeIconSuite
+			tst.w	(sp)+					; pop result for now and don't bail				<36>
+;;			move.w	(sp)+,d0				; sets CCs										<36>
+;;			move.w	d0,result(a6)			; save											<36>
+;;			bne		@done					;												<36>
+@NextItem
+			add.w	#AuxMenuInfoSize,a2		; next menu item
+			dbra.w	d3,@DelIconSuiteLoop
+
+			GetSMgrCore	a0
+			move.l	smgrKeyboardMenuPtr(a0),a0	; auxiliary keyboard menu ptr		
+			_DisposPtr
+			move.w	d0,result(a6)
+
+			subq	#2,sp					; space for OSErr result						<18>
+			_InitKeybdMenu					;												<18>
+			addq	#2,sp					; discard error result (we should really		<18>
+			bra.s	@done
+			
+@RestoreStack
+			addq	#6,sp					; results of _GetMHandle & _CountMItems
+			move.l	(sp)+,MenuList			; restore the menuList							<20>
+@done
+			movem.l	(sp)+,a2/d3
+			move.w	#rkmArgs,d0				; for StdUnlink
+			bra		StdUnlink				; standard exit
+			endwith
+
+	IF DoCmdKeyEquivalents THEN				; 												<21>
+			;------------------------------------------------------------------------------------------
+			;		AddCmdKeyMenuItems
+			;
+			;		Not really a routine- just a place I've moved the code to get it out of the
+			; 		middle of everything. Should be put back at 'bsr AddCmdKeyMenuItems' if we 
+			;		want to use it.  CAN NO LONGER ASSUME "ABOUT KEYBOARDS… MENUITEM IS PRESENT!!! <34>
+			;------------------------------------------------------------------------------------------
+			AddCmdKeyMenuItems
+						bsr		AddDisabledLine				; separate scripts by a disabled line
+						tst.b	scriptCount(a6)				; more enabled scripts?
+						bgt.s	@EnabledScriptLoop			; yup
+				;------------------------------------------------------------------------------------------ <3>
+				; add final items to menu
+				@SetCmdKeyEquiv
+						move.w	#NumItemsAfterKCHRs,d4		; num of cmd key equivalent items after KCHRs
+						sub.w	#1,d4						; loop terminator: want 0 based
+						move.w	#NextScriptIndex,d5			; first Cmd Key menu item is ‘Next Script’
+				
+				; (1st loop:) add ‘Next Script’ w/ a cmd key equivalent of ‘ ’ at the end
+				; (2nd loop:) add ‘Next Keyboard’ w/ a cmd key equivalent of ‘ ’  at the end
+				; my copy of the GetIndString library code: localGetIndString
+					
+						move.l  menuItemStringHdl(a6),a0
+						tst.l	a0
+						beq		@SetTitle					; if empty, just add title
+				@CmdKeyLoop
+						bsr		GetItemStr					;												<10>
+						tst.l	NextItemString(a6)
+						beq.s	@SetTitle					; error
+				; since have a STR# resource, adding a disabled line (if it's not the last menu item)
+						tst.w	d4							; is this the last item?
+						beq.s	@SkipLine
+						bsr		AddDisabledLine				; separate scripts by a disabled line
+				@SkipLine		
+				
+				; name the menu item
+						move.l	menuH(a6),-(sp)
+						pea		NextItemString(a6)			; name of this KCHR: pString
+						move.w	menuItem(a6),-(sp)			; insert ‘after’ this menuItem
+						_InsMenuItem
+				
+				; Add cmd key equivalent (actually, due to current Menu Mgr limitations (no way to show 
+				; CMD+space bar, no way to indicate CMD+SH and no way to show CMD+SH+space bar)
+				; I will only put up the command key symbol (with a space).
+				; Will need to add a table as this gets worked out, in order to add the correct chars
+				; for each menu item's cmd key equivalent.
+				
+				; disable cmd key equivalents for now!														<5>
+				;;		move.l	menuH(a6),-(sp)				;												<5>
+				;;		move.w	menuItem(a6),-(sp)			; item #										<5>
+				;;		move.w	d5,-(sp)					; temp: use string index (really want CMD+‘blank’)<5>
+				;;		add.w	#$30,(sp)					; make it an ascii number						<5>
+				;;		_SetItemCmd
+						
+				; if there is only one script enabled, disable the ‘Next Script’ menuItem
+				; is this the ‘Next Script’ menuItem?
+						cmp.w	#NextScriptIndex,d5
+						bne.s	@NextKbd
+						with	ExpandMemRec
+						move.l	ExpandMem,a2
+						move.l	emItlSysCachePtr(a2),a2		;													<9>
+						endWith
+						cmp.w	#1,(a2)						; is there only 1 script enabled?
+						bhi.s	@NextItem					; nope
+				; only 1 script's enabled so, disable item
+						move.l	menuH(a6),-(sp)
+						move.w	menuItem(a6),-(sp)
+						_DisableItem
+						bra.s	@NextItem
+						
+				@NextKbd
+				; if there is only one KCHR for the default script, disable the ‘Next Keyboard in Script’ menuItem
+				; last item is ‘Next Keyboard in Script’
+						cmp.w	#NextKeybdIndex,d5
+						bne.s	@NextItem
+				; is there only 1 KCHR for this script?
+						GetSMgrCore	a2						; the forgotten one!							<5>
+						move.w	smgrKeyScript(a2),d2
+						lsl.w	#2,d2
+						move.l	smgrEntry(a2,d2.w),a3
+						cmp.b	#1,scriptInputCount(a3)
+						bhi.s	@NextItem
+				; only 1 script's enabled so, disable item
+						move.l	menuH(a6),-(sp)
+						move.w	menuItem(a6),-(sp)
+						_DisableItem
+				@NextItem
+						
+						add.w	#1,menuItem(a6)
+						add.w	#1,d5
+						dbra.w	d4,@CmdKeyLoop
+						endWith								;												<6>
+	ENDIF
+;___________________________________________________________________________________________________
+
+		endproc									; this whole thing is one proc
+;formFeed
+;___________________________________________________________________________________________________
+; GetIndString as taken from {Sources}Libs:InterfaceSrcs:ToolUtils.a
+; (modified to return a pString)
+;			getindstring(theString,strListID,index)
+;			   char *theString <stringOut>;
+;			   short strListID;
+;			   short index;
+;___________________________________________________________________________________________________
+
+			BLANKS		ON
+			STRING		ASIS
+
+localGetIndString	proc	EXPORT
+
+gsFrame		record	{a6link},decr
+gsArgs		equ		*-8		; size of arguments.					<1>
+theString	ds.l	1
+strListID	ds.w	1
+index		ds.w	1
+return		ds.l	1		; return address
+a6link		ds.l	1		; old link pointer
+; insert any local variables here
+gsLocals	equ		*		; size of local variables.			
+			endr
+
+
+			with	gsFrame
+			link	a6,#gsLocals			; link
+			move.l  d2,-(sp)				; save register d2
+			subq	#4,sp					; GetResource result
+			move.l  #'STR#',-(sp)			; theType
+			move.w  strListID(a6),-(sp)		; strListID (was '14')
+			_GetResource					; get resource
+			move.l  theString(a6),a1		; theString (was '8'?)
+			clr.b   (a1)					; assume empty
+			move.l  (sp)+,d0				; handle to string list
+			move.l  (sp)+,d2				; restore register d2
+			tst.l   d0						; test result
+			beq.s   gsret					; if empty, just quit
+
+			move.l  d0,a0					; handle to string list
+			move.l  (a0),a0					; pointer to string list
+			cmp.l	#0,a0					; is the pointer NIL?					<35>
+			bne.s	gsGet					; no, continue							<35>
+			move.l	d0,-(sp)				; yes, so save handle 					<35>
+			move.l	d2,-(sp)				; preserve register						<35>
+			move.l	d0,-(sp)				; handle								<35>
+			_LoadResource					;										<35>
+			move.l	(sp)+,d2				; restore register						<35>
+			move.l	(sp)+,a0				; get handle again						<35>
+			move.l  (a0),a0					; deref again for ptr to string list	<35>
+			move.l  theString(a6),a1		; restore theString						<35>
+gsGet
+			move.w  (a0)+,d0				; number of strings
+			move.w  index(a6),d1			; index (was '18'?)
+			ble.s   gsRet					; return if index <= 0
+
+			cmp.w   d0,d1					; index > number of strings ?
+			bgt.s   gsret					; return if index > number
+			moveq   #0,d0					; clear for string lengths
+
+gsLoop		subq.w  #1,d1					; decrement the index
+			beq.s   gsCopy					; found the one we are looking for
+			move.b  (a0)+,d0				; get length of this one
+			add.l   d0,a0					; skip over this string
+			bra.s   gsLoop					; and go on to next
+
+gsCopy		move.b  (a0)+,d0				; get the length of this string
+			move.b	d0,(a1)+				; store the length in the string (make a pString!)
+			move.w  d0,d1					; save the length
+			_BlockMove						; copy it into theString
+
+gsRet		unlk	a6						; unlink
+			move.l	(sp)+,a0				; pop return address.
+			add.w	#gsArgs,sp				; pop arguments.
+			jmp		(a0)					; return to the caller.
+			endproc
+;___________________________________________________________________________________________________
+		
+		end
+;___________________________________________________________________________________________________

@@ -1,0 +1,949 @@
+;
+;	File:		DeskMgr.a
+;
+;	Contains:	The desk manager is the interface between the applications and the desk ornament/
+;				RAM-based driver system.  When an application receives an event, it passes it to
+;				the desk manager to allow the system to capture events for desk ornaments and
+;				other system functions.  The applications also call the desk manager routine
+;				"SystemTask" in their main loop to give the drivers back some good "main thread"
+;				time to call the memory manager or keep the desk ornaments alive.
+;
+;	Written by:	Andy Hertzfeld   23-Oct-82
+;
+;	Copyright:	© 1982-1993 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	  <SM18>	 8/16/93	BH		Manual-eject handling now looks at all of a volume's open files
+;									to determine if the volume needs to be updated, rather than just
+;									the vcbDirty flag.
+;	  <SM17>	  8/3/93	BH		Added manual-eject event support to SystemEvent.
+;	  <SM16>	 1/27/93	CSS		Patch the SystemMenu function to handle the Keyboard menu, and
+;									input method menus correctly. Also, fix the dispatcher to point
+;									to the SystemMenu routine in this file again.
+;	  <SM15>	11/18/92	SWC		Removed the HcMac IdleMind code since the _IdleMind call is now
+;									made in SyncIdleTime.
+;		<SM2>	11/01/92	HY		Conditionalize call to IdleMind for LC930 ROM.  We don't
+;									include any of the PowerMgr stuff for this ROM and IdleMind
+;									is one of the vectors conditionalized in :Make:VectorTable.a.
+;		<SM1>	 7/17/92	CSS		Jeff copied this directly from Reality, but with the
+;									diffences in include file structure over there, it compiled.
+;									Here in SuperMario, it didn't.  The reason is that SuperMario
+;									includes PowerEqu.a in StandardEqu.a while Reality includes
+;									PowerPrivEqu.a.  So, I am including PowerPrivEqu.a back
+;									in this file.  Maybe someday we can figure out why Power anything
+;									is included in StandardEqu.a.
+;		<11>	  7/8/92	JSM		Merge changes from SuperMario: roll-in HMSystemTaskPatch and
+;									HMSystemMenuPatch from Balloonptch28.a. Also, add a change from
+;									FixSystemClick that was’t originally done in <5> and roll-in
+;									GetDCtlRefNumFromHandleForSendDrvrMsg and
+;									GetDCtlRefNumFromHandleForClosingDeskAccessory patches from
+;									DeskMgrPatches.a.
+;		<10>	  5/5/92	JSM		Get rid of conditionals: get rid of local conditional
+;									ApplDefEvent which will never be true, hasIdle, hasJaws, and
+;									isUniversal are always true, hasNormandy is always false.  This
+;									file now has no conditionals.
+;		 <9>	 2/10/92	JSM		Moved this file to DeskMgr folder, keeping all the old
+;									revisions.
+;		 <8>	11/16/91	DTY		Replacing hard addresses with a record to make the equates “more
+;									universal” is nice but useless if the code has no way of getting
+;									to those addresses any more. Add an equate for VidRAMStkPtr to
+;									this file to keep the ROM build building until the hardware guys
+;									figure out what they’re trying to do.
+;		 <7>	 9/14/90	MSH		Newer, faster version of power cycling (should probably be
+;									vectorized someday).
+;		 <6>	 9/13/90	BG		Removed <4>. 040s are working more reliably now.
+;		 <5>	  8/2/90	csd		Fixed SystemClick to get the window variant in a 32-bit clean
+;									way.
+;		 <4>	 7/16/90	BG		Added EclipseNOPs for flakey 040s.
+;		 <3>	 5/16/90	MSH		Added Waimea Power Cycling to the portable idle code. Fully
+;									universal of course.
+;		 <2>	 1/12/90	CCH		Adding include of “HardwarePrivateEqu.a”.
+;	   <2.6>	 12/4/89	MSH		Ported over the forked off hcmac source changes.
+;	   <2.5>	 8/22/89	SES		Removed references to nFiles.
+;	   <2.4>	  6/8/89	KSM		Restored to version 1.9 (last real change).
+;	   <2.3>	  6/2/89	KSM		Updated conditionals for ROM/SYS build AGAIN (again).
+;	   <2.2>	  6/2/89	KSM		Updated conditionals for ROM/SYS build AGAIN.
+;	   <2.1>	  6/2/89	KSM		Updated conditionals for ROM/SYS build.
+;	   <2.0>	  6/1/89	KSM		Added check to handle events for tear off menus.
+;	   <1.9>	 5/15/89	EMT		Checked for NIL frontwindow in SystemEvent, fixes BRC #34592.
+;	   <1.8>	 5/15/89	MSH		Test of watch cursor had the wrong register.
+;	   <1.7>	 3/31/89	MSH		Moved the idle stuff to a subroutine at the end of the file.
+;	   <1.6>	  3/9/89	MSH		Check the time out dirty flag before using them.
+;	   <1.5>	  3/3/89	MSH		No longer have to check for LastAct and LastHd initialized.
+;	   <1.4>	 2/28/89	MSH		Time outs reduced to one each for sleep and hard disk.
+;	   <1.3>	  2/8/89	MSH		Moved all sleep and hard disk time out in from poweResourceMgr.a
+;	   <1.2>	12/14/88	MSH		Had to make file hardware dependent to support idle mode.
+;	   <1.1>	11/10/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	  <•1.2>	 9/23/88	CCH		Got rid of inc.sum.d and empty nFiles
+;	   <1.1>	 5/16/88	BBM		Give Notification Manager time as well.
+;	   <1.0>	 2/11/88	BBM		Adding file for the first time into EASE…
+;	  <C151>	 1/14/87	JTC		32-bit friendly changes, rolled in much later since TJ had
+;									access to the file during the 32-bit drive.
+;	  <A216>	10/14/86	TJ		Fixed missing drive # in call to DoEject; no longer complains
+;									about ejecting drive #243.
+;	  <C150>	  9/9/86	TJ		Extended the DiskHandler to accept DiskInsertEvt "Eject" events;
+;									the upper word if -1 means a disk eject, not insert. Eject
+;									function goes through a trap vector, no longer a ROM jump
+;									vector.
+;				 2/19/86	BBM		Made some modifications to work under MPW
+;				 9/26/85	BBM		Made DeskMgr pass on events greater than 8. Event 9 is still
+;									ignored and reserved for future use. To pass on application
+;									defined events, set the conditional assembly flag ApplDefEvent
+;									to 1.
+;				 2/20/85	LAK		Special IOPermission value set for OpenDeskAcc Opens.
+;				 1/30/85	LAK		Lock/Unlock window def proc around call.
+;				 1/29/85	EHB		Checked for NIL frontwindow in SystemTask
+;				 1/29/85	EHB		Unlocked WindowDef before LoadResource in SystemClick
+;				 1/23/85	LAK		Adapted for new equate files.
+;				  9/6/83	AJH		Made SystemEdit save and restore the port
+;				  9/5/83	AJH		Fixed bug in SystemEdit
+;				 8/30/83	SC		Fixed bug in Movem.l in system click
+;				 8/15/83	AJH		monster code krunch (from code review with Jerome, Capps)
+;				  8/9/83	AJH		Removed NetEvent support, general code crunch
+;				 6/30/83	AJH		Added CloseDeskAcc, SystemEdit
+;				 6/23/83	SC		Added support for multiple windows (Changed SearchWindow)
+;				 6/19/83	AJH		Made the desk mgr control call asynchronous
+;				 6/17/83	LAK		Changed to use UnitNtryCnt lomem var instead of equate.
+;				 6/15/83	AJH		Added OpenDeskAcc
+;				 5/10/83	AJH		Made it use a hook to close desk ornaments
+;				 4/27/83	AJH		Made SystemClick call deskHook with wmgrPort clip set up
+;				  3/7/83	AJH		Made TaskLock a byte flag (instead of word)
+;				  2/9/83	AJH		Made SystemTask not call active drivers
+;				  2/8/83	AJH		Changed DragWindow call to provide boundsRect
+;				 1/24/83	AJH		SystemMenu lets orn own menuBar; new I/O calls
+;				 1/23/83	AJH		added support for diskInserted events, deskHook in SystemClick
+;				 1/20/83	AJH		fixed stack bug in goAway handling code
+;				12/19/82	AJH		Added SystemMenu, handling of activate/deactivate events
+;				11/16/82	AJH		Added TaskLock to SystemTask to avoid re-entrancy problems
+;
+
+				BLANKS		ON
+				STRING		ASIS
+
+				LOAD		'StandardEqu.d'
+				INCLUDE		'HardwarePrivateEqu.a'
+				INCLUDE		'MMUEqu.a'
+				INCLUDE		'UniversalEqu.a'
+				INCLUDE		'BalloonsPriv.a'
+				INCLUDE		'TSMPrivate.a'		; <SM16> CSS
+				INCLUDE		'ScriptPriv.a'		; <SM16> CSS
+	
+DeskMgr 		PROC	EXPORT	
+
+				EXPORT	SystemEvent,SystemClick,SystemTask,SystemMenu,SystemEdit
+				EXPORT	OpenDeskAcc,CloseDeskAcc
+				WITH	ProductInfo,DecoderInfo,VideoInfo
+
+;
+;  FUNCTION SystemEvent(theEvent: EventRecord): BOOLEAN;
+;
+;	 SystemEvent is called by an application when it receives an event from the
+;  event manager.  SystemEvent determines if the event should be handled by the
+;  application or the system.  If the application should handle it, SystemEvent
+;  returns FALSE; otherwise, SystemEvent calls the appropriate system code to handle
+;  the event and returns TRUE.
+;
+SystemEvent
+				MOVE.L	A3,-(SP)				;preserve a work register
+				MOVE.L	8(SP),A3				;get pointer to event record
+				CLR.W	12(SP)					;assume its not for us (return FALSE)
+
+; preserve the current port
+
+				SUBQ	#4,SP					;make some room on stack
+				MOVE.L	SP,-(SP)				;point to it
+				_GetPort						;remember the current port
+
+;  case out on the Event.What field
+
+				MOVE.W	EvtNum(A3),D0			;get the event number
+
+				CMP 	#12,D0					;only handle events 0-8 					<26sep85> BBM
+
+				BCC.S	DoneSEvt				;if not one of ours, ignore it
+;
+				ADD.W	D0,D0					;double for word index
+				LEA 	EvtDTable,A0			;get address of dispatch table
+				ADD.W	0(A0,D0),A0 			;compute dispatch address
+				JMP 	(A0)					;dispatch to proper handler
+;
+; Here is the system event dispatch table, offset-encoded for compactness
+;
+EvtDTable
+				DC.W	DoneSEvt-EvtDTable		;null event is ignored			(0)
+				DC.W	DoneSEvt-EvtDTable		;mouse down is ignored			(1)
+				DC.W	IfTopWants-EvtDTable	;feed mouse up to top window	(2)
+				DC.W	IfTopWants-EvtDTable	;feed key down to top window	(3)
+				DC.W	IfTopWants-EvtDTable	;feed key up to top window		(4)
+				DC.W	IfTopWants-EvtDTable	;feed auto-key to top window	(5)
+				DC.W	SysUpdate-EvtDTable 	;handle system update events	(6)
+				DC.W	DiskHandler-EvtDTable	;handle disk inserted events	(7)
+				DC.W	SysUpdate-EvtDTable 	;handle activate events 		(8)
+				DC.W	DoneSEvt-EvtDTable		;reserved event is ignored		(9) 	<26sep85> BBM
+				DC.W	IfTopWants-EvtDTable	;feed network to top window 	(10)	<26sep85> BBM
+				DC.W	IfTopWants-EvtDTable	;feed device drvr to top window (11)	<26sep85> BBM
+
+;
+; DoneSEvt is the code for returning to the application when the desk manager
+; is all finished its work.  Events that are ignored branch here, too, since the
+; result has already been flagged false.  The alternative entry point "DoneSysEvt"
+; is used to return true.
+;
+DoneSysEvt
+				ADDQ.B	#1,16(SP)				;flag the result "TRUE"
+DoneSEvt
+				_SetPort						;restore it
+
+				MOVE.L	(SP)+,A3				;recover work register
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS 							;return to caller
+;
+; IfTopWants feeds the event to a driver if that driver's window is the frontMost
+; visible window and the driver has the event enabled.	First use FrontWindow
+; to find the frontMost visible window
+;
+IfTopWants
+				SUBQ	#4,SP					;make space for function result
+				_FrontWindow					;find out the frontMost window
+				MOVE.L	(SP)+,D0				; get windowPtr 					<1.9>
+				BEQ.S	DoneSEvt				; no searching for NIL windows! 	<1.9>
+				MOVE.L	D0,A0					; else search for window in A0		<1.9>
+				BSR.S	SearchWindow			;get handle to DCE that owns the window
+				BNE.S	DoneSEvt				;if none, we're done
+;
+; At this point, A1 is a pointer to the driver control entry that owns the window.
+; See if it wants this event.
+;
+				MOVE	EvtNum(A3),D0			;get number of event
+				MOVE	DCtlEMask(A1),D1		;get event mask
+				BTST	D0,D1					;this event enabled?
+				BEQ.S	DoneSEvt				;if not, we're done
+;
+				BSR.S	SendDrvrMsg 			;feed the event to the driver
+				BRA.S	DoneSysEvt				;return TRUE
+;
+;
+; SearchWindow takes the window pointer in A0 and fetches the windowKind. System
+; windows have negative kinds and the kind is the -UnitNumber of the driver.
+; So, using the - kind as an index into the unit table yields the handle/pointer
+; to the driver (if installed).
+; If one is found, A0 contains its handle, A1 contains a pointer and the
+; Z flag is set.  If none are found or the window isn't a system kind, the
+; Z-flag is cleared.
+;
+SearchWindow
+				MOVE	windowKind(A0),D0		; get the unit number from window
+				BPL.S	noGoodSearch			; if not sys. kind, ignore it
+				NOT 	D0						; flip it (bitwise)
+				ASL 	#2,D0					; * 4
+				MOVE.L	UTableBase,A0			; point to the driver table
+				MOVE.L	0(A0,D0),A0 			; get the handle
+				MOVE.L	(A0),A1 				; dereference
+				MOVEQ	#0,D0					; set z flag
+				RTS
+noGoodSearch
+				MOVEQ	#-1,D0					; clear z flag
+				RTS
+
+;
+; SendDrvrMsg sends the driver (whose DCE pointer is in A1) a "feedEvent" control
+; call.  A pointer to the relevant event record is in A3
+;
+SendDrvrMsg
+				MOVEQ	#64,D0					;message 64 is "feedEvent"
+;
+SendDCommon
+				LINK	A6,#-32 				;get some space for the control p-block
+				LEA 	IORefNum-32(A6),A0		;point A0 at the block
+				MOVE.W	DCtlRefNum(A1),(A0)+	;set up the refNum
+				MOVE.W	D0,(A0)+				;set up the control "opCode"
+				MOVE.L	A3,(A0) 				;set up event ptr as parameter
+				LEA 	-32(A6),A0				;point to pBlock
+				_Control  ,IMMED				;make the control call
+;
+				UNLK	A6						;de-allocate parameter block
+				RTS 							;return to caller
+;
+; SendRunMsg sends the "run" opcode control call to the driver whose DCE ptr is in A1
+; It shares lots of code with "SendDrvrMsg"
+;
+SendRunMsg
+				MOVEQ	#65,D0					;the run message is 65
+				BRA.S	SendDCommon 			;use common code
+
+;
+; SysUpdate handles update events for system windows.  On entry, A3 points to the
+; event record.
+;
+SysUpdate
+				MOVE.L	EvtMessage(A3),A0		;get the window pointer
+				BSR.S	SearchWindow			;try to find the window
+				BNE 	DoneSEvt				;if not found, we're done
+;
+; OK, we found the driver control entry of the driver that owns the window to be
+; update.  Send it the "feedEvent" message
+;
+				BSR 	SendDrvrMsg 			;send update message
+				BRA 	DoneSysEvt				;return TRUE
+;
+; DiskHandler handles a disk inserted event by calling the file system "suck em up"
+; routine.	It passes the event through to the application (by returning FALSE),
+; adding the result of the "suck em up" call to the event.message field
+;
+DiskHandler		tst.w	EvtMessage(A3)			;if an Eject event,			<C150/09sep86>
+				beq.s	@1						;handle as a Command-Shift-	<C150/09sep86>
+			IF hasManEject THEN					;							<SM17> <BH 03Aug93>
+				CMPI.W	#-2,EvtMessage(A3)		; is this a manual eject?	<SM17> <BH 03Aug93>
+				BEQ.S	HandleManEject			;							<SM17> <BH 03Aug93>
+			ENDIF								;							<SM17> <BH 03Aug93>
+				move.l	jDoEject,A0				;							<C150/10sep86>
+				move.w	EvtMessage+2(A3),D1		;the drive number,			<A216/14oct86>
+				moveq	#1,D2					;flag from "keyboard"		<C150/10sep86>
+				jsr		(A0)					;eject the disk				<C150/09sep86>
+				bra.s	DoneSysEvt				;mark as taken, no error	<C150/09sep86>
+
+@1				SUB.W	#24,SP					;allocate 24 bytes on stack
+				MOVE.L	SP,A0					;point to it
+				MOVE.W	EvtMessage+2(A3),IODrvNum(A0) ;get the "disk ID" parameter
+				_MountVol						;tell OS to do its thing
+				ADD.W	#24,SP					;deallocate space on stack
+				MOVE.W	D0,EvtMessage(A3)		;return result to application
+				BRA 	DoneSEvt				;always return "FALSE"
+
+	IF hasManEject THEN					; <SM17> <BH 03Aug93>
+			IMPORT	SwitchDisk,ClearSysErrorUpdateRect
+HandleManEject
+			MOVE.W	EvtMessage+2(A3),D1	; drive number
+			MOVEA.L	VCBQHdr+qHead,A2
+@chkvcb		MOVE.L	A2,D0
+			BEQ.S	DoneSysEvt			; nothing to see here, folks...move along
+			CMP.W	vcbDrvNum(A2),D1
+			BEQ.S	@gotvcb
+			MOVEA.L	qLink(A2),A2
+			BRA.S	@chkvcb
+			
+@gotvcb		MOVE.W	vcbFlags(A2),D0
+			BTST	#vcbDirty,D0		; VCB dirty?
+			BNE.S	@dirtyvol			; yes: go deal with it...							<SM18> <BH 16Aug93>
+			MOVEA.L	FCBsPtr,A1			; no: check FCBs for dirty files...							.
+			MOVEQ	#2,D1				; offset to first FCB										.
+@chkfcb		MOVE.L	fcbFlNm(A1,D1),D0	; open file?												.
+			BEQ.S	@nextfcb			; no, skip it												.
+			CMPA.L	fcbVPtr(A1,D1),A2	; does it belong to our volume?								.
+			BNE.S	@nextfcb			; no, skip it												.
+			BTST.B	#fcbModBit,fcbMdRByt(A1,D1)	; is it dirty?										.
+			BNE.S	@dirtyvol			; yes, go try to get the vol back							.
+@nextfcb	ADD.W	FSFCBLen,D1			; offset to next FCB										.
+			CMP.W	(A1),D1				; reached the end yet?										.
+			BEQ		@offline			; yes: everything's clean, so just offline it				.
+			BRA.S	@chkfcb				; check out the next one							<SM18> <BH 16Aug93>
+
+@dirtyvol	MOVE.W	vcbDRefNum(A2),-(SP)	; save driver refnum
+			MOVE.W	vcbDrvNum(A2),vcbDRefNum(A2)	; save old drive num here
+			CLR.W	vcbDrvNum(A2)		; and make it look offline so MountVol can do a remount
+			MOVE.W	#dsDirtyDisk,D4		; err code for SwitchDisk
+			JSR		SwitchDisk			; ask for the disk
+			BSET	#7,DSWndUpdate		; don't need evt mgr to update syserr box
+			JSR		ClearSysErrorUpdateRect	; we'll draw over it
+			TST.W	D0					; SwitchDisk result
+			BNE.S	@warning			; DS request aborted--warn the user
+			
+			SUBA.L	#ioVQElSize,SP		; volumeParam
+			CLR.L	ioVNPtr(SP)			; no name
+			MOVE.W	vcbVRefNum(A2),ioVRefNum(SP)	; vrefnum
+			MOVEA.L	SP,A0
+			_FlushVol
+			ADDA.L	#ioVQElSize+2,SP	; clean up stack (incl. DRefNum saved earlier)
+			
+			CLR.L	-(SP)				; result space
+			MOVE.W	#-16413,-(SP)		; "You may now remove the disk" DLOG ID
+			CLR.L	-(SP)				; allocate dialog record in heap
+			MOVEQ	#-1,D0
+			MOVE.L	D0,-(SP)			; come up in front
+			_GetNewDialog
+			MOVE.L	(SP),-(SP)			; dialog ptr
+			MOVE.W	vcbDrvNum(A2),D0	; drive num for filter proc
+			MOVE.L	D0,-(SP)			; dialog ptr is already on stack
+			_SetWRefCon
+			SUBQ	#2,SP				; result
+			PEA		@filter				; filter to watch for ejection
+			PEA		4(SP)				; -> result
+			_ModalDialog
+			MOVE.W	(SP)+,A3			; result (in A3 cause it's already saved--silly, I know)
+			_DisposeDialog				; ptr is already on stack
+			MOVE.W	A3,D0
+			BMI.S	@offline			; disk was ejected
+			BRA.S	DoneSysEvt			; user OKed, disk is flushed and present
+			
+@warning	MOVE.W	vcbDRefNum(A2),vcbDrvNum(A2)	; restore VCB stuff we tweaked to
+			MOVE.W	(SP)+,vcbDRefNum(A2)	; make the vol look offline
+			CLR.W	-(SP)				; result
+			MOVE.W	#-16414,-(SP)		; "You may lose data" ALRT ID
+			CLR.L	-(SP)				; no filter
+			_CautionAlert
+			ADDQ	#2,SP				; clear result
+			
+@offline	SUBA.L	#ioVQElSize,SP		; paramblock on the stack
+			MOVEA.L	SP,A0				; point to it
+			CLR.L	ioVNPtr(A0)			; don't use the name...
+			MOVE.W	vcbVRefNum(A2),ioVRefNum(A0)	; use the vRefNum instead
+			_Offline					; mark it offline
+			ADDA.L	#ioVQElSize,SP		; goodbye paramblock
+			NEG.W	vcbDRefNum(A2)		; volume has been ejected--flip this to indicate it
+			BRA.S	DoneSysEvt
+			
+@filter		LINK	A6,#-14-EvtBlkSize	; some local space
+			CLR.W	20(A6)				; default return: false
+			MOVEA.L	12(A6),A0			; A0 -> evt record
+			CMPI.W	#keyDwnEvt,evtNum(A0)	; keyDown?
+			BNE.S	@update
+			MOVE.L	evtMessage(A0),D0	; key
+			CMPI.B	#$0D,D0				; return?
+			BEQ.S	@ok
+			CMPI.B	#$03,D0				; enter?
+			BNE.S	@chkeject
+@ok			MOVEA.L	8(A6),A0			; A0 -> itemHit
+			MOVE.W	#1,(A0)				; itemHit=OK button
+			MOVE.B	#1,20(A6)			; handled it, so return true
+			BRA		@exit
+			
+@update		CMPI.W	#updatEvt,evtNum(A0)	; update?
+			BNE.S	@chkeject
+			PEA		-18(A6)				; old GrafPtr
+			_GetPort
+			MOVE.L	16(A6),-(SP)		; dialog ptr
+			_SetPort
+			MOVE.L	16(A6),-(SP)		; dialog ptr
+			MOVE.W	#1,-(SP)			; OK button item number
+			PEA		-2(A6)				; item type
+			PEA		-6(A6)				; item handle
+			PEA		-14(A6)				; item rect
+			_GetDItem					; get info
+			PEA		-14(A6)				; item rect
+			MOVE.L	#$FFFCFFFC,-(SP)	; -4,-4
+			_InsetRect
+			MOVE.L	#$00030003,-(SP)	; 3,3
+			_PenSize
+			PEA		-14(A6)				; rect
+			MOVE.L	#$00100010,-(SP)	; curvature: 16,16
+			_FrameRoundRect				; outline OK button
+			_PenNormal
+			MOVE.L	-18(A6),-(SP)		; old GrafPtr
+			_SetPort
+			BRA.S	@exit
+			
+@chkeject	LEA		-14-EvtBlkSize(A6),A0	; local event record
+			MOVE.W	#128,D0				; disk-insert event mask
+			_GetOSEvent
+			BNE.S	@exit				; didn't get anything we wanted
+			TST.W	-14-EvtBlkSize+evtMessage(A6)	; really an insertion?
+			BPL.S	@repost				; yes: save it for later
+			SUBQ	#4,SP				; no: an ejection--get dialog refcon
+			MOVE.L	16(A6),-(SP)		; dialog ptr
+			_GetWRefCon
+			MOVE.L	(SP)+,D0			; refcon==drive number we're watching for
+			CMP.W	-14-EvtBlkSize+evtMessage+2(A6),D0	; got it?
+			BNE.S	@repost				; no: throw it back
+			MOVEA.L	8(A6),A0			; A0 -> itemHit
+			MOVE.W	#-1,(A0)			; itemHit=-1 for ejection
+			MOVE.B	#1,20(A6)			; handled it, so return true
+			BRA.S	@exit
+@repost		MOVE.L	-14-EvtBlkSize+evtMessage(A6),D0	; get message
+			MOVEA.W	#DiskInsertEvt,A0	; event type
+			_PostEvent					; post it
+			
+@exit		UNLK	A6					; clean up locals
+			MOVEA.L	(SP),A0				; get return addr
+			ADDA.L	#16,SP				; clean up parameters
+			JMP		(A0)				; return
+	ENDIF	
+
+
+;
+; PROCEDURE SystemClick(theEvent: EventRecord; theWindow: windowPtr);
+;
+;  SystemClick is used to feed "mouse button down" events to the driver/desk
+; ornament system after they've been classified by FindWindow as a click in
+; a system window.	If the clicked-in window is the frontmost visible window,
+; feed it the event.  Otherwise we unhilite the current "frontWindow" and
+; hilite and BringToFront the clicked in window.
+;
+SystemClick
+				MOVEM.L D0/D3-D4/A3-A4,-(SP)	;preserve some work registers
+												;D0 to reserve space on stack
+				MOVE.L	SP,-(SP)				;push "savePort"
+				_GetPort						;remember the current grafPort on stack
+
+				MOVE.L	24(SP),A4				; get theWindow into A4
+				MOVE.L	WindowDef(A4),A3		; get the window def proc handle into A3  <EHB 29-Jan-85>
+				MOVE.L	28(SP),D4				; get theEvent into D4
+
+				MOVE.L	A4,D0					; test the window ptr
+				BEQ 	CheckDeskHook			; if nil, check the desk hook
+
+				MOVE.L	A4,A0					; pass in A0							<EHB 29-Jan-85>
+				BSR 	SearchWindow			;find it in the driver list
+				BNE.S	DoneSClick				;if not found, ignore the call
+				MOVE.L	A0,D3					;remember DCE handle (formerly remembered the pointer) (from FixSystemClick) <11>
+;
+; we found the window in the device table; A1 points to the DCE entry of the driver
+; that owns the window.  First see what part of the window its in by calling
+; the window definition proc to classify.
+;
+				MOVEQ	#0,D0					;clear out high part
+				MOVE.B	WindowDef(A4),D0		;get selector
+
+				CLR.L	-(SP)					;make room for the result
+				subq	#2, SP					; room for window variant
+				move.l	A4, -(SP)				; push window pointer
+				_GetWVariant					; legally get the window variant
+				MOVE.L	A4,-(SP)				;push the window ptr
+				MOVE	#WHitMsg,-(SP)			;the message is "HitTest"
+				MOVE.L	D4,A0					;get the event
+				MOVE.L	EvtMouse(A0),-(SP)		;push the mouse point (global)
+
+; don't lock window def before loading.  Be 32-bit friendly in any case.			<C151> JTC
+
+				MOVE.L	A3,-(SP)				; make sure window def proc is loaded	<EHB 29-Jan-85>
+				_LoadResource					;										<EHB 29-Jan-85>
+
+				MOVEA.L	A3,A0					;def proc handle	<C151>
+				_HLock							;lock before call	<C151>
+				MOVEA.L	(A3),A0					;deref the proc
+				JSR		(A0)					;invoke it
+				MOVEA.L	A3,A0					;def proc handle	<C151>
+				_HUnlock						;lock before call	<C151>
+				
+				MOVE.L	(SP)+,D0				;get the result code
+				BEQ.S	DoneSClick				;if 0, nothing to do
+				SUBQ	#2,D0					;is it in drag?
+				BEQ.S	DragClick				;if so, drag it
+				SUBQ	#2,D0					;how about GoAway?
+				BEQ.S	GoAwayClick 			;if so, handle it
+;
+; its in the content of the window.  See if its on top
+;
+				CLR.L	-(SP)					;make room for function result
+				_FrontWindow					;figure out the frontmost one
+				MOVE.L	(SP)+,D0				;get the result
+				CMP.L	A4,D0					;is it ours?
+				BNE.S	NotFrontMost			;if not, go bring ours to the top
+;
+; our window is the frontmost, so send it the event
+;
+				MOVE.L	D4,A3					;get event ptr in A3
+
+; begin roll-in GetDCtlRefNumFromHandleForSendDrvrMsg patch													<11>
+
+				move.l	d3,a1					;put DCE handle in an address register to dereference it	<11>
+				move.l	(a1),a1					;get the DCE pointer now									<11>
+
+; end roll-in GetDCtlRefNumFromHandleForSendDrvrMsg patch													<11>
+
+				BSR 	SendDrvrMsg 			;send it the "mouseDown" message
+;
+; all done with SystemClick so restore registers, strip parameters and return to caller
+;
+DoneSClick
+				_SetPort						;restore it
+
+				MOVEM.L (SP)+,D3-D4/A3-A4		;restore work registers
+				MOVE.L	(SP)+,A0				;get the return address
+				ADDQ	#8,SP					;strip parameters
+				JMP 	(A0)					;return to caller
+;
+; CheckDeskHook is called when the user called SystemClick with a NIL window
+; pointer.	Call the desk hook if its installed
+;
+CheckDeskHook
+				TST.L	DeskHook				;got something?
+				BEQ.S	DoneSClick				;if not, just ignore it
+
+				MOVE.L	WmgrPort,-(SP)			;push the wmgrPort
+				_SetPort						;get into the wmgrPort
+				MOVE.L	GrayRgn,-(SP)			;push the gray region
+				_SetClip						;make that the clip
+				CLR.L	-(SP)					;push NIL
+				_ClipAbove						;clip to all windows
+
+				MOVE.L	D4,A0					;get event pointer
+				MOVE.L	DeskHook,A1 			;get address in A-reg
+				MOVEQ	#-1,D0					;flag its from SystemClick
+				JSR 	(A1)					;call the deskHook
+				BRA.S	DoneSClick				;all done...
+
+;
+; at this point, the user has clicked in a system window that isn't the frontmost.
+; We must unHilite the old front window, bring the one just clicked in to the
+; front and hilite it.
+;
+NotFrontMost
+;
+				MOVE.L	A4,-(SP)				;push our window
+				_SelectWindow					;select it
+;
+				BRA.S	DoneSClick				;all done!
+
+;
+; It was clicked in the drag area of a system window so drag it
+;
+DragClick
+				MOVE.L	A4,-(SP)				;push the window
+				MOVE.L	D4,A0					;get the event
+				MOVE.L	EvtMouse(A0),-(SP)		;push the point
+				MOVE.L	(A5),A0 				;point to grafGlobals
+				PEA 	ScreenBits+Bounds(A0)	;use screenBits.bounds as boundsRect
+				_DragWindow 					;its a drag!
+
+				BRA.S	DoneSClick
+
+;
+; It was clicked in the GoAway button so track it and, if necessary, close the
+; driver
+;
+GoAwayClick
+				CLR.W	-(SP)					;make room for result
+				MOVE.L	A4,-(SP)				;push the window
+				MOVE.L	D4,A0					;get the event
+				MOVE.L	EvtMouse(A0),-(SP)		;push the point
+				_TrackGoAway					;track it
+
+				TST.B	(SP)+					;time to go Away?
+				BEQ.S	DoneSClick				;if not, we're done
+;
+; the user pushed the GoAway button so close this driver
+;
+
+; begin roll-in GetDCtlRefNumFromHandleForClosingDeskAccessory patch										<11>
+
+				move.l	d3,a1					;put DCE handle in an address register to dereference it	<11>
+				move.l	(a1),a1					;get the DCE pointer now									<11>
+
+; end roll-in GetDCtlRefNumFromHandleForClosingDeskAccessory patch											<11>
+
+				MOVE.L	CloseOrnHook,D0 		;is there a hook installed
+				BNE.S	DoCloseHook 			;if so, use it
+
+				MOVE.W	DCtlRefNum(A1),-(SP)	;push the refNum
+				_CloseDeskAcc					;close it
+
+				BRA.S	DoneSClick				;all done!
+
+DoCloseHook
+				MOVE.L	D0,A0					;get hook address in A-reg
+				JSR 	(A0)					;invoke it
+				BRA.S	DoneSClick				;all done
+
+;
+; PROCEDURE SystemTask;
+;
+;  SystemTask is called by the applications when they don't have anything better
+;  to do, hopefully at least once through their main loop.	SystemTask gives
+;  a call to any driver that has the "NeedsTime" flag set in its header.
+;  SystemTask provides a way for asynchronous tasks to call the memory manager,
+;  since any driver can hook into "main thread" time.  The DrvrCount parameter
+;  in the driver header specifies the number of ticks the driver needs between
+;  systemTask calls.  A value of 0 causes it to be called everytime systemTask
+;  is called.
+;
+SystemTask
+
+; begin roll-in HMSystemTaskPatch patch												<11>
+
+				IMPORT	ptchHMGetBalloons		;									<11>
+
+				JSR		ptchHMGetBalloons		; what is the state of What Is? mode?		<11>
+				BEQ.S	@BalloonsOff			; no, let's not scan for a content window	<11>
+
+				SUBQ	#2,SP					; make room for a dummy OSErr		<11>
+				_HMBalloonBulk					;									<11>
+				ADDQ	#2,SP					; toss result (for now)				<11>
+
+@BalloonsOff
+
+; end roll-in HMSystemTaskPatch patch												<11>
+
+				IMPORT	NMTask					;									<V1.1>
+				JSR		NMTask					;Give time to Notification Manager	<V1.1>
+
+				MOVEM.L D3/A3,-(SP) 			;save some work registers
+;
+; if this is a re-entrant call, just punt
+;
+				BSET	#7,TaskLock 			;flag that we're in system task
+				BNE 	TaskDone				;if re-entrant, just exit
+;
+				SUBQ	#4,SP					;make space on stack
+				MOVE.L	SP,-(SP)				;push pointer to it
+				_GetPort						;remember the old port
+
+;
+; first see if the FrontWindow is a system Window.	If so, give it a chance to
+; set the cursor shape
+;
+				CLR.L	-(SP)					;make room for result
+				_FrontWindow					;find out the front one
+				MOVE.L	(SP)+,D0				; get windowPtr 					<EHB 29-Jan-85>
+				BEQ.S	NotSWindow				; no searching for NIL windows! 	<EHB 29-Jan-85>
+				MOVE.L	D0,A0					; else search for window in A0		<EHB 29-Jan-85>
+				BSR 	SearchWindow			;get the DCE ptr in A1
+				BNE.S	NotSWindow				;if we cant find it, skip
+;
+; send the window pointed to by A0 a "cursor" message
+;
+				BTST	#DrvrActive,DCtlFlags+1(A1) ;is it active?
+				BNE.S	NotSWindow				;skip if its active
+
+				MOVEQ	#66,D0					;D0 contains "cursor" message
+				BSR 	SendDCommon 			;send the cursor message
+
+NotSWindow
+				MOVE.L	UTableBase,A3			;point to the driver table
+				MOVE.W	UnitNtryCnt,D3			;get number of entries
+;
+; here is the main loop for SystemTask.  For each driver that's installed, see if
+; it needs time.  If so, send it the RUN message.
+;
+SysTLoop
+				MOVE.L	(A3)+,D0				;get DCE handle
+				BEQ.S	NextTSys				;if NIL, this drivers not installed
+				MOVE.L	D0,A0					;need it in an A-reg
+				MOVE.L	(A0),A1 				;get the DCE ptr in A1
+;
+;				 BTST	 #DNeedTime,DCtlFlags(A1) ;does it need time at all?
+;				 BEQ.S	 NextTSys				 ;if not, go check the next one
+;				 BTST	 #DOpened,DCtlFlags+1(A1)  ;is it opened?
+;				 BEQ.S	 NextTSys				 ;if not, go check next one
+;				 BTST	 #DrvrActive,DCtlFlags+1(A1) ;is it active?
+;				 BNE.S	 NextTSys				 ;if so, don't call it
+
+				MOVE.W	DCtlFlags(A1),D0		;get the flags
+				AND 	#$20A0,D0				;get rid of the don't care bits
+				CMP.W	#$2020,D0				;in the right state (see above)
+				BNE.S	NextTSys				;if not, skip
+;
+; it might need time so check out the elapsed time from the last time it was called
+;
+				MOVEQ	#0,D0					;zero high part of D0
+				MOVE.W	DCtlDelay(A1),D0		;get delay tick count
+				BEQ.S	DoItNow 				;if zero, always do it
+				ADD.L	DCtlCurTicks(A1),D0 	;figure out next time to call it
+				CMP.L	Ticks,D0				;has that time passed yet?
+				BGT.S	NextTSys				;if not, don't call it
+;
+; its time to give it a call
+;
+				MOVE.L	Ticks,DCtlCurTicks(A1)	;update last called time
+DoItNow
+				BSR 	SendRunMsg				;send it the "RUN" message
+;
+; here is the bottom of the main loop.	See if there are any more entries to process
+;
+NextTSys
+				SUBQ.W	#1,D3
+				BGT.S	SysTLoop				;loop if there's more to do
+				_SetPort						;restore it
+				CLR.B	TaskLock				;flag that we're done
+TaskDone		MOVEM.L (SP)+,D3/A3 			;restore work registers
+				RTS 							;return to caller
+;
+; PROCEDURE SystemMenu(menuResult: LongInt);
+;
+;	 Feeds a menu event to the open driver that owns a menu matching the ID
+;  or, if MBarEnable is set, just feed it to the topMost window
+;
+SystemMenu
+				MOVE.L	4(SP),D1						;get the menuResult parameter
+
+				SWAP	D1						;get theMenu in low part
+
+				CMP.W	#kHMHelpMenuID,D1				; is it help menu id?
+				BEQ		@HandleHelpMenu					; then handle it.
+				CMP.W	#-kTSMSystemMenuID,D1			; is it input method menu (pencil)
+				BEQ		@HandleInputMethodMenu			; then handle it.
+				CMPI.W	#kKeyboardMenuID,D1				; is this keyboard ?
+				BEQ		@HandleKeyboardMenu				; then handle it
+				BRA		@SpecialMenusHandled
+
+
+; begin roll-in __SystemMenuPatch from TSMDispatch <SM16> CSS												<11>
+
+@HandleInputMethodMenu
+				SWAP	D1								;put the high word back
+				MOVE.L	D1,-(SP)						;move it onto the stack
+				PEA		(SP)							;push the address
+				IMPORT	CHANGEMENURESULTFORINPUTMETHOD
+				JSR		CHANGEMENURESULTFORINPUTMETHOD	;and send it to the input method
+				ADDQ	#4,SP							;get rid of space for menuresult
+				MOVE.L	(SP)+,(SP)						;strip parameter
+				RTS										;return to caller
+				
+; end roll-in __SystemMenuPatch from TSMDispatch <SM16> CSS
+
+; begin roll-in ptchSystemMenu from ScriptMgrSystemMenusPatch <SM16> CSS												<11>
+
+@HandleKeyboardMenu
+				SWAP	D1								;put the high word back
+				MOVE.L	D1,-(SP)						;move it onto the stack
+				IMPORT	HandleKeyboardMenu
+				JSR		HandleKeyboardMenu				;go handle the keyboard menu.
+				MOVE.L	(SP)+,(SP)						;strip parameter
+				RTS										;return to caller
+				
+; end roll-in ptchSystemMenu from ScriptMgrSystemMenusPatch <SM16> CSS												<11>
+
+; begin roll-in HMSystemMenuPatch patch												<11>
+@HandleHelpMenu
+				MOVE.L	ExpandMem,A0			; point to the expand mem ptr		<11>
+				MOVE.L	ExpandMemRec.emHelpGlobals(A0),A0	; A0 = global ptr		<11>
+	
+				MOVE.W	#kHMHelpMenuID,hmgSystemMenuID(A0)	; set the global system menu ID to our help menu ID		<11>
+				
+				SWAP	D1							; fix menuResult, so the item is in low word			<11>
+				MOVE.W	D1,hmgSystemMenuItem(A0)	;	and put the item into our system menu item global	<11>
+
+				CLR.W	-(SP)					; do a HiliteMenu(0); for apps that only call this			<11>
+				_HiliteMenu						; for their own menus [Nisus, Quicken, Adobe apps, etc.]	<11>
+
+				MOVE.L	4(SP),D1						;get the menuResult parameter again							<11>
+				SWAP	D1								;get theMenu in low part again								<11>
+; end roll-in HMSystemMenuPatch patch												<11>
+
+@SpecialMenusHandled
+				MOVEM.L A2-A3,-(SP) 					;preserve work registers
+				MOVE.W	MBarEnable,D0			;who owns the menuBar?
+				BEQ.S	@1						;if the app, we're cool
+				MOVE.W	D0,D1					;get ID in D1
+
+@1				MOVE.L	UTableBase,A2			;point to base of driver table
+				MOVE.W	UnitNtryCnt,D2			;get number of entries
+;
+SMLoop
+				MOVE.L	(A2)+,D0				;fetch DCE handle
+				BEQ.S	NextSM					;if none, skip
+				MOVE.L	D0,A0					;get handle in A0
+				MOVE.L	(A0),A1 				;and ptr in A1
+;
+				BTST	#DOpened,DCtlFlags+1(A1) ;is it open?
+				BEQ.S	NextSM					 ;if not, don't consider it
+
+				CMP.W	DCtlMenu(A1),D1 		;does this one own it?
+				BNE.S	NextSM					;if not, try the next one
+;
+; we found one that owns the menu, so send it the message
+;
+FeedToOrn
+				MOVE.L	12(SP),A3				;get param into A3
+				MOVEQ	#67,D0					;signal "menu" call
+				BSR 	SendDCommon 			;send the message
+				BRA.S	DoneSM					;return TRUE
+;
+; loop till we find one
+;
+NextSM
+				SUBQ.W	#1,D2
+				BGT.S	SMLoop					;loop till driver table's exhausted
+DoneSM
+				MOVEM.L (SP)+,A2-A3 			;restore work registers
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS 							;return to caller
+
+
+; FUNCTION SystemEdit(editCmd: INTEGER): BOOLEAN;
+;
+;	SystemEdit is called by an application when it receives an edit request
+; from the user (usually through a menu).  If the topMost window is a system
+; window, SystemEdit returns true and sends the corresponding desk accessory
+; an edit control call; otherwise SystemEdit returns false.
+
+SystemEdit
+				CLR.W	6(SP)					;assume false
+
+				SUBQ	#8,SP					;make room for function result
+				PEA 	4(SP)					;push pointer to buffer on stack
+				_GetPort						;remember the port
+
+				_FrontWindow					;get the frontWindow
+				MOVE.L	(SP)+,D0				;is there one?
+				BEQ.S	DoneSEdit				;if not, we're done
+
+; There is a front window, so send it the edit message
+
+				MOVE.L	D0,A0
+				BSR 	SearchWindow			;get DCE ptr in A1
+				BNE.S	DoneSEDit				;branch if unsuccessful
+				MOVE.W	8(SP),D0				;get edit index
+				ADD.W	#68,D0					;offset it to indicate edit
+				BSR 	SendDCommon 			;send the message
+				ADDQ.B	#1,10(SP)				 ;flag it as true
+
+; all done with SystemEdit
+
+DoneSEdit
+				_SetPort						;restore the port
+				BRA.S	TwoByteExit 			;use common code to exit
+
+
+; FUNCTION OpenDeskAcc(theName: Str255): INTEGER;
+;	opens a desk accessory and shows its window, returning the refCon.
+;	If the refCon = 0, it was a bad open.
+
+OpenDeskAcc
+				CLR.W	8(SP)			   ;return 0 as the default
+
+				SUB 	#32,SP			   ;get 32 bytes for a parameter block
+				MOVE.L	36(SP),IOFileName(SP)  ;set up name
+				CLR.W	IODrvNum(SP)	   ;use default volume
+				MOVE.W	#$0040, IOFileType(SP) ;clear type byte, special permissions to ID OpenDeskAcc
+				CLR.L	IOOwnBuf(SP)	   ;use system buffer
+
+				MOVE.L	SP,A0			   ;point to it
+				_Open					   ;open the driver
+				BNE.S	DoneOpenDAcc	   ;if an error, don't return refNum
+
+				MOVE.W	IORefNum(SP),D0    ;get the refNum
+				MOVE	D0,40(SP)		   ;return the refNum
+
+; figure out the DCE ptr
+
+				NOT.W	D0						; bitwise complement to get unitnum
+				ASL.W	#2,D0					; multiply by four
+				MOVE.L	UTableBase,A1			; get address of unit table
+				MOVE.L	0(A1,D0.W),A1			; add in the offset
+				MOVE.L	(A1),A1 				; dereference handle
+
+; get the window ptr and, if one exists, show it
+
+				MOVE.L	DCtlWindow(A1),D0		;get the window ptr
+				BEQ.S	DoneOpenDAcc
+
+				MOVE.L	D0,-(SP)
+				MOVE.L	D0,-(SP)				;push it twice
+
+				_SelectWindow
+				_ShowWindow 					;show it!
+
+DoneOpenDAcc
+				ADD.W	#32,SP					;strip the pBlock
+				MOVE.L	(SP)+,(SP)				;strip parameter
+				RTS
+
+; PROCEDURE CloseDeskAcc(refNum: INTEGER);
+;	close the desk accessory (or driver) with the specified refNum
+
+CloseDeskAcc
+				MOVE.W	4(SP),D0				;get the refNum
+				SUB 	#30,SP					;get space for param block
+				MOVE.W	D0,IORefNum(SP) 		;set up refNum
+				MOVE.L	SP,A0
+				_Close							;close it!
+				ADD 	#30,SP					;pop off param block
+TwoByteExit
+				MOVE.L	(SP)+,A0
+				ADDQ	#2,SP
+				JMP 	(A0)
+
+				
+				END 

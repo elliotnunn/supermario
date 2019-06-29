@@ -1,0 +1,2413 @@
+;
+;	File:		ScriptMgrExtensions.a
+;
+;	Contains:	Extensions to the Script Manager that were formerly in ScriptMgrExtTail.a.
+;
+;	Written by:	FM	Fred Monroe
+;				JSM	Jeff Miller
+;				PKE	Peter Edberg
+;				HA	Hani Abdelazim
+;
+;	Copyright:	© 1992-1993 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM8>	 5/21/93	CSS		Update fixes from Reality per P. Edberg's review:
+;		<12>	  4/2/93	ngk		Fix bug with gestalt routine. It was returning a long instead of
+;									a short. This is bad with Pascal calling conventions.
+;	   <SM7>	11/19/92	RB		When looking for the standard Chicago font, look in ROM first.
+;	   <SM6>	 11/6/92	SWC		Changed PackMacs.a->Packages.a.
+;	   <SM5>	10/27/92	CSS		Changed short branch to word branch.
+;		<10>	  7/6/92	HA		##1034403 <PKE>: Fixed bug in StyledLineBreak, now I made sure
+;									to return the correct offset when the (text buffer ends with a
+;									carriage return) AND (textStart parameter is > 0 ) AND the whole
+;									text fits in the line pixel width) .
+;		 <9>	 6/22/92	PKE		#1032408 <amw>: <+ csd>: Move check for presence of bidi &
+;									2-byte scripts to be after call to ScriptAvail vector.
+;		 <8>	 6/17/92	HA		#1029756,<PKE>: #1032724 <YS> : Fixed CharType to return correct
+;									results when offset is > 256. #1029756 <PKE> moved here the new
+;									StyledLineBreak (and FindCarriage) from ScriptMgrUtilText.a, so
+;									the new routine will be included in ptch 27.
+;		 <7>	  6/5/92	PKE		#1031797 <csd>: Add option-space to prevent enabling of all
+;									scripts except primary & roman
+;		 <6>	 5/31/92	FM		Add entry point StdExit for call by the ROM build. There was a
+;									duplicate of this code in another file. The only difference was
+;									this added label.
+;		 <5>	 5/18/92	PKE		#1028382,<jh>: InitScripts should not enable a script if it has
+;									no fonts. If the specified system font is not present but other
+;									fonts in the script range are, use one of them.
+;		 <4>	 5/14/92	PKE		#1029395,<bbm>: Move glue for generic FindScriptRun from Roman
+;									script to Script Mgr dispatcher so scripts get it for free; we
+;									only come to romanFindScriptRun if a new-format table does not
+;									exist. Move new FindScriptTable record to ScriptPriv.a, where it
+;									belongs.
+;		 <3>	  5/8/92	PKE		#1029395,<KST>: Fix FindScriptRun for non-Roman simple scripts
+;									to handle "shared" characters (space, punctuation) contextually.
+;									Also fix it to get the correct itl2.
+;		 <2>	 4/28/92	JSM		Move almost all resident code from ScriptMgrExtTail.a here.
+;									Slightly modified the LwrString routine by changing the name of
+;									the entry point to NewLwrString so we could keep the weird
+;									come-from patch back in ScriptMgrExtTail.a where it belongs.
+;									This file has no conditionals (yay!).
+;		 <1>	 4/28/92	JSM		first checked in
+;
+
+			blanks	on
+			string	asis
+		
+			LOAD	'StandardEqu.d'
+			include 'ScriptPriv.a'
+			include	'Packages.a'
+			include	'IntlUtilsPriv.a'
+			include	'GestaltEqu.a'
+
+; -----------------------------------------------------------------------	<1.4>
+; Gestalt function
+;
+
+			proc
+			import	StdUnlink
+			export	gestaltScriptMgr,gestaltSMgrTable
+			
+;____________________________________________________________
+; The following Gestalt Function is an interface between the Gestalt mechanism
+; and the Script Manager's GetEnvirons routine. Currently, it only supports two
+; Gestalt selectors: gestaltScriptMgrVersion and gestaltScriptCount.
+;
+; Routine	gestaltScriptMgr (
+;		    	gestaltSelector: 	OSType;		= PACKED ARRAY [1..4] OF CHAR;
+;			VAR gestaltResult:		Longint;
+;			):						OSErr;		= Integer;
+;
+; <08/05/89 pke>	New today
+;____________________________________________________________
+
+gestaltSMgrFrame record	{oldA6},decrement
+result			ds.w	1				; OSErr
+argSize			equ		*-8
+gestaltSelector	ds.l	1				; packed array [1..4] of char
+gestaltResult	ds.l	1				; addr of longint result
+return			ds.l	1
+oldA6			ds.l	1
+localFrame		equ	*
+				endR
+;____________________________________________________________
+
+gestaltScriptMgr
+
+			with	gestaltSMgrFrame
+			link	a6,#localFrame
+
+; initialize loop, set up default return values
+			move.l	gestaltSelector(a6),d0				; selector value
+			move.w	#gestaltUndefSelectorErr,result(a6) ; assume unknown selector	<12>
+			lea	gestaltSMgrTable,a1
+
+; loop to find Gestalt selector in table
+@gestaltLoop
+			move.l	(a1)+,d1			; get next table entry
+			beq.s	@gestaltDone		; end of list, quit
+			move.w	(a1)+,d2			; now get GetEnvirons verb
+			cmp.l	d0,d1				; is selector correct?
+			bne.s	@gestaltLoop		; no, get next one
+
+; ok, we found the Gestalt selector. Now call GetEnvirons with correct verb
+			clr.l	-(sp)				; space for result
+			move.w	d2,-(sp)			; push verb
+			_GetEnvirons
+			move.l	gestaltResult(a6),a0 ; addr for result
+			move.l	(sp)+,(a0)			; pop result into Gestalt
+			move.w	#noErr,result(a6)	; return no error
+; all done
+@gestaltDone
+				
+			move.w	#argSize, d0		; for StdUnlink
+			bra		StdUnlink			; standard exit
+			endWith
+		
+; Table for converting between gestalt selectors and GetEnvirons verbs. Each pair
+; consists of a long with the gestalt selector, followed by a word with the
+; GetEnvirons verb. This table and the equate files where the Gestalt selectors
+; are defined are the only things that need to change to add new Gestalt selectors
+; for the Script Manager.
+
+gestaltSMgrTable
+			dc.l	gestaltScriptMgrVersion
+			dc.w	smVersion
+			
+			dc.l	gestaltScriptCount
+			dc.w	smEnabled
+			
+			dc.l	0					; terminator
+
+			endproc
+
+			
+; ----------------------------------------------------------------------------	<45>
+; function:	PrintAction
+; input:	d0.l	Printer GrafPort.
+;			d1.w	Printer number.
+; warning:	This routine is register based.
+;
+; The script manager print action routine calls the print action routines
+; of each script that is currently installed.  These private print action
+; routines should preserve all of the registers.
+; ----------------------------------------------------------------------------
+
+		proc
+		export	PrintAction
+		
+; Save the registers and load a pointer to the list of script entries in the
+; script manager globals.  Load the script manager count so we will step
+; through all of the scripts.
+;
+; register usage:
+;	a4.l	Script Manager globals, script entry table.
+;	a3.l	Script Interface System entry pointer.
+;	d4.l	Count of script entries.
+
+PrintAction
+		with	smgrRecord,scriptRecord		;
+		movem.l	a0-a6/d0-d7,-(sp)			; save all registers.
+		GetSMgrCore a4						; load SMgr pointer.
+		lea		smgrEntry(a4),a4			; load entry table address.
+		move.w	#smgrCount,d4				; get the count.
+		bra.s	@2							; enter loop at bottom.
+
+; Check the next script system to see if it is installed.  If so, load call
+; the printer action routine.  A pointer to the routine is kept in the
+; script entry record.
+
+@1		move.l	(a4)+,d3					; entry pointer = nil?
+		beq.s	@2							; yes -> try the next script.
+		move.l	d3,a3						; load entry pointer.
+		tst.b	scriptEnabled(a3)			; script disabled?
+		beq.s	@2							; yes -> try the next script.
+		move.l	scriptPrint(a3),d3			; action pointer = nil?
+		beq.s	@2							; yes -> try the next script.
+		move.l	a3,a0						; pass ScriptRecord pointer to script	<45>
+		move.l	d3,a3						; load action pointer.
+		movem.l	a4/d0-d4,-(sp)				; save used registers.
+		jsr		(a3)						;  call the routine.
+		movem.l	(sp)+,a4/d0-d4				; restore used registers.
+@2		dbra	d4,@1						; try the next one.
+
+; Restore the registers and return to the caller.
+
+		movem.l	(sp)+,a0-a6/d0-d7			; restore all registers.
+		rts									; return to the caller.
+		endwith	;smgrRecord,scriptRecord
+		
+		endproc
+
+; ---------------------------------------------------------------------------- <8>
+; Function FindScriptRun (
+;				textPtr: Ptr;
+;				textLen: Longint;
+;				var	 lenUsed: Longint
+;			): Integer;
+;
+; Find a block of text. Very simple for Roman!
+; Modified to use itl2 tables for simple scripts (single-byte,non-Roman)
+; ----------------------------------------------------------------------------
+		proc
+		export	FindScriptRun
+		
+FScript			record	{oldA6},decr
+Result			ds.w	1	; result of the function
+ParamStart		equ		*
+TextPtr			ds.l	1	; Pointer 
+Length			ds.l	1	; length of the text
+LenUsedPtr		ds.l	1	; Length use
+scriptRecPtr	ds.l	1	; Scriptrecord ptr
+ParamEnd		equ		*
+Return 			ds.l	1	;
+oldA6			ds.l	1
+FScriptFrame	equ		*
+				endr
+
+FindScriptRun
+		WITH	ScriptRecord,FScript		;											<3>
+		link	a6,#FScriptFrame			; now link always							<3>
+		clr.w	Result(a6)					; initialize to script Roman, variant zero	<3>
+
+		move.l	Length(a6),d1				; check length								<3>
+		bpl.s	@goodLength					; if negative,								<3>
+		moveq	#0,d1						; fix it									<3>
+@goodLength
+		move.l	LenUsedPtr(a6),a0			; LenUsedPtr is the address					<3>
+		move.l	d1,(a0)						; initialize lenUsed to textLen				<3>
+
+		move.l	scriptRecPtr(a6),a0			; get script pointer						<3>
+		moveq	#0,d0						; for word-izing							<3>
+		move.b	scriptID(a0),d0				; what script are we really handling?		<3>
+		beq		@doneRoman					; if Roman, done, go unlink & return		<3>
+
+		move.b	d0,Result(a6)				; initialize to real script, variant 0		<3>
+		tst.l	d1							; any length?								<3>
+		beq		@doneRoman					; if not, bail now							<3>
+
+; Now use GetScriptItl																	<3>
+		subq	#4,sp						; make room for the itl handle.
+		move.w	#2,-(sp)					; push 'which' argument => itl2.
+		move.w	d0,-(sp)					; push ScriptCode
+		move.w	#-1,-(sp)					; push sysFlag as TRUE
+		_IUGetScriptItl						; get itl handle
+		move.l	(sp)+,d0					; pop handle (null if err)
+		beq.s	@doneRoman					; bail if none
+		
+		move.l	d0,a1						; get handle
+		move.l	(a1),a1						; get pointer
+		move.w	findScriptTableOffset(a1),d0 ; get offset to table
+		beq.s	@doneRoman					; bail if no table
+		tst.w	findScriptTableLen(a1)		; check table length
+		beq.s	@doneRoman					; bail if null
+		add.w	d0,a1						; make pointer to table
+		
+; Now we assume old format; new format would have been picked up by glue in			<4>
+; Script Mgr dispatcher.
+
+@oldFormat
+		move.l	a2,-(sp)					;											<3>
+		
+		move.l	Length(a6),d0				; text length to d0
+
+		move.l	a1,a2						; working table ptr in a1, saved in a2		<31++><3>
+		move.l	TextPtr(a6),a0				; text pointer to a0
+		move.b	(a0)+,d1					; get character
+		bra.s	@JmpIn1
+		
+; get initial script!
+@InitScriptLoop
+		addq	#1,a1
+@JmpIn1
+		cmp.b	(a1)+,d1
+		bhi.s	@InitScriptLoop				; not in this script range				<31>
+		move.b	(a1),d2						; save initial script of this text
+		move.b	d2,result(a6)				; and return it to caller in hi byte of word											;	sub 1 to zero base for the dbne below
+		
+; a2 = ptr to FindScriptTable
+; a0 = textPtr
+; d0.l = textLen
+; d2 = script of the first byte of the textPtr
+
+; now search for script run boundary
+@TextLoop
+		sub.l	#1,d0						; update textLen beyond processed char	<31+>
+		beq.s	@noMoreText					; 										<31+>
+		move.l	a2,a1						; reset ptr to FindScriptTable			<31++>
+		move.b	(a0)+,d1					; get character
+		bra.s	@JmpIn2
+@RangeLoop 
+		addq	#1,a1
+@JmpIn2
+		cmp.b	(a1)+,d1					; cmp to char range & incr to script #
+		bhi.s	@RangeLoop					; not in this script range				<31>
+
+; found range of character
+		cmp.b	(a1),d2						; are the scripts the same				<31+>
+		beq.s	@TextLoop					; yep, so branch (can't use dbne since d0 is long)	<31+>
+		
+@noMoreText
+; found a script boundary
+		move.l	LenUsedPtr(a6),a0			; LenUsedPtr is the address
+		sub.l	d0,(a0)						; contains initial length
+@done		
+		move.l	(sp)+,a2					;										<3>
+
+@doneRoman
+		unlk	a6
+		move.l	(sp)+,a1					; get return address
+		add.w	#ParamStart-ParamEnd,sp		; remove parameters from stack
+		jmp		(a1)						; return
+		
+		endwith	;ScriptRecord,FScript
+		endproc
+
+; ----------------------------------------------------------------------------		<18>
+; function:	ParseTable(tablePtr: Ptr): Boolean;
+; input:	(sp).l	Pointer to parse table.
+; output:	(sp).w	Table validity flag.
+; warning:	This routine follows pascal register conventions.
+;
+; ParseTable fills the given table with values for parsing characters in the
+; Roman script.
+; ----------------------------------------------------------------------------
+
+		proc					;													<18>
+		export	ParseTable		;													<18>
+		import	StdUnlink		;													<18>
+		
+ptRecord	record	{oldA6},decr
+result		ds.w	1			; validity flag.
+ptArgs		equ		*-8			; size of args. BUG FIX: Moved this AFTER result.	<18>
+table		ds.l	1			; parse table pointer.
+selector	ds.l	1			; selector
+return		ds.l	1			; return address.
+oldA6		ds.l	1			; old link address.
+ptLocals	equ		*			; size of local variables.
+			endr
+
+; Link the stack and set the result to true.  Since Roman characters are all
+; one byte long, all we have to do is clear the parse table.
+
+ParseTable
+		with	ptRecord
+		link	a6,#ptLocals			; set up stack frame.
+		move.w	#$0100,result(a6)		; set result to true.
+		move.l	table(a6),a0			; load table pointer.
+		move.w	#256-1,d0				; load table length - 1.
+@0		clr.b	(a0)+					; clear a byte in the table.
+		dbra	d0,@0					; do the next entry.
+
+; Unlink the stack and return to the caller.
+
+		move.w	#ptArgs,d0				; for std exit
+		bra		StdUnlink				; StdUnlink
+		endWith
+
+		endproc					;												<18>
+
+;------------------------------------------------------------------------	<14>
+;	FUNCTION InitScripts: OSErr;
+;------------------------------------------------------------------------
+;
+; InitScripts routine calls FixSMgrWorld and then handles new
+; initializations that must be done after script systems are installed
+; and enabled.
+;
+; These initializations set up the emItlSysCache sort cache (with entries		<15>
+; for each script in correct sorting order), and the emScriptMap and
+; emLangMap tables that map script (lang) to sorting position and default
+; lang (script).
+;
+; KillOldFixWorldVec is just an rts whose address we can stuff in the
+; old sVectFixSMgrWorld vector to render it inactive.
+;
+
+			proc
+			export	InitScripts, KillOldFixWorldVec
+			import	StdUnlink
+			
+disabCacheReq	equ -2						; disable cache request in CurFMInput	<26>
+
+isFrame			record	{a6link},decr
+result			ds.w	1						; OSErr result code.
+isArgs			equ		*-8						; size of arguments.
+selector		ds.l	1						; selector
+return			ds.l	1						; return address.
+a6link			ds.l	1						; old a6
+saveItlcSysFlag	ds.w	1						; save sysflags from itlc					<7>
+saveOldISOkeybd	ds.b	1						; Mac Plus ISO keybd flag					<7>
+disabAuxScripts	ds.b	1						; T to enable only system & Roman script	<7>
+isLocals		equ		*
+				endr
+
+isRegs			reg		d3-d7/a2-a4				; save all regs
+
+InitScripts
+			with	SMgrRecord,isFrame,ExpandMemRec		;
+			link	a6,#isLocals			; link the stack.
+			movem.l	isRegs,-(sp)			; save regs
+			
+; ----------------------------------------------------------------------------		<26>
+; The first batch of stuff is mostly a copy of the old FixSMgrWorld routine,
+; enhanced to (1) get the RegionCode from itlc, (2) copy and check the extended
+; itlb font and style info if present. It no longer detaches the itlc.
+; ----------------------------------------------------------------------------
+
+FixSMgrWorld
+
+		with	smgrRecord					;
+		GetSmgrCore a4						; get script manager core.
+
+; Install the keyboard swapping table from the system file.  If we get a nil
+; handle back, we store the nil value in the script manager globals anyway.
+; This effectively disables keyboard swapping.
+
+		sub.l	#4,sp						; make room for handle.
+		move.l	#'KSWP',-(sp)				; push KSWP type.
+		move.w	#0,-(sp)					; push KSWP id number.
+		_GetResource						; get the KSWP resource.
+		move.l	(sp)+,smgrKeySwap(a4)		; store handle in SMgr globals.
+
+; Load the configuration resource and set the system and
+; keyboard script numbers in the script manager globals.
+; Moved this after enabling all installed scripts.									<37>
+; Moved back here																	<7>
+
+; Currently we don't touch the following fields in SMgrRecord, which
+; are set from itlc only in ScriptMgrInit.a; should we reset them here?
+;	smgrFontForce	from itlcFontForce
+;	smgrIntlForce	from itlcIntlForce
+;	smgrGenFlags	from itlcFlags high byte
+
+		clr.w	saveItlcSysFlag(a6)			; set to 0 if we can't get 'itlc'		<7>
+		clr.b	saveOldISOkeybd(a6)			; set to 0 if we can't get 'itlc'		<7>
+
+		with	itlcRecord
+		sub.w	#4,sp						; make room for handle.
+		move.l	#'itlc',-(sp)				; push conf type.
+		move.w	#0,-(sp)					; push conf number.
+		_GetResource						; load the resource.
+		move.l	(sp)+,d0					; handle = nil?
+		beq.s	@doneItlc					; yes -> skip this.
+		move.l	d0,a0						; load conf handle.
+		move.l	(a0),a0						; load conf pointer.
+
+		move.w	itlcSystem(a0),d1			; load system code.
+		move.w	d1,smgrSysScript(a4)		; set system script.
+		move.w	d1,smgrKeyScript(a4)		; set key script.
+
+		move.w	itlcRegionCode(a0),d1		; get preferred region code.			<26>
+		move.w	d1,smgrRegionCode(a4)		; save in globals						<26>
+
+		move.w	itlcSysFlags(a0),saveItlcSysFlag(a6)	; save system flags			<7>
+		move.b	itlcOldKybd(a0),saveOldISOkeybd(a6)		; save Mac Plus ISO flag	<7>
+		
+		endWith	;itlcRecord
+@doneItlc
+
+; Check for Option-space to prevent enabling of scripts other than system			<7>
+; script & Roman
+; Masks for word at KeyMap+6:
+ClearCapsLock	equ	$FFFD				; and with this to ignore CapsLock			<7>
+NormalOptSpace	equ	$0204				; bits set for Opt & Space on reg kybd		<7>
+MacPlusISOOptSp	equ	$1004				; bits set for Opt & Space on Mac+ ISO		<7>
+
+		move.w	KeyMap+6,d0				; get state of modifiers, space, etc		<7>
+		and.w	#ClearCapsLock,d0		; ignore Caps Lock							<7>
+		move.w	#NormalOptSpace,d1		; setup desired bit state					<7>
+		cmp.b	#3,KbdType				; is it a 128K/512K-type mini keyboard?		<7>
+		bne.s	@doCompare				; if not, we're ready to check bits			<7>
+		tst.b	saveOldISOkeybd(a6)		; is it the ISO version?					<7>
+		beq.s	@doCompare				; if not, we're ready to check bits			<7>
+		move.w	#MacPlusISOOptSp,d1		; else desired bit state is different		<7>
+@doCompare								;											<7>
+		cmp.w	d1,d0					; Do we have Opt-Space & nothing else?		<7>
+		seq		disabAuxScripts(a6)		; if so, set disable flag					<7>
+
+
+; Fetch the script bundle for each installed script and copy the bundle
+; information into the script entry.  If we cannot find a bundle for a
+; script, it is disabled.  Notice that at least one bundle must be found
+; for an installed script in order for the script manager to be enabled.
+
+		with	ScriptRecord
+		sf		smgrEnabled(a4)				; clear the enabled counter.
+		move.w	#smgrCount-1,d3				; forall entries.
+@scriptLoop			
+		move.w	d3,d0						; copy index.
+		lsl.w	#2,d0						; long word offset.
+		move.l	smgrEntry(a4,d0.w),d0		; script installed?
+		beq		@nextScript					; no -> try next entry.
+		
+		move.l	d0,a3						; load script entry.
+		sf		scriptEnabled(a3)			; disable this entry.
+		
+; check for disabling key combo														<7>
+		tst.w	d3							; is it Roman?							<7>
+		beq.s	@dontDisable				; if so, don't disable					<7>
+		cmp.w	smgrSysScript(a4),d3		; is it system?							<7>
+		beq.s	@dontDisable				; if so, don't disable					<7>
+		tst.b	disabAuxScripts(a6)			; are we disabling others?				<7>
+		bne		@nextScript					; if so, we're outta here				<7>	
+@dontDisable
+
+		sub.l	#4,sp						; make room for handle.
+		move.l	#'itlb',-(sp)				; push bundle type.
+		move.w	d3,-(sp)					; push bundle number.
+		_GetResource						; load the resource.
+		move.l	(sp)+,d0					; handle = nil?
+		beq		@nextScript					; yes -> try next entry.
+		
+		with	ItlbRecord
+		move.l	d0,a2						; load bundle handle.
+		move.l	(a2),a0						; load bundle pointer.
+		lea		scriptBundle(a3),a1			; load script pointer.
+		move.l	#itlbSize,d0				; load size of bundle.
+		_BlockMove							; copy bundle into script.
+		endwith	;ItlbRecord
+		
+		move.b	d3,scriptID(a3)				; put script code in ScriptRecord		<52>
+
+		; Now see if we have an extended bundle, and if so, copy font info			<26>
+		
+		with	ItlbExtRecord
+		subq	#4,sp						; space for SizeRsrc result
+		move.l	a2,-(sp)					; push 'itlb' handle
+		_SizeRsrc
+		cmp.l	#itlbExtSize,(sp)+			; is itlb size big enough
+		blt		@doneExtItlb				; skip if too small or res err
+		move.l	(a2),a0						; get itlb pointer
+		move.l	itlbMonoFond(a0),scriptMonoFondSize(a3)		; set the mono font.
+		move.l	itlbPrefFond(a0),scriptPrefFondSize(a3)		; set the font.
+		move.l	itlbSmallFond(a0),scriptSmallFondSize(a3)	; set the font.
+		move.l	itlbSysFond(a0),scriptSysFondSize(a3)		; set the font.
+		move.l	itlbAppFond(a0),scriptAppFondSize(a3)		; set the font.
+		move.l	itlbHelpFond(a0),scriptHelpFondSize(a3)		; set the font.
+		move.b	itlbValidStyles(a0),scriptValidStyles(a3)	; set valid styles
+		move.b	itlbAliasStyle(a0),scriptAliasStyle(a3)		; set alias style
+		endwith	;ItlbExtRecord
+
+		; Done with bundle, now do some checking.									<26>
+		; First, if this is Roman, do some funky testing for sys fond ID.
+		; If Chicago $3FFF is present, it becomes the Roman sys font.
+		; If not, try the itlb value. If this also isn't present, assume
+		; 0 is the Roman sys FOND ID.
+		
+		clr.b	ResLoad						; don't bother loading fonts (move here)	<5>
+		tst.w	d3							; is this Roman?
+		bne.s	@nonRoman					; if not, different check					<5>
+
+		move.w	#RomanSysFond,d4			; assume fond $3FFF exists
+		bsr.s	@returnIfNotFound			; set if found, return if not				<5>
+
+		move.w	scriptSysFondSize(a3),d4	; try itlb value							<5>
+		bsr.s	@returnIfNotFound			; set if found, return if not				<5>
+
+		clr.w	d4							; otherwise, reset to 0
+		bra.s	@setSysFondId				;											<5>
+
+@nonRoman
+		; check that itlb system font ID is there										<5>
+		move.w	scriptSysFondSize(a3),d4	; try itlb value
+		bsr.s	@returnIfNotFound			; set if found, return if not
+
+		; if not, try itlb app font ID													<5>
+		move.w	scriptAppFondSize(a3),d4	; try itlb value
+		bsr.s	@returnIfNotFound			; set if found, return if not
+
+		; specified font not there; use first font in range								<5>
+		subq	#4,sp						; space for result
+		move.w	d3,-(sp)					; push ScriptCode (explicit code works at this point in boot)
+		_ScriptToRange						; map it
+		move.l	(sp)+,d4					; min in high word, max in low
+		move.w	d4,d5
+		swap	d4							; min in d4.w, max in d5.w
+@fontLoop
+		bsr.s	@returnIfNotFound			; set if found, return if not
+		addq.w	#1,d4
+		cmp.w	d5,d4						; past end of range?
+		ble.s	@fontLoop					; if not, check next
+		bra.s	@nextScript					; else no fonts found, don't enable
+
+; this routine expects FOND ID in d4. If found, it pops return addr and					<5>
+; falls through to set system font to the value in d4. Otherwise, it
+; returns to the caller.
+@returnIfNotFound
+		subq	#4,sp						; space for return value
+		move.l	#'FOND',-(sp)				; push type
+		move.w	d4,-(sp)					; push next id in range
+		MOVE.W	#MapTrue,RomMapInsert	; look in ROM first								<SM7> rb
+		_GetResource
+		tst.l	(sp)+						; was it there?
+		bne.s	@popRetnAndSetSysFondId		; if yes, go reset
+		rts
+@popRetnAndSetSysFondId
+		addq	#4,sp						; discard return addr
+
+@setSysFondId								;										<5>
+		move.w	d4,scriptSysFondSize(a3)	; reset the system font.				<5>
+
+
+		; now check non-sys fonts and copy font IDs to old fields					<26>
+
+		move.w	scriptSysFondSize(a3),scriptSysFond(a3)		; copy sys fond to old field
+		lea		scriptAppFondSize(a3),a0
+		bsr		FixFond										; resets to sys fond if bad
+		move.w	scriptAppFondSize(a3),scriptAppFond(a3)		; copy app fond to old field
+		lea		scriptMonoFondSize(a3),a0					; top word is fond id
+		bsr		FixFond										; resets to sys fond if bad
+		lea		scriptPrefFondSize(a3),a0					; top word is fond id
+		bsr		FixFond										; resets to sys fond if bad
+		lea		scriptSmallFondSize(a3),a0					; top word is fond id
+		bsr		FixFond										; resets to sys fond if bad
+		lea		scriptHelpFondSize(a3),a0					; top word is fond id
+		bsr		FixFond										; resets to sys fond if bad
+
+@doneExtItlb
+		
+		st		scriptEnabled(a3)			; enable this entry.
+		add.b	#1,smgrEnabled(a4)			; enable the script manager.
+
+; moved scriptRedraw check down after call to ScriptAvail							<9>
+
+@nextScript
+		move.b	#1,ResLoad					; reset ResLoad (move here)				<5>
+		dbra	d3,@scriptLoop				; do the next entry.
+		endWith	;ScriptRecord
+
+; (Load the configuration resource and set the system and
+; keyboard script numbers in the script manager globals.)
+; Moved this here from above, so we can make decisions based on						<37>
+; enabled scripts.																	<37>
+; Moved back above to get keyboard flag earlier, but keep decisions					<7>
+; here.
+;
+
+		moveq	#0,d0						; assume L->R						<37>
+		tst.w	saveItlcSysFlag(a6)			; check system flags				<37><7>
+		bpl.s	@doneSysFlags				; if config is L->R, don't change	<37>
+		cmpi.w	#1,smgrEnabled(a4)			; how many scripts?					<37>
+		ble.s	@doneSysFlags				; if Roman only, don't change		<37>
+		moveq	#-1,d0						; else R->L							<37>
+@doneSysFlags								;									<37>
+		move.w	d0,TESysJust				; set direction						<37>
+		
+; If the current system script is not installed, or is installed but not
+; enabled, default the system and key scripts to Roman.
+
+		with	scriptRecord
+		move.w	smgrSysScript(a4),d3		; load system script code.
+		move.w	d3,d0						; copy system script code.
+		lsl.w	#2,d0						; code is long word index.
+		move.l	smgrEntry(a4,d0.w),d0		; system script installed?
+		beq.s	@useRoman					; no -> use Roman.
+		move.l	d0,a3						; load system script entry.
+		tst.b	scriptEnabled(a3)			; system script enabled?
+		bne.s	@doneCheckSysScript			; yes -> keep system script.
+@useRoman
+		move.l	#smRoman,d3					; script is Roman.
+		move.l	smgrEntry(a4),a3			; load Roman script entry.
+		move.w	d3,smgrSysScript(a4)		; reset system script.
+		move.w	d3,smgrKeyScript(a4)		; reset keyboard script.
+		endWith	;scriptRecord
+@doneCheckSysScript
+
+; Set the system font according to the system script.  If the application
+; font is not in the system script's range, then reset it as well.
+; Note that we expect the system script code in d3 and its entry in a3.
+; Also, we have SMgrRecord pointer in a4.
+
+		with	scriptRecord
+
+; Now we just set it						;								<41>
+
+		move.w	scriptSysFond(a3),d0		; get desired system font.		<41>
+		cmp.w	SysFontFam,d0				; already set up?				<41>
+		beq.s	@SkipSFontSet				; yes -> skip resetting.		<41>
+		move.w	d0,SysFontFam				; set desired system font.		<41>
+		move.w	#disabCacheReq,CurFMInput	; disable cache request			<41>
+@SkipSFontSet
+
+		move.w	scriptAppFond(a3),d0		; get desired application font.	<41>
+		cmp.w	ApFontID,d0					; already set up?				<41>
+		beq.s	@SkipAFontSet				; yes -> skip resetting.		<41>
+		move.w	d0,ApFontID					; set desired application font.	<41>
+		move.w	#disabCacheReq,CurFMInput	; disable cache request			<41>
+@SkipAFontSet
+		
+; Load the keyboard character table for the new system script.  If this fails,
+; we are left with the current KCHR resource in the cache.
+
+		move.w	smgrKeyScript(a4),-(sp)		; push current keyboard script.	<16jun87 jdt>
+		_KeyScript							; load appropriate KCHR.		<16jun87 jdt>
+
+; Save the new boot driver number.  This prevents us from executing all of
+; the above code during a vanilla-launch.
+
+		move.w	BootDrive,smgrSysRef(a4)	; save vRefNum in globals.
+
+		endWith	; ScriptRecord
+		endWith ; SMgrRecord				;								<x3.1>
+
+EndFixSMgrWorld
+; ----------------------------------------------------------------------------
+
+
+; Set up regs we'll need
+			move.l	IntlSpec,a3				; SMgrRecord ptr
+			move.l	ExpandMem,a4			; ExpandMemRec ptr
+
+; Initialize ItlSysCache
+			with	NewItlCacheRec
+			moveq	#0,d0					; for wordizing smgrEnabled
+			move.b	smgrEnabled(a3),d0		; how many scripts installed?
+			move.w	d0,d3					; save copy
+			mulu.w	#newItlCacheRecSize,d0	; one record per script
+			addq.l	#2,d0					; space for record count
+			_NewPtr	sys,clear				; make a0 point to new space
+			bne		@doneInitScripts		; bail if error (errcode in d0)
+			move.l	a0,emItlSysCachePtr(a4)	; save pointer
+			move.w	d3,(a0)+				; put in record count
+			move.l	a0,a2					; save for later use
+			endwith	;NewItlCacheRec
+			
+; Get 'itlm' resource
+			subq	#4,sp					; space for returned handle
+			move.l	#'itlm',-(sp)			; resource type
+			clr.w	-(sp)					; resource ID
+			_GetResource
+			move.l	(sp)+,d7				; check handle, save in d7
+			beq		@resError				; special handling for rmgr errs
+			move.l	d7,a0					; copy handle
+			move.l	(a0),d6					; dereference, save in d6
+			_HLock							; "can't have error here"
+
+; Next, put script codes in emItlSysCache in proper sort order
+			with	ItlmHeaderRec,ScriptRecord,NewItlCacheRec
+			move.l	d6,a1					; copy pointer
+			add.l	scriptDataOffset(a1),a1	; point to scriptData table
+			addq	#4,a1					; skip to num entries
+			move.w	(a1)+,d3				; get num entries in 'itlm' table
+											; have emItlSysCachePtr in a2 from above
+			move.w	smgrSysScript(a3),d2	; get system script
+			move.w	d2,(a2)					; system script always comes first
+			lsl.w	#2,d2					; make it a long offset
+			move.l	smgrEntry(a3,d2.w),a0	; get scriptRecord ptr for sys script
+			st		scriptInItlm(a0)		; remember that script has 'itlm' entry
+			bra.s	@nextEntry				; test for d3=0, decrement it for dbra 
+@sysCacheLoop
+			move.w	(a1)+,d2				; get next script code in 'itlm'
+			addq	#2,a1					; skip default lang value
+			cmp.w	smgrSysScript(a3),d2	; is it system script?
+			beq.s	@nextEntry				; if so, we handled it above
+			move.w	d2,d1					; copy for shift
+			lsl.w	#2,d1					; make a long offset
+			move.l	smgrEntry(a3,d1.w),d0	; get scriptRecord ptr
+			beq.s	@nextEntry				; if none, script not installed
+			move.l	d0,a0
+			tst.b	scriptEnabled(a0)		; is script enabled?
+			beq.s	@nextEntry				; if not, really give up.
+			st		scriptInItlm(a0)		; remember that script has 'itlm' entry
+			add.w	#newItlCacheRecSize,a2	; now go to next emItlSysCache entry
+			move.w	d2,(a2)					; put script code in emItlSysCache entry
+@nextEntry
+			dbra	d3,@sysCacheLoop
+
+; Now, go through installed & enabled scripts and add any that were not in 'itlm'.
+			move.w	#smgrCount-1,d3			; for all possible scripts…
+			moveq	#0,d2					; current script
+			move.w	#0,d4					; keep track of max script code for…
+											; …inst. & enab. scripts
+			lea		smgrEntry(a3),a1		; pointer to current entry in SMgrRecord
+@scriptLoop
+			move.l	(a1)+,d0				; get scriptRecord ptr
+			beq.s	@nextScript				; if none, script not installed
+			move.l	d0,a0
+			tst.b	scriptEnabled(a0)		; is script enabled?
+			beq.s	@nextScript				; if not, really give up.
+			move.w	d2,d4					; keep max inst & enab script code so far
+			tst.b	scriptInItlm(a0)		; have we already put this in emItlSysCache?
+			bne.s	@nextScript				; skip if so
+			add.w	#newItlCacheRecSize,a2	; otherwise go to next emItlSysCache entry
+			move.w	d2,(a2)					; put script code in emItlSysCache entry
+@nextScript
+			addq.w	#1,d2					; next script
+			dbra	d3,@scriptLoop
+			endwith	;ItlmHeaderRec,ScriptRecord,NewItlCacheRec
+
+; Now emItlSysCache is set up, and d4 has max script code for an installed & enabled
+; script.
+
+; Next, allocate space for scriptData and fill it header entries
+			with	ItlmHeaderRec,NewItlCacheRec
+			move.l	d6,a1					; copy pointer
+			add.l	scriptDataOffset(a1),a1	; point to scriptData table
+			move.w	(a1)+,d5				; get max script for table
+			cmp.w	d4,d5					; is it big enough?
+			bge.s	@bigEnough				; if so, ok so far
+			move.w	d4,d5					; if not, make it big enough
+@bigEnough
+			lea		emScriptMapPtr(a4),a2	; say where to save ptr
+
+; Allocate map table, put pointer in ExpandMem, copy header from itlm,
+; advance pointer, set some registers with values from header, and fill in
+; default values.
+;
+; Scripts with real entries will replace the default values. Scripts that
+; are not installed and enabled are sorted after everything else in order
+; of script number, by adding a base value to their script code. They get
+; the default lang code.
+
+			bsr		SetHdrAndDefaults
+			bne		@unlockThenDone			; bail if can't allocate space
+
+; Now fill in sort positions obtained from sort order in emItlSysCache
+			moveq	#0,d2					; sort position count
+			move.l	emItlSysCachePtr(a4),a0	; get emItlSysCache ptr
+			move.w	(a0)+,d3				; get count of enab scripts
+			bra.s	@nextSort
+@sortLoop
+			move.w	(a0),d1					; get next script code, in order
+			lsl.w	#2,d1					; make a long offset
+			move.w	d2,0(a2,d1.w)			; set data in table
+			addq.w	#1,d2					; next sort position
+			add.w	#newItlCacheRecSize,a0	; now go to next emItlSysCache entry
+@nextSort
+			dbra	d3,@sortLoop
+			
+; And fill in lang codes obtained from 'itlm'.
+			bra.s	@nextScriptLang
+@scriptLangLoop
+			move.w	(a1)+,d1				; get script code
+			move.w	(a1)+,d2				; get lang code
+			cmp.w	d5,d1					; too big?
+			bgt.s	@nextScriptLang			; skip if so
+			lsl.w	#2,d1					; make a long offset
+			move.w	d2,2(a2,d1.w)			; stuff lang code
+@nextScriptLang
+			dbra	d4,@scriptLangLoop
+			endwith	;ItlmHeaderRec,NewItlCacheRec
+
+; Almost done: allocate space for langData and fill in header info.
+			with	ItlmHeaderRec
+			move.l	d6,a1					; copy pointer
+			add.l	langDataOffset(a1),a1	; point to langData table
+			move.w	(a1)+,d5				; get max lang for table
+			lea		emLangMapPtr(a4),a2		; say where to save ptr
+
+; Allocate map table, put pointer in ExpandMem, copy header from itlm,
+; advance pointer, set some registers with values from header, and fill in
+; default values.
+;
+; Langs with real entries will replace the default values. Langs that
+; are not in 'itlm' are sorted after everything else in order of lang
+; code, by adding a base value to their lang code. They get the default
+; script code.
+
+			bsr		SetHdrAndDefaults
+			bne		@unlockThenDone			; bail if can't allocate space
+
+; Now just fill in sort positions obtained from 'itlm'. This is much
+; simpler than what we did with script codes.
+
+			moveq	#0,d3					; sort position
+			bra.s	@nextLang
+@langLoop
+			move.l	(a1)+,d2				; get lang code & script
+			swap	d2						; get lang code
+			cmp.w	d5,d2					; too big?
+			bgt.s	@nextLang				; skip if so
+			move.w	d2,d1
+			lsl.w	#2,d1					; make a long offset
+			move.w	d3,d2					; stuff sort position
+			swap	d2						; put everything in its place
+			move.l	d2,(a2,d1.w)			; stuff lang code
+			addq.w	#1,d3					; update sort position count
+@nextLang
+			dbra	d4,@langLoop
+			endwith	;ItlmHeaderRec
+
+; Now go through all installed & enabled scripts, loading the 'itl2' and		<26>
+; 'itl4' resource IDs & handles into the system itl cache, and calling the
+; script’s scriptAvail vector if non-zero.
+; At this point, a4 still points to ExpandMemRec, a3 points to SMgrRecord.
+
+			with	ScriptRecord
+			move.l	emItlSysCachePtr(a4),a4	; get emItlSysCache ptr
+			move.w	(a4)+,d7				; number of enabled scripts
+			bra.s	@nextCopy				; dbra, so decrement d7
+@copyLoop
+			move.w	(a4)+,d6				; get script code
+			move.w	d6,d0					; copy it
+			lsl.w	#2,d0					; make it a long offset
+			move.l	smgrEntry(a3,d0.w),a2	; and get scriptRecord ptr
+											; we already know script is enabled
+;;			sub		#8,sp					; space for 2 GetResource results		<55>
+
+			with	ItlbRecord
+			move.w	scriptBundle.itlbSort(a2),d0	; get itl2 ID
+			move.w	d0,(a4)+						; save ID in cache
+;;			move.l	#'itl2',-(sp)			; push type								<55>
+;;			move.w	d0,-(sp)				; push ID								<55>
+;;			_GetResource					;										<55>
+;;			move.l	(sp)+,(a4)+				; save handle in cache (even if 0)		<55>
+			clr.l	(a4)+					; don't save a handle					<55>
+
+			move.w	scriptBundle.itlbToken(a2),d0	; get itl4 ID
+			move.w	d0,(a4)+						; save ID in cache
+;;			move.l	#'itl4',-(sp)			; push type								<55>
+;;			move.w	d0,-(sp)				; push ID								<55>
+;;			_GetResource					;										<55>
+;;			move.l	(sp)+,(a4)+				; save handle in cache (even if 0)		<55>
+			clr.l	(a4)+					; don't save a handle					<55>
+			endwith	;ItlbRecord
+
+			; now call ScriptAvail
+			
+			move.l	scriptAvail(a2),d0		; check script's Avail vector
+			beq.s	@checkRedraw			; if none, finish up this script		<9>
+			move.l	d0,a0					; otherwise…
+			move.w	d6,-(sp)				; …push script code…
+			jsr		(a0)					; …and call script’s Avail routine
+
+; Set smgrBidirect and smgrDoubleByte if appropriate (moved here from above)		<37><9>
+@checkRedraw								;											<9>
+			tst.b	scriptRedraw(a2)		; what kind of script is it?			<37><9>*
+			beq.s	@doneCheckRedraw		; if redraw char, L->R 1-byte, done		<37><9>
+			bpl.s	@setDouble				; if redraw word, 2-byte				<37><9>
+			st		smgrBidirect(a3)		; else redraw line, bidi sys			<37><9>*
+			bra.s	@doneCheckRedraw		;										<37><9>
+@setDouble									;										<37><9>
+			st		smgrDoubleByte(a3)		;										<37><9>*
+@doneCheckRedraw							;										<37><9>
+
+@nextCopy
+			dbra	d7,@copyLoop			; loop for all enabled scripts
+			endwith	;ScriptRecord
+
+; If we got to here, no errors
+			moveq	#0,d0					; return noErr
+
+; Set result and return
+@doneInitScripts
+			move.w	d0,result(a6)			; return error code or noErr
+			movem.l	(sp)+,isRegs			; restore regs
+			move.w	#isArgs,d0				; for StdUnlink
+			bra		StdUnlink				; standard exit
+
+@resError
+			move.w	ResErr,d0				; get current resource err code
+			bne.s	@doneInitScripts
+			move.w	#resNotFound,d0			; some errs leave ResErr as 0
+			bra.s	@doneInitScripts
+@unlockThenDone
+			move.w	d0,d6					; save errcode across HUnlock
+			move.l	d7,a0					; get handle
+			_HUnlock
+			move.w	d6,d0					; restore errcode
+			bra.s	@doneInitScripts
+			endwith	;SMgrRecord,isFrame,ExpandMemRec
+
+;--------
+; This utility routine allocates a block of memory for scriptMap or langMap,
+; copies header information from the 'itlm' resource, fills in the table with
+; default values, and sets up various registers.
+;
+; At entry:
+;	d5		max script or lang value for map table. WILL NOT BE CHANGED.
+;	a2		pointer to ExpandMemRec field for map table ptr. WILL BE REPLACED.
+;	a1		pointer to beginning of scriptData or langData table in 'itlm'.
+;			WILL BE ADVANCED PAST HEADER.
+;
+; At exit:
+;	d0		OSErr
+;	a1		pointer to scriptData or langdata data (past header).
+;	a2		pointer to map table data (past header, which has been filled in).
+;	d4		num entries in 'itlm' table
+;
+; Besides the above, uses: a0,d3,d2,d1
+;--------
+
+SetHdrAndDefaults
+			move.w	d5,d0
+			addq.w	#2,d0					; add script 0 and header entry
+			lsl.w	#2,d0					; get size (one long per entry)
+			_NewPtr	sys,clear				; OS trap, saves a1,d1-d2
+			bne.s	@exit					; bail if error (errcode in d0)
+			move.l	a0,(a2)					; save ptr
+			move.w	(a1)+,d3				; get default lang/script code
+			move.w	(a1)+,d4				; get num entries in 'itlm' table
+			move.w	d5,(a0)+
+			move.w	d3,(a0)+
+			move.l	a0,a2					; save pointer to data to fill in
+
+; Fill in default values for everything.
+			move.w	d5,d2
+			clr.w	d0						; current script/lang code
+			move.w	#$1000,d1				; base sort pos for bad scripts/langs
+@initLoop
+			move.b	d0,d1					; make base + script/lang
+			move.w	d1,(a0)+				; and put it in table
+			move.w	d3,(a0)+				; put in default lang/script code
+			addq.w	#1,d0					; next script/lang code
+			dbra	d2,@initLoop
+
+			moveq	#0,d0					; no error
+@exit
+			rts
+
+; -----------------------------------------------------------------------------
+;	Utility routine to check for FOND & reset if bad
+;	Input	(a0):	fond id 
+;			a3:		ptr to script globals	<47>
+;
+;	Don't manipulate ResLoad here, now done at higher level						<5>
+; -----------------------------------------------------------------------------
+FixFond
+			with	ScriptRecord
+			movem.l	a2,-(sp)					; don't trash a2 <47>
+			move.l	a0,a2						; remember pointer to fond id in a2 <47>
+			subq	#4,sp						; return room
+			move.l	#'FOND',-(sp)				; see if this FOND exists
+			move.w	(a2),-(sp)					; id, get the id from a2 pointer <47>
+			MOVE.W	#MapTrue,RomMapInsert		; look in ROM first						<SM7> rb
+			_GetResource
+			tst.l	(sp)+						; was it there?
+			bne.s	@fixFondDone				; yes, ok
+			move.w	scriptSysFond(a3),(a2)		; reset to system fond, changed to used a3 as pointer to script globals <47>
+@fixFondDone
+			movem.l (sp)+,a2					; restore a2
+			rts
+			endwith
+
+; -----------------------------------------------------------------------------
+; Convenient rts; this address will be stuffed in obsolete vectors
+
+KillOldFixWorldVec
+			rts
+
+			endproc
+
+;------------------------------------------------------------------------	<32>
+;	FUNCTION ReInitScripts: OSErr;
+;------------------------------------------------------------------------
+;
+; ReInitScripts frees all of the structures set up by InitScripts, then
+; redoes the parts of installation that must be performed with a new
+; system file: setting fields from itlc, setting up a KCHR, and then
+; calling InitScripts again.
+;
+
+			proc
+			export	ReInitScripts
+			import	StdUnlink
+			
+risFrame	record	{a6link},decr
+result		ds.w	1						; OSErr result code.
+risArgs		equ		*-8						; size of arguments.
+selector	ds.l	1						; selector
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6
+risLocals	equ		*
+			endr
+
+risRegs		reg		d3-d7/a2-a4				; save all regs
+
+ReInitScripts
+			with	risFrame,ExpandMemRec
+			link	a6,#risLocals			; link the stack.
+			movem.l	risRegs,-(sp)			; save regs
+
+; dispose of caches whose size depended on resources in old system file
+
+			move.l	ExpandMem,a1			; ExpandMemRec ptr
+			moveq	#0,d1
+
+			move.l	emItlSysCachePtr(a1),a0
+			_DisposPtr
+			move.l	d1,emItlSysCachePtr(a1)
+			
+			move.l	emScriptMapPtr(a1),a0
+			_DisposPtr
+			move.l	d1,emScriptMapPtr(a1)
+
+			move.l	emLangMapPtr(a1),a0
+			_DisposPtr
+			move.l	d1,emLangMapPtr(a1)
+
+; Call _InitScripts and get any errors from it
+
+			subq	#2,sp					; make room for OSErr result
+			_InitScripts					;
+			move.w	(sp)+,d0				; get result in d0
+
+; Set result and return
+@doneReInitScripts
+			move.w	d0,result(a6)			; return error code or noErr
+			movem.l	(sp)+,risRegs			; restore regs
+			move.w	#risArgs,d0				; for StdUnlink
+			bra		StdUnlink				; standard exit
+			endwith	;risFrame,ExpandMemRec
+
+			endproc
+
+;------------------------------------------------------------------------	<16>
+;	FUNCTION AddScriptFonts: OSErr;
+;------------------------------------------------------------------------
+;
+; AddScriptFonts loops through all enabled script systems, checks the
+; script's AddFonts vector, and calls the routine at that vector (if
+; non-zero) to load additional fonts over the network (or do other
+; post-initialization).
+;
+
+			proc
+			export	AddScriptFonts
+			import	StdUnlink
+			
+asfFrame	record	{a6link},decr
+result		ds.w	1						; OSErr result code.
+asfArgs		equ		*-8						; size of arguments.
+selector	ds.l	1						; selector
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6
+asfLocals	equ		*
+			endr
+
+asRegs		reg		a2-a3/d3				; regs to save
+
+AddScriptFonts
+			with	asfFrame,ExpandMemRec,NewItlCacheRec,SMgrRecord,ScriptRecord
+			link	a6,#asfLocals			; link the stack.
+			movem.l	asRegs,-(sp)			; save regs
+			
+			move.l	IntlSpec,a3				; GetSMgrRecord pointer
+			move.l	ExpandMem,a2			; get ExpandMemRec ptr
+			move.l	emItlSysCachePtr(a2),a2	; get sys itl cache ptr
+			move.w	(a2)+,d3				; get count of enabled scripts
+			bra.s	@nextAddFont			; enter loop at end
+@addFontLoop
+			move.w	(a2)+,d1				; get next script code
+			add		#newItlCacheRecSize-2,a2 ; advance to next cache entry
+			move.w	d1,d0					; copy script code
+			lsl.w	#2,d0					; make a long offset
+			move.l	smgrEntry(a3,d0.w),a0	; get ScriptRecord ptr, know it's enabled
+			move.l	scriptAddFonts(a0),d0	; check script's AddFonts vector
+			beq.s	@nextAddFont			; if none, skip to next script
+			move.l	d0,a0					; otherwise…
+			move.w	d1,-(sp)				; …push script code…
+			jsr		(a0)					; …and call script’s AddFonts routine
+@nextAddFont
+			dbra	d3,@addFontLoop
+
+			move.w	#noErr,result(a6)		; return noErr
+			movem.l	(sp)+,asRegs			; restore regs
+			move.w	#asfArgs,d0				; for StdUnlink
+			bra		StdUnlink				; standard exit
+			endwith	;asfFrame,ExpandMemRec,NewItlCacheRec,SMgrRecord,ScriptRecord
+
+			endproc
+
+;------------------------------------------------------------------------	<27>
+;	FUNCTION InitScriptApp: OSErr;
+;------------------------------------------------------------------------
+;
+; InitScriptApp initializes the application-specific Script Mgr globals,
+; which are allocated in the app heap.
+; So far, these just contain the application itl2/4 cache and some reserved
+; fields. The code to initialize the cache was moved from InternationalPACK.a.
+;
+
+			proc
+			export	InitScriptApp
+			import	StdUnlink
+			
+isaFrame	record	{a6link},decr
+result		ds.w	1						; OSErr result code.
+isaArgs		equ		*-8						; size of arguments.
+selector	ds.l	1						; selector
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6
+isaLocals	equ		*
+			endr
+
+isaRegs		reg		a2						; regs to save
+
+InitScriptApp
+			with	isaFrame,ExpandMemRec,SMgrAppRecord
+			link	a6,#isaLocals				; link the stack.
+			movem.l	isaRegs,-(sp)				; save regs
+			
+; Create app-specific script globals, initialize itl cache part from
+; sys itl cache. This code mostly moved from International PACK.a.
+
+			move.l	ExpandMem,a2
+			move.l	emItlSysCachePtr(a2),a0		; get pointer to sys itl cache
+			_GetPtrSize
+			tst.l	d0							; error?
+			bmi.s	@isaExit					; if so, no app script globals
+			move.l	d0,d2						; save length
+			add.l	#smgrAppRsvdSize,d0			; add space for other global fields
+			_NewHandle ,CLEAR					; make global space in app heap		<28>
+			bmi.s	@isaExit					; if error, no app script globals
+			move.l	a0,a1						; save new handle in a1…
+			move.l	a1,emScriptAppGlobals(a2)	; …and in ExpandMemRec field
+			_HNoPurge							; and make it non-purgeable
+			move.l	emItlSysCachePtr(a2),a0		; get pointer to sys itl cache
+			move.l	(a1),a1						; get pointer to new globals
+			lea		smgrAppCacheCount(a1),a1	; point to base of cache area
+			move.l	d2,d0						; get length of cache part
+			_BlockMove							; copy sys cache to app cache
+												; what to do about errors here?
+@isaExit
+			move.w	#noErr,result(a6)			; return noErr
+			movem.l	(sp)+,isaRegs				; restore regs
+			move.w	#isaArgs,d0					; for StdUnlink
+			bra		StdUnlink					; standard exit
+			endwith	;isaFrame,ExpandMemRec,SMgrAppRecord
+
+			endproc
+
+;------------------------------------------------------------------------	<27>
+;	FUNCTION CleanupScriptApp: OSErr;
+;------------------------------------------------------------------------
+;
+; CleanupScriptApp cleans up the application-specific Script Mgr globals.
+;
+
+			proc
+			export	CleanupScriptApp
+			import	StdUnlink
+			
+csaFrame	record	{a6link},decr
+result		ds.w	1						; OSErr result code.
+csaArgs		equ		*-8						; size of arguments.
+selector	ds.l	1						; selector
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6
+csaLocals	equ		*
+			endr
+
+;csaRegs	reg		a2-a3/d3				; regs to save
+
+CleanupScriptApp
+			with	csaFrame,ExpandMemRec
+			link	a6,#csaLocals			; link the stack.
+;			movem.l	csaRegs,-(sp)			; save regs
+			
+; If app script globals exist, dispose of them
+			move.l	ExpandMem,a0				; get ptr to ExpandMemRec
+			move.l	emScriptAppGlobals(a0),a0	; get handle to app’s script globals
+			move.l	a0,d0						; is it 0 (couldn’t allocate)?
+			beq.s	@csaExit					; if so, nothing to do
+			addq.l	#1,d0						; is it -1 (Process Mgr didn’t set field)?
+			beq.s	@csaExit					; if so, nothing to do
+			_DisposHandle
+			move.l	ExpandMem,a0			; get ptr to ExpandMemRec				<29>
+			clr.l	emScriptAppGlobals(a0)	; clear out so we don't try to use it	<29>
+
+@csaExit
+			move.w	#noErr,result(a6)		; return noErr
+;			movem.l	(sp)+,csaRegs			; restore regs
+			move.w	#csaArgs,d0				; for StdUnlink
+			bra		StdUnlink				; standard exit
+			endwith	;csaFrame,ExpandMemRec
+
+			endproc
+
+;-------------------------------------------------------------------------------	<24>
+; FUNCTION IsCmdChar(keyEvent: EventRecord; testChar: CHAR): BOOLEAN;
+;
+; This function tests if Command is being pressed in conjunction with another
+; key (or keys) that could generate testChar for some combination of Command up
+; or down and Shift up or down. This accomodates European keyboards that may
+; have testChar as a Shifted character, and non-Roman keyboards that will ONLY
+; generate testChar if Command is down. It is most useful for testing for
+; Command-period.
+;
+; The caller passes in the event record, which is assumed by the function to be
+; an event record for a key-down or auto-key event with the Command key down.
+; The caller also passes in the character to be tested for (e.g. '.'). The
+; function returns TRUE if the test char is produced with the current modifier
+; keys, or if it would be produced by changing the current modifier key bits in
+; the following ways:
+;	1. turning the Command bit off
+;	2. toggling the Shift bit
+;	3. both of the above
+;-------------------------------------------------------------------------------
+
+			proc
+			export	IsCmdChar
+			export	DoKeyTrans	;														<37>
+			
+keyUpMask		equ	$80			; or mask to set key up bit in keycode
+cmdOffMask		equ $FEFF		; and mask to clear CmdKey bit in keycode
+cmdOnMask		equ	$0100		; or mask to set CmdKey bit in keycode
+shiftToggleMask	equ	$0200		; xor mask to toggle ShiftKey bit in keycode
+
+iccFrame	record	{a6link},decr
+result		ds.w	1					; Boolean result
+iccArgStart	equ		*
+eventRecPtr	ds.l	1					; Pointer to event record
+testChar	ds.w	1					; Char parameter to test for
+selector	ds.l	1					; Script Mgr selector
+iccArgEnd	equ		*
+return		ds.l	1					; return address
+a6link		ds.l	1					; link register
+iccLocals	equ		*
+iccArgSize	equ		iccArgStart-iccArgEnd
+			endr
+
+iccRegs		reg		a2/d3-d4			; regs to save									<37>
+; Local regs:
+; a2.l	KCHRPtr
+; d3.w	keycode
+; d4.w	testChar
+
+IsCmdChar
+			with	iccFrame
+			LINK	A6,#iccLocals		;
+			movem.l	iccRegs,-(sp)		; save regs										<37>
+
+			move.w	testChar(a6),d4		; save testChar									<37>
+
+;...............................................................................
+; Set up KeyTrans parameters keycode and KCHRPtr
+;...............................................................................
+
+			move.l	eventRecPtr(a6),a0	; get ptr to event record
+			move.w	evtMeta(a0),d3		; get modifier keys in hi byte of word			<37>
+			move.b	evtMessage+2(a0),d3	; get virtual key code in lo byte				<37>
+			or.b	#keyUpMask,d3		; Set key up bit. This will make				<37>
+										; KeyTrans skip dead key processing.
+
+			with	ExpandMemRec
+			MOVE.L	ExpandMem,A0		; Pointer to ExpandMemRec
+			MOVE.L	emKeyCache(A0),a2	; Save pointer to KCHR resource					<37>
+			endwith
+
+;...............................................................................
+; Call KeyTrans with various modifier key settings
+;...............................................................................
+			ST		result(A6)				; Assume we have a match
+			BSR.S	DoKeyTrans				; First, call with real modifiers
+			BEQ.S	DoneTest				; If that gave us a match, hooray
+			AND.W	#cmdOffMask,d3			; Turn off Command and try again			<37>
+			BSR.S	DoKeyTrans				; I can't stand the suspense
+			BEQ.S	DoneTest				; Do we have a match yet?
+			MOVE.W	#shiftToggleMask,D0		; Because of weird 68000 EOR inst.
+			EOR.W	D0,d3					; Toggle the Shift bit and try again		<37>
+			BSR.S	DoKeyTrans				; Read all about it…
+			BEQ.S	DoneTest				; Are we home yet?
+			OR.W	#cmdOnMask,d3			; Turn on Command and try once more			<37>
+			BSR.S	DoKeyTrans				; Almost done…
+			SZ		result(A6)				; Our final result
+
+;...............................................................................
+; Clean up and exit
+;...............................................................................
+DoneTest
+			movem.l	(sp)+,iccRegs		; restore regs									<37>
+			UNLK	A6					;
+			MOVE.L	(SP)+,A0			; pop return address
+			ADD.L	#iccArgSize,SP		; clean up parameter space
+			JMP		(A0)				; return to caller
+
+;...............................................................................
+; Subroutine for calling KeyTrans. Returns with condition codes set
+; to indicate result: Z set if match, clear if no match.
+;
+; Assumes the following registers are set up:											<37>
+; a2.l	KCHRPtr
+; d3.w	keycode
+; d4.w	testChar
+;...............................................................................
+DoKeyTrans
+			SUBQ.L	#4, SP				; Make room for KeyTrans result
+			MOVE.L	a2,-(SP)			; Push pointer to KCHR resource					<37>
+			MOVE.W	d3,-(SP)			; Push keycode (w/o modifiers)					<37>
+			PEA		TestDead			; Push address of dead key state
+			_KeyTrans
+			CMP.W	(SP)+,D4			; compare testChar with first char				<37>
+			BEQ.S	@FixStackReturn		; if equal, clean up stack & return
+			CMP.W	(SP)+,D4			; compare testChar with second char				<37>
+			RTS							; return Z set or clear, indicates result
+@FixStackReturn
+			ADDA.W	#2,SP				; fix stack w/o changing cond codes
+			RTS							; return with Z set.
+			
+TestDead	dc.l	0					; storage for dead state
+			endwith
+			endproc
+
+;-------------------------------------------------------------------------------	<33>
+; FUNCTION FindCharInSet(textPtr: Ptr; textLen: LongInt; charSet: StringPtr;
+;						table: CharByteTable): LongInt;
+;
+;	The textPtr and textLen parameters specify a string to be searched for any
+;	of the characters in charSet. If any are found, the offset where the
+;	character was found is returned; otherwise, the function returns -1.
+;
+;	The table parameter is obtained from the Script Mgr ParseTable routine.
+;	The caller  must set the txFont of the port to a font in the script being
+;	handled, then call ParseTable to get the table.
+;
+;	This routine is used by Dialog Mgr and Finder (and Help Mgr?).
+;	Written by Kevin S. MacDonell.
+;-------------------------------------------------------------------------------
+
+		proc
+		export	FindCharInSet
+
+FCISFrame		RECORD	{A6Link},decr
+fcisresult		DS.L		1
+txtPtr			DS.L		1
+txtLen			DS.L		1
+charSetPtr		DS.L		1
+tblPtr			DS.L		1
+selector		DS.L		1					; Script Mgr selector	<36>
+fcisparamSz		EQU			fcisresult-*
+ReturnAddr		DS.L		1
+A6Link			DS.L		1
+				ENDR
+
+fcisSaveReg		REG	D2-D7/A2-A4
+;	Register conventions for this routine
+;		D0	-	The char from the text buffer we are looking at
+;		D1	-	The char from the charset we are looking at
+;		D2	-	length of character in charset
+;		D3	-	offset into charset
+;		D4	-	offset into text
+;		D5	-	subrange counter (bytes into char from charset)
+;		D6	-	The # of BYTES in the charset (because there may be double-byte chars in it)
+;		D7	-	The text length in bytes (not chars, we assume caller does not know this)
+
+;		A4/D4	-	txtPtr and offset
+;		A3/D3	-	charSetPtr and offset
+;		A2		-	tblPtr
+;		A1		-	subrange pointer into charset
+;		A0		-	subrange pointer into text
+
+FindCharInSet
+		WITH	FCISFrame
+		link	a6,#0
+		movem.l	fcisSaveReg,-(sp)
+
+		moveq	#-1,d7
+		move.l	d7,fcisresult(a6)			; Assume we won’t find anything
+
+		move.l	txtLen(a6),d7				; Get the length of the text to search
+		ble.s	@done						; don’t bother if it’s bogus
+
+		move.l	charSetPtr(a6),a3			; Get base of string
+		moveq	#0,d6						; Clear high part
+		move.b	(a3)+,d6					; Get length byte and bump pointer past it
+		beq.s	@done						; If no chars to search for, bail
+
+		moveq	#0,d0						; Clear text byte
+		moveq	#0,d1						; Clear charset byte
+		moveq	#0,d2						; Clear subrange counter
+		move.l	txtPtr(a6),a4				; Get the text ptr
+		move.l	tblPtr(a6),a2				; Get the table ptr
+		move.b	(a3),d1						; Preload d1 with single char to preflight special case
+											; Since it never changes during textloop
+
+;	Loop thru each char in the text and compare it with each char in the charset
+;	If we find a match, return the byte offset into the text where the match starts
+
+		moveq	#0,d4						; Start at offset zero into text
+@textLoop									; while (offsetintotext (d4) < textlen) do
+		move.b	(a4,d4.l),d0				; Get first byte of next char in text
+		cmp.w	#1,d6						; Is the charset only 1 byte long? (special case)
+		beq.s	@fastCompare
+
+		moveq	#0,d3						; Start at offset zero into charset
+	@charsetLoop:							; while (offsetintocharset(d3) < charsetlen) do
+			lea		(a4,d4.l),a0			; Point to current byte in text string
+			lea		(a3,d3.l),a1
+			move.b	(a1),d1					; Get first byte of next char in charset
+			move.b	(a2,d1.l),d2			; Get the length of this charset character
+			move.l	d2,d5					; Copy to loop counter
+
+		@subcharsetloop:
+				cmpm.b	(a0)+,(a1)+			; Did we find it?
+				bne.s	@charsetLoopNext	; Nope, check the next char in the charset
+				dbf		d5,@subcharsetloop	; Go check the next one
+				bra.s	@foundit			; If we fell out of loop, we found it!
+
+	@charsetLoopNext:
+			addq.l	#1,d3					; Advance 1 byte in the char set
+			add.l	d2,d3					; Advance more bytes if necessary, past end of char
+			cmp.l	d3,d6					; Checked all the chars in the charset?
+			bgt.s	@charsetLoop			; no, keep going
+			bra.s	@textLoopNext			; yep, check next char in text
+
+; This is the short-circuit compare loop when we are searching for a single 1-byte character
+@fastCompare
+		cmp.b	d0,d1						; Did we find it?
+		bne.s	@textLoopNext
+
+@foundit
+		move.l	d4,fcisresult(a6)			; Return the offset into the text where we matched
+		bra.s	@done
+
+@textLoopNext
+		addq.l	#1,d4						; Point to next character in the text
+		move.b	(a2,d0.l),d0				; Get number of additional chars
+		add.l	d0,d4						; And point past those
+		cmp.l	d4,d7						; Checked all the chars in the text?
+		bgt.s	@textLoop					; keep going
+
+@done
+		movem.l	(sp)+,fcisSaveReg
+		unlk	a6
+		move.l	(sp)+,a0
+		moveq	#fcisparamSz,d0
+		add.w	d0,sp
+		jmp		(a0)
+			
+		endproc
+
+
+; ----------------------------------------------------------------------------
+; StdUnlink, StdExit
+; Standard point of return for script manager routines.
+; Input
+;		d0 := number of arguments passed to returning routine
+;		sp := address of jump target routine 
+; ----------------------------------------------------------------------------
+			proc
+			export	StdUnlink, StdExit				; standard exit points
+
+StdUnlink
+			unlk	a6					; unlink the stack.
+StdExit
+			move.l	(sp)+,a0			; pop return address.
+			add.w	d0,sp				; pop arguments.
+			jmp		(a0)				; return to the caller.
+			endproc
+
+; -----------------------------------------------------------------------	<1.8>
+; Patch out LwrString to handle 2-byte chars.
+; ----------------------------------------------------------------------------
+; routine:	LwrString
+; input:	a0		textPtr
+;			d0.w	length
+;			d1.w	trap word; the following bits are significant in 7.0 only:
+;					Opcode bits
+;						10	9		Function
+;						--	--		--------
+;						0	0		convert to lower-case
+;						0	1		strip diacritics
+;						1	0		convert to upper-case
+;						1	1		convert to upper-case and strip diacritics
+; output:	d0.w	error
+; function:	Change text pointed to by a0 according to opcode bits. Before 7.0, we
+;			just assume that these bits are 0 and act accordingly.
+; -----------------------------------------------------------------------------
+; Add a new entry point for ScriptUtil. Like LwrString, but params on stack,
+; and two additional params: script specifies the script (so we don't need a
+; grafPort), and func selects which function (Upper, Lower, etc.) using the same
+; bits as in the OS trap word.
+;
+;	PROCEDURE SCLwrString(textPtr: Ptr;len: INTEGER;script: ScriptCode;
+;							func: INTEGER); 
+;
+; ----------------------------------------------------------------------------
+
+			proc
+			export	NewLwrString, SCLwrString			;								<38><2>
+
+lwrTrFrame	record	{a6link},decr
+return		ds.l	1					; return address
+a6link		ds.l	1					; link pointer
+sourcePtr	ds.l	1					; orig source ptr
+sourceLen	ds.l	1					; orig source len
+sourceHndl	ds.l	1					; new handle with copy of source
+destHndl	ds.l	1					; new handle for transliterate result
+errCode		ds.w	1					; err code to be returned in d0
+target		ds.w	1					; target for Transliterate <new in 7.0>
+script		ds.w	1					; script code									<38>
+lwrTrLocals	equ	*						; size of locals
+			endr
+			
+opcodeMask	equ		$0600				; mask for opcode bits
+stripOnly	equ		$0200				; opcode bits for strip diacritics only
+
+
+; New entry point, ScriptUtil routine													<38>
+SCLwrString
+
+			move.l	(sp)+,a1			; pop return address							<38>
+			addq	#4,sp				; discard selector								<38>
+			move.w	(sp)+,d1			; get func code (bits 9-10 like trap word)		<38>
+			move.w	(sp)+,d2			; get ScriptCode for later						<38>
+			move.w	(sp)+,d0			; get length where OS trap would have it…		<38>
+			move.l	(sp)+,a0			; and pointer where OS trap would have it.		<38>
+			move.l	a1,-(sp)			; restore return address						<38>
+
+			cmp.w	#smSystemScript,d2		; check ScriptCode							<38>
+			blt.s	useFontScript			; FontScript, go get it						<38>
+
+			with	SMgrRecord,ScriptRecord	;											<38>
+			movea.l	IntlSpec,a1				; doesn't affect cc							<38>
+			bgt.s	@haveRealScript			;											<38>
+			move.w	smgrSysScript(a1),d2	; get system script							<38>
+@haveRealScript
+			move.w	d2,-(sp)				; save script code							<38>
+			lsl.w	#2,d2					; convert to long offset.					<38>
+			move.l	smgrEntry(a1,d2.w),d2	; script installed?							<38>
+			beq		lwrCleanup				; no, do nothing							<38>
+			move.l	d2,a1					; load ScriptRecord pointer.				<38>
+			tst.b	scriptEnabled(a1)		; script enabled?							<38>
+			beq		lwrCleanup				; if so, go dispatch						<38>
+			move.w	(sp)+,d2				; restore ScriptCode						<38>
+			bra.s	haveValidScript			;											<38>
+			endwith	;SMgrRecord,ScriptRecord											<38>
+
+; Old entry point, OS trap
+NewLwrString								;											<2>
+
+; ----------------------------------------------------------------------------
+; NOTE: For 2-byte scripts, we need to call Transliterate. So, the first thing to
+; do is figure out what script we're in. We also test for length <= 0 (tests >32K).
+; ----------------------------------------------------------------------------
+
+useFontScript								;										<38>
+			movem.l	a0/d0/d1,-(sp)			; save important registers
+			subq.l	#2,sp					; make room for return
+			_FontScript						; find script of port, ScriptRecord in a0
+			move.w	(sp)+,d2				; pop script into d2
+			move.l	a0,a1					; put ScriptRecord ptr in a1			<38>
+			movem.l	(sp)+,a0/d0/d1			; restore important registers
+
+haveValidScript								;										<38>
+; Here we have:								;										<38>
+;	a0		textPtr
+;	d0.w	len
+;	d1.w	bits 9-10 have func flags
+;	a1		ScriptRecord ptr
+;	d2		real script code
+
+			ext.l	d0					; as fast as tst.w and we need ext.l later	<38> move here
+			ble		lwrRTS				; if bad length, quit						<38> move here
+
+; ----------------------------------------------------------------------------
+; Here we make use of the fact that a word redraw flag of 1 (or anything >0)
+; indicates a 2-byte script.
+; Now we already have ScriptRecord ptr in a1, and we know script is enabled.		<38>
+; ----------------------------------------------------------------------------
+
+			with	ScriptRecord			;										<38>
+			tst.b	scriptRedraw(a1)		; is it a 2-byte script?
+			ble		not2Byte				; if not, go use normal LwrString
+			endwith	;ScriptRecord
+
+; ----------------------------------------------------------------------------
+; OK, we need to set up for Transliterate: set up source & dest handles.
+; Also set target depending on opcode bits <new in 7.0>.
+; ----------------------------------------------------------------------------
+
+			with	lwrTrFrame
+			link	a6,#lwrTrLocals			; create local storage
+			move.w	d2,script(a6)			; save script code						<38>
+; ------------
+; Set target depending on opcode bits <new in 7.0>.
+			clr.w	errCode(a6)				; start with no errors
+			move.w	#smTransLower+smTransAscii,target(a6)	; assume lower-casing
+			and.w	#opcodeMask,d1			; isolate opcode bits
+			beq.s	@gotTarget				; if 00, go with lower-casing
+			cmp.w	#stripOnly,d1			; if just stripping diacritics…
+			beq		lwrTrUnlk				; nothing to do in 2-byte system
+			move.w	#smTransUpper+smTransAscii,target(a6)	; else upper-casing
+@gotTarget
+; ------------
+			move.l	a0,sourcePtr(a6)		; save source ptr
+			move.l	d0,sourceLen(a6)		; save length
+			_PtrToHand						; make new handle containing copy of text
+			move.w	d0,errCode(a6)			; save err code
+			bne		lwrTrUnlk				; if error in PtrToHand, quit <SM5> CSS
+			move.l	a0,sourceHndl(a6)		; save new source handle
+			move.l	sourceLen(a6),d0		; get length again
+			_NewHandle						; make new handle with random contents
+			move.w	d0,errCode(a6)			; save err code
+			bne.s	lwrTrDisp1Hndl			; if error in NewHandle, quit
+
+; ----------------------------------------------------------------------------
+; Now do Transliterate and check result: dest length should equal source length
+; ----------------------------------------------------------------------------
+
+			move.l	a0,destHndl(a6)			; save new dest handle
+			subq.l	#2,sp					; space for Transliterate error code
+			move.l	sourceHndl(a6),-(sp)	; push source handle
+			move.l	a0,-(sp)				; push dest handle (still in a0)
+			move.w	target(a6),-(sp)		; use specified target <changed in 7.0>
+			move.l	#smMaskAscii,-(sp)		; convert Roman only
+			move.w	script(a6),-(sp)		; push ScriptCode						<38>
+			_SCTransliterate				;										<38>
+			move.w	(sp)+,errCode(a6)		; save error code
+			bne.s	lwrTrDisp2Hndl			; if error in Transliterate, quit
+			move.l	destHndl(a6),a0			; now check result…
+			_GetHandleSize
+			move.w	d0,errCode(a6)			; save err code
+			tst.l	d0						; .l, because the result is really a long
+			blt.s	lwrTrDisp2Hndl			; if error in GetHandleSize, quit
+			move.w	#-1,errCode(a6)			; assume len err; need a better err code!
+			cmp.l	sourceLen(a6),d0		; should be same as source len
+			bne.s	lwrTrDisp2Hndl			; if not, set err and bail
+		
+; ----------------------------------------------------------------------------
+; Copy result (destHndl) to original text buffer (sourcePtr).
+; NOTE: For large text blocks, _BlockMove might be faster than this loop.
+; ----------------------------------------------------------------------------
+
+			move.l	destHndl(a6),a0			; get dest handle and…
+			move.l	(a0),a0					; deref it to get source ptr for this copy
+			move.l	sourcePtr(a6),a1		; old source ptr is dest for this copy
+			move.l	sourceLen(a6),d0		; length for copy (we know it is >= 1)
+			subq.l	#1,d0					; set up for dbra
+@1			move.b	(a0)+,(a1)+				; copy a byte
+			dbra	d0,@1					; loop till done
+			clr.w	errCode(a6)				; no errors!
+
+; ----------------------------------------------------------------------------
+; Exits - need to dispose of handles we created
+; ----------------------------------------------------------------------------
+
+lwrTrDisp2Hndl
+			move.l	destHndl(a6),a0			;
+			_DisposHandle					;
+lwrTrDisp1Hndl
+			move.l	sourceHndl(a6),a0		;
+			_DisposHandle					;
+lwrTrUnlk
+			move.w	errCode(a6),d0			; set err code
+			unlk	a6						;
+			rts
+			endwith
+
+lwrCleanup									;									<38>
+			addq	#2,sp					; discard saved script code			<38>
+lwrRTS
+			clr.w	d0
+			rts
+
+; ----------------------------------------------------------------------------
+; This is not a 2-byte script, just use old LwrString.
+; ----------------------------------------------------------------------------
+not2Byte
+; We used to jump back into ROM here with "BackToTrap oldLwrString". Now we		<38>
+; patch out LwrString entirely, so we add the code below.
+; Instead of saving/clearing IntlForce, calling GetIntl,
+; then restoring IntlForce, we now just call GetScriptItl.
+
+		move.l	a2,-(sp)					; save a2 <03/05/89 pke>
+; actually, OS trap dispatch saves & restores a2 - strange but true <06/05/89 pke>
+
+		movem.l	a0/d0/d1,-(sp)				;*save around IUGetScriptItl (ugly temp hack)
+
+											;									<38>
+		clr.l	-(sp)						; space for returned handle
+		move.w	#2,-(sp)					; select itl2
+		move.w	d2,-(sp)					; push ScriptCode					<38>
+		clr.w	-(sp)						; sysFlag = 0						<38>
+		_IUGetScriptItl						; may trash a0,a1,d0-d2				<38>
+		move.l	(sp)+,a2					; store itl2 handle
+											;									<38>
+
+		movem.l	(sp)+,a0/d0/d1				;*(ugly temp hack)
+		move.l	a2,d2						; nil handle?				<06/05/89 pke>
+		beq.s	@LwrError					; bail if so				<06/05/89 pke>
+		move.l	(a2),a2						; dereference
+		btst.b	#0,itl2FlagsOffset+1(a2)	; extended itl2 tables?
+		beq.s	@LwrError					; no, bail (was beq to @LwrExit)	<06/05/89 pke>
+		move.l	a2,a1						; copy pointer
+		clr.l	d2							; for longizing
+		move.w	classArrayOffset(a2),d2		; longize classArrayOffset
+		add.l	d2,a1						; make classArray pointer
+
+; Opword = 1010 xcdx xxxx xxxx , where c=caseBit and d=diacBit.  Shift & mask
+; to form  0000 0000 0000 0CD0 for use as an address offset.				<03/28/89 pke>
+		lsr.w	#8,d1						; xxxx xxxx 1010 xcdx			<03/28/89 pke>
+		andi.w	#$0006,d1					; 0000 0000 0000 0cd0			<03/28/89 pke>
+		move.w	@LwrOffsetTable(d1.w),d1	; offset into itl2 offset table	<03/28/89 pke>
+		move.w	0(a2,d1.w),d2				; now get actual table offset	<03/28/89 pke>
+
+		add.l	d2,a2						; make lowerList pointer
+	
+		clr.l	d1							; wordize
+		bra.s	@LwrNext					; loop at bottom
+@LwrLoop
+		move.b	(a0),d1						; char
+		move.b	0(a1,d1.w),d1				; class
+		move.b	0(a2,d1.w),d1				; delta
+		add.b	d1,(a0)+					; add delta to make lower
+@LwrNext
+		dbra	d0,@LwrLoop					; until d0 = -1
+@LwrExit		
+		clr.l	d0							; no error
+@LwrExit2									;							<06/05/89 pke>
+		move.l	(sp)+,a2					; restore a2				<03/05/89 pke>
+		rts
+		
+@LwrError									;					<06/05/89 pke>
+		move.w	#resNotFound,d0				;					<06/05/89 pke><07/08/89 pke>
+		bra.s	@LwrExit2					;					<06/05/89 pke>
+
+@LwrOffsetTable								; 					<03/28/89 pke>
+		dc.w	lowerListOffset				; 					<03/28/89 pke>
+		dc.w	noMarkListOffset			; 					<03/28/89 pke><04/07/89 pke>
+		dc.w	upperListOffset				; 					<03/28/89 pke>
+		dc.w	upperNoMarkListOffset		; 					<03/28/89 pke>
+
+		endproc
+
+;-------------------------------------------------------------------------------		<37>
+; FUNCTION TestLetter(testChar: CHAR): BOOLEAN;	{Pascal calling conventions}
+;
+; This function tests if a key on the main keyboard is being pressed that could
+; generate testChar with Command up or down (and no other modifiers). This is only
+; intended to test for Roman lower-case letters. It checks for the key press by
+; examining the low-memory Keymap area, so this is useful when we are not in an
+; event loop. We check with Command bit on because this forces the Roman layout
+; on a non-Roman keyboard.
+;
+; Example of usage from assembly language to test for Opt-e:
+;
+;		btst	#2,KeyMap+7		; option key down?
+;		beq.s	@done			; no, skip check.
+;		subq	#2,sp			; make room for Boolean result
+;		move.w	#'e',-(sp)		; push 'e' as the char to test for
+;		bsr		TestLetter		; returns TRUE if key with Roman 'e' being pressed
+;		tst.b	(sp)+			; what was the result?
+;		bne		SkipInstall		; if Opt-e, skip script install
+;
+;-------------------------------------------------------------------------------
+
+			proc
+			export	xTestLetter, iTestLetter
+			import	DoKeyTrans
+			
+clearModifiers	equ	$FFFF7F80	; and mask to clear modifier bits in (KeyMap+4).L
+keyUpMask		equ	$0080		; or mask to set key up bit in keycode
+cmdOnMask		equ	$0100		; or mask to set CmdKey bit in keycode
+
+tlFrame		record	{a6link},decr
+result		ds.w	1					; Boolean result
+tlArgStart	equ		*
+testChar	ds.w	1					; Char parameter to test for
+tlArgEnd	equ		*
+return		ds.l	1					; return address
+a6link		ds.l	1					; link register
+tlLocals	equ		*
+tlArgSize	equ		tlArgStart-tlArgEnd
+			endr
+
+tlRegs		reg		a2/d3-d4			; regs to save
+; Local regs:
+; a2.l	KCHRPtr
+; d3.w	keycode
+; d4.w	testChar
+
+xTestLetter								; external entry							<44>
+			move.l	(sp)+,(sp)			; discard selector but save return addr		<44>
+
+iTestLetter								; internal entry							<44>
+;-------------------------------------------------------------------------------
+; Check if we  have a non-modifier key down on the main keyboard (not the keypad
+; etc.). We look in the KeyMap bit array to see if a bit is set that indicates a
+; non-modifier key is pressed. KeyMap is 128 bits, so we can test 4 longs.
+; However, we skip the last 2 longs, because they are only for the keypad, arrow
+; keys or special keys on the extended keyboard.
+;-------------------------------------------------------------------------------
+			CLR.W	6(SP)				; Assume result FALSE
+
+			MOVEQ	#0,D1				; bit offset in KeyMap
+			MOVE.L	KeyMap,D0			; Key down in (KeyMap+0).L?
+			BNE.S	GotKey				; If so, handle it
+			MOVEQ	#32,D1				; bit offset in KeyMap
+			MOVE.L	KeyMap+4,D0			; Get (KeyMap+4).L
+			AND.L	#clearModifiers,D0	; Is non-modifier key down?
+			BEQ.S	NoKey				; If not, give up
+
+;-------------------------------------------------------------------------------
+; Here, we have a non-modifier key down on the main keyboard. At this point, D0
+; is guaranteed to have at least one non-zero bit. We determine the keycode
+; modulo 32 based on the position of this bit in D0. Then we add in the bit
+; offset from the beginning of KeyMap to the 32-bit block that the key down bit
+; was in (this value is in D1). This gives us the keycode.
+;-------------------------------------------------------------------------------
+GotKey
+			with	tlFrame
+			LINK	A6,#tlLocals
+			movem.l	tlRegs,-(sp)		; save regs
+
+			move.w	testChar(a6),d4		; save testChar
+
+;-------------------------------------------------------------------------------
+; Set up KeyTrans parameter: keycode (in d3)
+; Note that modifiers byte will be all 0 (this is what we want)
+;-------------------------------------------------------------------------------
+
+			MOVEQ.L	#31,d3				; Loop starts testing from 31
+@bitLoop
+			BTST.L	d3,d0				; Is selected bit set in D0?
+			DBNE	d3,@bitLoop			; No, try next. Guaranteed to find one.
+; Now d3.W contains the number of the bit that was set in D0.L.
+			MOVE.W	d3,d0				; Copy bit number
+			AND.W	#$07,d3				; Get bit number within byte
+			AND.W	#$F8,d0				; Get bit offset of byte in register
+			ADD.W	#24,d3				; Byte's bit offset in KeyMap is …
+			SUB.W	d0,d3				; … 24 - bit offset in register
+; Now we have keycode mod 32 in d3.
+			ADD.W	d1,d3				; Add in Keymap block bit offset (0 or 32).
+; Now we have keycode in d3.w
+			OR.W	#keyUpMask,d3		; Set key up bit. This will make
+										; KeyTrans skip dead key processing.
+
+;-------------------------------------------------------------------------------
+; Get KeyTrans parameter: KCHRPtr (in a2)
+;-------------------------------------------------------------------------------
+
+			with	ExpandMemRec
+			MOVE.L	ExpandMem,A0		; Pointer to ExpandMemRec
+			MOVE.L	emKeyCache(A0),a2	; Save pointer to KCHR resource
+			endwith	;ExpandMemRec
+
+;-------------------------------------------------------------------------------
+; Call KeyTrans with various modifier key settings
+;-------------------------------------------------------------------------------
+			ST		result(A6)				; Assume we have a match
+			BSR		DoKeyTrans				; First, call with no modifiers
+			BEQ.S	DoneTest				; If that gave us a match, hooray
+			OR.W	#cmdOnMask,d3			; Turn on Command and try once more
+			BSR		DoKeyTrans				; Almost done…
+			SZ		result(A6)				; Our final result
+
+;-------------------------------------------------------------------------------
+; Clean up and exit
+;-------------------------------------------------------------------------------
+DoneTest
+			movem.l	(sp)+,tlRegs		; restore regs
+			UNLK	A6					;
+NoKey
+			MOVE.L	(SP)+,A0			; pop return address
+			ADDQ.L	#tlArgSize,SP		; clean up parameter space
+			JMP		(A0)				; return to caller
+
+			endwith	;tlFrame
+			endproc
+
+;-------------------------------------------------------------------------------		<50>
+; GetScript/SetScript for Roman
+;
+; These do nothing but clean up the stack and return a constant value.
+;-------------------------------------------------------------------------------
+
+			proc
+			export	RomanGetScript, RomanSetScript
+
+gsRecord	record	{return},decr
+result		ds.l	1						; result code.
+gsArgs		equ		*-4						; size of arguments.
+script		ds.w	1						; script code.
+verb		ds.w	1						; verb value.
+selector	ds.l	1						; trap selector.
+return		ds.l	1						; return address.
+gsLocals	equ		*						; size of local variables.
+			endr
+
+RomanGetScript
+			with	gsRecord
+			move.l	(sp)+,a0				; pop return address.
+			addq	#gsArgs,sp				; discard arguments.
+			clr.l	(sp)					; return value
+			jmp		(a0)					; return to the caller.
+			endwith	;gsRecord
+
+ssRecord	record	{return},decr
+result		ds.w	1						; result code.
+ssArgs		equ		*-4						; size of arguments.
+script		ds.w	1						; script code.
+verb		ds.w	1						; verb value.
+param		ds.l	1						; parameter value.
+selector	ds.l	1						; trap selector.
+return		ds.l	1						; return address.
+ssLocals	equ		*						; size of local variables.
+			endr
+
+RomanSetScript
+			with	ssRecord
+			move.l	(sp)+,a0				; pop return address.
+			add.w	#ssArgs,sp				; discard arguments.
+			move.w	#smBadVerb,(sp)			; set error code.
+			jmp		(a0)					; return to the caller.
+			endwith	;ssRecord
+
+			endproc
+
+
+; ----------------------------------------------------------------------------		<54>
+; function:	CharType(textBuf: Ptr; textOffset: Integer): Integer;
+; input:	(sp).l	Text pointer.
+; 			(sp).w	Text offset.
+; output:	(sp).w	Result, character type.
+; warning:	This routine follows Pascal register conventions.
+;
+; Return information about a character, including character type, punctuation
+; type, and case.  For RIS, this is reduced to a simple table lookup.
+; ----------------------------------------------------------------------------
+
+		proc
+		export	CharType
+
+ctRecord		record	{a6link},decr
+result			ds.w	1			; result.
+ctArgs			equ		*-8			; size of arguments.
+textBuf			ds.l	1			; text buffer pointer.
+textOffset		ds.w	1			; text buffer offset.
+scriptRecPtr	ds.l	1			; Scriptrecord ptr
+return			ds.l	1			; return address.
+a6link			ds.l	1			; old a6 register.
+ctLocals		equ		*			; size of local variables.
+				endr
+
+caseBit			equ	14				; case bit index in returned word
+dirBit			equ	13				; dir bit index in returned word				<54>
+charMask		equ	$0f				; mask for character type.
+punctMask		equ	$70				; mask for punctuation class in itl2 (L-R scripts)
+rlPunctMask		equ	$30				; mask for punctuation class in itl2 (R-L scripts)	<54>
+dirBitInItl2	equ	6				; dir bit number in Itl2 type byte					<54>
+
+ctRegs			reg	a2/a3			;
+
+
+CharType
+
+		with	ctRecord
+
+		move.l	4(sp),a0					; ScriptRecord ptr (maybe nonRoman)
+		moveq	#0,d2						; sysFlag=0 in hi word
+		move.b	ScriptRecord.scriptID(a0),d2 ; script code in low word
+
+		clr.l	-(sp)						; space for returned handle
+		move.w	#2,-(sp)					; select itl2
+
+		move.l	d2,-(sp)					; two arguments: script code, sysFlag=0
+		_IUGetScriptItl						; may trash a0,a1,d0-d2
+		move.l	(sp)+,d0					; store itl2 handle
+
+		move.l	(sp)+,a0					; pop return address.
+		move.l	(sp)+,d2					; save scriptRecPtr in d2			<54>
+		move.w	(sp)+,d1					; get character offset.
+		move.l	(sp)+,a1					; get text buffer pointer.
+		movem.l	ctRegs, -(sp)				; save regs
+
+		tst.l	d0							; nil handle?
+		beq.s	@CharTypeExit				; if so, bail (return 0)
+		move.l	d0,a2						; get handle in a2
+		clr.l	d0							; for longizing & err return
+		move.l	(a2),a2						; dereference
+		btst.b	#0,itl2FlagsOffset+1(a2)	; extended itl2 tables?
+		beq.s	@CharTypeExit				; no, bail (returns 0)
+		move.l	a2,a3						; copy
+		move.w	classArrayOffset(a2),d0		; longize
+		add.l	d0,a2						;
+		move.w	typeListOffset(a3),d0		;
+		add.l	d0,a3						;
+
+		clr.l	d0							; clear character code.
+		move.b	0(a1,d1.w),d0				; get the character code.
+		move.b	0(a2, d0.w),d0				; get character class and
+		move.b	0(a3, d0.w),d0				; specific type
+
+		MOVEQ	#0,D1						; clear it, we are going to shit later <8>
+		move.b	d0,d1						; punctuation type.
+		bpl.s	@1							; move case bit to the
+		bset	#caseBit,d0					; left.
+@1		andi.b	#charMask,d0				; isolate character type.
+		move.l	d2,a1						; scriptRecPtr							<54>
+		tst.b	ScriptRecord.scriptRight(a1) ; right-to-left script?				<54>
+		beq.s	@dontSetDirBit				; if not, don't check dir bit			<54>
+		; for right-left scripts, itl2 table has 2 bits for type + 1 dir bit		<54>
+		btst	#dirBitInItl2,d1			; does byte in table indicate R-L char?	<54>
+		beq.s	@dontSetDirBit				; if not, go handle punct sub-types		<54>
+		bset	#dirBit,d0					; return R-L direction					<54>
+		andi.b	#rlPunctMask,d1				; and isolate punctuation sub-type		<54>
+		bra.s	@setType					;										<54>
+@dontSetDirBit								;										<54>
+		andi.b	#punctMask,d1				; isolate punctuation sub-type.
+@setType									;										<54>
+		lsl.w	#4,d1						;
+		or.w	d1,d0						; or punctuation type back
+	
+@CharTypeExit
+		movem.l	(sp)+,ctRegs 				;
+	
+		move.w	d0,(sp)						; into character type.
+		jmp		(a0)						; return to the caller.
+		endWith
+
+		endproc
+
+;____________________________________________________________
+; Routine	StyledLineBreak (
+;				textPtr:		Ptr;
+;				textLen: 		Longint;	{must be < 32K ;<2/14/89 pke>}
+;				textStart:		Longint;
+;				textEnd:		Longint;
+;				flags:			Longint;
+;				var textWidth:	Fixed;		{on exit, set if too long}
+;				var textOffset:	Longint;
+;			):					LineCode;
+;____________________________________________________________
+
+
+LineBreakFrame	record	{oldA6},decrement
+result			ds.w	1
+argSize			equ		*-8
+textPtr			ds.l	1
+textLen			ds.l	1
+textStart		ds.l	1
+textEnd			ds.l	1
+flags			ds.l	1
+textWidth		ds.l	1
+textOffset		ds.l	1
+selector		ds.l	1
+return			ds.l	1
+oldA6			ds.l	1
+offsets			ds.l	3
+leadingEdge		ds.b	1
+foundCR			ds.b	1
+lineDirection	ds.w	1
+oldBlockFlags	ds.w	1		; only a byte is used
+savedTextWidth	DS.L	1		; fixed value
+localFrame		equ	*
+				endR
+
+FixMinusOne	equ	$FFFF0000
+
+HiByteFlags	EQU	ScriptRecord.scriptBundle.itlbFlags
+LoByteFlags	EQU	HiByteFlags+1
+
+LineBreakRegs	reg	a2-a3/d4-d6
+;____________________________________________________________
+
+StyledLineBreak	proc	EXPORT						; <8>
+
+		import	FindCarriage
+		import	StdUnlink
+
+; setup
+		with	LineBreakFrame
+		CheckSelector
+		link	a6,#localFrame
+		movem.l	LineBreakRegs,-(sp)
+
+; common args
+		move.l	textWidth(a6),a3					; get @width
+		move.l	textPtr(a6),d5						; pointer
+		add.l	textStart(a6),d5					; pointer+start
+
+; save environment and reset
+;!!! generalize for left-right
+		move.w	teSysJust,lineDirection(a6) 		; save just
+		move.w	#0,teSysJust						; set to LR, disable formating of RL scripts
+
+; get current script
+		move.w	#0,-(sp)							; allocate _FontScript return
+		_FontScript									; get current script
+		move.w	(sp)+,d0							; current script
+ 
+; get core globals and test: inline instead of trap, for speed
+ 
+		lsl.w	#2,d0								; make script code a longword offset		<1.9>
+		GetSmgrCore	a2								; smgr core globals
+		move.l	smgrRecord.smgrEntry(a2,d0),a2		; get the script record ptr
+ 		move.b	HiByteFlags(a2),oldBlockFlags(a6)	; save the high byte of the itlb flags
+		bclr.b	#smsfReverse,HiByteFlags(a2)		; set reverse block bit, disable reversing text for RL scripts
+
+; quick check on length
+		move.l	textEnd(a6),d4						; get length
+		sub.l	textStart(a6),d4					; segment length
+		ble		@TooLong							; if zero, bail
+		tst.l	(a3)								; no width (degenerate)
+; changed this so we handle blanks at start of 0-width line.					<06/09/89 pke><3>
+		bmi		@FixNoChars							; fix neg width
+
+; first search for a carriage return, try minimum buffer for NPixel2Char
+
+		MOVE.L	D5,A0								; pass text ptr (TextPtr + start offset)
+		MOVE.W	D4,D0								; pass textlength (start offset - end offset)
+		BSR		FindCarriage						; returns the offset after CR in D1
+		MOVE.B	D0,foundCR(A6)						; D0=true if a carriage return was found,save this value
+		MOVE.W	D1,D4								; update the textlength
+		
+; now try to find how much of the text (D4) fits in the line pixel width
+
+		MOVE.L	(A3),savedTextWidth(A6)				; save this value, can be changed by NP2C
+		MOVE.W	#0,-(SP)							; space for result
+		MOVE.L	D5,-(SP)							; push text ptr
+		MOVE.L	D4,-(SP)							; push text byte length
+		MOVE.L	#0,-(SP)							; 0 slop
+		MOVE.L	(A3),-(SP)							; line pixel width
+		PEA		leadingEdge(A6)						; leading Edge flag
+		MOVE.L	A3,-(SP)							; remaing with
+		MOVE.W	#smOnlyStyleRun,-(SP)				; style run position
+		MOVE.L	#$00010001,D0						; 1/1 scaling
+		MOVE.L	D0,-(SP)							; num
+		MOVE.L	D0,-(SP)							; denum
+		_NPixel2Char								; call trap
+		MOVE.L	#0,D6								; longize
+		MOVE.W	(SP)+,D6							; pop char offset
+		
+; if width is zero, fix leadingEdge for FindWord etc.
+
+		tst.l	savedTextWidth(A6)					; zero width?
+		bne.s	@doneFixleadingEdge					;
+		st		leadingEdge(a6)						; if so, fix leadingEdge
+@doneFixleadingEdge
+
+; check for position being too long
+
+		move.l	d6,d0								; copy un-offsetted length
+		add.l	textStart(a6),d6					; get char offset
+
+; if offset > length, return width of text
+
+		cmp.l	d4,d0								; position at end?
+		blt.s	@GotCharPos							; no, skip
+		tst.b	leadingEdge(a6)						; test if D4=D0 and leadingEdge is false
+		BEQ.S	@GotCharPos							; if so, skip 
+		TST.B	foundCR(A6)							; was a CR found ?
+		BEQ.S	@TooLong							; the pix width is too big for the line
+		MOVE.L	D6,D1								; update D1 with the whole offet	<10>
+		BRA		@ReturnWord							; we had CR so, return a word
+@GotCharPos
+
+; get word around char offset
+
+		move.l	textPtr(a6),-(sp)					; ptr
+		move.w	textLen+2(a6),-(sp)					; length (mod)
+		move.w	d6,-(sp)							; offset (truncate)
+		move.b	leadingEdge(a6),-(sp)				; leadingEdge
+		move.l	MinusOne,-(sp)						; line break table
+		pea		offsets(a6)							; offset table
+ 		_FindWord									; use trap
+
+; test character to see if it is white-space
+; Mark suggests checking to see if VisibleLength would work better here… <06/09/89 pke>
+
+		move.w	#0,-(sp)							; allocate return
+		move.l	textPtr(a6),-(sp)					; ptr
+		move.w	offsets(a6),-(sp)					; offset
+ 		_CharType									; use trap
+		move.w	(sp)+,d0							; get type
+		move.l	#0,d1								; longize
+		move.w	offsets(a6),d1						; assume second offset ***
+		and.w	#smcTypeMask+smcClassMask,d0		; type and class
+		cmp.w	#smCharPunct+smPunctBlank,d0		; blank?
+		bne.s	@ReturnOffset						; no, continue
+		btst.b	#smsfReverse,oldBlockFlags(a6)		; test reverse block flag
+		sne		d0									; 0/-1 left/right
+		cmp.b	LineDirection+1(a6),d0				; line = char? (bottom byte of line)
+		bne.s	@ReturnOffset						; yes, skip to end
+
+; here, word is whitespace and direction is ok (script direction = line direction),
+; so return second offset.
+
+		MOVE.W	offsets+2(A6),D1					; set to second offset
+		BRA.S	@ReturnWord							; we broke at word boundary
+		
+@TooLong		
+		move.l	textEnd(a6),d6						; return width
+		move.l	#smBreakOverflow,d0					; set type
+		bra.s	@Done								; return
+		
+@ReturnOffset
+		tst.l	d1									; break at start?
+		bne.s	@ReturnWord							; yes, return char
+
+		move.l	textOffset(a6),a0					; get @textOffset
+		tst.l	(a0)								; was offset 0 at entry?
+		beq.s	@ReturnWord							; if so, go return zero offset
+
+; have to break word, so backup until length is less.
+
+; The most we have to backup is one char, and we only have to do that if
+; leadingEdge is false . We also need to catch the case of d6=0.
+
+		tst.b	leadingEdge(a6)						; leadingEdge?
+		bne.s	@checkNullOffset					; if T, skip decrement
+		sub.l	#1,d6								; decrement
+
+		BTST.B	#smsfSingByte,LoByteFlags(A2)		; is it a single byte script ?
+		BNE.S	@checkNullOffset					; don't fall thru if single byte script
+
+		clr.w	-(sp)								; allocate return
+		move.l	d5,-(sp)							; pass text ptr
+		move.l	d6,d0								; cur position
+		sub.l	textStart(a6),d0					; start of real text
+		move.w	d0,-(sp)							; count (mod!!!)
+		_CharByte
+		tst.w	(sp)+								; return 0=single,-1=first,1=last
+		ble.s	@checkNullOffset					; bail if -1 or 0, ok
+		sub.l	#1,d6								; fix for 2-byte chars
+
+@checkNullOffset
+		tst.l	d6									; are we still >0?
+		bgt.s	@ReturnChar							; if so, go return a char
+		bra.s	@FixNoChars1						; don't redo test for orig offset 0
+
+@FixNoChars	
+		move.l	textOffset(a6),a0					; get @textOffset
+		tst.l	(a0)								; was offset 0 at entry?
+		bne.s	@FixNoChars1						; if not, return 1 char
+		moveq	#0,d1								; if so, set zero offset
+		bra.s	@ReturnWord							; and go return word break
+@FixNoChars1	
+
+; string is now zero length, make it at least 1 char
+
+		move.l	#1,d6								; include first char
+
+		BTST	#smsfSingByte,LoByteFlags(A2)		; is it single byte script ?
+		BNE.S	@ReturnChar							; don't fall thru if single byte script
+
+		clr.w	-(sp)								; allocate return
+		move.l	d5,-(sp)							; pass text ptr
+		move.w	#1,-(sp)							; offset
+		_CharByte
+		tst.w	(sp)+								; return 0=single,-1=first,1=last
+		ble.s	@ReturnChar							; bail if -1 or 0, ok
+		add.l	#1,d6								; fix for 2-byte chars
+
+@ReturnChar
+		move.l	#smBreakChar,d0						; so, word too long.
+		bra.s	@Done								; exit
+
+@ReturnWord
+		moveq	#0,d6								; make long
+		move.w	d1,d6								; set to word bound
+
+		move.l	#smBreakWord,d0						; break at word
+
+@Done
+		move.l	textOffset(a6),a0					; get @textOffset
+		move.l	d6,(a0)								; set to char position
+		move.b	d0,result(a6)						; set result type
+		
+; restore environment
+
+ 		move.b	oldBlockFlags(a6),HiByteFlags(a2)	; restor the high byte of itlb flags
+ 		move.w	lineDirection(a6),teSysJust			; restore just
+
+; cleanup
+		movem.l	(sp)+,LineBreakRegs
+		CheckA6
+				
+		move	#argSize, d0						; for StdUnlink
+		bra		StdUnlink							; standard exit
+		endWith
+		endProc
+
+;____________________________________________________________
+; Routine	FindCarriage
+; Input		a0.l	ptr
+;			d0.w	length
+; Output	d0.b	$FF/0	found/not found
+;			d1.w	offset from ptr to char after CR; =length if CR not found
+; Uses		Pascal regs
+;____________________________________________________________
+
+FindCarriage	proc
+		With	smgrRecord, scriptRecord ; <8>
+
+		move.w	d0,d1					; copy for later
+		move.b	#$0D,d2					; carriage return
+		bra.s	@CheckLength			; zero check
+@CarriageLoop
+		cmp.b	(a0)+,d2				; is it?
+@CheckLength
+		dbeq	d0,@CarriageLoop		; keep going?
+		beq.s	@GotCarriage			; not found
+		sf		d0						; signal caller
+		bra.s	@FindCarriageDone		; done
+		
+@GotCarriage
+; found a CR. Set up length and leftside. length is to character AFTER cr.
+
+		sub.w	d0,d1					; - characters left (+1)			<2/14/89 pke><3>
+
+		st		d0						; signal caller
+
+@FindCarriageDone
+		rts
+		endWith
+		endProc
+;____________________________________________________________
+
+		end

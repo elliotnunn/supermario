@@ -1,0 +1,918 @@
+;
+;	File:		ScriptMgrSysMenuPatch.a
+;
+;	Contains:	SystemMenu patch for handling system keyboard menu
+;
+;	Written by:	SMB	Sue Bartalo
+;
+;	Based on:	Implementation of the InvalMenuBar trap as a patch, stolen from Darin Adler
+;
+;	Copyright:	© 1990-1993 by Apple Computer, Inc., all rights reserved.
+;
+;
+;	Change History (most recent first):
+;
+;	   <SM8>	 1/27/93	CSS		Made the ROM version of the patch to SystemMenu here a
+;									subroutine called by SystemMenu (in DeskMgr). Also, reverted
+;									<SM5-6> back to the Reality version of this file.
+;	   <SM7>	10/22/92	PN		Fix comments
+;	   <SM6>	10/22/92	PN		#1049099 Save A2 and A3 across the NewSystemMenu call.
+;	   <SM5>	 10/2/92	PN		#1044792 Roll in patchSystemMenu into SM ROM
+;		<33>	  7/1/92	DTY		Fix compare from <31> so the build works again.
+;		<32>	 6/30/92	SMB		#1033475,#1030903, <pke>: Add bug #s and Peter Edberg's
+;									reviewing initials for change <45> since the CheckInMultiple
+;									script was upset with my erroneous bug # detail.
+;		<31>	 6/30/92	SMB		Optimization: do not call utSetTextServiceLanguage if LastScript
+;									== KeyScript. Also fixed a potential bug by preserving d1
+;									(script code) around SwapKybd call.
+;		<30>	 6/17/92	SMB		#1024950,<cv>: Created a new About Keyboards dialog to mention
+;									input methods as well as keyboard layouts when a 2-byte script
+;									is installed so am now testing the system for this additional
+;									configuration so that the correct dialog is used.  Am now using
+;									my routine localGetIndString (exported from ScriptMgrKbdMenu.a)
+;									and ParamText to fetch and display the strings for the dialog.
+;									Replaced NameString stack frame variable with kbdMenuString1and
+;									kbdMenuString2 in order to more easily localize the About
+;									Keyboards dialog strings (and so I can use localGetIndString for
+;									ParamText).
+;		<29>	  6/5/92	SMB		#1029675,<pke>: When switching from old-style IM to a keyboard
+;									layout need to deactivate the old-style IM. So, now calling
+;									UpdateInputMethods for all updating of menu items and then doing
+;									the appropriate setting for the KCHR.
+;		<28>	  6/4/92	SMB		#1031618,<pke>: DrawMenuBar uncovered an old bug when I added
+;									the private KeyScript verb (smKeySynchKbdMenuState) in the last
+;									checkin.  In DisableKeyboardItems, I was stomping on a word of
+;									the stack (which was where I was saving d4) by using the stack
+;									address for a VAR parameter. Fixed this bugger by correctly
+;									pushing some stack space for the VAR parameter before passing
+;									the address.
+;		<27>	 5/10/92	SMB		#1026551,<pke>: Removed patch to DrawMenuBar for disabling the
+;									keyboard appropriately per an application's smgrAppDisableKybds
+;									flag and instead created a private KeyScript verb
+;									(smKeySynchKbdMenuState) to do the same thing. This is now
+;									called from DrawMenuBar (the SE/Plus patch version (!) and the
+;									ROM version of the code). The problem was that since SMgr is
+;									installed before link patches and MenuMgr is a linked patch for
+;									the SE/Plus, our patch was getting overwritten when MenuMgr was
+;									installed.
+;		<26>	 4/30/92	FM		Get rid of conditionals: ScriptMgrKeyboardMenu,NOT
+;									DoCmdKeyEquivalents
+;		<25>	 4/10/92	SMB		#1026551,<pke>: , #1026911: Added ptchDrawMenuBar: Need to now
+;									to disable the keyboard appropriately for the state of the
+;									current applications scriptDisableKybds flag. Also, fixed the
+;									bug that assumed item #1 was always the About Keyboards… item.
+;									Now if an iconSuiteH does not exist for item #1 then I know it’s
+;									About.
+;		<24>	  4/6/92	SMB		#1022196,<pke>: In ptchSystemMenu, fixed branch from old-style
+;									IMs code so that they didn't write the FEP ID into the itlbKeys
+;									field. Instead they branch to @UpdateKbdDriver. Had to also move
+;									call to utSetTextServiceLanguage below @UpdateKbdDriver so that
+;									it would still be called. Replaced a huge chunk of code that was
+;									duplicated here from ScriptMgrKeyGetSet.a with a call to
+;									UpdateInputMethods which is now imported.
+;		<23>	 2/28/92	YK		Fix condition to see if the selected item is an (old or
+;									new)input method. It used to test auxItemInfo, which is nil for
+;									the old IM and KCHR.  Now it checks itemType. (0:KCHR,1:new
+;									IM,2:old IM)
+;		<22>	 2/11/92	DCL		Changed the name of TSMEqu.[aph] to TextServices.[aph] for
+;									better read-ability.
+;		<21>	 2/10/92	KST		Change2OldJIM message takes a parameter now. We need to include
+;									TSMPrivate.a as well.
+;		<20>	  2/3/92	KST		When we switch form old to new Japanese IM, need to shut down
+;									the old one.
+;		<19>	  2/1/92	KST		When switching scripts or input method from the KB menu, need to
+;									call SetTextServiceLanguage when we switch from CJK to Roman.
+;									Call SetDefaultInputMethod when switch to a TSM styled IM.
+;		<18>	 1/15/92	SMB		Add code to support old-style Japanese input methods in the
+;									menu. Fix stack problem caused by not restoring MenuList when no
+;									menu handle exists.
+;		<17>	12/16/91	JH		Fixing change 16, we were setting a4 but we weren't setting it
+;									to point at an actual auxmenuinforecord.  Now it does.
+;		<16>	12/16/91	pvh		In UpdateKbdMenu move initialization of A4 to before it needs to
+;									be used. What a concept.
+;		<15>	12/11/91	SMB		Updating to support input methods in the keyboard menu. Renamed
+;									AuxKeyboardMenuInfo members with new names. Renamed
+;									scriptRecord's scriptKCHRCount member to scriptInputCount.
+;		<14>	 11/8/91	SMB		#1015613 (for CubeE & Bruges) - Fix bug that shows up when an
+;									application has no menu bar. We really want to use the system
+;									menu bar (SystemMenuList) and not the current menu bar which may
+;									be an application's menu bar.
+;		<13>	  2/9/91	PKE		smb,#81489: A call to KeyScript with the verb
+;									smKeyDisableKybdSwitch disables the “About…” item in the
+;									Keyboard menu, but should not.
+;		<12>	12/15/90	SMB		(gbm/csd) Modified EnableKeyboardItems to not enable the About
+;									Keyboards… menu item since it has an explicit verb of its own
+;									for this! Modified to guarantee fetching resources from the
+;									system resource file. Use Kevin's new, cool filter proc to
+;									automatically outline the default button in the modal dialog.
+;									Modified use of ResLoad to be a byte op and not a word op.
+;									Updated the data structures for each kbd driver to point to the
+;									correct 'KCHR' by calling SwapKybd after selecting a new
+;									keyboard layout.
+;		<11>	  9/1/90	SMB		Get a different DITL for the About Keyboards dialog if there's
+;									only 1 script enabled.
+;		<10>	 8/16/90	SMB		Since can now disable About… menu item must be able to re-enable
+;									it!
+;		 <9>	 8/14/90	SMB		Fixed bugs in loops in DisableKeyboardItems &
+;									EnableKeyboardItems by using indexed addressing to fetch icon
+;									suite handles. Also cleaned up improper use of stack for
+;									GetItmIcon in DisableKeyboardItems.
+;		 <8>	 8/10/90	SMB		Adding ‘About Keyboards…’ support. Removed code that was going
+;									to write the new KCHR id into the script record. No longer
+;									necessary. Cleaned up comments here too!<
+;		 <7>	  8/7/90	SMB		Reading default keybd marker from a resource now.
+;									Added DisableKeyboardItems, EnableKeyboardItems and
+;									DisableKybdSwitching.
+;		 <6>	 6/22/90	SMB		Conditionalizing out code that expects the Next Keyboard and
+;									Next Script menu items to exist. Using flag DoCmdKeyEquivalents.
+;		 <5>	  6/1/90	SMB		Modified to handle Next Keyboard and Next Script menu items, and
+;									added a dash instead of outlining to indicate a script's def
+;									KCHR. Added SetKbdMenuInfo guts for ProcessMgr call.
+;		 <4>	 5/31/90	PKE		Added framework for new private routine SetKbdMenuInfo. This
+;									routine is for cleaner communication between Process Mgr and
+;									Script Mgr for keyboard menu handling. Deleted some extra lines
+;									after the END statement.
+;		 <3>	 5/31/90	SMB		Renaming IconUtils.a to Icons.a.
+;		 <2>	 5/13/90	SMB		Adding UpdateKeybdMenu and guts for ptchSystemMenu!
+;		 <1>	  5/5/90	PKE		Added a butchered version of Sue’s new file with a temporary
+;									stub for ptchSystemMenu. Sue will fill this in later and add
+;									UpdateKeyboardMenu.
+;___________________________________________________________________________________________________
+;	To Do:
+;	• see <??>
+;	• in DisableKeyboardItems: instead of 'cmp.b' followed by 'tst.b' of smgrAppDisableKybds(a1),
+;		simply do a tst.b followed by beq, bgt, blt for each disable/enable state.
+;	• in DoAboutDialog, check if LocalGetIndString returns an empty string and if so, set 
+;		kbdMenuString(x) to NIL appropriately.  See <30xx>
+;___________________________________________________________________________________________________
+
+		load	'StandardEqu.d'
+		include	'ScriptPriv.a'
+		include 'Icons.a'
+		include 'MFPrivate.a'
+		include 'DialogsPriv.a'
+		include	'MenuMgrPriv.a'					;							<14>
+		include	'Components.a'					;							<15>
+		include	'TextServices.a'				;							<19> <22>
+		include 'TSMPrivate.a'					;							<21>
+
+		
+		blanks	on
+		string	asis
+
+		proc
+	IF NOT forROM THEN
+		export	ptchSystemMenu
+	ELSE
+		export	HandleKeyboardMenu
+	ENDIF
+		export	UpdateKeybdMenu
+
+
+;;NameString			record	0			; holds IconSuite handle
+;;menuItemLen			ds.b	1
+;;menuItemSpecChar		ds.b	1			; part of name
+;;menuItemString		ds.b	4			; name (but really is the IconSuiteH)
+
+;;					endR
+					
+				string	asis					
+menuFrame			record	{a6link},decr
+a6link				ds.l	1				; old link pointer
+menuH				ds.l	1				; menuHandle
+newScript			ds.w	1				; new menuItem's script #
+itemHit				ds.w	1				; item hit in ModalDialog call						<8>
+scriptLangRec		ds.l	1				; script word / language word						<19>
+CompDesc			ds		ComponentDescription	;											<15>
+;;MenuItemName		ds		NameString
+				string	pascal
+kbdMenuString1		ds.b	256				; needed for ParamText now so replace NameString	<30>
+kbdMenuString2		ds.b	256				; needed for ParamText now so replace NameString	<30>
+menuLocals			equ		*				; size of locals
+					endR
+
+UpdateKeybdMenuRegs		reg		d2-d6/a2-a4	
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; formfeed
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;		ptchSystemMenu
+;
+;		If the menu ID is the Keyboard Menu then we do the
+;		right thing!  Otherwise, we pass the info on through.
+;
+;		Input
+;		4(sp) = menuItem num (L word)/ menuID in (H word)
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+	IF Not ForROM THEN
+ptchSystemMenu
+; is the mouse-down in the Keyboard Menu?		
+		move.l	4(sp),d0					; get the menu ID (after the return address)
+		swap	d0
+		cmpi.w	#kKeyboardMenuID,d0	
+		bne		@notScriptMenu
+	ELSE
+HandleKeyboardMenu							; <SM8> CSS we already know we are handling keyboard menu
+		move.l	4(sp),d0					; get the menu ID (after the return address)
+		swap	d0
+	ENDIF
+
+		move.l	(sp)+,a1					; save return address
+		addq	#4,sp						; pop menu info
+		move.l	a1,-(sp)					; restore return address
+		
+;————————————————————————————————————————————————————————————————————————————————————————————— 	<5>
+; duplicated initialization in order to determine if menuItem is Next Keyboard or Next Script
+; since these menuItems aren't enabled yet we just plow forward into processing the desired menuItem.
+		with	menuFrame,smgrRecord,ScriptRecord,ItlbRecord
+		link	a6,#menuLocals
+		movem.l	UpdateKeybdMenuRegs,-(sp)
+		
+		move.l	d0,d3						; menuItem Num (H)/ menuID (L)
+
+; get the keyboard menu handle
+
+; If an application doesn't have a menuBar then _GetMHandle will fail. What we 					<14>
+; really want is to use the system menuBar and not the application menuBar.						<14>
+		move.l	MenuList,-(sp)				; save the current menuList since it may be an apps menu <14>
+		move.l	SystemMenuList,MenuList		;													<14>
+
+		subq	#4,sp
+		move.w	d3,-(sp)					; menu ID
+		_GetMHandle
+		move.l	(sp)+,d0
+		beq		Done						; no menu handle
+		move.l	d0,menuH(a6)
+		move.l	(sp)+,MenuList				; restore the menuList								<14>
+
+; get the menu item
+		swap	d3							; want menu item (now: menuID (H)/menuItem num (L)
+
+;--------------------------------------------
+		cmp.w	#1,d3						; is this the first menu item?						<8>
+		bne		@InputMenuItem				; nope so continue
+; if the first menu item is About Keyboards… then display dialog otherwise, process input type	<25>
+		with	AuxKeyboardMenuInfo			;													<25>
+		GetSMgrCore	a2						; get script manager core							<25>
+		move.l	smgrKeyboardMenuPtr(a2),a4	;													<25>
+		move.w	d3,d0						; menu item number									<25>	
+		mulu.w	#AuxMenuInfoSize,d0			;													<25>
+		cmp.l	#0,IconSuiteH(a4,d0)		; if NIL then is About								<25>
+		beq		DoAboutDialog				; put up the About Keyboards… dialog & exit			<8>
+		endWith
+;--------------------------------------------
+		; fall thru to @InputMenuItem to process input selection since no cmd key items			<6>
+
+	IF DoCmdKeyEquivalents THEN				; 													<6>
+			; determine if Next Keyboard or Next Script were selected
+					sub.w	#2,sp						; result
+					move.l	menuH(a6),-(sp)
+					_CountMItems
+					move.w	(sp)+,d0
+					move.w	#-4,d1						; assume rotate to next available keyboard in script
+					cmp.w	d3,d0						; last item is ‘Next Keyboard in Script’
+					beq.s	@GetNext
+					sub.w	#1,d0
+					cmp.w	d3,d0						; second to last item is ‘Next Script’
+					bne.s	@InputMenuItem
+			; must have been Next Keyboard menu item
+					move.w	#-1,d1						; rotate to next keyboard in script
+			
+			@GetNext
+			; since _KeyScript calls UpdateKeybdMenu must restore regs and pop unlk.
+					movem.l	(sp)+,UpdateKeybdMenuRegs
+					unlk	a6
+			
+			; either next script (-1) or next keyboard (-4)
+					move.w	d1,-(sp)
+					_KeyScript
+					rts
+
+
+	ENDIF									;													<6>
+
+;————————————————————————————————————————————————————————————————————————————————————————————— 	<5>
+;—————————————————————————————————————————————————————————————————————————————————————————————	<5>
+; We branch to this point if the menuItem is one of the input items (not Next Keyboard, etc.)
+@InputMenuItem
+
+; save the keyScript as the last keyscript (since UpdateKeybdMenu expects this!)
+		GetSMgrCore	a2						; get script manager core
+		move.w	smgrKeyScript(a2),d2
+		move.w	d2,smgrLastScript(a2)		; save as previous script
+		
+; get the new menuItem's script # and save in smgrKeyScript
+		with	AuxKeyboardMenuInfo			;													<5>
+		move.l	smgrKeyboardMenuPtr(a2),a4	;													<5>
+		move.w	d3,d0						; menu item number									<5>	
+		mulu.w	#AuxMenuInfoSize,d0			;													<5>
+		add.w	d0,a4						; ptr to menu info for new input					<5>
+;—————————————————————————————————————————————————————————————————————							<15>
+; If we choose the same item number, this should be a noop, don't do anything		<#19><01Feb92 KSCT>
+	;  d2 = current script, get old AuxMenuInfo ....								<KSCT #19>
+		lsl.w	#2,d2						; long word offset.						<#19>
+		move.l	smgrEntry(a2,d2.w),a0		; get script record						<#19><24>
+		moveq	#0,d5						;										<#19>
+		move.b	scriptKeysItemNum(a0),d5	; def KCHR's menu item number			<#19><24>
+		move.l	smgrKeyboardMenuPtr(a2),a3	;										<#19>
+		move.w	d5,d0						; menu item number						<#19>
+		mulu.w	#AuxMenuInfoSize,d0			;										<#19>
+		add.w	d0,a3						; ptr to menu info for old input		<#19>
+
+; current status of the world:
+; a0 = ptr to current script record (based on keyScript)							<24>
+; a2 = script manager core															<#19>
+; a3 = ptr to menu info for OLD input 												<#19>
+; a4 = ptr to menu info for NEW input	(d3)										<#19>
+		cmp.l	a3,a4						; if the same, then nothing changed		<#19>
+		beq		RestoreRegs					; then this is a noop					<#19>
+
+;-----------------------------------------------------------------------------------
+; New input is an IM so calling UpdateInputMethods to handle necessary updating.
+; UpdateInputMethods does the right thing if the previous input (current keyScript)
+; was an input method or a KCHR.  Must call utSetTextServiceLanguage afterwards so
+; TSM can clean up the previous state of the world (see UpdateKbdDriver below!)
+;
+; 	Need to set up the registers for UpdateInputMethods:
+;	Input
+;		d2 = ptr to AuxKeyboardMenuInfo record, smgrKeyboardMenuPtr
+;		a0 = ptr to current script record (based on keyScript)
+;		a3 = ptr to AuxKeyboardMenuInfo record, smgrKeyboardMenuPtr, for the new input item
+;		a6 = stackframe, menuFrame
+;	Output
+;		d2.w =  00 for no error
+;		 	 = $FFFF for error occurred.
+;	preserves d0/d1/d3/a0/a2/a3/a4
+;-----------------------------------------------------------------------------------
+		move.l	smgrKeyboardMenuPtr(a2),d2	; ptr to menu info for old input item 	<24>
+		movea.l	a4,a3						; ptr to menu info for new input item 	<24>
+		import	UpdateInputMethods			;										<24>
+		jsr		UpdateInputMethods			; update for switching between IMs		<24>
+		tst.w	d2							; error result?							<24>
+		bne		RestoreRegs					; yes, don't change anything since can't get next item
+		tst.b	itemType(a4)				; is this a KCHRitem?					<24><29>
+		beq.s	@KCHRinput					; yep									<29>
+		move.w	smgrKeyScript(a2),d1		; need keyScript in d1 for branch		<24>
+		bra		@UpdateKbdDriver			; no error								<24>
+									
+;-----------------------------------------------------------------------------------
+
+@KCHRinput
+		move.w	itemRsrcID(a4),d0			;													<5>
+		endwith								; AuxKeyboardMenuInfo
+		
+; get the script # from the KCHR ID: (KCHR id - #16384)/#512 + 1
+		move.l	#smRoman,d1					; initialize to Roman script
+		sub.w	#smFondStart,d0				; beginning of non-Roman resource IDs (zero base KCHR #) 
+		bmi.s	@KnowScript
+		move.w	#9,d1						; shift amt
+		asr.w	d1,d0						; get into script range
+		addq.w	#1,d0						; get real script #
+		move.w	d0,d1
+@KnowScript
+
+		with	ScriptRecord,AuxKeyboardMenuInfo	;											<12>
+		move.w	d1,smgrKeyScript(a2)				; set new keyscript code
+; update the data structures for each kbd driver to point to the correct KCHR					<12>
+		move.w	d1,d0								; copy script code									<12>
+		lsl.w	#2,d0								; find smgrEntry offset								<12>
+		move.l	smgrEntry(a2,d0.w),a0					;										<12>
+		move.w	itemRsrcID(a4),scriptBundle.itlbKeys(a0)	; move new KCHR id into itlbKeys	<12>
+
+@UpdateKbdDriver
+; a2 = script manager core
+; d1 = new keyscript code
+
+		move.w	d1,-(sp)					; preserve script code around SwapKybd				<31>
+		move.l	SmgrRecord.sVectSwapKybd(a2),a0			; load address of SwapKybd				<12>
+		jsr		(a0)						; jsr to it											<12>
+		endWith								; ScriptRecord,AuxKeyboardMenuInfo													<12>
+		move.w	(sp)+,d1					; restore script code								<31>
+
+		cmp.w	smgrLastScript(a2),d1		; did the script change?							<31>
+		beq.s	ShowNewSelection			; no, so no need to update TSM						<31>
+		import	utSetTextServiceLanguage	;												<19>
+		bsr		utSetTextServiceLanguage	; d1,a2 preserved								<19><24> moved from above UpdateKbdDriver
+		bra.s	ShowNewSelection			;													<5>
+		endWith								; menuFrame,smgrRecord,ScriptRecord,ItlbRecord
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+	IF Not ForROM THEN ; <SM8> CSS
+@notScriptMenu		
+; just return through original trap
+		with	SMgrRecord
+		move.l	IntlSpec,a0
+		move.l	sVectOldSystemMenu(a0),a0
+		jmp		(a0)
+		endWith
+	ELSE	; ForROM
+		move.l	(sp)+,(sp)					; strip parameter
+		rts									; return to caller
+	ENDIF
+
+; formfeed
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;		UpdateKeybdMenu
+;
+;		Help out the System Menu by handling the new keyboard menu!
+; 		This routine is called from _KeyScript. ptchSystemMenu (above)
+;		branches here at the ShowNewSelection label.
+;
+;		In the case that no menu is drawn, must update SMGR record w/ defKCHR, and update
+;		scriptBundle.itlbKeys (KCHR id) and scriptKeysItemNum in script Record.
+;
+;		Input
+;		d0 = menuItem num (L word)/ menuID in (H word)
+;		The SMgr variables LastScript and KeyScript are set to reflect the new input (KCHR or input method).
+;
+; 		Register usage:
+; 		d3 = menuID (L word)/ menuItem num in (H word)
+; 		d4 = system keyscript
+;		d5 = current input menu item number
+;		a2 = ptr to smgrRecord
+;		a3 = ptr to keyScript's ScriptRecord
+; 		a4 = ptr to AuxKeyboardMenuInfo
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+UpdateKeybdMenu
+
+; test if there's a MenuList yet: explicitly test for -1 or 0.
+		move.l	MenuList,d1
+		beq		NoMenuList					; bra if 0
+		add.l	#1,d1
+		beq		NoMenuList					; bra if -1
+		
+		with	menuFrame,smgrRecord,ScriptRecord,ItlbRecord,AuxKeyboardMenuInfo
+
+		link	a6,#menuLocals
+		movem.l	UpdateKeybdMenuRegs,-(sp)
+		move.l	d0,d3						; save menuItem Num (H)/ menuID (L)
+
+; INITIALIZATIONS:
+
+; get the keyboard menu handle
+; If an application doesn't have a menuBar then _GetMHandle will fail. What we 			<14>
+; really want is to use the system menuBar and not the application menuBar.					<14>
+		move.l	MenuList,-(sp)				; save the current menuList since it may be an apps menu <14>
+		move.l	SystemMenuList,MenuList		;													<14>
+
+		subq	#4,sp
+		move.w	d3,-(sp)					; menu ID
+		_GetMHandle
+		move.l	(sp)+,d0
+		beq		Done						; no menu handle
+		move.l	d0,menuH(a6)
+		move.l	(sp)+,MenuList				; restore the menuList							<14>
+
+; get the menu item
+		swap	d3							; want menu item (now: menuID (H)/menuItem num (L)
+
+ShowNewSelection							;													<5>
+; get the keyScript, default KCHR ID, and menuItem number for the current script (smgrLastScript now)	
+		move.l	IntlSpec,a2					; get script manager core
+		move.w	smgrLastScript(a2),d2
+		lsl.w	#2,d2						; long word offset.
+		move.l	smgrEntry(a2,d2.w),a3		; get script record
+		moveq	#0,d5
+		move.b	scriptKeysItemNum(a3),d5	; current input menu item number
+		
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Undo the previous input item:
+; Replace check mark of previous input item with a diff marker to indicate default
+; 	input (not doing this yet so using null)
+
+		move.l	menuH(a6),-(sp)
+		move.w	d5,-(sp)
+; setup defaultMark for the menu																<7>
+		move.w	#KeybdDefaultMrk,-(sp)		; null is the default if the resource can’t be loaded
+
+; setup for resource fetch from the system file													<12>
+		subq.w	#2,sp						; storage for current resource file					<12>
+		_CurResFile							; 													<12>
+		move.w	#0,-(sp)					; use system resource file							<12>
+		_UseResFile							;													<12>
+		move.b	ResLoad,-(sp)				; preserve											<12>											<8>
+		move.b	#$FF,ResLoad				; set T for this resource							<12>
+
+; get the strings for ParamText substitution
+		pea		kbdMenuString1(a6)			; ptr to Str255										<30>
+		move.w  #kKeyboardMenuItemsID,-(sp)	; strListID											<30>
+		move.w	#DefMarkIndex,-(sp)			; string index										<30>
+		import	localGetIndString			;													<30>
+		bsr		localGetIndString			; making a pString (rather than a ptr to text)		<30>											<34>
+
+		move.b	(sp)+,ResLoad				; restore											<12>										<8>
+; restore previous (current) resource file														<12>
+		_UseResFile							; current resource file ID on stack					<12>
+
+		tst.b	kbdMenuString1(a6)			; do we have a string?								<30>
+		beq		@useDefMarker				; if empty, use default marker						<30>
+		move.b	kbdMenuString1+1(a6),1(sp)	; skip over the string length						<30>
+		
+@useDefMarker
+
+		_SetItmMark
+				
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Do the new input:
+; (if called from KeyScript, then the previous menu item = the new menu item.)
+
+; Remove the default marker for the previous default input (KCHR or input method) for this new script
+; 	Use the new script # to get the current scriptRecord
+		move.w	smgrKeyScript(a2),d2		; new keyscript
+		lsl.w	#2,d2						; long word offset.
+		move.l	smgrEntry(a2,d2.w),a3		; get script record
+		moveq	#0,d5
+		move.b	scriptKeysItemNum(a3),d5	; def KCHR's menu item number
+
+		move.l	menuH(a6),-(sp)
+		move.w	d5,-(sp)
+		move.w	#0,-(sp)					; remove the mark
+		_CheckItem
+
+; czech the selected menu item
+		move.l	menuH(a6),-(sp)
+		move.w	d3,-(sp)
+		move.w	#$FFFF,-(sp)				; check it
+		_CheckItem
+
+; Set the new KCHR info in the scriptRecord
+; a3 = ptr to new keyScript's ScriptRecord
+
+		move.b	d3,scriptKeysItemNum(a3)
+		
+; get KCHR id for this item																		<5>
+		move.l	smgrKeyboardMenuPtr(a2),a4	;													<5>
+		move.w	d3,d0						; menu item number									<5>	
+		mulu.w	#AuxMenuInfoSize,d0			;													<5>
+		add.w	d0,a4						; ptr to menu info for new KCHR						<5>
+;—————————————————————————————————————————————————————————————————————				<15> <16><17>
+; find out the type of input														<15> <16><17>
+		tst.w	itemType(a4)				; is this an input method?				<23>
+		bne.s	@ChangeTitle				; don't update script's keyScript for input methods
+;—————————————————————————————————————————————————————————————————————				<15> <16><17>
+
+		move.w	itemRsrcID(a4),scriptBundle.itlbKeys(a3)	;									<5>
+		
+	IF DoCmdKeyEquivalents THEN				; 													<6>
+			; if there is only one KCHR for this script, disable the ‘Next Keyboard in Script’ menuItem
+			; last item is ‘Next Keyboard in Script’
+					move.l	menuH(a6),-(sp)				; push early for _DisableItem call
+					sub.w	#2,sp						; result
+					move.l	menuH(a6),-(sp)
+					_CountMItems
+					; leave count ( = last menuItem #) on stack
+					cmp.b	#1,scriptInputCount(a3)
+					bhi.s	@EnableIt
+					_DisableItem
+					bra.s	@ChangeTitle
+			@EnableIt
+					_EnableItem
+	ENDIF									;													<6>
+	
+@ChangeTitle
+; Change the title of the menu to the icon of the new script's keybd..
+		move.l	menuH(a6),a0
+		move.l	(a0),a0								; deref
+; stuff the length (5 bytes) and special byte into the name: 01 indicates a handle is following
+		move.w	#$0501, menuData(a0)				;											<15>
+		move.l	IconSuiteH(a4),menuData+2(a0)		; stuff the IconSuite handle into the name
+		_InvalMenuBar								; redraw menu bar
+		bra.s	RestoreRegs							; skip restoring MenuList since already done	<14>
+Done
+		move.l	(sp)+,MenuList						; restore the menuList						<14>
+RestoreRegs
+		movem.l	(sp)+,UpdateKeybdMenuRegs
+		unlk	a6
+		endWith										; menuFrame,smgrRecord,ScriptRecord,ItlbRecord,AuxKeyboardMenuInfo
+
+NoMenuList
+		rts
+		
+;————————————————————————————————————————————————————————————————————————————————————————————— 	<8>
+;		DoAboutDialog
+;
+;		Entry:
+;		<<already setup…>>
+;			link	a6,#menuLocals
+;			movem.l	UpdateKeybdMenuRegs,-(sp)
+;		<<but must be cleaned up…>>
+;			d3	menu item
+;————————————————————————————————————————————————————————————————————————————————————————————— 	<8>
+
+DoAboutDialog
+; Add support for About Keyboards
+		with 	menuFrame,smgrRecord
+; set up param text
+	IF 0 THEN
+		move.b	#KeybdDefaultMrk,kbdMenuString1+1(a6)	; null is default if the resource can’t be loaded
+		move.b	#1,kbdMenuString1(a6)		; default string length								<30>
+	ENDIF
+	
+; setup for resource fetch from the system file													<12>
+		subq.w	#2,sp						; storage for current resource file					<12>
+		_CurResFile							; 													<12>
+		move.w	#0,-(sp)					; use system resource file							<12>
+		_UseResFile							;													<12>
+		move.b	ResLoad,-(sp)				; preserve											<12>
+		move.b	#$FF,ResLoad				; set T for this resource							<12>
+	IF 0 THEN
+; get the strings for ParamText substitution
+		pea		kbdMenuString2(a6)			; ptr to Str255										<30>
+		move.w  #kKeyboardMenuItemsID,-(sp)	; strListID											<30>
+		move.w	#DefMarkIndex,-(sp)			; string index										<30>
+		import	localGetIndString			;													<30>
+		bsr		localGetIndString			; making a pString (rather than a ptr to text)		<30>											<34>
+		tst.b	kbdMenuString2(a6)			; do we have a string?								<30>
+		beq		@setText					; if empty, use default marker						<30>
+		move.l	kbdMenuString2(a6),kbdMenuString1(a6)	; move length byte and marker			<30>
+@setText
+		pea		kbdMenuString1(a6)			; string ^0											<30>
+		move.l	#0,-(sp)					; string ^1 is empty
+		move.l	#0,-(sp)					; string ^2 is empty
+		move.l	#0,-(sp)					; string ^3 is empty
+		_ParamText
+	ENDIF
+
+;get the DITL, DLOG and STR# ID
+		move.w	#kKeyboardMenuID-3,d4		; start w/ the multi-script DITL ID	(-16494)		<30>
+		GetSMgrCore	a3						; get script mgr core								<11>
+		cmp.b	#1,smgrEnabled(a3)			; > 1 script enabled?								<11>
+		bhi.s	@MultiScript				; yep												<11>
+		add.w	#2,d4						; get the Roman-only version of the dialog (-16492)	<11>
+		bra.s	@GetTheSTR					;													<30>
+		
+@MultiScript
+; now test if a 2-byte script system is installed												<30>
+		subq	#4,sp
+		move.w	#smDoubleByte,-(sp)
+		_GetEnvirons
+		move.l	(sp)+,d0
+		tst.b	d0							; T=> 2-byte script installed						<30>
+		beq.s	@GetTheSTR					; F=> 1-byte scripts only
+		add.w	#1,d4						; get the 2-byte IM version of the dialog (-16493)	<30>
+
+@GetTheSTR		
+; get the strings for ParamText substitution
+		move.l	#0,kbdMenuString2(a6)		; initialize to NIL									<30>
+		pea		kbdMenuString1(a6)			; ptr to Str255										<30>
+		move.w  d4,-(sp)					; strListID											<30>
+		move.w	#kCheckActiveKbdIndex,-(sp)	; string index										<30>
+		import	localGetIndString			;													<30>
+		bsr		localGetIndString			; making a pString (rather than a ptr to text)		<30>											<34>
+;;		tst.b	kbdMenuString1(a6)			; do we have a string?								<30xx>
+;;		bne		@setText					; if empty, use NIL string							<30xx>
+;;		move.l	#0,kbdMenuString1(a6)		; set to NIL										<30xx>
+
+		cmp.w	#kKeyboardMenuID-1,d4		; is this for a Roman-only system (-16492)?			<30>
+		beq.s	@setText					; yes, done w/ fetching strings						<30>
+		pea		kbdMenuString2(a6)			; no, get next string								<30>
+		move.w  d4,-(sp)					; strListID											<30>
+		move.w	#kRotateKbdsIndex,-(sp)		; string index										<30>
+		bsr		localGetIndString			; making a pString (rather than a ptr to text)		<30>											<34>
+		
+;;		tst.b	kbdMenuString2(a6)			; do we have a string?								<30xx>
+;;		bne		@setText					; if empty, use NIL string							<30xx>
+;;		move.l	#0,kbdMenuString2(a6)		; set to NIL										<30xx>
+
+@setText
+		pea		kbdMenuString1(a6)			; string ^0											<30>
+		pea		kbdMenuString2(a6)			; string ^1											<30>
+		move.l	#0,-(sp)					; string ^2 is empty
+		move.l	#0,-(sp)					; string ^3 is empty
+		_ParamText
+
+; get the ‘DITL’ resource
+		subq	#4,sp						; result of GetResource
+		move.l  #'DITL',-(sp)				; theType
+		move.w	d4,-(sp)					; itemListID										<30>
+		_GetResource
+		move.l  (sp)+,d0					; handle to item list
+		tst.l	d0
+		beq		@NoResource
+		
+; create a dialog	
+		subq	#4,sp						; result
+		move.w	d4,-(sp)					; dialog ID
+		move.l	#0,-(sp)					; NIL for dStorage => allocate dialog record in heap
+		move.l	#$FFFFFFFF,-(sp)			; behind WindowPtr: put in front of all
+		_GetNewDialog
+		move.l	(sp)+,d3					; save the pointer
+		beq.s	@NoResource
+		
+		move.l	d3,-(sp)
+		_SetPort
+		
+; automatically outline the default button (and handle <Enter>/<Return>)						<12>
+		subq	#2,sp						; 													<12>
+		move.l	d3,-(sp)					;  													<12>
+		move.w	#1,-(sp)					;													<12>
+		_SetDialogDefaultItem				;													<12>
+		addq	#2,sp						; ignore error										<12>
+		
+@ModalLoop
+		move.l	#0,-(sp)					; NIL for a filter proc: do standard thing
+		pea		itemHit(a6)
+		_ModalDialog
+		cmp.w	#1,itemHit(a6)				; 1 => Return key or Enter key pressed
+		bne.s	@ModalLoop
+		
+		move.l	d3,-(sp)					; do it and be done with it!
+		_DisposDialog
+		
+@NoResource
+		move.b	(sp)+,ResLoad				; restore											<12>
+; restore previous (current) resource file														<12>
+		_UseResFile							; current resource file ID on stack					<12>
+		movem.l	(sp)+,UpdateKeybdMenuRegs
+		unlk	a6
+		rts
+;————————————————————————————————————————————————————————————————————————————————————————————— 	<8>
+		endwith
+		endProc
+
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; FUNCTION SetKbdMenuInfo(theMenu: MenuHandle; menuItem: Integer; pInfo: AuxMenuItemRecPtr): OSErr;
+;
+; This is a private Script Mgr routine that is called by the Process Mgr when the keyboard menu
+; structures need updating. <5>
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		proc
+		export	SetKbdMenuInfo
+		import	StdUnlink
+
+skmiFrame	record	{a6link},decr
+result		ds.w	1		; OSErr result code.
+skmiArgs	equ		*-8		; size of arguments.
+menuHandle	ds.l	1		; handle of the menuInfo record for keyboard menu
+menuItem	ds.w	1		; item number in the keyboard menu
+auxInfoPtr	ds.l	1		; pointer to Process Mgr AuxMenuItemRec structure
+selector	ds.l	1		; ScriptMgr selector on stack
+return		ds.l	1		; return address.
+a6link		ds.l	1		; old link pointer
+skmiLocals	equ		*		; size of locals
+			endr
+
+FamilyIconCmd		equ		$20				; icon cache or suite (_PlotIconSuite knows for sure!)
+
+SetKbdMenuInfo
+		with	skmiFrame,SMgrRecord,AuxKeyboardMenuInfo
+		link	a6,#skmiLocals
+
+		move.l	auxInfoPtr(a6),a0
+		move.w	#0,auxMenuIconGray(a0)		; false
+		move.l	#0,auxMenuHelpString(a0)	; nil
+		move.w	#0,auxMenuIconSize(a0)		; initialize to 0 (assume nil handle)
+		
+		GetSMgrCore	a1						; get script manager core
+		move.l	smgrKeyboardMenuPtr(a1),a1	; get ptr to aux kbd menu info
+		move.w	menuItem(a6),d0				; new menuItem #
+		mulu.w	#AuxMenuInfoSize,d0			; offset to new item
+		add.w	d0,a1						; ptr to menu info for new menuItem #
+		move.l	IconSuiteH(a1),auxMenuIconHandle(a0)
+		cmp.l	#0,IconSuiteH(a1)			; if handle exists, set size
+		beq.s	@Cleanup
+		move.w	#familyIconCmd,auxMenuIconSize(a0)		
+@Cleanup
+		clr.w	result(a6)					; return noErr=0.
+		move.w	#skmiArgs,d0				; for StdUnlink: # arg bytes to remove from stack
+		bra		StdUnlink
+		endWith
+		endProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; PROCEDURE DisableKeyboardItems
+; PROCEDURE EnableKeyboardItems
+;
+; These are private Script Mgr routines that are called by KeyScript when the keyboard menu
+; items need to be enabled (or disabled) for keyboard input. <7>  These are also called by
+; ptchDrawMenuBar now for restoring the keyboard menu to the frontmost application’s disabled
+; setting.
+;
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		proc
+		export	DisableKeyboardItems
+		export	EnableKeyboardItems
+
+DisableKeyboardItems
+EnableKeyboardItems
+; get the ptr to AuxKeyboardMenuInfo record
+		with	AuxKeyboardMenuInfo, smgrRecord
+		movem.l	a2-a4/d3,-(sp)
+		GetSMgrCore	a2
+		tst.b	smgrKbdMenuAvail(a2)	; do we have a menu?			new test			<13>
+		beq		@done					; skip if not					new test			<13>
+		move.l	smgrKeyboardMenuPtr(a2),a4
+			
+; get menu handle for _CountMItems call
+; If an application doesn't have a menuBar then _GetMHandle will fail. What we 			<14>
+; really want is to use the system menuBar and not the application menuBar.					<14>
+		move.l	MenuList,-(sp)				; save the current menuList since it may be an apps menu <14>
+		move.l	SystemMenuList,MenuList		;													<14>
+
+		subq	#2,sp					; result for _CountMItems call
+		subq	#4,sp					; result for _GetMHandle
+		move.w	#kKeyboardMenuID, -(sp)	; menuID
+		_GetMHandle
+		tst.l	(sp)
+		beq		@RestoreStack
+		move.l	(sp),a3					; save menu handle
+; get # of menu items
+		; leave menu handle on stack
+		_CountMItems
+		move.w	(sp)+,d3				; item count
+		move.l	(sp)+,MenuList			; restore the menuList								<14>
+		
+		with	ExpandMemRec, SMgrAppRecord	;												<25>
+		move.l	ExpandMem,a1			; get ExpandMemRec ptr								<25>
+		move.l	emScriptAppGlobals(a1),a1	; get globals handle							<25>
+		move.l	(a1),a1					; dereference - get ptr to globals					<25>
+		cmp.b	#1,smgrAppDisableKybds(a1)	; all switching disabled?						<25>
+;;		cmp.b	#1,smgrDisableKybds(a2)														<25>
+		beq.s	@DisableKybdSwitching	; Disable all keyboard menu items
+		
+		tst.b	smgrAppDisableKybds(a1)	; are we disabling or enabling items?				<25>
+;;		tst.b	smgrDisableKybds(a2)	; are we disabling or enabling items?				<25>
+		bne.s	@DisableItems			; disabling!
+		; fall into enabling
+;———————————————————————————————————————————————
+; Enable all items, n -> 1
+@EnableLoop
+; only enable input (KCHR and input method) menu items
+		move.w	d3,d0					; menu item number	
+		mulu.w	#AuxMenuInfoSize,d0	
+		move.l	IconSuiteH(a4,d0),d0	; if no icon suite then, not an input menuitem ;indexed & made .l <9>
+		beq.s	@GetNextItem
+		move.l	a3,-(sp)				; menu handle
+		move.w	d3,-(sp)				; item #
+		_EnableItem
+@GetNextItem
+		sub.w	#1,d3
+		bne.s	@EnableLoop
+; also re-enable About Keyboards menu item			<12>: Now use explicit verb for this function.															<10>
+;		move.l	a3,-(sp)				; menu handle											<10><12>
+;		move.w	#1,-(sp)				; About… menu item #									<10><12>
+;		_EnableItem																					<12>
+		bra.s	@done
+		
+;———————————————————————————————————————————————
+@DisableItems
+; Disable all items that are not in the System Script or Roman Script
+		move.w	d4,-(sp)				; preserve
+		move.w	smgrSysScript(a2),d4
+@DisableLoop
+; only disable input (KCHR and input method) menu items
+		move.w	d3,d0					; menu item number	
+		mulu.w	#AuxMenuInfoSize,d0	
+		move.l	IconSuiteH(a4,d0),d0	; if no icon suite then, not an input menuitem ;indexed & made .l <9>
+		beq.s	@NextItem
+
+; get the script # from the menu item
+		subq	#2,a7					; storage for script beyond d4							<28>
+		move.l	a7,a0					; get addr of storage for icon byte						<9>
+		move.l	a3,-(sp)				; menu handle
+		move.w	d3,-(sp)				; item #
+		pea		(a0)					; VAR: icon byte (returned as a word)
+		_GetItmIcon
+		move.w	(sp)+,d0				; get the script										<28>
+		
+		cmp.w	#smRoman,d0				; is it the Roman script? (use d0 instead of sp now)	<28>
+		beq.s	@NextItem				; yes, leave enabled
+		cmp.w	d0,d4					; is it the System script? (use d0 instead of sp now)	<28>
+		beq.s	@NextItem				; yes, leave enabled
+
+		move.l	a3,-(sp)				; menu handle
+		move.w	d3,-(sp)				; item #
+		_DisableItem
+@NextItem
+		sub.w	#1,d3
+		bne.s	@DisableLoop
+		move.w	(sp)+,d4				; restore
+		bra.s	@done
+
+;———————————————————————————————————————————————
+; Disable all menu items so that no keyboard switching is allowed.
+;———————————————————————————————————————————————
+@DisableKybdSwitching
+		move.l	a3,-(sp)				; menu handle
+		move.w	d3,-(sp)				; item #
+		_DisableItem
+		sub.w	#1,d3
+		cmp.w	#2,d3					; have we reached disabled line below "About…"			<13>
+		bgt.s	@DisableKybdSwitching	; if not, keep going									<13>
+		bra		@done
+
+;———————————————————————————————————————————————
+@RestoreStack
+		add.w	#6,sp
+		move.l	(sp)+,MenuList			; restore the menuList									<18>
+@done
+		movem.l	(sp)+,a2-a4/d3
+		rts
+		endWith
+		endProc
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		end

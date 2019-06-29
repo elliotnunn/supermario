@@ -1,0 +1,1271 @@
+;
+;	File:		CommResourceMgrUtilities.a
+;
+;	Contains:	Resource chain manipulation routines for the CommResourceMgr
+;
+;	Written by:	Byron Han.  
+;	Ported to Assembler by Jerry Godes.
+;
+;	Copyright:	© 1989-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <4>	 8/12/93	kc		<mb>: I deleted all of the "TheFuture" conditionals in all of
+;									the CommToolbox per Mike Bell's instructions. I also had to
+;									delete some old code that was compiled under the "CubeE"
+;									conditional.
+;		<15>	  6/8/92	JSM		Fix ProcessMgrExists routine (already conditionalized for
+;									TheFuture) to match the one in FileMgrPatches.a that looks at
+;									emProcessMgrExists. Like that file, we may want to invert the
+;									sense of this routine when we really turn it on so we can just
+;									do a tst.
+;		<14>	  2/7/92	BH		took out constants in CommToolboxPriv.a for resource map
+;									structure and use constants in ResourceMgrPriv.a
+;									also set the twoDeep bit after opening the resource file so when
+;									we splice below the system map we dont screw up the font folder
+;		<13>	 10/4/91	JSM		Change PsychoticFarmerOrLater conditionals to TheFuture.
+;		<12>	 10/2/91	DTY		Conditionalise <9> and <10> out of CubeE.
+;		<11>	  7/2/91	BH		change routines to prefix with __ to avoid glue conflicts
+;		<10>	 6/25/91	BH		bracket all calls to _HOpenResFile and _CloseResFile with
+;									_BeginSystemMode and _EndSystemMode
+;		 <9>	 6/17/91	BH		fix problem with CRMReleaseRF which does not set return code
+;									properly when useCount > 1
+;		 <8>	 12/6/90	JNG		Don't muck w/ file name in CRMOpenRFPerm <kaz>
+;		 <7>	 10/2/90	kaz		Changin' ResFileRec field theFile to theName to reflect parity
+;									in private interface files. <jng>
+;		 <6>	 9/10/90	JNG		Resolve aliases in CRMOpenRFPerm; Change ResFileRec to use
+;									canonical file specification.
+;		 <5>	  7/2/90	kaz		Code shrinkage/cleanup
+;		 <4>	 4/11/90	BBH		fixed call to CRMFindCommunications to properly setup stack
+;									(converted to pascal calling conventions instead of internal
+;									assembler dispatch table convention)
+;		 <3>	  4/9/90	BBH		removed _CRMFindCommunications
+;		 <2>	 3/16/90	BBH		make it compile please
+;		 <1>	 3/14/90	BBH		first checked in
+;
+;	Pre-BBS Modification History
+;				1/25/90		BBH		Renamed a bunch of routines (added _ before them) to prevent
+;									conflicts between glue and the toolbox
+;				8/3/89		BBH		Fixed problem with saving D1 in calling HOpenRFPerm
+;									Also fixed bug in getting the address of the resource filename
+;									that is in the resource file record being managed
+;				7/27/89		JNG		Added CRMGetIndToolName, CRMGetIndFile, CRMFindCommunications,
+;									CRMCountFiles
+;				6/23/89		JNG		Start port
+;
+;	To Do:
+;		• Move CRMGetIndTool etc calls to C and use caching of folder information
+;		• _CRMCountFiles & _CRMGetIndFile are similar.  Try to combine
+;		• Use StandardEntry routine that loads CTBGlobals & resFiles into a0, a1
+;	
+				
+	print 		push
+	print		off
+	load		'StandardEqu.d'
+	INCLUDE		'Aliases.a'
+	
+  				IF (&TYPE('CommToolboxPriv') = 'UNDEFINED') THEN
+ 	INCLUDE		'CommToolboxPriv.a'
+ 				ENDIF
+	
+	INCLUDE		'MFPrivate.a'	; <10>
+	INCLUDE		'GestaltEqu.a'	; <10>
+	
+	INCLUDE		'ResourceMgrPriv.a'		;	<14>
+	
+	print		pop
+	
+SysRefNum	EQU		2
+RomRefNum	EQU		1
+
+isAliasBit  EQU 	15			; file is an alias
+	
+	EXPORT		__CRMOpenRFPerm, __CRMReserveRF, __CRMReleaseRF, __CRMGetRFCount, __CRMToolPreflight, \
+				__CRMToolPostflight, __CRMCountFiles, __CRMGetIndFile, \
+				__CRMGetIndToolName
+	IMPORT		HOpenResFile
+	
+;	Routine: 	IsInRMap
+;	Arguments:	refnum - resource file reference number
+;	Return:		true or false
+;	Behavior:	returns TRUE if a resource map with the given refnum is found in the
+;					resource chain
+;	Called by:	_CRMReleaseRF
+;	Calls:		nothing
+;	Type:		UTILITY
+;	Register Usage:
+;	 On Entry
+;		D0 - refnum to look for
+;
+;	 Internal
+;		A0 - Resource map pointer
+;		D1 - temp to save refnum
+;		D2 - temp for comparison
+;
+;	 On exit 
+;		D0 - 1 if it was found, 0 otherwise
+
+IsInRMap		FUNC
+		movem.l		d1-d2,-(SP)
+		move.w		d0,d1
+		clr.w		d0						; Pessimism
+		move.l		TopMapHndl,a0			; Get TopMapHndl
+@1		move.l		a0,d2					; Is it nil?
+		beq.s		@done					; Yup, no go
+		move.l		(a0),a0					; Dereference
+
+;-------		
+		CMP.W		mRefNum(a0),d1			; <14>
+;-------cmp.w		ResourceMapRecord.refNum(a0),d1	; Do we match
+
+		beq.s		@2						; Yup, we're done
+
+;-------		
+		move.l		mNext(a0),a0			; <14>
+;-------move.l		ResourceMapRecord.next(a0),a0 ; Keep going young man
+
+		bra.s		@1
+@2		move.w		#$1,d0
+@done	movem.l		(SP)+,d1-d2
+		tst.w		d0						; set flag for caller
+		RTS
+		DbgInfo.new	IsInRMap
+				ENDF
+				
+;=====================================================================================================
+;
+;	Routine: 	AddResFileRec
+;	Arguments:	none
+;	Return:		resource file record handle if successful, NIL if not
+;	Behavior:	will attempt to allocate a resource file record handle from the
+;					system heap and will splice record into top of the resource 
+;					file record handle list pointer to off of the CTBGlobal.
+;	Called by:	_CRMOpenRFPerm
+;	Calls:		NewHandleSysClear
+;	Type:		UTILITY
+;
+;	This routine adds a resource file record (an internal CRM data structure) to the top of the
+;	list of	resource files being tracked/managed by the Communications Resource Manager
+;	
+;	The data structure is created in the system heap.
+;	
+;	If NIL is returned, the data structure was not created.
+;
+;	Register Usage:
+;		d0 - temp for cmp
+;		a1 - ResourceFileRecord pointer
+;		a2 - CTBGlobal data
+;	On Exit
+;		a0 - Return value for the ResFileRecHandle
+				
+AddResFileRec	FUNC
+		movem.l		a1-a2,-(SP)
+		MOVE.L		#ResFileRec.size,D0				
+		_NewHandle	sys, clear					; Create the record - we depend on the clear later
+		
+		move.l		a0,d0						; Check for a valid handle
+		beq.s		@done
+
+		move.l		(a0),a1						; dereference it				
+		move.l		CommToolboxGlobals,a2		; Get Global list
+		move.l		CTBBlock.resFiles(a2),ResFileRec.next(a1)	; Next handle
+		move.l		a0,CTBBlock.resFiles(a2)	; Put new one into list
+		
+@done	movem.l	(SP)+,a1-a2
+		RTS		
+		DbgInfo.new	AddResFileRec
+		ENDF
+
+;=====================================================================================================
+;
+;	Routine: 	FindResRefNum
+;	Arguments:	_refnum - file reference number
+;	Return:		resource file record handle if found, NIL if not
+;	Behavior:	will attempt to locate a resource file record handle from the
+;					resource file record list pointed to off of the CTBGlobal.
+;	Called by:	_CRMReserveRF, _CRMReleaseRF, _CRMGetRFCount
+;				_CRMToolPreflight, _CRMToolPostflight
+;	Calls:		nothing
+;	Type:		UTILITY
+;
+;=====================================================================================================
+;	This routine searches the list of resource files tracked by the communications resource
+;	manager for a record with resource file reference number refnum.
+;	
+;	If NIL is returned, the data structure was not found.
+;
+; Register Usage:
+;	Entry
+;		D0 - refnum
+;	Internal - 
+;		D1 - temp for address comparison
+;		A1 - dereferenced ResFileRecHdl
+;	Exit
+;		A0 - ResFileRecHdl
+FindResRefNum	FUNC
+		movem.l	d1/a1,-(SP)					; save off temp regs
+		move.l	CommToolboxGlobals,a0		; Get resource file list
+		move.l	CTBBlock.resFiles(a0),a0
+@1		move.l	a0,d1						; Check end of list
+		beq.s	@done
+		move.l	(a0),a1						; Check matching refnums
+		cmp.w	ResFileRec.refNum(a1),d0
+		beq.s	@done						; We found it - lets take off
+		move.l	ResFileRec.next(a1),a0		; Onward James
+		bra.s	@1
+@done
+		movem.l	(SP)+,d1/a1					; Restore temp regs
+		RTS
+		DbgInfo.new	FindResRefNum
+	ENDF
+
+;=====================================================================================================
+;
+;	Routine: 	DeleteResFileRec
+;	Arguments:	none
+;	Return:		nothing.  will quietly succeed or fail
+;	Behavior:	will attempt to delete a resource file record handle from the
+;					resource file record list pointed to off of the CTBGlobal.
+;	Called by:	_CRMReleaseRF
+;	Calls:		DisposHandle
+;	Type:		UTILITY
+;
+;=====================================================================================================
+;	This routine deletes the given resource file record handle from the list of
+;	resource files tracked by the communications resource manager.
+;
+DeleteResFileRec	PROC
+		movem.l		a1-a2,-(SP)						; Save Regs
+		move.l		CommToolboxGlobals,a2			; Get Resource File list
+		move.l		CTBBlock.resFiles(a2),a1
+		cmp.l		a0,a1							; Are we deleting the first elt?
+		bne.s		@notFirst
+		move.l		(a1),a1							; Yes, change the header pointer
+		move.l		ResFileRec.next(a1),CTBBlock.resFiles(a2)
+		bra.s		@deleteIt
+@notFirst											; Nope, check the next pointers
+@1		move.l		a1,d0
+		beq.s		@deleteIt						; We're done without finding the item - 
+													; we still want to delete the record passed in
+													; even though we haven't tracked it
+		move.l		(a1),a1
+		cmp.l		ResFileRec.next(a1),a0			; Is next the one we want?
+		bne.s		@next
+		move.l		(a0),a2							; Yup, relink the list
+		move.l		ResFileRec.next(a2),ResFileRec.next(a1)
+		bra.s		@deleteIt
+
+@next		
+		move.l		ResFileRec.next(a1),a1			; Move on to next item
+		bra.s		@1
+		
+@deleteIt	
+		_DisposHandle								; Free the data
+		movem.l		(SP)+,a1-a2						; restore the regs
+		RTS											; and go home
+		DbgInfo.new	DeleteResFileRec
+	ENDP		
+;=====================================================================================================
+;
+;	Routine: 	_CRMOpenRFPerm
+;	Arguments:	fName - filename, vRefNum - volume reference number, dirID - directory ID
+;	Return:		reference number of file opened, -1 if failed
+;	Behavior:	Searches the resource file record list pointed to off of CTBGlobal.
+;				(a) If the file has been opened previously with the same current heapZone, 
+;					then return the file reference number
+;				(b) If the file has been previously opened without the same current heapZone,
+;					then register the file name, dirID, and vRefNum along with the new
+;					heapZone as a new entry in the list.  
+;					
+;					Do a stripaddress on the filename before opening to prevent problems re TN 232
+;
+;					Return the file reference number returned from HOpenResFile.  
+;					
+;					The resource map is loaded in the current zone. The resource map handle is
+;					stored in the resource file record.
+;					
+;					*** The resource map is removed from the resource map chain. ***
+;					TopMapHandle is set to the resource file just below the resource file
+;						opened and cut out of the chain.
+;					CurMap is set to the new topmost resource file.
+;					
+;				(c) If the file has never been opened, do the same as the previous case (b) 
+;
+;	<10> modifications
+;		Set process to system process before opening the file - this allows persistent
+;		connections to be opened after the process manager is initted and bypasses the
+;		sanity checking in FSCleanup called from the CleanupApplication trap which
+;		auto closes all files opened by an application
+;
+;	Called by:	Dispatcher
+;	Calls:		CompareFileName, AddResFileRec, 
+;				HOpenResFile, CloseResFile, UseResFile
+;	Type:		INTERNAL
+;
+;	Register Usage
+;	On Entry - 
+;		A0 - pointer to the parameters (Record defined below)
+;	Internal - 
+;		d0 - temp (used for checking pointers,lengths in EqualString, address for StripAddress)
+;		d1 - vRefNum
+;		d2 - dirID
+;		d3 - current zone
+;		d4 - refNum
+;		d5 - 0 if process mgr exists, 1 otherwise <10>
+;		a0 - ResFileRecHandle
+;		a2 - ResFileRec
+;		a3 - file name
+;	On Exit - 
+;		D0 - refnum
+__CRMOpenRFPerm	FUNC
+
+		IMPORT	ZeroPB,ProcessMgrExists
+
+Parms	Record	0
+sel		DS.W	1
+dirID	DS.L	1
+vRefNum	DS.W	1
+fName	DS.L	1
+	ENDR
+Locals	RECORD	{A6Link}
+LocalStart	EQU		*
+thePB		ds.b	ioFQElSize
+theAlias	ds		FSSpec
+temp		ds.w	1
+tempName	ds.b	64
+LocalSize	EQU 	LocalStart -*			; size of all the local variables
+A6Link		DS.L	1			; place holder for A6 link
+RetAddr 	DS.L	1			; place holder for return address
+	EndR
+
+		LINK	a6,#Locals.LocalSize
+		movem.l	d1-d5/a1-a3,-(SP)				; added d5 <10>
+		move.w	Parms.vRefNum(a0),d1			; Save off the parameters into locals
+		move.l	Parms.dirID(a0),d2
+		move.l	Parms.fname(a0),a3
+		move.l	a3,d0
+		_StripAddress
+		move.l	d0,a3
+		move.l	TheZone,d3
+	
+;================================================= start <10>
+@pmcheck										; check for process manager
+		moveq	#1,d5							; does not exist
+		bsr		ProcessMgrExists
+		bne.s	@afterpmcheck
+		moveq	#0,d5							; does exist
+@afterpmcheck
+;------------------------------------------------- end <10>
+	
+@tryAgain
+		move.l	CommToolboxGlobals,a2			; Get resource files list
+		move.l	CTBBlock.resFiles(a2),a2
+
+@1		move.l	a2,d0							; End of list?
+		beq.s	@notFound
+		move.l	(a2),a2
+		cmp.w	ResFileRec.theName.vRefNum(a2),d1		; Matching volumes?
+		bne.s	@next
+		cmp.l	ResFileRec.theName.parID(a2),d2			; Matching directories?
+		bne.s	@next
+		cmp.l	ResFileRec.pZone(a2),d3			; Matching heap zones? (Same application)
+		bne.s	@next
+		
+		clr.l	d0							; Set up for the CmpString
+		lea.l	ResFileRec.theName.name(a2),a0		; The current res file's name
+		move.b	(a0)+,d0					
+		swap	d0
+		move.l	a3,a1						; The name we're looking for
+		move.b	(a1)+,d0
+		_CmpString							; This gives case insensitive, diacrit sensitive
+		beq		@found
+@next
+		move.l	ResFileRec.next(a2),a2		; Onwards
+		bra.s	@1
+		
+@notfound			; Not recorded
+
+		lea		Locals.thePB(a6),a0			; Set up the PB
+		move.l	#ioFQElSize,d0
+		JSR		ZeroPB						; Clear everything
+		move.w	d1,ioVRefNum(a0)		; vRefNum
+		move.l	d2,ioDirID(a0)			; dirID
+		move.l	a3,ioNamePtr(a0)		; Name
+		_HGetFileInfo
+		bmi		@problem1
+		move.w	ioFlUsrWds + fdFlags(a0),d0
+		btst	#isAliasBit,d0
+		beq.s	@gotRealFile
+	; We have an alias - resolve it
+		move.w	d1,Locals.theAlias.vRefNum(a6)
+		move.l	d2,Locals.theAlias.parID(a6)
+		move.l	a3,a0
+		lea		Locals.theAlias.name(a6),a1
+		moveq	#32,d0
+		_BlockMove
+		subq	#2,sp
+		pea		Locals.theAlias(a6)
+		st		-(sp)
+		pea		Locals.temp(a6)
+		pea		Locals.temp(a6)
+		_ResolveAliasFile
+		move.w	(sp)+,d0
+		tst.w	d0
+		bne		@problem1
+		move.w	Locals.theAlias.vRefNum(a6),d1
+		move.l	Locals.theAlias.parID(a6),d2
+		lea		Locals.theAlias.name(a6),a0
+		lea		Locals.tempName(a6),a1
+		move.l	a1,a3
+		moveq	#32,d0
+		_BlockMove
+		bra.s	@tryAgain
+
+@gotRealFile
+
+;================================================= start <10>
+	MOVEM.L	D1-D2,-(SP)						; save registers for the duration of the open
+											; D1 is vrefnum, D2 is dirID
+		tst.l	d5							; process mgr?
+		bne.s	@afterbegin1				
+
+		subq.l	#2,sp						; space for return value
+		_BeginSystemMode					; <10>
+		addq.l	#2,sp						; ignore return
+		
+@afterbegin1
+
+	MOVEM.L	(SP),D1-D2						; changed number of saved registers from D0-D2/A0-A2
+;------------------------------------------------- end <10>
+	
+	
+		clr.w	-(SP)
+		move.w	d1,-(SP)					; vRefNum
+		move.l	d2,-(SP)					; dirID
+		move.l	a3,-(SP)					; Name
+		move.b	#fsRdPerm,-(SP)				; Read Only
+		_HOpenResFile										
+		move.w	(SP)+,D4					; Here's the refnum
+
+
+;================================================= start <10>
+		tst.l	d5							; process mgr?
+		bne.s	@afterend1					
+		
+		subq.l	#2,sp						; space for return value
+		_EndSystemMode						; <10>
+		addq	#2,sp
+		
+@afterend1									
+	MOVEM.L	(SP)+,D1-D2						; restore vrefnum and dirID
+;------------------------------------------------- end <10>
+	
+		cmp.w	#-1,D4						; Did we have an error
+		beq.S		@problem1
+		JSR		AddResFileRec				; a0 on exit handle to new record
+		move.l	a0,d0
+		beq.S		@problem				; Nil handle
+		move.l	(a0),a2
+	; Fill in the fields of the ResFileRec	
+		move.l	#$40,d0						; copy all for less code size
+		move.l	a3,a0
+		lea		ResFileRec.theName.name(a2),a1
+		_BlockMove
+		move.w	d1,ResFileRec.theName.vRefNum(a2)
+		move.l	d2,ResFileRec.theName.parID(a2)
+		move.w	d4,ResFileRec.refNum(a2)
+		move.l	TopMapHndl,ResFileRec.resMap(a2)
+		move.l	d3,ResFileRec.pZone(a2)
+;		clr.l	ResFileRec.useCount(a2)		; These two fields are zeroed since we're doing
+;		clr.l	ResFileRec.reserved(a2)		; a NewHandle, sys, clear
+		move.l	TopMapHndl,a0
+		move.l	(a0),a0
+
+;-------
+;-------
+		MOVE.L	mNext(a0),TopMapHndl		; <14>
+		CLR.L	mNext(a0)					; <14>
+;-------move.l	ResourceMapRecord.next(a0),TopMapHndl
+;-------clr.l	ResourceMapRecord.next(a0)
+		
+	;	<14>
+	;	this bit is being set because CommToolbox likes to put the resource files
+	;	below the system map while the tool code is being executed
+	;
+	;	as a result, with the Font Folder changes for Cube E, we need to maintain
+	;	the ability to find font files below the system file (and also below the
+	;	tool file since we splice in just _below_ the system and not at the bottom
+	;	of the resource chain
+	
+		bset	#twoDeepBit,mInMemoryAttr(a0)								; ••• <14>
+
+		move.l	TopMapHndl,a0
+		move.l	(a0),a0
+
+;-------
+		move.w	mRefNum(a0),-(SP)			; <14>
+;-------move.w	ResourceMapRecord.refNum(a0),-(SP)
+
+		_UseResFile
+@found	
+		move.w	ResFileRec.refNum(a2),d0
+		bra.s	@done
+		
+@problem									; let's close down the file now
+;================================================= start <10>
+		tst.l	d5							; process mgr?
+		bne.s	@afterbegin2				; <10>
+
+		subq	#2,sp						
+		_BeginSystemMode					
+		addq	#2,sp
+@afterbegin2
+;------------------------------------------------- end <10>
+	
+		move.w	d4,-(SP)
+		_CloseResFile
+
+;================================================= start <10>
+		tst.l	d5							; process mgr?
+		bne.s	@afterend2					; <10>
+
+		subq	#2,sp			
+		_EndSystemMode
+		addq	#2,sp
+@afterend2
+;------------------------------------------------- end <10>
+	
+@problem1
+		move.w	#-1,d0
+@done
+		movem.l	(SP)+,d1-d5/a1-a3			; added d5 <10>
+		UNLK	a6
+		RTS
+		DbgInfo.new	CRMOpenRFPerm
+		
+	ENDF
+	
+;=====================================================================================================
+;
+;	Routine: 	_CRMReserveRF
+;	Arguments:	resource file refnum
+;	Return:		noErr, fnfErr
+;	Behavior:	will attempt to find a resource file record handle from the
+;					resource file record list pointed to off of the CTBGlobal
+;					and increment the useCount
+;	Called by:	Dispatcher
+;	Calls:		FindResRefNum
+;	Type:		INTERNAL
+;
+;=====================================================================================================
+;	this routine search for the resource file with given reference number in the
+;	list managed by the comm resource manager and increment the useCount if found.
+;	
+;	fnfErr is returned if the file cannot be found.
+;
+__CRMReserveRF	FUNC
+Parms	RECORD	0
+sel		DS.W	1
+refNum	DS.W	1
+	ENDR
+		move.w	Parms.refNum(a0),d0
+		JSR		FindResRefNum			; Get the ResFileRec, d0 - refnum, a0 - ResFileRecHandle
+		move.l	a0,d0
+		beq.S		@err					; Not in the list
+		move.l	TheZone,d0
+		move.l	(a0),a0
+		cmp.l	ResFileRec.pZone(a0),d0	; Sanity check - Right zone?
+		bne.s	@err
+		addq.l	#$1,ResFileRec.useCount(a0)	; Bump the use count
+		moveq.l	#$0,d0						; No error
+		bra.s	@done
+@err
+		move.w	#fnfErr,d0				; couldn't find the resource file
+@done
+	RTS
+	DbgInfo.new	CRMReserveRF
+	ENDF
+
+;====================================================================================================
+;
+;	Routine: 	_CRMReleaseRF
+;	Arguments:	resource file refnum
+;	Return:		noErr, fnfErr
+;	Behavior:	will attempt to find a resource file record handle from the
+;					resource file record list pointed to off of the CTBGlobal
+;					and decrement the useCount
+;					
+;					If useCount goes to zero or negative, we will splice the
+;					resource file into the resource map chain if necessary and then
+;					call CloseResFile.  The resource file record handle is then
+;					disposed of.
+;	Called by:	Dispatcher
+;	Calls:		FindResRefNum, IsInRMap, DeleteResFileRec
+;	Type:		INTERNAL
+;
+;	d3			1 if process mgr does not exist		<10>
+;				0 otherwise	
+;	
+__CRMReleaseRF	FUNC
+		IMPORT	ProcessMgrExists
+Parms	RECORD	0
+sel		DS.W	1
+refNum	DS.W	1
+	ENDR
+		movem.l	d1-d3/a1-a3,-(sp)					; added d3 <10>
+		move.w	Parms.refNum(a0),d1
+		move.w	d1,d0
+		JSR		FindResRefNum						; Find the resource file record
+		move.l	a0,d0
+		beq.s	@err								; Is it in there?
+		move.l	a0,a1
+		move.l	(a1),a2
+		move.l	theZone,d2
+		cmp.l	ResFileRec.pZone(a2),d2				; Sanity check the zone
+		bne.s	@err
+		subq.l	#$1,ResFileRec.useCount(a2)			; We've finished with on use
+		bgt.s	@goodexit							; Someone else is still using it <9> changed to goodexit
+		move.w	d1,d0
+		JSR		IsInRMap							; Is it already inthe map?
+		bne.s	@InMap
+		move.l	ResFileRec.resMap(a2),a0			; No - put it in so close res file works
+		move.l	(a0),a3
+
+;-------		
+		move.l	TopMapHndl,mNext(a3)				; <14>
+;-------move.l	TopMapHndl,ResourceMapRecord.next(a3)
+
+		move.l	a0,TopMapHndl
+@InMap
+;================================================= start <10>
+		move.w	d1,-(sp)							; d1 is volatile.  d1 is also the refnum so just save
+													; 	thepart we care about
+
+		moveq	#1,D3								; no pm
+		bsr		ProcessMgrExists			
+		bne.s	@afterbegin3		
+
+		subq.l	#2,sp
+		_BeginSystemMode
+		addq.l	#2,sp						; ignore return
+
+		moveq	#0,D3
+@afterbegin3
+
+;------------------------------------------------- end <10>
+											; refnum is already on stack (see above) <10>
+		_CloseResFile						; Close it
+
+
+;================================================= start <10>
+		tst.l	d3							; process mgr?
+		bne.s	@afterend1
+
+		subq.l	#2,sp
+		_EndSystemMode	
+		addq	#2,sp
+@afterend1
+
+;------------------------------------------------- end <10>
+
+		move.l	a1,a0
+		JSR		DeleteResFileRec			; Remove our record of it
+@goodexit									; <9>
+		clr.w	d0							; return noErr
+		bra.s	@done
+@err
+		move.w	#fnfErr,d0
+@done
+		movem.l	(sp)+,d1-d3/a1-a3			; added d3 <10>
+		RTS
+	DbgInfo.new	CRMReleaseRF
+	ENDF
+;=====================================================================================================
+;
+;	Routine: 	_CRMGetRFCount
+;	Arguments:	resource file refnum
+;	Return:		noErr, fnfErr
+;	Behavior:	will attempt to find a resource file record handle from the
+;					resource file record list pointed to off of the CTBGlobal
+;					and return the useCount
+;					
+;	Called by:	Dispatcher
+;	Calls:		FindResRefNum
+;	Type:		INTERNAL
+;
+;=====================================================================================================
+;	this routine search for the resource file with given reference number in the
+;	list managed by the comm resource manager and return the useCount if found.
+;		
+;	fnfErr is returned if the file cannot be found.
+;
+; Register Usage
+;	Entry - 
+;		D0 - refnum
+;
+__CRMGetRFCount	FUNC
+Parms	Record	0
+sel		DS.W	1
+refNum	DS.W	1
+	ENDR
+	
+		move.w	Parms.refNum(a0),d0		; get the refNum
+		JSR		FindResRefNum			; D0 - refnum, a0 - ResFileRecHandle
+		move.l	a0,d0
+		beq.s	@err					; Is it in the list?
+		move.l	TheZone,d0
+		move.l	(a0),a0
+		cmp.l	ResFileRec.pZone(a0),d0	; Sanity check - Right zone?
+		bne.s	@err
+		move.l	ResFileRec.useCount(a0),d0 ; OK just pull out the field
+		bra.s	@done
+@err
+		move.w	#fnfErr,d0					; Couldn't find the resource file
+@done
+		RTS
+		DbgInfo.new	CRMGetRFCount
+	ENDF
+;=====================================================================================================
+;
+;	This routine preflights calls to the communications tool code by manipulating the resource file
+;	chain.  The tool file is placed just BELOW the system file, 
+;	
+;	the context of the resource chain is stored in the crmContext record including
+;		procID of the file just below the system file
+;		was the tool already installed
+;		the procID of the tool
+;		
+;	if -1 is passed in for the procID, we get the procID from the crmContext and
+;		store the context in the heaplist entry for this zone.  this is to allow
+;		jamming the resource map into the resource list when setup dialog is up
+;
+__CRMToolPreflight	PROC
+Parms	RECORD	0
+sel		ds.w	1
+crmContext	ds.l	1
+procID	ds.w	1
+	ENDR
+		movem.l	d1-d2/a1-a4,-(SP)
+		moveq	#$0,d1
+		move.l	a0,a2
+		move.l	Parms.crmContext(a2),a1
+		move.w	Parms.procID(a2),d0
+		cmp.w	#$FFFF,d0								; Are we being called from Setup
+		bne.s	@regular
+		move.w	CRMToolContext.toolProcID(a1),d0		; Get the real procID
+		move.w	d0,Parms.procID(a2)
+		moveq	#$1,d1									; Set our flag
+@regular		
+		JSR		FindResRefNum							; Now find the file
+		move.l	a0,d0
+		beq		@err									; Not one of ours
+		move.l	TheZone,d2								; sanity check the zone
+		move.l	(a0),a0
+		cmp.l	ResFileRec.pZone(a0),d2
+		bne		@err									; Wrong zone
+														; Start filling in the context
+		move.w	#$FFFF,CRMToolContext.oldProcID(a1)		; No oldProcID yet
+		move.b	#$0,CRMToolContext.wasBelow(a1)
+		move.w	Parms.ProcID(a2),CRMToolContext.toolProcID(a1)	; Save off current procID
+		
+; A2 is now being converted to be the resMap we are searching for		
+		move.l	ResFileRec.resMap(a0),a2					
+		move.l	SysMapHndl,a3
+		move.l	(a3),a3
+		
+;-------
+		move.l	mNext(a3),CRMToolContext.oldHidden(a1)	; <14>
+;-------move.l	ResourceMapRecord.next(a3),CRMToolContext.oldHidden(a1)	; OldHidden is first below system
+		
+		beq.s	@nothingHidden									; Above move checks condition codes for us
+
+;-------		
+		move.l	mNext(a3),a3							; <14>
+;-------move.l	ResourceMapRecord.next(a3),a3
+		
+		move.l	(a3),a4
+
+;-------
+		move.w	mRefNum(a4),CRMToolContext.oldProcID(a1) ; <14>
+;-------move.w	ResourceMapRecord.refNum(a4),CRMToolContext.oldProcID(a1) ; The previously hidden file
+		
+		move.l	#$0,a4									; Previous - there isn't any yet
+@1		cmp.l	a3,a2									; Is this the resource file?
+		bne.S		@next
+		move.b	#$1,CRMToolContext.wasBelow(a1)			; Yes - mark it as already below 
+		move.l	a4,d0									; Are we on the first one?
+		beq.S		@doneSplice								; Yup - don't touch the list
+		move.l	(a4),a4									; No - splice it in
+		move.l	(a3),a3
+		
+;-------
+		move.l	mNext(a3),mNext(a4) 					; <14>
+;-------move.l	ResourceMapRecord.next(a3),ResourceMapRecord.next(a4) 	; PrevRM^^.next := currRM^^.next
+		
+		bra.s	@doneSplice
+@next
+		move.l	a3,a4									; PrevRM := currRM
+		move.l	(a3),a3
+
+;-------
+		move.l	mNext(a3),a3							; <14>
+;-------move.l	ResourceMapRecord.next(a3),a3			; currRM := currRM^^.next
+
+		move.l	a3,d0
+		bne.s	@1
+@nothingHidden		
+		move.l	(a2),a3
+		move.l	SysMapHndl,a4
+		move.l	(a4),a4
+
+;-------
+;-------
+		move.l	mNext(a4),mNext(a3) 					; <14>
+		move.l	a2,mNext(a4)							; <14>
+
+;-------move.l	ResourceMapRecord.next(a4),ResourceMapRecord.next(a3) ; currRM := SysRM^^.next
+;-------move.l	a2,ResourceMapRecord.next(a4)			; SysRM^^.next := currRM
+
+@doneSplice
+		tst.w	d1										; Is this a special - ie from setup code
+		beq.s	@done
+		move.w	CRMToolContext.OldProcID(a1),ResFileRec.special.OldProcID(a0) ; Yes - we need to save the context
+		move.l	CRMToolContext.oldHidden(a1),ResFileRec.special.OldProcID(a0)
+		move.w	CRMToolContext.toolProcID(a1),ResFileRec.special.toolProcID(a0)
+		move.b	CRMToolContext.wasBelow(a1),ResFileRec.special.wasBelow(a0)
+		bra.s	@done
+@err
+		move.w	#fnfErr,d0
+		bra.s	@goHome
+@done
+		move.w	#$0,d0
+@goHome
+		movem.l	(SP)+,d1-d2/a1-a4
+		RTS
+		DbgInfo.new	CRMToolPreflight
+	ENDP
+;=====================================================================================================
+;
+;	This routine postflights calls to the communications tool code by manipulating the resource file
+;	chain into the state that it was in before the _CRMToolPreflight call.
+;	
+;	If we need to remove the tool from the resource list and the current map is the system map,
+;		we need to set the curMap to 0. (system file)
+;
+; Register Usage
+;	Entry - 
+;		A0 - pointer to parameters
+;	Internal
+;		A0 - pointer to ResFileRec
+;		A1 - pointer to CRMToolContext
+;		A2 - prevRM
+;		A3 - currRM
+;		A4 - currRM^
+;		
+__CRMToolPostflight 	PROC
+Parms	Record	0
+sel			DS.W	1
+crmContext	ds.l	1
+	ENDR
+		movem.l	d0/a1-a4,-(SP)
+		move.l	Parms.crmContext(a0),a1					; Get context pointer
+		move.w	CRMToolContext.toolprocID(a1),d0		; find the ResFileRec
+		JSR		FindResRefNum
+		move.l	a0,d0
+		beq.s	@notRegistered							; We're not keeping track of this file
+		move.l	TheZone,d1								; sanity check the zone
+		move.l	(a0),a0
+		cmp.l	ResFileRec.pZone(a0),d1
+		bne		@done									; Wrong zone
+@notRegistered
+		tst.w	CRMToolContext.oldProcID(a1)			; Was prefight called from setup?
+		bne.s	@notSpecial
+
+		move.l	a0,d0									; Check again
+		beq		@done									; Now, we have an error - can't restore context1
+		
+		move.w	ResFileRec.special.OldProcID(a0),CRMToolContext.OldProcID(a1) ; Yup - restore context
+		move.l	ResFileRec.special.oldHidden(a0),CRMToolContext.oldHidden(a1)
+		move.w	ResFileRec.special.toolProcID(a0),CRMToolContext.toolProcID(a1)
+		move.b	ResFileRec.special.wasBelow(a0),CRMToolContext.wasBelow(a1)
+
+@notSpecial
+		tst.w	CRMToolContext.oldProcID(a1)			; Was something hiding before?
+		blt.s	@doneSplice								; yes, Splice it back in
+		move.l	#$0,a2									; PrevRM
+		move.l	SysMapHndl,a3							; Start searching for it at the system file
+		move.l	(a3),a4
+@1
+
+;-------
+		move.l	mNext(a4),a3							; <14>
+;-------move.l	ResourceMapRecord.next(a4),a3			; Can't be the system - so go on one
+
+		move.l	a3,d0
+		beq.s	@doneSplice								; We're at the end of the list
+		move.l	(a3),a4									; 
+		cmp.l	CRMToolContext.oldHidden(a1),a3			; Is this the old file?
+		bne.s	@next
+		move.l	a2,d0									; Yes - Is this the first item in the list?
+		beq.s	@doneSplice								
+		move.l	(a2),a2									; No - splice it in
+;-------
+		move.l	mNext(a4),mNext(a2)						; <14>
+;-------move.l	ResourceMapRecord.next(a4),ResourceMapRecord.next(a2) ; PrevRM^^.next := oldHidden^^.next
+
+		move.l	SysMapHndl,a2							; oldHidden^.next := SysMapHndl^^.next
+		move.l	(a2),a2
+
+;-------
+;-------
+		move.l	mNext(a2),mNext(a4)						; <14>
+		move.l	a3, mNext(a2);							; <14>
+;-------move.l	ResourceMapRecord.next(a2),ResourceMapRecord.next(a4)
+;-------move.l	a3,ResourceMapRecord.next(a2)			; SysMapHndl^^.next := oldHidden;
+
+		bra.s	@doneSplice
+@next
+		move.l	a3,a2
+		bra.s	@1
+		
+@doneSplice
+		tst.b	CRMToolContext.wasBelow(a1)				; Was this file previously below?
+		bne.s	@done
+			
+		move.l	a0,d0
+		beq.s	@done
+		
+		move.l	SysMapHndl,a3							; Yup - splice it back
+		move.l	a3,a2									; PrevRM
+		move.l	(a3),a4
+@2
+;-------
+		move.l	mNext(a4),a3
+;-------move.l	ResourceMapRecord.next(a4),a3
+		move.l	a3,d0
+		beq.s	@done									; We didn't find it
+
+		move.l	(a3),a4
+		cmp.l	ResFileRec.resMap(a0),a3				; Do we match?
+		bne.s	@next1									; nope
+
+		move.l	(a2),a2									; We've got a match
+;-------
+;-------
+		move.l	mNext(a4),mNext(a2)						; <14>
+		move.l	#$0,mNext(a4)							; <14>
+;-------move.l	ResourceMapRecord.next(a4),ResourceMapRecord.next(a2)  ; PrevRM^^.next := currRM^^.next
+;-------move.l	#$0,ResourceMapRecord.next(a4)			; CurrRM^^.next := nil
+
+		move.w	CRMToolContext.toolProcID(a1),d0		
+		cmp.w	CurMap,d0								; Did we just play with CurMap?
+		bne.s	@done
+
+		move.l	TopMapHndl,a3							; Yup - set CurMap to TopMapHndl
+		move.l	(a3),a3
+		
+;-------		
+		move.w	mRefNum(a3),CurMap						; <14>
+;-------move.w	ResourceMapRecord.refNum(a3),CurMap
+		bra.s	@done
+@next1
+		move.l	a3,a2
+		bra.s	@2
+@done
+		movem.l	(SP)+,d1/a1-a4
+		RTS
+		DbgInfo.new	CRMToolPostflight
+	ENDP
+	
+	
+;	Routine: 	ZeroPB
+;	Arguments:	Number of bytes to clear, and starting address
+;	Return:		nothing
+;	Behavior:	Clears specified number of bytes
+;	Called by:	_CRMGetIndFile
+;	Calls:		nothing
+;	Type:		UTILITY
+;	Register Usage:
+;	 On Entry
+;		D0 - number of Bytes to clear
+;		A0 - starting Address
+;
+;	 Internal
+;		A0 - Pointer into data
+;		D0 - remaining # of words
+;
+ZeroPB			PROC								; zeros PB referenced by A0
+				MOVEM.L		D0/A0,-(SP)				; save it
+				LSR.L		#1,D0					; divide by two (shift right 1)
+				SUBQ		#1,D0					; subtract one to get translate to 0 base
+@TopOfLoop
+				CLR.W		(A0)+					; clear
+				DBGT		D0,@TopOfLoop			; D0--; if D0>0 go to top
+				
+				MOVEM.L		(SP)+,D0/A0				; restore it
+				RTS									; This is an important instruction
+				ENDPROC
+				
+;	Routine: 	_CRMCountFiles
+;	Arguments:	DirID, and VRef num to search in, as well as file type to search for.
+;	Return:		number of files matching input parameters
+;	Behavior:	this routine return the number of files with the given filetype in the folder
+;			    with the given volume reference number and directory ID.
+;	Called by:	Dispatcher
+;	Calls:		_HGetFileInfo
+;	Type:		INTERNAL
+;	Register Usage:
+;	 On Entry
+;		A0 - Pointer to parameters
+;
+;	 Internal
+;		A0 - Pointer to PB for file system calls
+;		A1 - Pointer to Parameters
+;		D0 - temp
+;		D1 - index number of files
+;		D2 - number of matching files
+;
+;	 Exit
+;		D0 - number of matching files
+__CRMCountFiles	FUNC
+
+		IMPORT	ZeroPB
+		
+Parms	RECORD	0
+sel		ds.w	1
+dirID	ds.l	1
+vRefNum	ds.w	1
+fType	ds.l	1
+	EndR
+	
+Locals	RECORD	{A6Link}
+LocalStart	EQU		*
+thePB		ds.b	ioFQElSize
+LocalSize	EQU 	LocalStart -*			; size of all the local variables
+A6Link		DS.L	1			; place holder for A6 link
+RetAddr 	DS.L	1			; place holder for return address
+	EndR
+			LINK	a6,#Locals.LocalSize
+			movem.l	d1-d3/a1,-(sp)
+			
+			move.l	a0,a1
+			move.w	#$1,d1						; Start with file # 1
+			clr.w	d2							; No matches yet
+			move.l	Parms.fType(a1),d3			; Save File type
+			
+			lea		Locals.thePB(a6),a0			; Set up the PB
+			move.l	#ioFQElSize,d0
+			JSR		ZeroPB						; Clear everything
+			move.w	Parms.vRefNum(a1),ioVRefNum(a0)	
+@1		
+			move.l	Parms.dirID(a1),ioDirID(a0)	; DirID gets trashed by HGetFileInfo, so reset
+			move.w	d1,ioFDirIndex(a0)
+			_HGetFileInfo
+			bne.s	@done						; Trap dispatcher checks D0 for us.
+			
+			cmp.l	ioFlUsrWds+fdType(a0),d3	; Matching type?
+			bne.s	@noMatch
+			add.w	#$1,d2						; Yup - add one to count
+@noMatch			
+			add.w	#$1,d1						; Next file
+			bra.s	@1
+			
+@done
+			move.w	d2,d0						; give 'em the result
+
+			movem.l	(sp)+,d1-d3/a1				; Clean up.
+			UNLK	a6
+			rts
+			DbgInfo.new	CRMCountFiles
+		ENDF
+
+;	Routine: 	_CRMGetIndFile
+;	Arguments:	DirID, and VRef num of file, as well as index and type
+;	Return:		name of file matching specifications
+;	Behavior:	this routine return the index-th file with the given filetype in the folder
+;			    with the given volume reference number and directory ID.
+;	Called by:	Dispatcher, _CRMGetIndToolName
+;	Calls:		_HGetFileInfo
+;	Type:		INTERNAL
+;	Register Usage:
+;	 On Entry
+;		A0 - Pointer to parameters
+;
+;	 Internal
+;		A0 - Pointer to PB for file system calls
+;		A1 - Pointer to Parameters
+;		D0 - temp
+;		D1 - index number of files
+;		D2 - number of matching files
+;
+;	 Exit
+;		D0 - OSErr
+__CRMGetIndFile	FUNC
+
+		IMPORT	ZeroPB
+		
+Parms	RECORD	0
+sel		ds.w	1
+index	ds.w	1
+dirID	ds.l	1
+vRefNum	ds.w	1
+fType	ds.l	1
+fName	ds.l	1
+	EndR
+	
+Locals	RECORD	{A6Link}
+LocalStart	EQU		*
+thePB		ds.b	ioFQElSize
+LocalSize	EQU 	LocalStart -*			; size of all the local variables
+A6Link		DS.L	1			; place holder for A6 link
+RetAddr 	DS.L	1			; place holder for return address
+	EndR
+			LINK	a6,#Locals.LocalSize
+			movem.l	d1-d3/a1,-(sp)
+			
+			move.l	a0,a1
+			move.w	#$1,d1						; Start with file # 1
+			clr.w	d2							; No matches yet
+			move.l	Parms.fType(a1),d3			; Save File type
+			
+			lea		Locals.thePB(a6),a0			; Set up the PB
+			move.l	#ioFQElSize,d0
+			JSR		ZeroPB						; Clear everything
+			move.l	Parms.fName(a1),ioFileName(a0)
+			move.w	Parms.vRefNum(a1),ioVRefNum(a0)	
+@1		
+			move.l	Parms.dirID(a1),ioDirID(a0)			; DirID gets trashed by HGetFileInfo, so reset
+			move.w	d1,ioFDirIndex(a0)
+			_HGetFileInfo
+			bne.s	@notFound
+			cmp.l	ioFlUsrWds+fdType(a0),d3	; Matching type?
+			bne.s	@noMatch
+			add.w	#$1,d2						; Yup - add one to count
+			cmp.w	Parms.index(a1),d2			; Are we at the right index?
+			bne.s	@noMatch
+			
+			clr.w	d0
+			bra.s	@done
+@noMatch			
+			add.w	#$1,d1						; Next file
+			bra.s	@1
+
+@notFound
+			move.l	Parms.fName(a1),a0
+			clr.b	(a0)			
+@done			
+			movem.l	(sp)+,d1-d3/a1				; Clean up.
+			UNLK	a6
+			rts
+			DbgInfo.new	CRMGetIndFile
+		ENDF
+
+
+;	Routine: 	_CRMGetIndToolName
+;	Arguments:	Index and Type 
+;	Return:		name of file matching specifications
+;	Behavior:	this routine return the index-th file with the given filetype in the Communications
+;				folder
+;	Called by:	Dispatcher
+;	Calls:		_HGetFileInfo
+;	Type:		EXTERNAL
+;	Register Usage:
+;	 On Entry
+;		A0 - Pointer to parameters
+;
+;	 Internal
+;		A0 - Pointer to PB for file system calls
+;		A1 - Pointer to Parameters
+;		D0 - temp
+;		D1 - index number of files
+;		D2 - number of matching files
+;
+;	 Exit
+;		D0 - OSErr
+__CRMGetIndToolName FUNC
+		IMPORT	CRMFindCommunications, CRMCreateCommunications, CRMGetIndFile
+
+Parms	Record 0
+sel			ds.w	1
+toolName	ds.l	1
+index		ds.w	1
+bundleType	ds.l	1
+	endR
+Locals	RECORD	{A6Link}
+LocalStart	EQU		*
+dirID		ds.l	1
+vRefNum		ds.w	1
+LocalSize	EQU 	LocalStart -*			; size of all the local variables
+A6Link		DS.L	1			; place holder for A6 link
+RetAddr 	DS.L	1			; place holder for return address
+	EndR
+			Link	A6,#Locals.LocalSize	; Setup
+			move.l	a2,-(sp)				; save a2
+			move.l	a0,a2
+										
+			clr.w	-(sp)					; return value
+			pea		Locals.vRefNum(a6)		; Does Communications folder exist?
+			pea		Locals.dirID(a6)
+			JSR		CRMFindCommunications
+			MOVE.W	(SP)+,D0
+			tst.w	d0						; Result in D0
+			beq.s	@FolderExists			; We got the folder
+			
+			; Why do we create the folder here????
+@CreateIt
+			clr.w	-(sp)						; Return value
+			pea		Locals.vRefNum(a6)
+			pea		Locals.dirID(a6)
+			JSR		CRMCreateCommunications		; Both procedures take the same parms
+			move.w	(sp)+,d0
+			bra.s	@done						; just made -> no tools here yet
+			
+@FolderExists
+; pascal OSErr	CRMGetIndFile(Str63 fName, OSType fType, short vRefNum, long dirID, short index);
+
+
+			clr.w	-(sp)						; return value
+
+	
+			move.l	Parms.toolName(a2),-(sp)	; Ok, now get the info on the file
+			move.l	Parms.bundleType(a2),-(sp)
+			move.w	Locals.vRefNum(a6),-(sp)
+			move.l	Locals.DirID(a6),-(sp)
+			move.w	Parms.Index(a2),-(sp)
+			
+
+			jsr		CRMGetIndFile
+
+	
+@done
+			move.l	(sp)+,a2
+			UNLK	a6
+			RTS
+			DbgInfo.new	CRMGetIndToolName
+		ENDF
+
+;
+;	STOLEN from {sources}OS:HFS:FileMgrPatches.a  <10>
+;
+;________________________________________________________________________________
+; Routine:	ProcessMgrExists
+; Function: check if Process Mgr is running
+; Input:	none
+; Output:	D0=0 if it is ready; all other registers are preserved.
+;			Condition codes = (tst.w  d0)
+; ________________________________________________________________________________
+ProcessMgrExists	proc	export
+			move.l	a0,-(sp)					; save a0
+			move.l	ExpandMem,a0				; get ExpandMem				<15>
+			tst.w	ExpandMemRec.emProcessMgrExists(a0)		; is Process Mgr up yet?	<15>
+			beq.s	@notReady					; no						<15>
+			moveq	#0,d0						; DO = 0 means ready		<15>
+			bra.s	@exit						;							<15>
+@notReady
+			moveq	#1,d0						; D0 <> 0 means not ready	<15>
+@exit
+			movea.l	(sp)+,a0					; d0 = OSErr, noErr if Process Mgr exists
+			rts									; leave with condition codes intact
+			endproc
+
+			END

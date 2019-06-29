@@ -1,0 +1,169 @@
+;
+;	File:		NotificationMgrPatch.a
+;
+;	Contains:	Patches for Notification Manager
+;
+;	Written by:	Dean Yu, Vincent Lo, Darin Adler
+;
+;	Copyright:	© 1990-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <3>	 2/17/92	kc		Change case of SETUPNOTIFICATIONMGR, USENEWNMTASK,
+;									KILLOLDNMGLOBAL GLUNMINST, and GLUNMRMV.
+;		 <2>	 2/13/92	RLM		Patch roll-in
+;		 <3>	 12/4/91	csd		#1016448: Added support for Scruffy. Changed the patch to
+;									InitApplZone which calls FlushApplNM when Scruffy is running
+;									because Scruffy’s version of InitApplZone already calls
+;									FlushApplNM.
+;		 <2>	 9/21/90	VL		Added patches to patch out routines in ci and portable ROMs for
+;									Notification Manager.
+;		 <1>	 6/26/90	DTY		First checked in.  This file was Originally
+;									NotificationMgrPatchTail.  Since the Notification Manager is now
+;									a linked patch, NotificationMgrPatchHead is no longer necessary.
+;									This file now uses the new LinkedPatchMacros, instead of the old
+;									PatchMacros.
+;
+
+			LOAD		'StandardEqu.d'
+			include		'LinkedPatchMacros.a'
+			
+			CASE	OBJ
+
+
+; The Notification Manager needs to be implemented on the Plus, SE, and II ROMs.
+; And it needs to be patched on IIci and Portable ROMs. The only routine that is
+; currently patched is NMTask but we also have to initialize the globals (after getting
+; rid of the old ones).
+
+; Initialize the Notification Manager
+
+;************************************************************<RLM>
+;* roll-in													*<RLM>
+;* KILLOLDNMGLOBAL  added to StartBoot						*<RLM>
+;************************************************************<RLM>
+
+KILLOLDNMGLOBAL	InstallProc (IIci,Portable)
+			
+			move.l	$B60,A0			; get rid of original NM globals
+			_DisposPtr		
+			rts
+
+			ENDPROC
+
+;************************************************************<RLM>
+;* roll-in													*<RLM>
+;* SETUPNOTIFICATIONMGR  added to StartBoot					*<RLM>
+;************************************************************<RLM>
+
+SETUPNOTIFICATIONMGR	InstallProc (Plus,SE,II,IIci,Portable)
+			IMPORT	NMINIT
+
+			jmp		NMINIT				; Initialize
+
+			EndProc
+			
+;************************************************************<RLM>
+;* roll-in  not IIci										*<RLM>
+;************************************************************<RLM>
+
+; Glue to FlushApplNM() in NotificationMgr.c
+; (Patch on _InitApplZone)
+
+InstallNMInitApplZone	PatchProc	$A02C,(Plus,SE,II)
+			IMPORT	FLUSHAPPLNM
+
+			cmp.l	#$00002000, SysZone		; is Scruffy installed?					<3>
+			beq.s	@hasCleanMemoryManager	; if so, don’t need to call FlushApplNM	<3>
+			jsr		FLUSHAPPLNM
+@hasCleanMemoryManager						;										<3>
+			jmpOld						; Jump to original _InitApplZone
+			ENDPROC
+
+;************************************************************<RLM>
+;* roll-in  not IIci										*<RLM>
+;************************************************************<RLM>
+			
+; Glue to NMGNEFilter() in NotificationMgr.c
+; Install an event filter
+
+InstallNMGNEFilter	PatchProc	JGNEFilter,(Plus,SE,II)
+			IMPORT	NMGNEFILTER
+
+			jsr		NMGNEFILTER			; Call the C GNEFilter routine
+			peaOld						; Push address of old event filter on stack
+			tst.l	(sp)				; Check to see if there is one
+			bne.s	@toOldFilter
+			
+			add.w	#4,sp				; If no more filters, remove the “address” we just pushed on
+@toOldFilter
+			rts							; Return to caller, or go to next filter
+			ENDPROC
+
+;************************************************************<RLM>
+;* roll-in  not IIci										*<RLM>
+;************************************************************<RLM>
+
+; Glue to NMTask() in NotificationMgr.c
+; Patch on _SystemTask
+
+InstallNMSystemTask	PatchProc	_SystemTask,(Plus,SE,II)
+			IMPORT	NMTASK
+			
+			jsr		NMTASK				; Call C NMTask() routine
+			jmpOld						; Jump to old _SystemTask
+			ENDPROC
+			
+			
+;************************************************************<RLM>
+;* roll-in													*<RLM>
+;* USENEWNMTASK  added to DispTable							*<RLM>
+;* Rombind AFTERNMTASKINSYSTEMTASK added as label			*<RLM>
+;************************************************************<RLM>
+
+AFTERNMTASKINSYSTEMTASK	ROMBIND (Portable,$156a0),(IIci,$1c904)
+
+USENEWNMTASK	PatchProc	_SystemTask,(IIci,Portable)
+			IMPORT	NMTASK
+			
+			jsr		NMTASK						; Call C NMTask() routine
+			jmpROM	AFTERNMTASKINSYSTEMTASK		; Jump to old _SystemTask
+			ENDPROC
+
+
+
+;************************************************************<RLM>
+;* roll-in													*<RLM>
+;* GLUNMINST  added to DispTable							*<RLM>
+;************************************************************<RLM>
+
+; Glue to _NMInstall() in NotificationMgr.c
+
+GLUNMINST	PatchProc	$A05E,(Plus,SE,II,IIci,Portable)
+			IMPORT	_NMInstall
+
+			MOVE.L	A0, -(SP)			; Put A0 on stack
+			jsr		_NMInstall			; Call the C routine
+			ADDQ.L	#4, SP				; Clean up stack
+			RTS
+			ENDPROC
+
+
+
+;************************************************************<RLM>
+;* roll-in													*<RLM>
+;* GLUNMRMV  added to DispTable								*<RLM>
+;************************************************************<RLM>
+			
+; Glue to _NMRemove() in NotificationMgr.c
+
+GLUNMRMV	PatchProc	$A05F,(Plus,SE,II,IIci,Portable)
+			IMPORT	_NMRemove
+
+			MOVE.L	A0, -(SP)			; Put A0 on stack
+			jsr		_NMRemove			; Call the C routine
+			ADDQ.L	#4, SP				; Clean up stack
+			RTS
+			ENDPROC
+			End
+

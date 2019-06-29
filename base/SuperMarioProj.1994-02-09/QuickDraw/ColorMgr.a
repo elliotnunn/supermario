@@ -1,0 +1,2699 @@
+;
+;	File:		ColorMgr.a
+;
+;	Copyright:	© 1981-1990, 1992-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM9>	11/29/93	SAM		Yet another getCTable mod.  Move the handle to the clut copy
+;									into A0 prior to the seed range check.
+;	   <SM8>	 11/7/93	SAM		Changed GetCTable to get a new seed if the id > 1023 (kMinSeed).
+;	   <SM7>	 9/29/93	SAM		From mc900ftjesus
+;	   <MC4>	 9/27/93	SAM		Rewrote the guts of GetCTable.  The result of calling GetCtable
+;									is a Handle to a ram based copy of the clut (whether its in ROM
+;									or not).  It no longer requires that you have 2x sixeof(clut)
+;									heap space. Made GetCTable not set ctSeed if the ct ID is ≤ 8.
+;	   <SM6>	 9/13/93	SAM		Changed all instances of _Translate24to32 to _rTranslate24to32
+;									so they can conditionalized out of the build.
+;	   <SM5>	  3/3/93	PN		Fix the rGetResource in MakeITable by adjusting the CurMap to
+;									point to SysMap before calling rGetResource. Roll in patch
+;									StartRGetResourceFromSystemMapFormitqResources
+;	   <SM4>	 1/21/93	KW		(LW3 fau) Rolled in the MySaveEntries patch:  In SaveEntries, if
+;									the bpp is ≥ 16bpp it will exit with an error, but the code was
+;									not returning the stack to it's correct state.  Renamed all the
+;									labels in SaveEntries that started with a SE to SaveEnt so they
+;									don't clash with the ones in SetEntries, that also start with
+;									SE.
+;	   <SM3>	12/19/92	HI		Modified GetCTable to copy the 'clut' resources instead of
+;									just detaching the resource handle because sometimes GetCTable
+;									modifies the 'clut' but it can't sice the SuperMario 'clut'
+;									resource overrides the System file's resource. Hence a RAM copy
+;									of the ROM's 'clut' resource must be made. This fixes the bug
+;									of machine freezing when switching to 16 colors. (Hoon Im)
+;	   <SM2>	 6/11/92	stb		<sm 6/9/92>stb add comments from QDciPatchROM.a to MakeITable,
+;									AdjZone, Collapse, NewHandleTempSysApp, Index2Color,
+;									InvertColor, DelSearch, DelComp; this file is synched with
+;									QDciPatchROM.a
+;		<16>	 1/18/91	dvb		Don't restore color environment if it hasn't been changed.
+;									Modify SetEntries to mark flag in QDSpare.
+;		<15>	 11/6/90	KON		GetCTable should return NIL if call fails. This is at an offset
+;									of 6, not 8. [SMC]
+;		<14>	10/29/90	KON		If GetCTable fails, it should return NIL. There were cases where
+;									it returned without setting the return value at all.
+;		<13>	 9/17/90	BG		Removed <10>. 040s are now behaving more reliably.
+;		<12>	 8/21/90	KON		No need to _HLock and _HUnlock search element handle in
+;									Color2Index.
+;		<11>	 7/24/90	gbm		change a duplicate symbol or two
+;		<10>	 6/25/90	BG		Added EclipseNOPs to deal with flakey 040s.
+;		 <9>	 5/29/90	KON		Make DelSearch and DelComp jive with ci patch.
+;		 <8>	 5/29/90	KON		Call Translate24to32 on addresses passed to DelSearch and
+;									DelComp so they match the addresses in the gDevice.
+;		 <7>	 3/26/90	KON		Use NewHandle,sys rather than change zone when getting memory
+;									for ITable. Fix comp proc bug in _InvertColor.
+;		 <6>	  3/2/90	KON		If app heap is the same as sys heap, only check for memory once.
+;		 <5>	  3/1/90	KON		Change MakeITable so it first looks in Tmp memory, then in sys
+;									memory, and finally theZone for memory.
+;		 <4>	 1/31/90	BAL		Fixed replication of 5 bit components in Index2Color to use the
+;									same algorithm as Search16toIndexed (stretch.a) in order to make
+;									SeedCFill/CalcCMask happy.
+;		 <3>	 1/30/90	DAF		Removed CLUTBusy asynchronous flags from SetEntries.  They
+;									didn't work well and broke Studio/8.
+;		 <2>	 1/16/90	BAL		Changed MakeITab to restore theZone during error returns.
+;	  <•2.3>	 7/14/89	BAL		For Aurora: Final CQD
+;	   <2.2>	 6/30/89	BAL		GetCTable will not modify 2 bit CLUT if hilite color is a gray.
+;									∂
+;	   <2.1>	 6/15/89	BAL		Changed source to use ReserveBit instead of Reserve; Fixed bug
+;									in makeGray tab.
+;	   <2.0>	 6/12/89	BAL		Added ; to 1.9
+;	   <1.9>	 6/12/89	BAL		Stopped Color2Index,Index2Color from clearing QDErr. Rolled in
+;									fix to MyGetCTable.
+;	   <1.8>	 6/10/89	CEL		Moved Private.a QuickDraw Equates into proper QuickDraw private
+;									file (colorequ.a), got rid of QuickDraw nFiles dependencies and
+;									fixed up necessary files…
+;	  <•1.7>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;	   <1.6>	 5/15/89	DAF		Corrected GetCTable (actually myGetCTable) to always return a
+;									non-purgeable cTabHandle
+;				 5/14/89	DAF		Fixed GetCTable to return non-purgeable handle if from system
+;									resource.
+;	   <1.5>	 4/20/89	GGD		Fixed assembly error (missing semicolon) so that the ROMs can
+;									build again.
+;	   <1.4>	 4/19/89	DAF		Rolled in system disk patch to SetEntries (additional error
+;									checking).
+;				 4/19/89	DAF		Rolled in SaveEntries patch from system file.
+;	  <•1.3>	 4/12/89	BAL		Blasting in 32-Bit QuickDraw 1.0B1
+;				  4/5/89	DAF		Added additional error checking to RestoreEntries.
+;				 4/24/87	DAF		Fixed MakeITable not to SysError on memory failures (from
+;									romfix78)
+;	  <C835>	 2/20/87	DAF		MakeITable gets queue sizes from a resource now. Exported
+;									ITabMatch and vector to it from Color2Index. ReserveEntry
+;									changes ctSeed when deactivating reserve bit.
+;	  <C824>	 2/15/87	DAF		Fixed displacement into hidden color table in ITabMatch to work
+;									correctly in 5-bit res mode.
+;	  <C777>	  2/9/87	DAF		Reactivated usage of .value fields for protect, reserve and
+;									ownerID. Made ReserveEntry change ctSeed.
+;	  <C751>	  2/3/87	DAF		Separated ProtErr test for protect and reserve in SetEntries
+;									(err only if .value field doesn't match clientID. Adjusted
+;									ReserveEntry to set clientID when reserve=TRUE. Added range and
+;									protection error checking to SetCommon. Adjusted seeding code in
+;									MakeITable for common loop for single loop exit, and to seed
+;									original colors in a different order.
+;	  <C733>	  2/2/87	DAF		Fixed MakeITable to test if result table can be allocated early,
+;									so it doesn't need to SysError, and cleaned up zone setting.
+;									SetEntries now returns a ProtErr when attempting to change
+;									reserved entries. RealColor fixed to compare only iTable
+;									resolution bits of each channel. Updated error codes throughout.
+;	  <C695>	 1/26/87	DAF		Made _Control calls immediate. Added range-checking for res and
+;									default color- and inverse tables to MakeITable
+;	  <C666>	 1/22/87	DAF		Fixed trashed registers in MakeSubTable. Changed searchProc
+;									chain to be handles instead of pointers. Added
+;									DeleteSearch,DeleteComp routines.
+;	  <C645>	 1/15/87	DAF		Fixed 5-Bit ITable building by expanding TblSize to a long
+;	  <C575>	12/30/86	DAF		Made some minor bug fixes to SetCommon and MakeITable
+;	  <C491>	 12/6/86	DAF		Made fixes from code review. Changed interfaces of
+;									Color2Index,Index2Color, and SetEntry (now SetEntries)
+;	  <C387>	 11/9/86	DAF		Refined Save/RestoreEntries (added reqLSize field), improved
+;									error handling added QDErr routine.
+;	  <C348>	 11/4/86	DAF		Added Save/RestoreEntries
+;	  <C294>	10/26/86	DAF		Updated SetEntry to call video driver
+;	  <C241>	10/20/86	DAF		Fixed TFB CLUT address temporarily
+;	  <C239>	10/19/86	DAF		Added ITSeed to inverse tables. Made ITabMatch rebuild invalid
+;									iTable
+;				10/13/86	EHB		Delete packCLUT and unpackCLUT. No packed CLUTs!
+;	  <C367>	 10/7/86	DAF		Removed temp patches in SetEntry
+;				 10/5/86	DAF		Added a number of unimplemented routines
+;				 8/12/86	EHB		Added CTSeed field to color tables built by unpackClut
+;				 8/12/86	EHB		INIT VALUE FIELD TO ENTRY NUMBER
+;				 7/24/86	DAF		New today
+;
+;	To Do:
+;
+
+;EASE$$$ READ ONLY COPY of file “ColorMgr.a”
+;•2.3	BAL 07/14/1989 For Aurora: Final CQD
+; 2.2	BAL 06/30/1989 GetCTable will not modify 2 bit CLUT if hilite color is a gray. ∂
+;Changed MakeITable to use MFTemp memory if allocation of its work buffer in the app heap fails.∂
+;If MakeITable returns an error, ITabMatch will use the stale inverse table instead of aborting.
+; 2.1	BAL 06/15/1989 Changed source to use ReserveBit instead of Reserve; Fixed bug in makeGray tab.
+; 2.0	BAL 06/12/1989 Added ; to 1.9
+; 1.9	BAL 06/12/1989 Stopped Color2Index,Index2Color from clearing QDErr.  Rolled in fix to MyGetCTable.
+; 1.8	CEL 06/10/1989 Moved Private.a QuickDraw Equates into proper QuickDraw
+;		private file (colorequ.a), got rid of QuickDraw nFiles dependencies
+;		and fixed up necessary files…
+;•1.7	BAL 05/29/1989 Blasting in 32-Bit QuickDraw version 1.0 Final
+; 1.6	DAF 05/15/1989 Corrected GetCTable (actually myGetCTable) to always
+;		return a non-purgeable cTabHandle
+; 1.5	GGD 04/20/1989  Fixed assembly error (missing semicolon) so that the ROMs can
+;		build again.
+; 1.4	DAF 04/19/1989 Rolled in system disk patch to SetEntries (additional
+;		error checking).
+;•1.3	BAL 04/12/1989 Blasting in 32-Bit QuickDraw 1.0B1
+
+;
+; File ColorMgr.a
+;
+; Copyright Apple Computer, Inc.  1981-1986
+; All Rights Reserved
+;
+;
+;------------------------------------------
+;
+;	Color Manager
+;
+; 	This code provides services for matching RGB color specifications to
+;	color look-up table indices, implements the device-independent layer
+;	of functions such as setting color table entries, and includes 
+;	some useful utilities for dealing with pixelmaps.
+;
+;	Modification History:
+;	----------------------------
+;
+;	24-Jul-86	DAF		New today
+;   12AUG86		EHB		INIT VALUE FIELD TO ENTRY NUMBER
+;   12Aug86		EHB		Added CTSeed field to color tables built by unpackClut
+;	05Oct86		DAF		Added a number of unimplemented routines
+;   13oct86     EHB     Delete packCLUT and unpackCLUT.  No packed CLUTs!
+;<C239/19Oct86> DAF		Added ITSeed to inverse tables. Made ITabMatch rebuild
+;						invalid iTable
+;<C241/20Oct86> DAF 	Fixed TFB CLUT address temporarily
+;<C294/26Oct86> DAF 	Updated SetEntry to call video driver
+;<C348/04Nov86> DAF		Added Save/RestoreEntries
+;<C367/07Oct86> DAF		Removed temp patches in SetEntry
+;<C387/09Nov86> DAF		Refined Save/RestoreEntries (added reqLSize field), improved error handling
+;						added QDErr routine.
+;<C491/06Dec86> DAF		Made fixes from code review.  Changed interfaces of Color2Index,Index2Color,
+;						and  SetEntry (now SetEntries)
+;<C575/30Dec86> DAF		Made some minor bug fixes to SetCommon and MakeITable
+;<C645/15Jan87> DAF		Fixed 5-Bit ITable building by expanding TblSize to a long
+;<C666/22Jan87> DAF		Fixed trashed registers in MakeSubTable.  Changed searchProc chain to be 
+;						handles instead of pointers.  Added DeleteSearch,DeleteComp routines.
+;<C695/26Jan87> DAF		Made _Control calls immediate.  Added range-checking for res and default
+;						color- and inverse tables to MakeITable
+;<C733/02Feb87> DAF		Fixed MakeITable to test if result table can be allocated early, so it 
+;						doesn't need to SysError, and cleaned up zone setting.  SetEntries now
+;						returns a ProtErr when attempting to change reserved entries.  RealColor
+;						fixed to compare only iTable resolution bits of each channel.  Updated
+;						error codes throughout.
+;<C751/03Feb87> DAF		Separated ProtErr test for protect and reserve in SetEntries (err only if
+;						.value field doesn't match clientID.  Adjusted ReserveEntry to set clientID
+;						when reserve=TRUE.  Added range and protection error checking to SetCommon.
+;						Adjusted seeding code in MakeITable for common loop for single loop
+;						exit, and to seed original colors in a different order.
+;<C777/09Feb87> DAF		Reactivated usage of .value fields for protect, reserve and ownerID.  Made
+;						ReserveEntry change ctSeed.  
+;<C824/15Feb87> DAF		Fixed displacement into hidden color table in ITabMatch to work correctly
+;						in 5-bit res mode.
+;<C835/20Feb87> DAF		MakeITable gets queue sizes from a resource now.  Exported ITabMatch
+;						and vector to it from Color2Index.  ReserveEntry changes ctSeed when 
+;						deactivating reserve bit.  
+;_______________________________________________________________________
+;
+; Post Mac II Release
+;_______________________________________________________________________
+;
+; <24Apr87>		 DAF 	Fixed MakeITable not to SysError on memory failures (from romfix78)
+;_______________________________________________________________________
+;
+; The Colorful World of 32-bit QuickDraw
+;
+; <05Apr89>		DAF		Added additional error checking to RestoreEntries.
+; <19Apr89		DAF		Rolled in SaveEntries patch from system file.
+; <14May89>		DAF		Fixed GetCTable to return non-purgeable handle if from 
+;						system resource.
+; <30Jan98		DAF		Removed CLUTBusy change-blocking flag in SetEntries
+;_______________________________________________________________________
+
+
+		MACHINE		MC68020 
+
+;---------------------------
+; TEMPORARY EXPORTS OF UNIMPLEMENTED ROUTINES.
+
+UPDATEPIXMAP	PROC	EXPORT
+				RTS
+
+;
+; QUEUE and DEQUEUE	: macro definitions for circular queue maintainance, as
+;	used by MakeITable.  They expect : A4 = queue insertion pointer
+;									   A5 = end of queue memory
+;									   A1 = queue removal pointer
+;									   QStart(A6) = start of queue memory
+;	D0 is trashed
+
+		MACRO
+		QUEUE		&reg1,&reg2			; 
+		CMP.L		A4,A5				; is it time to wrap?
+		BNE.S		@88					; nope, so continue
+		MOVE.L		QStart(A6),A4		; wrap back
+@88		MOVE.L		&reg1,D0			; copy it to D0
+		ADD.L		&reg2,D0			; and add the other reg
+		MOVE.W		D0,(A4)+			; put it in the queue
+		ENDM
+
+		MACRO
+		DEQUEUE		&reg				;
+		CMP.L		A1,A5				; is it time to wrap?
+		BNE.S		@97					; nope, so continue
+		MOVE.L		QStart(A6),A1		; wrap back
+@97		CMP.L		A4,A1				; is it done?
+		BNE.S		@98					; not done, so get a displacement
+		MOVEQ		#0,&reg				; return the completion signal
+		BRA.S		@99					;
+@98		MOVE.W		(A1)+,&reg			; get the next displacement
+@99
+		ENDM
+
+
+MakeITable	PROC	EXPORT
+			EXPORT MakeGrayITab
+;----------------------------------------------------------------
+;
+;  PROCEDURE MakeITable (CTABH: CTabHandle; ITabH: ITabHandle; res:integer);
+;
+;  This procedure builds an inverse lookup table with res bits per channel
+;  based on the specified color table.  Algorithm by MJ Potel, based on Voronoi theory.
+;  Algorithm modified by Art Cabral, adding a linked list at the end of the table
+;  which is used to find hidden colors in Color2Index.
+;
+;	Still to be done : 	Consolidate Queue and table into 1 memory block
+;						Convert to bitmap/iLUT form
+;						Eliminate BTST for TST.B
+;
+;  1. Use supplied cTabHandle and iTabHandle.  This makes it context independent.
+;  2. Compress directly into iTable.  A little faster.
+;  3. Shouldn't need to to error checking in QUEUE and DEQUEUE
+
+; contains the fix from QDciPatchROM.a to first search temp memory, then system <sm 6/9/92>stb 
+; zone, then finally theZone.													<sm 6/9/92>stb 
+
+UNDEF 		EQU		$8000					; hi bit on
+BOUND		EQU		$7FFF					; non-neg, large unused index
+
+QInTempBit		EQU	$00
+ITableInTempBit	EQU	$01
+
+PARAMSIZE	EQU		10						; total bytes of params
+CTabH		EQU		PARAMSIZE+8-4			; Color table handle
+ITabH		EQU		CTabH-4					; ITable handle
+RES			EQU		ITabH-2					; entry size
+
+QStart		EQU		-4						; pointer to the queue
+SvZone		EQU		QStart-4				; save the current zone
+TblH		EQU		SvZone-4				; copy of our temp ITable
+TblSize		EQU		TblH-4					; size of our temp ITable
+InfoOffset	EQU		TblSize-4				; offset to ITInfoTable from ITabH
+isTmpHandle	EQU		InfoOffset-2			; boolean->true if TblH is a TmpMem handle
+QHandle		EQU		isTmpHandle-4			; Handle for queue	<28Feb90 KON>
+VARSIZE		EQU		QHandle
+
+
+		LINK		A6,#VARSIZE				; set up a stack frame
+		MOVEM.L		A2-A5/D3-D7,-(SP) 		; save 'em all
+;		move.l		theZone,SvZone(A6)		; save the current heap zone for later restore <16Jan90> BAL
+
+		CLR.W		QDErr					; clear QDError flag				<C666/22Jan87> DAF
+
+		MOVE		res(A6),D7				; get the channel size				<C777/12Feb87> EHB
+		CMP.L		#-1,theGDevice			; if -1, then it's uninitialized	<C777/12Feb87> DAF
+		BEQ.S 		@ResCheck				; OK, so continue					<C777/12Feb87> DAF
+
+@GDevOK
+		MOVE.L		([theGDevice]),A0		; get a pointer to the current device	<C777/12Feb87> DAF
+
+; test the parameters.  If ITabH or CTabH are NIL, substitute handles from theGDevice 	<C695/26Jan87> DAF
+
+		TST.L		ITabH(A6)			; is ITabH NIL?							<C695/26Jan87> DAF
+		BNE.S		@DoCTabH			; no, so continue						<C695/26Jan87> DAF
+		MOVE.L		GDITable(A0),ITabH(A6)	; stick theGDevice's ITabH in stack frame	<C695/26Jan87> DAF
+
+@DoCTabH
+
+		TST.L		CTabH(A6)			; is CTabH NIL?							<C695/26Jan87> DAF
+		BNE.S		@DoITabRes			; no, so continue						<C695/26Jan87> DAF
+		MOVE.L		([GDPMap,A0]),A1	; get pixMap's handle					<C695/26Jan87> DAF
+		MOVE.L		PMTable(A1),CTabH(A6)	; get the device colorTable's pointer	<C695/26Jan87> DAF
+
+@DoITabRes
+
+; get the ITable resolution
+
+		TST			D7					; test the channel size					<C777/09Feb87> EHB
+		BNE.S		@ResCheck			; if valid, continue					<C695/26Jan87> DAF
+
+; the res parameter was 0, so get theGDevice's preferred resolution				<C777/09Feb87> DAF
+		MOVE.W		GDResPref(A0),D7	; get the preferred ITabRes				<C695/26Jan87> DAF
+		BNE.S		@ResSubst			; if non-zero, then continue			<C777/09Feb87> DAF
+		MOVEQ		#4,D7				; if resPref=0, then force to 4			<C777/09Feb87> DAF
+@ResSubst
+		MOVE.W		D7,res(A6)			; and put it in the stack frame			<C695/26Jan87> DAF
+
+@ResCheck
+		CMP.W		#2,D7				; don't accept res≤2					<C695/26Jan87> DAF
+		BLE.S		@BadRes				;										<C695/26Jan87> DAF
+		CMP.W		#6,D7				; or ≥ 6								<C695/26Jan87> DAF
+		BLT.S		@ResOK				; 										<C695/26Jan87> DAF
+
+@BadRes	MOVE.W		#cResErr,QDErr		; mark the error and quit				<C695/26Jan87> DAF
+		BRA			MITDone				; 										<C695/26Jan87> DAF
+@ResOK									;										<C695/26Jan87> DAF
+
+; Calculate the size of the compressed table and verify the handle
+
+		MOVE		D7,D1				; get the channel size					<C733/02Feb87> DAF
+		MOVEQ.L		#1,D0				; prime the register
+		LSL.L		D1,D0				; calculate 2^^res
+		LSL.L		D1,D0				; square it
+		LSL.L		D1,D0				; cube it
+		ADD.L		#ITTable,D0			; make room for everybody
+		MOVE.L		D0,InfoOffset(A6)	; save offset to end of table
+		ADD.L		#ITExtraSize,D0		; make room for InfoTable
+
+		MOVE.L		ITabH(A6),A0		; get the ITable handle
+		TST.L		(A0)				; is the table purged?				<C751/03Feb87> DAF
+		BEQ.S		@1					; yes, so Realloc it				<C751/03Feb87> DAF
+ 		_SetHandleSize					; set the size						<C751/03Feb87> DAF
+		BRA.S		@2					; and continue						<C751/03Feb87> DAF
+@1
+		_ReallocHandle					;									<C751/03Feb87> DAF
+@2
+ 		BEQ.S		@SizeOK				; => size ok, so continue			<C733/02Feb87> DAF
+		MOVE.W		#CNoMemErr,QDErr	; report this error					<C733/02Feb87> DAF
+		BRA			MITDone				; and quit							<C733/02Feb87> DAF
+
+@SizeOK
+;---------------------------------------------------------------------			<BAL 15Mar89>
+;
+;	Cruise through the clut and check if all non-reserved entries are grays.
+;	If they are then build a gray Itab and set flag in Info header to indicate grayness.
+;
+
+		move.l		CTabH(a6),a0		;
+		move.l		(a0),a0				; get CTab ptr
+		move.w		ctSize(a0),d0		; get clut entries-1
+		lea			ctTable(a0),a1		; point at first clut entry
+
+@nextEntry
+		move.l		(a1)+,d1			; pick up value,red
+		move.l		(a1)+,d2			; pick up green,blue
+		cmp.w		d1,d2				; red==blue?
+		bne.s		@notGray			;
+		swap		d2					; get green
+		cmp.w		d1,d2				; red==green?
+		bne.s		@notGray			;
+@skippy	dbra		d0,@nextEntry		; continue checking
+
+		_MakeGrayITab					; go make special Gray ITab
+		bra			MITDone				; all done
+
+@notGray
+		btst		#ReserveBit+24,d1		; is this entry reserved?
+		bne.s		@skippy				; don't check reserved entries
+
+;---------------------------------------------------------------------			<BAL 15Mar89>
+
+AdjZone
+
+; this is where the patch used to move.w #8080 to force the call to DisposeTempBuffer,	<sm 6/9/92>stb 
+; but now, having had the opportunity to fix the code elsewhere, we don’t have to be	<sm 6/9/92>stb 
+; so tricky, and we can go back to the normal way of doing things.						<sm 6/9/92>stb 
+
+		move.w		#0,isTmpHandle(a6)	;assume handles are not in temp memory	<28Feb90 KON>
+
+; Here is the fix for rGetResource from ResourceMgrPatches.a
+		move.w	CurMap,-(sp)			; Save the current resource map. <SM5>
+		move.w	SysMap,CurMap			; <27> Start searching from the System file instead of the top <SM5>	
+
+; allocate space on the heap for the queue, reading queue size from resource
+
+		SUBQ		#4,SP				; make room for the function return		<C835/20Feb87> DAF
+		MOVE.L		#'mitq',-(SP)		; push the queue size resource type		<C835/20Feb87> DAF
+		CLR.W		-(SP)				; want mitq=0							<C835/20Feb87> DAF
+		_rGetResource					; system first, then ROM				<C835/20Feb87> DAF
+		MOVE.L		(SP)+,A0			; get the handle						<C835/20Feb87> DAF
+	
+		move.w		(sp)+,CurMap		; Restore the current resource map <SM5>
+		
+		MOVE.L		(A0),A0				; get the pointer in A0					<C835/20Feb87> DAF
+		MOVE.L		-12(A0,D7*4),D0		; get the queue size (adjust for no 1 or 2 bit resolutions) <C835/20Feb87> DAF
+		MOVE.L		D0,D3				; hold it for a second
+		bsr			NewHandleTempSysApp	;get memory								<28Feb90 KON>
+		BNE  		MakeIErrLate		; if there was an error report it
+;
+; Got a handle.  Check which heap it's in and lock it.
+;
+		tst.w		d1					;d1=0 -> memory in temp heap			<28Feb90 KON>
+		bne.s		@notTemp1			;										<28Feb90 KON>
+		bset		#QInTempBit, isTmpHandle(a6)	;Main ITable is in temp memory	<28Feb90 KON>
+@notTemp1
+;
+; want a ptr, so lock and deref handle
+;
+		move.l		a0,QHandle(a6)		;save QHandle							<28Feb90 KON>
+		_HLock							;preserves a0							<28Feb90 KON>
+		move.l		(a0),a0				;deref it								<28Feb90 KON>
+
+		MOVE.L		A0,QStart(A6)		; save the starting addr in stack frame
+		ADD.L		D3,A0				; compute the addr of the queue end
+		MOVE.L		A0,A5				; keep the queue end here
+
+; allocate BIG space on the heap for the ITable (to be shrunken and moved to sysheap later)
+
+		MOVEQ		#1,D6				; prime the register
+		LSL.L		D7,D6				; calculate 2^^res
+		MOVE.L		D6,D5				; save here for boundary setting
+		ADDQ		#2,D6				; increase by 2 for the boundary
+		MOVE.L		D6,D0				; get it in a working register
+		MULU.W		D6,D0				; square it
+		MULU.W		D6,D0				; cube it
+		ADD.L		D0,D0				; table size -> words
+		MOVE.L		D0,TblSize(A6)			; save size of table
+
+		bsr			NewHandleTempSysApp		;search everywhere for some memory	<28Feb90 KON>
+		bne			MakeIErr			;failed!								<28Feb90 KON>
+;
+; Got memory, check which heap it's in
+;
+		tst.w		d1					;d1=0 -> memory in temp heap			<28Feb90 KON>
+		bne.s		@notTemp2			;										<28Feb90 KON>
+		bset		#ITableInTempBit, isTmpHandle(a6)	;Main ITable is in temp memory	<28Feb90 KON>
+@notTemp2
+
+		MOVE.L		A0,TblH(A6)			; save temporary table
+		MOVE.L		(A0),A0				; dereference the handle
+		MOVE.L		A0,A3				; set up the table base ptr
+
+; and mark the boundaries of the cube. (thanks, Ernie)
+
+Boundary
+
+		MOVE.L		#((Bound)++(Bound<<16)),D1	; get BOUND.LONG				<C666/22Jan87> DAF
+		MOVE.L		#((UNDEF)++(UNDEF<<16)),D0	; GET UNDEF.LONG				<C666/22Jan87> DAF
+
+; DO TOP EXCEPT ONE ROW
+
+			MOVE	D6,D4				;GET WIDTH OF TOP
+			MULU	D6,D4				;GET AREA OF TOP
+			SUB		D6,D4				;BACK UP ONE ROW
+			SUBQ	#1,D4				;MAKE 0 BASED
+			LSR		#1,D4				;CONVERT TO LONGS (moved conversion!!)
+
+CLRTOP		MOVE.L	D1,(A0)+			;SET TOP TO BOUND
+			DBRA	D4,CLRTOP			;=>UNTIL DONE
+
+; FOR EACH MIDDLE SLAB, SET 2 ROWS TO BOUND
+; THEN ONE LONG OF BOUND FOLLOWED BY WIDTH/2 LONGS OF UNDEF
+
+			SUB.L	#2,A0				;SO RIGHT/LEFT EDGES IN SAME LONG
+
+			MOVE	D5,D4				;GET NUMBER OF MIDDLE SLABS TO DO
+			SUBQ	#1,D4				;MAKE 0 BASED
+
+CLRSLAB
+			MOVE.L	D6,D3				;DO 2 BOUND ROWS
+			SUBQ	#1,D3				; and adjust counter
+TWOROWS		MOVE.L	D1,(A0)+			;SET TO BOUND
+			DBRA	D3,TWOROWS			;=>UNTIL DONE
+
+			MOVE.L	D5,D2				; get the number of rows in a layer
+			SUBQ	#1,D2				; convert to counter
+ClrLayer
+			MOVE.L	D1,(A0)+			;PREVIOUS RIGHT, NEXT LEFT = BOUND
+
+			MOVE	D5,D3				;INNER ROW = UNDEF
+			LSR		#1,D3				; convert to long
+			SUBQ	#1,D3				; make this zero based, too
+CLRROW		MOVE.L	D0,(A0)+			;SET TO UNDEF
+			DBRA	D3,CLRROW			;=>UNTIL DONE
+
+			DBRA	D2,ClrLayer			;do each row of a layer
+
+			DBRA	D4,CLRSLAB			;=>DO NEXT SLAB
+
+; DO BOTTOM PLUS ONE ROW PLUS ONE WORD
+
+			MOVE	D1,(A0)+			;DO THE EXTRA WORD
+
+			MOVE	D6,D4				;GET WIDTH OF BOTTOM
+			MULU	D6,D4				;GET AREA OF BOTTOM
+			ADD.L	D6,D4				;ADD ONE ROW
+			SUBQ	#1,D4				;adjust for counter
+			LSR		#1,D4				;CONVERT TO LONGS (moved conversion!!)
+
+CLRBOT		MOVE.L	D1,(A0)+			;SET BOTTOM TO BOUND
+			DBRA	D4,CLRBOT			;=>UNTIL DONE
+
+
+; Time to queue the seed colors.  First, make some lookup tables for the 
+;	rgb components.  This is necessary, since the "big" cube is (2^^n)+2
+;	in size, and the 3 indices can't be shifted and ORed together.  These
+;	lookup tables are word sized, and looked up with a byte index.  Each 
+;	entry is repeated 2^^(8-res) times, which saves truncating the values.  
+;	Since these tables are fairly small, and the queue is large, we build 
+;	them at the end of the queue's memory space.
+
+Seed
+
+; first, calculate the inner and outer loop counts
+
+		MOVE.L		D6,D4				; calculate 2^^res (outer loop count)
+		SUBQ		#3,D4				; and turn it into a counter 
+
+		MOVE.L		#8,D3				; compute 2^^(8-res) (inner loop count)
+		SUB			res(A6),D3			; get 8-res
+		MOVEQ		#1,D5				; prime for a power of two calc
+		LSL			D3,D5				; and get power of 2 in D5
+		SUBQ		#1,D5				; and turn it into a counter
+
+; next, calculate increments and starting values
+
+		MOVE.L		D6,D7				; copy cube edge size to D7
+		MULU		D6,D7				; square it (size^^2 is increment for red)
+
+		MOVE.L		D7,D0				; init red value to include 
+		ADD.L		D6,D0				;	offset to (1,1,1) of the big cube
+		ADDQ		#1,D0				;
+		MOVEQ		#0,D1				; init green value
+		MOVEQ		#0,D2				; init blue value
+
+; now figure out where the table starts.  It's easy since the table is a 
+;	constant size = 256 * 4 words = 1024 words = $800 bytes
+
+		MOVE.L		A5,A0				; copy the queue end addr
+		SUB.L		#$800,A0			; table starts here
+		MOVE.L		A0,A2				; remember it here
+
+; OK, let's get to it!  To make lookup easy, we multiplex the three tables
+;	together so it looks like RGBxRGBxRGBx.  The "x" value lets us get to
+;	these entries using SCALE*8
+
+@1
+		MOVE.L		D5,D3				; set up inner loop counter
+@2
+		MOVE.W		D0,(A0)+			; write red
+		MOVE.W		D1,(A0)+			; write green
+		MOVE.W		D2,(A0)+			; write blue
+		ADDQ		#2,A0				; skip a word
+
+		DBRA		D3,@2				; for some number of times
+
+		ADD.W		D7,D0				; add size^^2 to red value
+		ADD.W		D6,D1				; add size to green value
+		ADD.W		#1,D2				; add one to blue value
+
+		DBRA		D4,@1
+
+;
+;  Queue the seed colors, marking their positional value in the color
+;  table in the big cube (don't use the colorSpec.index field!!)
+;
+
+		MOVE.L		QStart(A6),A4		; initialize the queue insertion point to the beginning
+		ADDQ		#2,A4				; bump the start by a little
+		MOVE.L		([ITabH,A6]),A1		; get a pointer to the colorTable
+		ADD.L		InfoOffset(A6),A1	; bump the pointer past the big table to the info stuff
+		CLR.W		ITabHidden(A1)		; no hidden entries yet
+		CLR.W		ITabReserved(A1)	; no extra fields yet
+		CLR.W		ITabFlags(A1)		; not a gray ITab					<BAL 16Mar89>
+
+;
+; Black and white's index values have special significance to QuickDraw in old grafPorts.
+;	By default, they are the first and last colors in the colortable.  We queue them 
+;	first so that they will never be overridden by identical colors in the interior of the
+;	colorTable.  If B&W are not in their normal positions, old grafports will look funny
+;	anyway, so we don't need to check.  D5 has the colorTable index to queue.
+;	<C751/03Feb87> DAF - Queuing order changed (search for *&*& to see end of change)
+
+		MOVE.L		([CTabH,A6]),A0		; get a pointer to the colorTable
+
+		MOVEQ		#0,D5				; the first element is normally white (clr top half of D5, too)
+		BSR.S		QUtil				; queue it
+
+		MOVE.W		CTSize(A0),D5		; the last element is normally black
+		BSR.S		QUtil				; queue it
+
+;
+; order doesn't matter for the remaining colors.  clut=8 has best results if we seed
+;	moving forward so let's do it that way.
+;
+
+		MOVE.L		D5,D4				; copy total # of color (and cleared hi word)
+		SUBQ		#2,D4				; this is the number of colors remaining
+		BLE.S		QVille				; if zero or negative, all done
+		MOVEQ		#1,D5				; start at color #1 (zero based)
+@TheRestOfUs							; a temporary label for the rest of us
+		BSR.S		QUtil				; queue it
+		ADDQ		#1,D5				; advance to next
+		DBRA 		D4,@TheRestOfUs		; and loop til done
+		BRA.S		QVille				; and continue
+
+;
+; here's an inline queuing utility.  This allows us to queue in any order, but particularily
+;	we can try to queue black and white first, to make sure that they are in the inverse
+;	table even though, by default they are at opposite ends of the colorTable.  It's inline
+;	so it can be a short branch around it.
+;
+
+QUtil
+		BTST		#ReserveBit,CTTable+value(A0,D5*8)	; is this color reserved?		<C695/26Jan87> DAF
+		BNE.S		@5								; if so, don't queue			<C695/26Jan87> DAF
+		MOVEQ		#0,D0							; clear the index register
+		MOVEQ		#0,D1							; init the lookup register
+		MOVE.B		CTTable+rgb+red(A0,D5*8),D0 	; get the HI BYTE of red value
+		MOVE.W		0(A2,D0*8),D1					; get the adjusted red value
+		MOVE.B		CTTable+rgb+green(A0,D5*8),D0 	; get the HI BYTE of green value
+		ADD.W		2(A2,D0*8),D1					; add the adjusted green value
+		MOVE.B		CTTable+rgb+blue(A0,D5*8),D0 	; get the HI BYTE of blue value
+		ADD.W		4(A2,D0*8),D1					; add the adjusted blue value
+
+		MOVE.W		(A3,D1.L*2),D2					; fetch the current value
+		BMI.B		@4								; if Undef (<0) then just use it
+		MOVE.B		ITabInfo(A1,D2),ITabInfo(A1,D5)	; current.link := old.link
+		MOVE.B		D5,ITabInfo(A1,D2)				; old.link := current
+		ADDQ.W		#1,ITabHidden(A1)				; bump the number of hidden entries
+		BRA.S		@5								; branch to end of loop			<C751/03Jan87> DAF
+
+@4		MOVE.B		D5,ITabInfo(A1,D5)				; make it self-referential
+		MOVE.W		D5,(A3,D1.L*2)					; put the color in the cube
+		QUEUE		D1,#0							; queue the displacement
+@5													; 								<C695/26Jan87> DAF
+		RTS											; and return
+
+;*&*& end of <C751/03Feb87> DAF
+
+;
+; Now it's time to propagate the seed values throughout the 
+;	cube.  The procedure is fairly straightforward- dequeue an element
+;	from the queue, then mark and queue its six neighbors until the 
+;	cube is full.  D6 still has the cube edge size (green delta), 
+;	and D7 still has the size of a plane (red delta).
+;
+
+QVille
+
+		MOVE.L		QStart(A6),A1		; set the removal ptr to the 1st valid entry
+		ADDQ.L		#2,A1				; bump the end up to match the first entry
+
+		MOVEQ		#1,D5				; set up the blue delta
+		BRA			@7					; jump to end of loop (save 1 inst)
+@1
+		LEA			(A3,D1.L*2),A0		; get the address of the queued element
+
+		MOVE.W		(A0),D4				; get the color value in this position (note that hi bit is set {that's good!})
+
+		BTST		#7,(A0,D5.L*2)		; check the next blue
+		BEQ.S		@2					; if nonzero, then skip it
+		MOVE.W		D4,(A0,D5.L*2)		; mark it as taken
+		QUEUE		D1,D5				; and queue the index
+@2
+		NEG.L		D5
+		BTST		#7,(A0,D5.L*2)		; check the alternate blue
+		BEQ.S		@3					; if nonzero, then skip it
+		MOVE.W		D4,(A0,D5.L*2)		; mark it as taken
+		QUEUE		D1,D5				; and queue the index
+@3
+		BTST		#7,(A0,D6.L*2)		; check the next green
+		BEQ.S		@4					; if nonzero, then skip it
+		MOVE.W		D4,(A0,D6.L*2)		; mark it as taken
+		QUEUE		D1,D6				; and queue the index
+@4
+		NEG.L		D6
+		BTST		#7,(A0,D6.L*2)		; check the alternate green
+		BEQ.S		@5					; if nonzero, then skip it
+		MOVE.W		D4,(A0,D6.L*2)		; mark it as taken
+		QUEUE		D1,D6				; and queue the index
+@5
+		BTST		#7,(A0,D7.L*2)		; check the next red
+		BEQ.S		@6					; if nonzero, then skip it
+		MOVE.W		D4,(A0,D7.L*2)		; mark it as taken
+		QUEUE		D1,D7				; and queue the index
+@6
+		NEG.L		D7
+		BTST		#7,(A0,D7.L*2)		; check the alternate red
+		BEQ.S		@7					; if neg, then skip it
+		MOVE.W		D4,(A0,D7.L*2)		; mark it as taken
+		QUEUE		D1,D7				; and queue the index
+
+		MOVEQ		#0,D1				; clear the hi half of the offset register
+
+@7		DEQUEUE		D1					; pull a queue element
+		BNE  		@1					; if the new one is zero, then done (0,0,0 is a boundary and never queued)
+
+;
+; the iLUT is now built.  Compress it down to a byte table and resize the handle
+;
+
+Collapse
+
+		MOVE.L		ITabH(A6),A0		; get the ITable handle
+		MOVE.L		(A0),A0				; get pointer to ITable
+		MOVE.L		([CTabH,A6]),A2		; get a pointer to the colortable			<C239> DAF
+		MOVE.L		CTSeed(A2),(A0)+	; get the color table's seed value	(itabSeed)
+		MOVE		RES(A6),(A0)+		; write out resolution (itabRes)
+		MOVE.L		TblSize(A6),D0		; get the cube size
+		LSR.L		#1,D0				; divide by 2 to get entry count in words
+		SUBQ		#1,D0				; and convert to counter for DBRA
+		MOVE.L		TblH(A6),A2			; get the cube handle
+		MOVE.L		(A2),A2				; get the cube pointer
+
+@1		MOVE.W		(A2)+,D1			; get an element of the expanded table
+		CMP.W		#BOUND,D1			; is it a boundary cell?
+		BEQ.S		@2					; if so, then skip it
+		MOVE.B		D1,(A0)+			; if not, then write byte in final table
+@2		DBRA		D0,@1				; loop through entire cube
+
+		MOVE.L		TblH(A6),A0			; get the temporary handle
+; from QDciPatchROM.a MakeITable patch											<sm 6/9/92>stb
+		btst		#ITableInTempBit, isTmpHandle(a6)	;is handle in temp memory 	<28Feb90 KON>
+		beq.s		@notTmp				; no, use normal dispose				<2.2> BAL
+		_DisposeTempBuffer				; bag it								<2.2> BAL
+		bra.s		@allGone			; continue								<2.2> BAL
+
+@notTmp	_DisposHandle					; release it
+@allGone
+
+;
+; dispose of the memory for the Queue
+;
+DisposeQ								;										<24Apr87> DAF
+		MOVE.L		QHandle(A6),A0		; release the queue						<28Feb90 KON>
+		btst		#QInTempBit, isTmpHandle(a6)	;is Queue in temp memory 	<28Feb90 KON>
+		beq.s		@QnotTmp						; no, use normal dispose	<28Feb90 KON>
+		_DisposeTempBuffer				; bag it								<28Feb90 KON>
+		bra.s		@QallGone			; continue								<28Feb90 KON>
+
+@QnotTmp	_DisposHandle				; release it							<28Feb90 KON>
+@QallGone								;										<28Feb90 KON>
+
+
+MITDone									; 										<C695/26Jan87> DAF
+;		MOVE.L		SvZone(A6),theZone	; always restore the zone (needed for error exits) <BAL>
+		MOVEM.L		(SP)+,A2-A5/D3-D7	; restore registers
+		UNLK		A6					; bag the stack frame
+
+		RTD			#ParamSize			; flush parameters and return home		<C733/02Feb87> DAF
+
+MakeIErr								;										<24Apr87> DAF
+		MOVE.W		#CTempMemErr,QDErr	; report a table allocation error
+		bra.s		DisposeQ
+MakeIErrLate
+		MOVE.W		#CTempMemErr,QDErr	; report a table allocation error
+		BRA.S		MITDone
+
+
+;----------------- Subroutine to hunt for memory -----------------------------
+; from QDciPatchROM.a															<sm 6/9/92>stb
+
+NewHandleTempSysApp
+;
+; Called with requested size in d0.  Routine first tries to get memory first in
+; multifinder temp memory, then sys heap, then app heap.  If memory found in
+; temp memory, d1 returns 0, otherwise d1 is 1.
+;
+;	Returns with:	d0 error, 0=noErr
+;					a0 handle if no error
+
+;
+; Try temp memory if multifinder exists
+;
+		move.l		d0, -(sp)		;save requested size
+		moveq		#0, d1			;assume temp memory
+		_NewTempHandle				;look for it in temp memory
+		cmp.l		(sp),d0			;is it the size we requested?
+		beq.s		@GotMem			;yes, it's big enough
+
+		_DisposeTempBuffer			;A0 already has handle of wrong size
+;
+; Try sys memory
+;
+@noMF
+		moveq		#1, d1			;not temp memory
+		move.l	(sp),d0
+		_NewHandle ,sys
+		beq.s		@GotMem
+;
+; Try app memory if zone different from system zone
+;
+		move.l	theZone,d0
+		cmp.l	sysZone, d0			;have we already tried this zone?
+		beq.s	@Memoryerr			;don't try it again
+
+		move.l	(sp),d0
+		_NewHandle
+		bne.s		@MemoryErr		;couldn't find the memory anywhere
+
+@GotMem
+		moveq		#0,d0			;signal noErr
+@MemoryErr
+		addq		#4,sp			;remove requested memory size
+		tst.w		d0				;set condition codes
+		rts
+
+MakeGrayITab
+;-----------------------------------------------------------------------------
+;
+; MakeGrayITab
+;
+;	At his point we know that all the clut entries are grays.
+; 
+;	First allocate a word-sized luminosity table on the stack and fill
+;	it with the appropriate index for each level by a seed fill method.
+;	Then compact the luminosity table into the ITInfoTable at the end of the ITab.
+;
+;   Finally fill the ITab out with the appropriate index for each luminosity
+;   mapped position.
+;
+;PARAMSIZE	EQU		10							; total bytes of params
+;CTabH		EQU		PARAMSIZE+8-4				; Color table handle
+;ITabH		EQU		CTabH-4						; ITable handle
+;RES		EQU		ITabH-2						; entry size
+;
+;QStart		EQU		-4							; pointer to the queue
+;SvZone		EQU		QStart-4					; save the current zone
+;TblH		EQU		SvZone-4					; copy of our temp ITable
+;TblSize	EQU		TblH-4						; size of our temp ITable
+;InfoOffset	EQU		TblSize-4					; offset to ITInfoTable from ITabH
+;VARSIZE	EQU		InfoOffset
+
+
+; Allocate and initialize table on stack
+		moveq		#-1,d0						; initializer for table
+		moveq		#63,d1						; # of double longs-1 in table
+@1		move.l		d0,-(sp)					; init 2 entries
+		move.l		d0,-(sp)					; init 2 entries
+		dbra		d1,@1
+
+; Seed table with clut entries
+
+		clr.w		510(sp)						; seed white to guarantee last entry
+		move.w		#255,(sp)					; seed black to guarantee 1st entry
+
+		move.l		CTabH(a6),a0				;
+		move.l		(a0),a0						; point at CLUT
+		move.w		ctSize(a0),d0				; get # entries -1
+
+		moveq		#0,d2						; clear out high end of word
+@nxtEntry
+		move.w		d0,d1						; assume entry = index
+		btst		#ReserveBit,ctTable+value(a0,d0*8)
+		bne.s		@skip						; ignore reserved entries
+	;	tst.w		TransIndex(a0)				; look for flag in transIndex	ASSUME DEVICE CLUT
+	;	bmi.s		@UseIndex					; => flag set, use index		<BAL 29Mar89>
+	;	move.w		ctTable+value(a0,d0*8),d1	; get value of current entry	FUNG'S A HOSER
+@UseIndex
+		move.b		ctTable+rgb+red(a0,d0*8),d2	; get luminance=red
+		move.w		d1,(sp,d2*2) 				; put pixel value in luminace table
+@skip	dbra		d0,@nxtEntry				; => repeat until done
+
+
+; Repeatedly smear right and then left one position until no changes in table
+
+		move.l		a7,a1						; 
+		add.w		#512,a1						; set up limit pointer
+@smear
+		moveq		#0,d1						; clear changed flag
+		lea			2(a7),a0					; point at second entry
+
+@right	cmp.l		a0,a1						; reached end of table yet?
+		ble.s		@end
+		tst.w		(a0)+						; is this entry occupied?
+		bpl.s		@right						; yes, keep going
+		move.w		-4(a0),-2(a0)					; no, smear right
+		addq		#2,a0						; don't smear more than one position
+		st			d1							; set changed flag
+		bra.s		@right
+
+@end	subq		#2,a0						; stay inside last entry
+@left	cmp.l		a0,a7						; reached beginning of table yet?
+		bge.s		@doneSmear
+		tst.w		-(a0)						; is this entry occupied?
+		bpl.s		@left						; yes, keep going
+		move.w		2(a0),(a0)					; no, smear left
+		subq		#2,a0						; don't smear more than one position
+		st			d1							; set changed flag
+		bra.s		@left
+
+@doneSmear
+		tst			d1							; were there any changes?
+		bne.s		@smear						; yes, smear some more
+
+; Now compress the table into the ITInfoTable and discard the stack version.
+
+		move.l		ITabH(a6),a1				;
+		move.l		(a1),a1						; 
+
+		move.l		([CTabH,a6]),a2				; get a pointer to the colortable
+		move.l		CTSeed(a2),iTabSeed(a1)		; get the color table's seed value
+		move		RES(a6),iTabRes(a1)			; write out resolution
+
+		add.l		InfoOffset(a6),a1			; point at ITInfoTable
+		bset		#15,iTabFlags(a1)			; set grayITab flag
+		move.w		#255,d0						; get table size
+		lea			ITabLuma(a1),a3				; point at luma table
+
+@copy	move.b		1(sp,d0*2),d1				; get index
+		move.b		d1,ITabInfo(a1,d0)			; copy into ITInfoTable
+		move.b		ctTable+rgb+red(a2,d1*8),(a3,d0) ; get actual luminance=red for dither error table
+		dbra		d0,@copy
+
+		add.w		#512,sp						; discard temp table
+
+; Now fill out the ITab with luminance mapped index values at each location.
+
+
+		MOVE.L		([ITabH,a6]),A0			; get the iTable's master pointer
+		MOVEQ		#1,D0					; prime the register again				<BAL 16Mar89>
+		MOVE		ITabRes(A0),D2			; get the inverse table resolution (and Bit-field width)
+		LSL.L		D2,D0					; calculate 2^res
+		subq		#1,d0					; make it zero based for dbra
+		LEA			ITTable(A0),A0			; point us at the ITab data
+		lea			ITabInfo(a1),a1			; bump past header
+
+		move		#2*256,d4				; start with max blue contribution
+		lsr.w		d2,d4					; divide by # of steps
+		move		#9*256,d5				; start with max green contribution
+		lsr.w		d2,d5					; divide by # of steps
+		sub			#2*256,d5				; adjust for reverse blue bump
+		move		#5*256,d6				; start with max red contribution
+		lsr.w		d2,d6					; divide by # of steps
+		sub			#9*256,d6				; adjust for reverse green bump
+
+;-------------------------------------------------------
+;		a0 = ITTable		d0 = 2^iTabRes
+;		a1 = ITabInfo		d1 = red looper
+;		a2 = cur luma		d2 = green looper
+;		a3 = 				d3 = blue looper
+;		a4 = 				d4 = blue bump
+;		a5 = 				d5 = green bump - max blue
+;		a6 = locals			d6 = red bump - max green
+;		a7 = 				d7 = scratch
+;-------------------------------------------------------
+		sub.l		a2,a2					; init composite luminance
+		move.w		d0,d1					; init red position
+@red	move.w		d0,d2					; init green position
+@green	move.w		d0,d3					; init blue position
+@blue	move.w		a2,d7					; make a copy
+		lsr.w		#4,d7					; normalize luminance
+		move.b		(a1,d7),(a0)+			; store index in table
+		add			d4,a2					; bump in blue
+		dbra		d3,@blue
+		add			d5,a2					; bump back to zero blue coordinate and increment green
+		dbra		d2,@green
+		add			d6,a2					; bump back to zero green coordinate
+		dbra		d1,@red
+
+	;	bra			MITDone					; all done
+		rts
+
+
+;-----------------------------------------------------------------------------
+;
+; function ITabMatch ( myColor : RGBColor; var MatchPos : longint ) : boolean;
+;
+;	This procedure takes an RGBColor and finds the best match
+; 	to the .rgb field by lookup in the inverse table.  The resultant
+;	index value is extended to a long and returned as the result.  
+;	As the default routine, it does not look at the CDID field and 
+;	always returns a result.  It uses the linked list at the end of the
+;   ILUT to find and return "hidden" colors, based on a simple best fit
+;   calculation.
+;
+
+ITabMatch	PROC	EXPORT
+
+PARAMSIZE	EQU		10						; total bytes of params
+Result		EQU		PARAMSIZE+8-2
+MyColor		EQU		Result-4
+MatchPos	EQU		MyColor-4
+
+Best		EQU		-2						; keeps track of our index during hidden searches
+BestVal		EQU		Best-2					; keeps track of the best value while searching
+EndLink		EQU		BestVal-2				; the self-referential link that signals stop
+ITabInfoPtr	EQU		EndLink-4				; pointer to hidden colors, etc
+VARSIZE		EQU		ITabInfoPtr
+
+
+		LINK		A6,#VARSIZE				; set up a stack frame
+		MOVE.L		A2,-(SP)				; save a register				<C835/20Feb87> DAF
+		CLR.B		Result(A6)				; assume boolean false
+
+		MOVE.L		([theGDevice]),A2		; get a pointer to the current device
+		MOVE.L		([GDPMap,A2]),A1		; get pixMap's handle
+		MOVE.L		PMTable(A1),A0			; get the device colorTable's handle
+		MOVE.L		([A0],CTSeed),D1		; get a pointer to the device colortable
+		MOVE.L		([GDITable,A2]),D0		; get the Itable's master pointer
+		CMP.L		(ITabSeed,ZA0,D0.L),D1	; has the colortable changed?
+		BEQ.S		@1						; if equal, then the iTable is OK
+
+; if table is not up to date, build a new one
+
+		MOVE.L		A0,-(SP)				; push theGDevice's color table handle
+		MOVE.L		GDITable(A2),-(SP)		; push theGDevice's current iTabHandle
+		MOVE.W		GDResPref(A2),-(SP)		; push the preferred iTableResolution
+		_MakeITable 						; make a new table
+;		TST.W		QDErr					; was this successful?					<2.2> BAL
+;		BNE			MtchEnd					; nope, so quit							<2.2> BAL
+		MOVE.L		([theGDevice]),A2		; redereference in case it moved		<BAL 31Mar89>
+		MOVE.L		([GDITable,A2]),D0		; get the iTable's master pointer
+
+@1		MOVE.L		D0,A0					; and get a pointer to the ITab
+		MOVEQ		#1,D0					; prime the register again				<BAL 16Mar89>
+		MOVE		ITabRes(A0),D2			; get the inverse table resolution (and Bit-field width)
+		LSL.L		D2,D0					; calculate 2^^res
+		LSL.L		D2,D0					; square it
+		LSL.L		D2,D0					; cube it
+		LEA			ITTable(A0,D0.L),A1		; point us at the ITabInfo
+		move.l		a1,ITabInfoPtr(a6)		; save for later
+		tst.w		iTabFlags(a1)			; is this a grayITab?					<BAL 16Mar89>
+		bpl.s		@notGray
+
+; Now we know that all matchable clut entries are grays so simply compute luminance
+; of input RBG and return index from 256 entry luminance table at end of the grayITab.
+
+
+		move.l		myColor(a6),a0			; get a pointer to the RGBColor
+		lea			red(a0),a0				; point at red cmp
+		moveq		#0,d0					; clear out high end
+		moveq		#0,d1					; clear out high end
+		moveq		#0,d2					; clear out high end
+		move.w		(a0)+,d0				; get the red component
+		move.w		(a0)+,d1				; get the green component
+		move.w		(a0),d2					; get the blue component
+
+; Compute Luminance = ((((((r+g)/2)+b)/2+r)/2)+g)/2
+
+		move.l		d1,a0					; copy green
+		add.l		d0,d1
+		lsr.l		#1,d1
+		add.l		d2,d1
+		lsr.l		#1,d1
+		add.l		d0,d1
+		lsr.l		#1,d1
+		add.l		a0,d1
+		lsr.l		#1,d1
+		lsr.l		#8,d1					; make into byte value
+
+		move.b		ITabInfo(A1,D1),D1		; pick up index for this luminance
+		bra			FoundIt					; => D1 has the answer
+
+
+
+@notGray
+		MOVE		ITabRes(A0),D2			; get the inverse table resolution (and Bit-field width)
+		MOVE.L		myColor(A6),A1			; get a pointer to the RGBColor
+		BFEXTU		red(A1){0:D2},D0		; get the red component (BFEXTU zero extends)
+		LSL.L		D2,D0					; and shift it over res bits
+		BFEXTU		green(A1){0:D2},D1		; get the green component
+		OR.L		D1,D0					; put them together
+		LSL.L		D2,D0					; shift over again
+		BFEXTU		blue(A1){0:D2},D1		; get the blue component
+		OR.L		D1,D0					; and here's the completed index
+
+; BFEXTU clears high 3 bytes of D1
+
+		MOVE.B		ITTable(A0,D0),D1	; get the index value
+
+; Now we have the index, but we may not have the best match it can offer.  See if
+; it is self referential within the ITabInfo table, in which case it is probably the best
+
+		move.l		ITabInfoPtr(a6),a1	; point us at the ITabInfo				<BAL 16Mar89>
+		CMP.B		ITabInfo(A1,D1),D1	; is this entry self referential?
+		BEQ.S		FoundIt				; => D1 has the answer
+
+; Where we keep some stuff:
+;	A0 - pointer to target RGBColor
+;	A1 - pointer to ITabInfo
+;	A2 - pointer to color table of current device
+;	D0 - calculates and holds the "distance"
+;	D1 - best index found
+;	D2 - used to calculate difference
+
+		MOVE.L		myColor(A6),A0		; get a pointer to the RGBColor
+
+		MOVE.L		([theGDevice]),A2	; get the current device pointer
+		MOVE.L		([GDPMap,A2]),A2	; get the device pixelmap pointer
+		MOVE.L		([pmTable,A2]),A2	; point to the color table
+
+		MOVE.W		D1,Best(A6)			; save current index - high byte is 0
+		MOVE.W		D1,EndLink(A6)		; terminate when Current.Link = EndLink
+		MOVE.W		#$7FFF,BestVal(A6)	; BestVal := $7FFF
+
+; Okay, we have to look through the hidden values until we find the best match.  This is a
+; crude and simple search - we estimate the "distance" between our target and a hidden value
+; based upon max(abs(∆Red),max(abs(∆Blue),abs(∆Green))).  We select the index which has the minimum
+; "distance", stopping early if we find an exact match.
+
+Repeatr	MOVE.W		CTTable+rgb+red(A2,D1.W*8),D0	; get red value of current index
+		SUB.W		Red(A0),D0			; subtract target red
+		BPL.S		@1					; make it positive
+		NEG			D0					; like so
+@1		MOVE.W		CTTable+rgb+green(A2,D1.W*8),D2	; get green value of current index
+		SUB.W		Green(A0),D2		; subtract target green
+		BPL.S		@2					; make it positive
+		NEG			D2					; like so
+@2		CMP.W		D2,D0				; select D0 := max(D2,D0)
+		BGE.S		@3
+		MOVE.W		D2,D0
+@3		MOVE.W		CTTable+rgb+blue(A2,D1.W*8),D2
+		SUB.W		Blue(A0),D2
+		BPL.S		@4
+		NEG			D2
+@4		CMP.W		D2,D0
+		BGE.S		@5
+		MOVE.W		D2,D0
+@5		TST.W		D0					; check result of our calculations
+		BEQ.S		FoundIt				; D1 has the best match
+
+		CMP.W		BestVal(A6),D0
+		BGE.S		NotBest
+
+; Set BestVal to the newly calculated match and update BestIndex
+
+		MOVE.W		D0,BestVal(A6)			; copy new best value into holder
+		MOVE.W		D1,Best(A6)				; copy current index into result
+NotBest	MOVE.B		ITabInfo(A1,D1.W),D1	; get the next link - high byte still 0
+		CMP.W		EndLink(A6),D1			; are we done?
+		BNE.S		Repeatr
+		MOVE.W		Best(A6),D1			; grab the best match into D1
+FoundIt	MOVE.L		MatchPos(A6),A0		; get pointer to index result
+		EXT.L		D1					; make sure the upper word is clear
+		MOVE.L		D1,(A0)				; write result
+		MOVE.B		#1,Result(A6)		; and return boolean true
+
+MtchEnd	MOVE.L		(SP)+,A2			; restore register (was 2)				<C835/20Feb87> DAF
+		UNLK		A6					; release stack frame
+		RTD			#8					; and go home
+
+
+
+
+
+ColorThing2Index	PROC	EXPORT		; 		<BAL/dvb 23Feb89>
+					EXPORT Color2Index
+;
+;
+; function ColorThing2Index ( myThing : ColorThing ) : longint;
+;
+;	This procedure takes an RGB colorSpec-like thing and returns
+;	the appropriate pixel value for the current GDevice (despite how much I 
+;	hate the concept of THEGDevice damn it!).  But atleast we can share code.
+;
+
+;		ColorThing format
+
+colorSpace		equ	0					;[byte]	0=RGB, 1=palette index, 2=?
+ctFiller		equ	colorSpace+1		;[byte] reserved for clut compatibility
+colorData		equ	ctFiller+1			;actual color stuff, 0->48bit RGB, 1->16bit palette index 
+
+result		EQU		12					; longword result
+myThing		EQU		8					; pointer to colorThing
+retAddr		EQU		4					; return address
+LongRes		EQU		-4					; space for a longint return
+FrameSize	EQU		LongRes				;
+
+		LINK		A6,#FrameSize		;
+
+		clr.l		-(sp)				; make room for result
+		move.l		myThing(a6),a0		; get thing ptr
+		move.w		(a0)+,-(sp)			; push palette index
+		move.l		a0,myThing(a6)		; set to RGB ptr for color2Index
+		moveq		#0,d0				; Entry2Index selector
+	;	dc.w		$aaa2				; ask the brink
+		jsr			([$e00+(4*$2a2)])	; ask the brink (faster)
+		move.l		(sp)+,result(a6)	; get the answer
+		move.w		qderr,d0			; is it real?
+		bne.s		c2iShare
+		UNLK		A6					; release stack frame
+		RTD			#4					; return and dealloc
+
+;
+; function Color2Index ( myColor : RGBColor ) : longint;
+;
+;	This procedure takes an RGB color specification and finds it's best 
+; 	match using the search rule chain.  The resultant index value is 
+;	returned right-justified in the longword result.  Note that direct
+;	mapping devices MUST have a searchProc.
+;
+
+Color2Index	;PROC	EXPORT				; interface modified					<C491/06Dec86> DAF
+
+;result		EQU		12					; longword result						<C601/07Jan87> DAF
+MyColor		EQU		8					; pointer to rgbColor					<C601/07Jan87> DAF
+;retAddr	EQU		4					; return address						<C601/07Jan87> DAF
+;LongRes	EQU		-4					; space for a longint return			<C601/07Jan87> DAF
+;FrameSize	EQU		LongRes				;
+
+		LINK		A6,#FrameSize		;										<C601/07Jan87> DAF
+c2iShare
+		MOVE.L		A2,-(SP)			; save a register						<C491/06Dec86> DAF
+;		CLR.W		QDErr				; clear the error register				<1.9>
+
+		MOVE.L		([theGDevice]),A2	; get a pointer to the device port
+
+	if 0 then
+		MOVE.L		GDSearchProc(A2),D0	; get the head of the search chain
+
+@1
+		BEQ.S		DefRule				; if NIL, then apply default rule
+		MOVE.L		D0,A2				; save the search element handle		<C666/22Jan87> DAF
+		MOVE.L		D0,A0				; and set up for HLock					<C666/22Jan87> DAF
+		_HLock							; lock the search element (so A2 will be valid after searchProc)	<C666/22Jan87> DAF
+		SUBQ		#2,SP				; make room for boolean result 			<C601/07Jan87> DAF
+		MOVE.L		MyColor(A6),-(SP)	; push RGBColor pointer					<C601/07Jan87> DAF
+		PEA			LongRes(A6)			; push pointer to placeholder			<C601/07Jan87> DAF
+		MOVE.L		(A2),A0				; get pointer to search element			<C666/22Jan87> DAF
+		MOVE.L		SrchProc(A0),A0		; get the searchProc address			<C666/22Jan87> DAF
+		JSR			(A0)				; execute routine						<C491/06Dec86> DAF
+		MOVE.L		A2,A0				; unlock the search element now			<C666/22Jan87> DAF
+		_HUnlock						; 										<C666/22Jan87> DAF
+		TST.B		(SP)+				; test the boolean result				<C601/07Jan87> DAF
+		BNE.S		Found1				; if result = TRUE then quit			<C601/07Jan87> DAF
+		MOVE.L		(A2),A0				; get pointer to this search element again <C666/22Jan87> DAF
+		MOVE.L		NxtSrch(A0),D0		; get pointer to next					<C666/22Jan87> DAF
+		BRA.S		@1					; 
+	endif
+
+;-----------Optimization <20AUG90 KON>  Hopefully it still works--------------------------------
+		MOVE.L		GDSearchProc(A2),a2	; get the head of the search chain		<20AUG90 KON>
+NxtProc
+		MOVE.L		A2,D0				; To work register						<20AUG90 KON>
+		beq.s		DefRule				; no search proc, or end of list		<20AUG90 KON>
+		MOVE.L		(A2),A0				; get pointer to search element			<C666/22Jan87> DAF
+		move.l		NxtSrch(a0),a2		; get handle to next search element		<20AUG90 KON>
+;
+; Call search proc
+;
+		SUBQ		#2,SP				; make room for boolean result 			<C601/07Jan87> DAF
+		MOVE.L		MyColor(A6),-(SP)	; push RGBColor pointer					<C601/07Jan87> DAF
+		PEA			LongRes(A6)			; push pointer to placeholder			<C601/07Jan87> DAF
+		MOVE.L		SrchProc(A0),A0		; get the searchProc address			<C666/22Jan87> DAF
+		JSR			(A0)				; execute routine						<C491/06Dec86> DAF
+		TST.B		(SP)+				; test the boolean result				<C601/07Jan87> DAF
+		beq.s		NxtProc				; not found, try next search proc		<20AUG90 KON>
+;-----------END <20AUG90 KON>  -----------------------------------------------------------------
+
+Found1
+		MOVE.L		LongRes(A6),D0		; get the longword index				<C601/07Jan87> DAF
+		MOVE.L		D0,result(A6)		; return result							<C491/06Dec86> DAF
+		MOVE.L		(SP)+,A2			; restore saved register				<C491/06Dec86> DAF
+		UNLK		A6					; release stack frame					<C601/07Jan87> DAF
+		RTD			#4					; return and dealloc
+
+
+DefRule
+		MOVE.L		([theGDevice]),A0	; get a pointer to the device port		<C777/12Feb87> DAF
+		CMP.W		#DirectType,GDType(A0)	; if it is direct, don't call ITabMatch <C777/12Feb87> DAF
+		BEQ.S		@DirectPix				; calc direct pixel value				<C777/12Feb87> DAF
+		CLR.B		-(SP)				; make room for function result			<C583/02Jan87> DAF
+		MOVE.L		myColor(A6),-(SP)	; push RGBColor pointer 
+		PEA			LongRes(A6)			; push pointer to index placeholder		<C583/02Jan87> DAF
+		_ITabMatch						; call the default routine
+		TST.B		(SP)+				; test the boolean result				<C491/06Dec86> DAF
+		;BNE.S		GetIt				; if OK result, get index				<C583/02Jan87> DAF
+		bra.s		GetIt				; just get index anyway
+@DirectPix
+		MOVE.L		([GDPMap,A0]),A1	; get the device pixelmap pointer
+		move.w		cmpSize(a1),d1		; get cmp size							<rgb/06Jul88> BAL
+		MOVE.L		myColor(A6),A0		; point to the color spec				<RGB/19May88> DAF
+		moveq		#0,d0				; clear a register						<rgb/06Jul88> BAL
+		MOVE.B		red(A0),D0			; get the red channel					<RGB/19May88> DAF
+		LSL.L		d1,D0				; shift over							<RGB/19May88> DAF
+		MOVE.B		green(A0),D0		; get the green channel					<RGB/19May88> DAF
+		LSL.L		d1,D0				; shift again							<RGB/19May88> DAF
+		MOVE.B		blue(A0),D0			; get the blue channel					<RGB/19May88> DAF
+		neg.w		d1
+		addq.w		#8,d1				; shift needed to right justify pixel
+		ble.s		@noShift			; needed for cmpSize=10
+		lsr.l		d1,d0
+@noShift
+
+		MOVE.L		D0,LongRes(A6)		; just for now!							<RGB/19May88> DAF
+GetIt	BRA.S		Found1				; and return							<C583/02Jan87> DAF
+
+
+;
+; procedure Index2Color ( index : longint; VAR myColor : RGBColor );
+;
+;	This procedure takes an index value and returns the RGB
+; 	components of this element of theGDPort^^.GDPMap.pmTable.
+;
+; as seen in QDciPatchROM.a														<sm 6/9/92>stb 
+
+Index2Color	PROC	EXPORT
+
+		MOVE.L		8(SP),D0			; get the index							<C491/06Dec86> DAF
+		MOVE.L		4(SP),A0			; get pointer to result RGB				<C491/06Dec86> DAF
+		MOVE.L		([theGDevice]),A1	; get the current device pointer
+		MOVE.L		([GDPMap,A1]),A1	; get the device pixelmap pointer
+		cmp			#16,pixelType(a1)	; is it a direct device?				<BAL 06Jul88>
+		beq.s		I2CDirect			; yes, no CLUT							<BAL 06Jul88>
+
+		MOVE.L		([pmTable,A1]),A1	; point to the color table
+;		CLR.W		QDErr				; clear the error register				<1.9>
+
+		MOVE.W		ctSize(A1),D1		; get ctSize 							<C491/06Dec86> DAF
+		CMP.W		D1,D0				; is index in range?					<C491/06Dec86> DAF
+		BGT.S		I2CErr				; nope, so quit							<C491/06Dec86> DAF
+		MOVE.W		CTTable+rgb+red(A1,D0.L*8),red(A0) ;  move red				<C491/06Dec86> DAF
+		MOVE.L		CTTable+rgb+green(A1,D0.L*8),green(A0) ;  move green & blue	<C491/06Dec86> DAF
+I2CDone
+		RTD			#8					; and return
+
+I2CErr
+		MOVE.W		#cRangeErr,QDErr	; set error code
+		BRA.S		I2CDone				; 
+
+I2CDirect								; Handle 24bit/pixel direct devices		<BAL 06Jul88>
+		moveq		#8,d1				; get handy constant
+		sub.w		cmpSize(a1),d1		; shift needed to left justify cmp
+		beq.s		I2C24				; cmpsize is 8 so go fast
+
+	;enter with a 16-bit source pixel in d0
+
+		lsl.l	#3,d0						;left align blue in lo byte
+		move.b	d0,d1
+		lsl.l	#5,d1						;get 5 bits of blue
+		move.b	d0,d1
+		lsl.l	#5,d1						;make into 10 bits of blue
+		move.b	d0,d1
+		lsl.l	#5,d1						;make into 15 bits of blue
+		move.b	d0,d1
+		lsr.l	#7,d1						;get a word of blue
+		MOVE.w	d1,blue(a0)					;store out in color spec
+
+		lsr.l	#5,d0						;left align green in lo byte
+		move.b	d0,d1
+		lsl.l	#5,d1						;get 5 bits of green
+		move.b	d0,d1
+		lsl.l	#5,d1						;make into 10 bits of green
+		move.b	d0,d1
+		lsl.l	#5,d1						;make into 15 bits of green
+		move.b	d0,d1
+		lsr.l	#7,d1						;get a word of green
+		MOVE.w	d1,green(a0)				;store out in color spec
+
+		lsr.l	#5,d0						;left align red in lo byte
+		move.b	d0,d1
+		lsl.l	#5,d1						;get 5 bits of red
+		move.b	d0,d1
+		lsl.l	#5,d1						;make into 10 bits of red
+		move.b	d0,d1
+		lsl.l	#5,d1						;make into 15 bits of red
+		move.b	d0,d1
+		lsr.l	#7,d1						;get a word of red
+		MOVE.w	d1,red(a0)					;store out in color spec
+
+
+	if 0 then
+		lsl.l		d1,d0				; put cmp at high end of byte
+		move.w		cmpSize(a1),d1		; get distance to next cmp
+
+		move.b		d0,d2				; make a copy
+		lsl.w		d1,d2				; preserve cmpSize bits in high byte
+		move.b		d0,d2				; replicate cmpSize bits
+		lsr.w		d1,d2				; make into a byte
+
+		move.b		d2,blue(a0)			; set up high byte of blue result
+		move.b		d2,blue+1(a0)		; set up low byte of blue result
+
+		move.w		d0,d2				; make a copy of cmpSize bits in high byte
+		lsr.l		d1,d0				; get next cmp in high end of lo byte
+		move.b		d0,d2				; replicate cmpSize bits
+		lsr.w		d1,d2				; make into a byte
+
+		move.b		d2,green(a0)		; high green
+		move.b		d2,green+1(a0)		; low green
+
+		move.w		d0,d2				; make a copy of cmpSize bits in high byte
+		lsr.l		d1,d0				; get next cmp in high end of lo byte
+		move.b		d0,d2				; replicate cmpSize bits
+		lsr.w		d1,d2				; make into a byte
+
+		move.b		d2,red(a0)			; high red
+		move.b		d2,red+1(a0)		; low red
+	endif
+
+		bra.s		I2CDone
+
+I2C24
+		move.b		d0,blue(a0)			; set up high byte of blue result
+		move.b		d0,blue+1(a0)		; set up low byte of blue result
+		lsr.w		#8,d0				; get green byte
+		move.b		d0,green(a0)		; high green
+		move.b		d0,green+1(a0)		; low green
+		swap		d0					; get red byte
+		move.b		d0,red(a0)			; high red
+		move.b		d0,red+1(a0)		; low red
+		bra.s		I2CDone
+
+;
+; procedure InvertColor ( VAR myColor : RGBColor );
+;
+;	This procedure takes an RGBColor, calculates its inverse using the current
+;	inverse rules, then updates the provided RGBColor.  It only uses the 
+;	compProc interface if the default is not called.
+;
+; has fix from QDciPatchROM.a where an offset was wrong because of a byte result <sm 6/9/92>stb
+
+InvertColor	PROC	EXPORT
+
+		MOVE.L		A2,-(SP)			; save a register						<C601/07Jan87> DAF
+		MOVE.L		([theGDevice]),A2	; get a pointer to the device port
+		MOVE.L		GDCompProc(A2),D0	; get the head of the complement chain
+@1
+		BEQ.S		DefComp				; if NIL, then apply default rule
+		MOVE.L		D0,A2				; save the pointer						<C601/07Jan87> DAF
+		MOVE.L		D0,A0				; set up to lock this element			<C666/22Jan87> DAF
+		_HLock							; lock it down so that A2 will be valid after the JSR	<C666/22Jan87> DAF
+		CLR.B		-(SP)				; room for a boolean result
+		MOVE.L		8+2(SP),-(SP)		; push the pointer to the color			<26MAR90 KON>
+		MOVE.L		(A0),A0				; get the element pointer				<C666/22Jan87> DAF
+		MOVE.L		CompProc(A0),A0		; get the complement proc ptr			<C666/22Jan87> DAF
+		JSR			(A0)				; execute routine
+		MOVE.L		A2,A0				; set up for HUnlock					<C666/22Jan87> DAF
+		_HUnlock						; release the compElement				<C666/22Jan87> DAF
+		TST.B		(SP)+				; test the result
+		BNE.S		FoundComp			; if result = TRUE then quit
+		MOVE.L		(A2),A0				; get the compElement pointer again		<C666/22Jan87> DAF
+		MOVE.L		NxtComp(A0),D0		; get pointer to next					<C666/22Jan87> DAF
+		BRA.S		@1					; 
+
+FoundComp
+		MOVE.L		(SP)+,A2			; restore the register					<C601/07Jan87> DAF
+		RTD			#4					; and go home
+
+; the default procedure is VERY simple.  It just gets the complement of each 
+;	component.  It always returns a sucessful result.
+DefComp
+		MOVE.L		8(SP),A0			; get pointer to RGBColor
+
+		NOT.W		(A0)+				; complement red
+		NOT.W		(A0)+				; complement green
+		NOT.W		(A0)				; complement bleu, svp.
+		BRA.S		FoundComp			; and it always works too.
+
+
+;
+; procedure RGBForeColor (Color : RGBColor);
+;
+;	This routine takes an RGB triple and sets the current Graf- or CGrafPort
+;	fields so that drawing will take place with the best match of the
+;	requested color, using the current GDevice's color matching rules.  The
+;	appropriate fields are set depending on portType
+;
+
+RGBForeColor	PROC	EXPORT
+				EXPORT	RGBBackColor,RGB2OLD
+
+		MOVEQ		#FGCOLOR,D0					; get offset to index field
+		MOVEQ		#RGBFgColor,D1				; get offset to RGB field
+
+SHARE	MOVE.L		4(SP),A1					; point at the RGB color
+		MOVE.L		GRAFGLOBALS(A5),A0			; get the QuickDraw globals pointer
+		MOVE.L		THEPORT(A0),A0				; point at the port
+		PEA			0(A0,D0)					; save pointer to the index field
+		TST			PORTBITS+ROWBYTES(A0)		; is it a new port?
+		BMI.S		NEWPORT						; => yes, set RGB components
+		JSR			RGB2OLD						; else convert RGB to old color
+		BRA.S		DONE						; => and return
+
+; Palette manager patch rolled in <6Jun87 EHB>
+; Flag to the Palette Manager whether it a foreground or a background call happened
+
+NEWPORT	MOVE.L		GrafVars(A0),D2				; get the GrafVars handle			<6Jun87 EHB>
+		BEQ.S		NoPM						; =>no grafVars, continue			<6Jun87 EHB>
+		MOVE.L		D2,A1						; else get GrafVars handle			<6Jun87 EHB>
+		MOVE.L		(A1),A1						; point to GrafVars					<6Jun87 EHB>
+		MOVE		PmFlags(A1),D2				; get flags							<6Jun87 EHB>
+		CMP			#FgColor,D0					; is this a foreground call?		<6Jun87 EHB>
+		BNE.S		NotFg						; no => clear PmBkBit				<6Jun87 EHB>
+		BCLR		#PmFgBit,D2					; clear the foreground flag bit		<6Jun87 EHB>
+		BRA.S		Common						; reunite it						<6Jun87 EHB>
+
+NotFg	BCLR		#PmBkBit,D2					; clear the background flag bit		<6Jun87 EHB>
+Common	MOVE		D2,PmFlags(A1)				; save the flags to GrafVars		<6Jun87 EHB>
+		MOVE.L		8(SP),A1					; restore the pointer to the RGBColor <6Jun87 EHB>
+
+NoPM	MOVE.L		red(A1),red(A0,D1)			; copy red and green components	to the port
+		MOVE.W		blue(A1),blue(A0,D1)		; and blue too
+
+; make an rgbColor on the stack
+
+		MOVE.L		green(A1),-(SP)				; copy green and blue
+		MOVE.W		red(A1),-(SP)				; copy red
+		SUBQ		#4,SP						; make room for function return			<C491/06Dec86> DAF
+		PEA			4(SP)						; push pointer to rgb					<C491/06Dec86> DAF
+		_Color2Index							; convert it to an index
+
+		MOVE.L		(SP)+,D0					; get the index result					<C491/06Dec86> DAF
+		ADDQ		#6,SP						; get rid of the rgbColor				<C491/06Dec86> DAF
+
+DONE	MOVE.L		(SP)+,A0					; get pointer to index field
+		MOVE.L		D0,(A0)						; and set the index field
+		RTD			#4							; all done								<C491/06Dec86> DAF
+
+
+
+RGB2OLD
+;-----------------------------------------------
+;
+; UTILITY TO CONVERT AN RGB (POINTED TO BY A1) VALUE
+; TO AN OLD STYLE COLOR VALUE.  RETURNS VALUE IN D0.  CLOBBERS A0,D1
+;
+; USES HIGH BIT OF EACH COMPONENT TO SELECT RGB OFF (0) OR ON (1)
+
+		MOVEQ		#0,D1						; clear out D1
+		MOVE		(A1)+,D1					; get red
+		ADD.L		D1,D1						; get high bit
+		MOVE		(A1)+,D1					; get green
+		ADD.L		D1,D1						; get high bit
+		MOVE		(A1)+,D1					; get blue
+		ADD.L		D1,D1						; get high bit
+		SWAP		D1							; get RGB index
+
+noBlue	LEA			MapTbl,A0					; get translate table
+		MOVEQ		#0,D0						; clear out high word
+		MOVE		0(A0,D1*2),D0				; convert to planar value
+		RTS										; => all done
+
+; TABLE TO MAP FROM 3 BIT RGB TO OLD-STYLE COLOR INDICES
+
+MapTBL	DC.W		blackColor					; RBG = 0,0,0 -> black
+		DC.W		blueColor					; RBG = 0,0,1 -> blue
+		DC.W		greenColor					; RBG = 0,1,0 -> green
+		DC.W		cyanColor					; RBG = 0,1,1 -> cyan
+		DC.W		redColor					; RBG = 1,0,0 -> red
+		DC.W		magentaColor				; RBG = 1,0,1 -> magenta
+		DC.W		yellowColor					; RBG = 1,1,0 -> yellow
+		DC.W		whiteColor					; RBG = 1,1,1 -> white
+
+;
+; procedure RGBBackColor (Color : RGBColor);
+;
+;	This routine takes an RGB triple and sets the current Graf- or CGrafPort
+;	fields so that drawing will take place with the best match of the
+;	requested color, using the current GDevice's color matching rules.  The
+;	appropriate fields are set depending on portType.
+;
+
+RGBBackColor
+
+		MOVEQ		#BKCOLOR,D0					; get offset to the index field
+		MOVEQ		#RGBBkColor,D1				; get offset to RGB field
+		BRA.S		SHARE						; => and use common code
+
+;
+; PROCEDURE GetForeColor (VAR Color: RGBColor);
+;
+; Return the RGB components of the current foreground color
+; Works for old and new ports.
+
+
+GetForeColor	PROC	EXPORT
+				EXPORT	GetBackColor
+
+		MOVEQ		#FGCOLOR,D0					; get offset to the index field
+		MOVEQ		#RGBFgColor,D1				; get offset to RGB field
+
+SHARE	MOVE.L		4(SP),A1					; point at the RGB color
+		MOVE.L		GRAFGLOBALS(A5),A0			; get the QuickDraw globals pointer
+		MOVE.L		THEPORT(A0),A0				; point at the port
+		TST			PORTBITS+ROWBYTES(A0)		; is it a new port?
+		BPL.S		GETOLD						; => no, set using planar values
+
+		MOVE.L		red(A0,D1),red(A1)			; copy red and green components from the port
+		MOVE.W		blue(A0,D1),blue(A1)		; and blue too
+
+DONE	MOVE.L		(SP)+,A0					; get the return address
+		ADDQ		#4,SP						; get rid of the parameter
+		JMP			(A0)						; and return
+
+; USE CMYB BITS IN COLOR TO DERIVE PROPER RGB COMPONENTS
+
+GETOLD	MOVE.L		(A0,D0),D0					; get planar color from port
+		LSR			#1,D0						; CHECK FOR WHITE (I CMYB rgbw)
+		BCS.S		@BLACK						; =>NOT WHITE
+		OR			#$00E0,D0					; ELSE SET WHITE BITS (CMY = 111)
+@BLACK	LSR			#5,D0						; SHIFT ICMY INTO LOW NIBBLE
+		AND			#$7,D0						; CLEAR ALL BUT CMY
+		MOVE.L		QDColors,A0					; GET DEFAULT COLORS
+		LEA			2(A0,D0*8),A0				; point to proper entry
+		MOVE.L		(A0)+,(A1)+					; copy red, green
+		MOVE		(A0)+,(A1)+					; copy blue
+		BRA.S		DONE						; => all done
+
+;
+; PROCEDURE GetBackColor (VAR Color: RGBColor);
+;
+; Return the RGB components of the current background color
+; Works for old and new ports.
+;
+
+GetBackColor
+
+		MOVEQ		#BKCOLOR,D0					; get offset to the index field
+		MOVEQ		#RGBBkColor,D1				; get offset to RGB field
+		BRA.S		SHARE						; and use common code
+
+
+;
+; function RealColor ( color : RGBColor ) : boolean;
+;
+;	This call tests if the given RGBColor actually exists in the current
+;	device colortable.  It is analogous to RealFont in the Font Manager.
+;	It tests if the best match to the provided color is actually in the 
+;	device colortable rather than actually testing the color table elements.
+;
+
+RealColor	FUNC	EXPORT
+
+result		EQU		12
+inCol		EQU		8
+I2CSpace	EQU		-6
+
+		LINK		A6,#I2CSpace		; build a stack frame							<C491/06Dec86> DAF
+		CLR.B		result(A6)			; assume result false
+		SUBQ		#4,SP				; make room for the function return				<C491/06Dec86> DAF
+		MOVE.L		inCol(A6),-(SP)		; push pointer to rgbColor						<C491/06Dec86> DAF
+		_Color2Index					; find the index, leave result on stack			<C491/06Dec86> DAF
+		PEA			I2CSpace(A6)		; push pointer to rgbColor result				<C491/06Dec86> DAF
+		_Index2Color					; get the device colorTable entry
+
+		MOVE.L		([theGDevice]),A0		; get a pointer to the current device		<C733/02Feb87> DAF
+		MOVE.L		([GDITable,A0]),A0		; get the Itable's master pointer			<C733/02Feb87> DAF
+		MOVE.W		ITabRes(A0),D2			; get the current iTable resolution			<C733/02Feb87> DAF
+
+		BFEXTU		([inCol,A6]){0:D2},D0		; get res hi bits of red input				<C733/02Feb87> DAF
+		BFEXTU		I2CSpace(A6){0:D2},D1		; get res hi bits of red result				<C733/02Feb87> DAF
+		CMP			D0,D1						; compare them								<C733/02Feb87> DAF
+		BNE.S		@0							; if different then return FALSE			<C733/02Feb87> DAF
+
+		BFEXTU		([inCol,A6],green){0:D2},D0	; get res hi bits of grn input				<C733/02Feb87> DAF
+		BFEXTU		I2CSpace+green(A6){0:D2},D1	; get res hi bits of grn result				<C733/02Feb87> DAF
+		CMP			D0,D1						; compare them								<C733/02Feb87> DAF
+		BNE.S		@0							; if different then return FALSE			<C733/02Feb87> DAF
+
+		BFEXTU		([inCol,A6],blue){0:D2},D0	; get res hi bits of blu input				<C733/02Feb87> DAF
+		BFEXTU		I2CSpace+blue(A6){0:D2},D1	; get res hi bits of blu result				<C733/02Feb87> DAF
+		CMP			D0,D1						; compare them								<C733/02Feb87> DAF
+		BNE.S		@0							; if different then return FALSE			<C733/02Feb87> DAF
+
+		MOVE.B		#1,result(A6)		; the color exists, so set boolean TRUE
+
+@0		UNLK		A6					; dump stack frame
+		RTD			#4					; and return									<C491/06Dec86> DAF
+
+
+;
+; procedure SetEntries ( start,count : integer; aTable : ptr );
+;
+; 	This routine places the specified color into position index in the 
+;	current device color table.  The value field of this element is set to 
+;	ownerID, which may include an owner ID number, as well as protect and
+;	reserve bits.  If this value is zero, then the value is considered
+; 	to be fair game for the system.  After updating the GDevice data
+;	structures, the device's driver is called to actually change the
+; 	lookup table.  
+;
+
+SetEntries	PROC	EXPORT					; rewritten  <C522/15Dec86> DAF
+
+csc_SetEntries		EQU		3				; control call # for setEntries
+
+Start 	EQU			14
+Count	EQU			12
+Tbl		EQU			8
+SEPBlock	EQU		-csParam-4			; parmBlock for control (32 bytes)
+CParms		EQU		SEPBlock-8			; control call parameters (8 bytes)
+LinkSize	EQU		CParms
+
+		LINK		A6,#LinkSize		; set up a stack frame
+		MOVEM.L		A2/D3,-(SP)			; save some registers
+
+; first, test to make sure the requested entries can be changed
+
+		MOVE.L		([theGDevice]),A0	; get the master pointer to current device
+		MOVE.W		GDID(A0),D2			; get theGDevice's ownerID
+		CMP.W		#CLUTType,GDType(A0)	; is this a changeable device?
+		BNE			SEDevErr			; nope, so quit
+
+; Mark QDSpare that the color environment has changed, but only if
+; QD exists
+		TST.B		QDExist				; is QD around?
+		BNE.S		@noQDE				; no, skip this next
+		MOVE.L		(A5),A2
+		BSET		#3,QDSpare0(A2)		; Tell PMgrExit to do color cleaning
+@noQDE
+
+
+		MOVE.L		([GDPMap,A0]),A0	; get a pointer to the device pixmap
+		MOVE.L		([pmTable,A0]),A2	; get a pointer to the device's color table
+
+		MOVE.W		Count(A6),D1		; get the count
+		MOVE.W		Start(A6),D0		; get the starting position
+		BMI.S		IndexMode			; if minus, then index mode
+
+SeqMode
+		ADD.W		D1,D0				; calc the last entry to change
+		CMP.W		CTSize(A2),D0		; compare to color table size					<C751/03Feb87> DAF
+		BGT.S		RangeErr			; if in legal range (≤), continue				<C751/03Feb87> DAF
+
+@0
+		BTST		#protectBit,CTTable+value(A2,D0*8)	; test the protect bit					<C751/03Feb87> DAF
+		BNE.S		ProtError						; oh, oh.  Can't changed a protected one!
+		BTST		#ReserveBit,CTTable+value(A2,D0*8)	; test the reserve bit					<C751/03Feb87> DAF
+		BEQ.S		@1								; if clear, then it can be changed		<C751/03Feb87> DAF
+		CMP.B		CTTable+value+1(A2,D0*8),D2		; compare to current ClientID (byte only) <C751/03Feb87> DAF
+		BNE.S		ProtError						; sorry, can't change someone else's	<C751/03Feb87> DAF
+@1
+		SUBQ		#1,D0				; back index up by one
+		DBRA		D1,@0				; loop back
+		BRA.S		OKFine				; the request is valid
+
+RangeErr
+		MOVE		#cRangeErr,D0		; 	if not, then return an error
+		BRA			SEError				; 
+
+ProtError
+		MOVE		#cProtectErr,D0		;
+		BRA 		SEError
+
+IndexMode								; test the .value fields in INDEX mode
+		MOVE.L		Tbl(A6),A0			; get addr of first request
+@0
+		MOVE.W		value(A0),D0					; get the destination location from request array
+		AND.W		#$00FF,D0						; lo-byte only for index
+		CMP.W		CTSize(A2),D0					; is the request in range?				<C835/20Feb87> DAF
+		BGT.S		RangeErr						; nope, so quit							<C835/20Feb87> DAF
+		BTST		#protectBit,CTTable+value(A2,D0*8)	; test the protect bit					<C751/03Feb87> DAF
+		BNE.S		ProtError						; oh, oh.  Can't changed a protected one!
+		BTST		#ReserveBit,CTTable+value(A2,D0*8)	; test the reserve bit					<C751/03Feb87> DAF
+		BEQ.S		@1								; if clear, then it can be changed		<C751/03Feb87> DAF
+		CMP.B		CTTable+value+1(A2,D0*8),D2		; compare to current ClientID (byte only) <C751/03Feb87> DAF
+		BNE.S		ProtError						; sorry, can't change someone else's 	<C751/03Feb87> DAF
+@1
+		ADDQ		#CTEntrySize,A0		; move to next entry
+		DBRA 		D1,@0				; reduce count
+
+OKFine
+
+		MOVE.W		Start(A6),CParms+csStart(A6)	; set up control parm block
+		MOVE.W		Count(A6),CParms+csCount(A6)	; 
+		MOVE.L		Tbl(A6),CParms+csTable(A6)		;
+
+; now build a parameter block for a control call (in stack frame)
+
+		MOVE.L		#0,SEPBlock+ioCompletion(A6)	; no completion routine
+		MOVE.W		#0,SEPBlock+ioVRefNum(A6)		; device not volume
+		MOVE.L		([theGDevice]),A1			 	; get ptr to theGDevice
+		MOVE.W		(A1),SEPBlock+ioRefNum(A6) 		; copy refNum from theGDevice
+		MOVE.W		#csc_SetEntries,SEPBlock+csCode(A6)	; control code for this call
+		LEA			CParms(A6),A1					; get addr of parms
+		MOVE.L		A1,SEPBlock+csParam(A6)			; move addr of parms into block
+
+; make a call to the device driver
+
+		LEA			SEPBlock(A6),A0		; get pointer to parmblock
+		_Control 	,IMMED				; make a control call			<C695/26Jan87> DAF
+
+; test result and finish up
+
+		TST.W		D0					; test the result
+		BNE.S		SEError
+
+; put the RGBs into theGDevice's colortable.  Copy the current ownerID into .value
+;	(wait until control call returns successfully!).  D2 has GDID in it from above
+
+		MOVE.L		Tbl(A6),A0			; get the request array ptr
+		MOVE.W		Count(A6),D0		; get the number of entries to install
+		MOVE.W		Start(A6),D1		; get the starting position number
+		BMI.S		InstIndex			; if minus, then INDEX mode
+
+InstSeq
+		LEA			CTTable(A2,D1*8),A1	; get ptr to start position in sysColorTable
+@0
+		ADDQ		#1,A1				; advance to lo half of value		<C777/09Feb87> DAF
+		MOVE.B		D2,(A1)+			; set value field to ownerID		<C777/09Feb87> DAF
+
+		MOVE.L		(A0)+,D3			; get request value (junk) and red
+		MOVE.W		D3,(A1)+			; set red
+		MOVE.L		(A0)+,(A1)+			; set green and blue
+		DBRA 		D0,@0				; loop for all requests
+		BRA.S		FinishUp			;
+
+InstIndex
+		MOVE.W		(A0)+,D3			; get the insertion index (.value field)
+		MOVE.B		D2,CTTable+value+1(A2,D3*8)	; set value field to the ownerID	<C777/09Feb87> DAF
+		MOVE.W		(A0)+,CTTable+rgb+red(A2,D3*8)	; set red
+		MOVE.L		(A0)+,CTTable+rgb+green(A2,D3*8)	; set green and blue
+		DBRA 		D0,InstIndex		; loop for all entries
+
+FinishUp
+; update the CTSeed
+
+		CLR.L		-(SP)				; make room for function return
+		_rGetCTSeed						; get the next seed							<BAL 04Sep88>
+		MOVE.L		(SP)+,CTSeed(A2)	; and put it in the table
+
+; invalidate the cached fonts
+
+		MOVE.L		MinusOne,lastSPExtra	; this marks them invalid				<C777/12Feb87> DAF
+
+SEDone
+		MOVEM.L		(SP)+,A2/D3			; restore saved registers
+		UNLK		A6					; dump stack frame
+		RTD			#8
+
+SEDevErr 	MOVE.W	#cDevErr,D0			; wrong device type error
+SEError
+		MOVE.W		D0,QDErr			; record the error code				<C367/07Nov86> DAF
+		BRA.S		SEDone				; and finish up						<C367/07Nov86> DAF
+
+
+;
+; procedure RestoreEntries (srcTable:cTabHandle; DstTable:cTabHandle; var selection:requestList);
+;
+; 	RestoreEntries sets a selection of entries from srcTable into DstTable.  The dstTable elements
+;	to be set are enumerated in selection (these values are offsets into the srcTable, 
+;	not the contents of the value field).  If a request is beyond the end of the dstTable,
+;	that position of the requestList is set to invalColReq, and is not installed into dstTable.
+;	This call does not observe the reserve and protect fields of entries in dstTable.
+;	If DstTable is NIL (or = to theGDevice's colortable), then srcTable is installed into 
+;	theGDevice's colortable, and the CLUT is set to the new values.  Note that srcTable and 
+;	selection are assumed to have the same number of elements.
+;
+
+RestoreEntries	PROC	EXPORT
+
+csc_SetEntries		EQU		3				; control call # for setEntries
+
+; stack frame declarations
+SrcT	EQU			16
+dstT	EQU			12
+RLst	EQU			8
+SEPBlock	EQU		-csParam-4			; parmBlock for control (36 bytes)
+CParms		EQU		SEPBlock-8			; control call parameters (8 bytes)
+LinkSize	EQU		CParms				; size of stack frame locals
+
+		LINK		A6,#LinkSize		;
+		MOVEM.L		A2/A3/D3,-(SP)		; save some registers
+		CLR.W		QDErr				; clear error register
+		MOVE.L		([SrcT,A6]),A2		; get source colortable ptr
+		MOVE.L		RLst(A6),A1			; get the request list ptr
+		MOVE.W		ReqLSize(A1),D2		; get the request list size
+
+		MOVE.L		([theGDevice]),A0	; get a pointer to the current device
+		CMP.W		#CLUTType,GDType(A0)	; is it a clut device?
+		BNE			REDevErr			; nope, so report an error
+		MOVE.L		([GDPMap,A0]),A0	; get pixMap's handle						<C239> DAF
+		MOVE.L		([PMTable,A0]),A0	; get a pointer to the device colortable	<C239> DAF
+
+		MOVE.L		([dstT,A6]),A3		; get destination colortable ptr in case it's OK
+		CMP.L		A0,A3				; does dest point to theGDevice's colortable?
+		BEQ.S		@8					; so do the control call
+		TST.L		dstT(A6)			; is destination NIL?
+		BNE.S		JustInstall			; if non-NIL, then just install the srcTbl
+		MOVE.L		A0,A3				; move the device colortable ptr to A3
+@8
+
+; if DstTbl was NIL or (ptr) equal, then dest is theGDevice's colortable...
+; save the value fields of the srcTable on the stack
+
+		MOVEQ		#0,D1				; clear hi half of D0
+		MOVE.W		D2,D1				; make a copy of the srcTable size
+		ADDQ		#1,D1				; adjust from count to size
+		ASL			#1,D1				; times two for words
+		SUBA		D1,SP				; make room for these values on stack
+		MOVE.W		D2,D0				; get # of value fields to move
+@0
+		MOVE.W		CTTable+value(A2,D0*8),(SP,D0*2)	; copy the values
+		DBRA  		D0,@0				; 
+
+; now install the position fields into the srcTable
+
+		MOVE.W		D2,D0				; get # of value fields to move
+@1
+		MOVE.W		ReqLData(A1,D0*2),D3		; get the target position
+		CMP.W		CTSize(A3),D3				; compare to the maximum for this destination
+		BGT 		LeakError					; if out of range, return error (Bruce wanted this)
+		MOVE.W		D3,CTTable+value(A2,D0*8)	; write the request in the source table
+		DBRA  		D0,@1				; 
+
+; at this point, the "bad" entries should be removed, but we can leave them
+;	for now since the driver will range test positions (and invalColReq >256).
+
+; make a driver call with the modified src table
+
+		MOVE.L		#0,SEPBlock+ioCompletion(A6)	; no completion routine
+		MOVE.W		#0,SEPBlock+ioVRefNum(A6)		; device not volume
+		MOVE.L		([theGDevice]),A0			 	; get ptr to theGDevice
+		MOVE.W		(A0),SEPBlock+ioRefNum(A6) 		; copy refNum from theGDevice
+		MOVE.W		#csc_SetEntries,SEPBlock+csCode(A6)	; control code for this call
+		LEA			CParms(A6),A0					; get addr of parms
+		MOVE.L		A0,SEPBlock+csParam(A6)			; move addr of parms into block
+
+; set up control call parameters 
+
+		LEA			CTTable(A2),A0					; get pointer to the colorspecs
+		MOVE.L		A0,cParms+csTable(A6)			; put in parameter block
+		MOVE.W		#-1,cParms+csStart(A6)			; always use index mode
+		MOVE.W		D2,cParms+csCount(A6)			; for the correct size
+
+; make a call to the device driver
+
+		LEA			SEPBlock(A6),A0		; get pointer to parmblock
+		_Control	,IMMED				; make a control call			<C695/26Jan87> DAF
+
+; test result and finish up
+
+		BEQ.S		ReleaseSP			; call went ok, so continue
+		MOVE.W		D0,QDErr			; report the control code error
+
+; finally, restore the src table value fields
+ReleaseSP
+		MOVE.W		D2,D0				; get # of value fields to move
+@2
+		MOVE.W		(SP,D0*2),CTTable+value(A2,D0*8)	; copy the values
+		DBRA 		D0,@2				; 
+
+		ADDA		D1,SP				; release the temporary space
+
+JustInstall
+		MOVE.W		ReqLData(A1,D2*2),D0	; get the request index
+		CMP.W		#invalColReq,D0		; if the request is bad, skip it
+		BEQ.S		JLoopCont			;
+		CMP.W		CTSize(A3),D0		; is it in the legal range?
+		BGT.S		JIErr				; if not, then return an error
+		MOVE.L		CTTable(A2,D2*8),CTTable(A3,D0*8)	; copy value and red
+		MOVE.L		CTTable+rgb+green(A2,D2*8),CTTable+rgb+green(A3,D0*8)	;copy green and blue
+JLoopCont
+		DBRA 		D2,JustInstall		; loop back
+Exeunt
+		TST.L		dstT(A6)			; if NIL, was a device call, so call the Palette Mgr
+		BNE.S		Moofem				; nope, so skip around
+		MOVE.L		RLst(A6),-(SP)		; push the request list pointer
+		MOVE		#18,D0				; this is the selector for the _ReleaseList call
+		DC.W		$AAA2				; this is the extensible PaletteMgr trap
+Moofem
+		MOVEM.L		(SP)+,A2/A3/D3  	; restore work registers
+		UNLK		A6					; release stack frame
+		RTD			#12					; and return to caller
+
+JIErr
+		MOVE.W		#cRangeErr,QDErr	; move error message into QDErr
+		BRA.S		JLoopCont			; continue
+REDevErr
+		MOVE.W		#cDevErr,QDErr		;
+		BRA.S		Moofem				;
+
+; If ANY of the requests are out of range, then leave the whole call without doing anything.  Bruce
+;	asked for this change since ancient users of Save/RestoreEntries (PixelPaint and Color Picker)
+;	will trash the system with RestoreEntries if they were Switcheroo'd into a different depth.  This
+;	ONLY protects you if you are switching to a lower pixel depth, but it helps out a lot in those
+;	cases
+LeakError
+		MOVE.W		#cRangeErr,QDErr	; report an error
+		MOVE.W		D2,D0				; get # of value fields to move
+@2
+		MOVE.W		(SP,D0*2),CTTable+value(A2,D0*8)	; restore the sourcetable values
+		DBRA 		D0,@2				; 
+
+		ADDA		D1,SP				; release the temporary space
+		BRA.S		Exeunt				; and out
+
+;
+; procedure SaveEntries (srcTable:cTabHandle; ResultTable:cTabHandle; var selection:requestList);
+;
+; 	SaveEntries saves a selection of entries from srcTable into ResultTable.  The elements
+;	to be copied are enumerated in selection (these values are offsets into the colorTable, 
+;	not the contents of the value field).  If an element is not present in srcTable, then
+;	that position of the requestList is set to invalColReq, and that position of ResultTable has random
+;	values returned.  If one or more elements are not found, then an error code is posted
+;	to QDErr; however, for every element in selection which is not -1, the values in ResultTable
+;	are valid.  Note that srcTable and selection are assumed to have the same number
+;	of elements.
+;
+
+SaveEntries		PROC	EXPORT
+
+SrcT	EQU			16
+ResT	EQU			12
+RLst	EQU			8
+
+		LINK		A6,#0				;
+		MOVE.L		A2,-(SP)			; save a register
+		CLR.W		QDErr				; clear error register
+		TST.L		SrcT(A6)			; if source is NIL, use theGDevice's ctable
+		BNE.S		@80					;
+
+		MOVE.L		([theGDevice]),A0	; get a pointer to the current device
+		CMP.W		#CLUTType,GDType(A0)	; is it a CLUT device?					<1.4>
+		BNE.S		SavEntDevErr		; nope, so report an error					<1.4> <SM3>
+		MOVE.L		([GDPMap,A0]),A0	; get pixMap's handle						<C239> DAF
+		MOVE.L		([PMTable,A0]),A2	; get a pointer to the device colortable	<C239> DAF
+		BRA.S		@81					; and continue
+@80
+		MOVE.L		([SrcT,A6]),A2		; get source colortable ptr
+@81
+		MOVE.L		RLst(A6),A1			; get the request list ptr
+		MOVE.W		ReqLSize(A1),D2		; get the request list size
+		MOVE.W		D2,D0				; copy size to a temp register
+		ADDQ		#1,D0				; increase by one for size calculations
+		MULU		#CTEntrySize,D0		; calc the result table size
+		ADDQ		#CTTable,D0			; add the header size
+		MOVE.L		ResT(A6),A0			; get the result table handle
+		TST.L		(A0)				; is the master pointer NIL?
+		BEQ.S		@0					; if so, do a realloc
+		_SetHandleSize					; set the result table size
+		BRA.S		@1					;
+@0
+		_ReallocHandle					;
+@1
+		BEQ.S		@2
+		MOVE.W		#CNoMemErr,QDErr	; mark the error							<C621/13Jan87> DAF
+		BRA.S		SaveEntDone			; and quit									<C621/13Jan87> DAF <SM3>
+@2
+		MOVE.L		(A0),A0				; get a pointer to the result table
+		MOVE.L		#0,CTSeed(A0)		; clear CTSeed
+		MOVE.W		#0,TransIndex(A0)	; clear transparent value
+		MOVE.W		D2,CTSize(A0)		; #elements = size of request table
+SavLoop
+		MOVE.W		ReqLData(A1,D2*2),D0	; get the request value
+		CMP.W		CTSize(A2),D0		; is it in the allowable range?				<C491/08Dec86> DAF
+		BGT.S		SaveEntRangeErr		; no, so mark an error						<SM3>
+		MOVE.L		CTTable(A2,D0*8),CTTable(A0,D2*8)	;move value and red to result table
+		MOVE.L		CTTable+rgb+green(A2,D0*8),CTTable+rgb+green(A0,D2*8)	; green and blue
+SLoopCont
+		DBRA		D2,SavLoop			; go on to the next request
+SaveEntDone								;												<SM3>
+		MOVE.L		(SP)+,A2			; restore that register		
+		UNLK		A6					; trash the stack frame
+		RTD			#12					; and return									<SM3>
+
+SaveEntRangeErr							;												<SM3>
+		MOVE.W		#invalColReq,ReqLData(A1,D2*2)	; mark this element invalid
+		MOVE.W		#cRangeErr,QDErr	; move error message into QDErr
+		BRA.S		SLoopCont			; continue
+
+SavEntDevErr								;										<1.4><1.5><SM3>
+		MOVE.W		#cDevErr,QDErr		; post error code						<1.4><SM3>
+		BRA.S		SaveEntDone			; and quit								<1.4><SM3>
+
+
+;
+; procedure ProtectEntry (index : integer; protect : boolean);
+;
+;	ProtectEntry sets the protect bit in theGDevice's colortable.  If 
+;	protect is TRUE, then the bit is set and SetEntry will not change
+;	it.  If protect is FALSE, then the bit is cleared and the CLUT can
+;	be changed.
+;
+
+ProtectEntry	PROC	EXPORT
+				EXPORT	ReserveEntry
+
+		MOVEQ	#protectBit,D2			; this call modifies the protect bit
+		BSR.S	CTCommon				; do it
+OneQuit									;												<C751/03Feb87> DAF
+		RTD		#4						;
+
+ProtErr
+		MOVE.W	#cProtectErr,QDErr		; mark the error								<C751/03Feb87> DAF
+		BRA.S	RErrQ					; jump to common exit						 	<C751/03Feb87> DAF
+
+RangeErr
+		MOVE.W	#cRangeErr,QDErr		; mark the error								<C751/03Feb87> DAF
+RErrQ
+		ADDQ	#4,SP					; kill the BSR's return addr					<C751/03Feb87> DAF
+		BRA.S	OneQuit					; use ProtectEntry's (both have same cleanup) 	<C751/03Feb87> DAF
+
+;
+; utility CTCommon
+;
+;	CTCommon is a utility shared by ProtectEntry and Reserve entry.  It
+;	sets/clears the bit (whose mod 8 position is in D2) in theGDevice's
+;	colortable.  It trashes A1/D1 and ReserveEntry expects A0 to contain
+;	a pointer to the colorTable and D0 to be the affected index.
+;	Corrected offsets into stack frame and scaling (C575)
+
+CTCommon
+		CLR.W	QDErr					; clear the error flag				<C751/03Feb87> DAF
+		MOVE.L	([theGDevice]),A0		; get the current device pointer
+		MOVE.L	([GDPMap,A0]),A0		; get the device pixelmap pointer
+		MOVE.L	([pmTable,A0]),A0		; point to the color table
+		MOVE.W	10(SP),D0				; get the index						<C575/30Dec86> DAF
+		CMP.W	CTSize(A0),D0			; is it in the legal range?			<C751/03Feb87> DAF
+		BGT.S	RangeErr				; oops, out of range				<C751/03Feb87> DAF
+		TST.B	8(SP)					; test the boolean					<C575/30Dec86> DAF
+		BEQ.S	@1						; if equal, then clear bit
+		BTST	D2,CTTable+value(A0,D0.W*8) ; if bit already on?			<C751/03Feb87> DAF
+		BNE.S	ProtErr					; if so, return error			<C751/03Feb87> DAF
+		BSET	D2,CTTable+value(A0,D0.W*8) ; turn bit on				<C575/30Dec86> DAF
+		BRA.S	@2						;
+@1		BCLR	D2,CTTable+value(A0,D0.W*8) ; turn bit off				<C575/30Dec86> DAF
+@2
+		RTS
+
+;
+; procedure ReserveEntry (index : integer; reserve : boolean);
+;
+;	ReserveEntry sets the reserve bit in theGDevice's colortable.  If 
+;	reserve is TRUE, then this CLUT element will not be seeded during
+;	ITable building and will not be a treated as an available color.
+;	Additionally, if reserve is TRUE, the value field will be marked 
+;	with the current GDID (for symmetry with SetEntries).
+;	If reserve is FALSE, then the bit is cleared and this entry
+;	can be a match.  The clientID of this entry is not affected
+;
+
+ReserveEntry
+
+		MOVEQ	#ReserveBit,D2				; this call modifies the reserve bit
+		BSR.S	CTCommon				; do it
+		TST.B	4(SP)					; is reserve true?							<C751/03Feb87> DAF
+		BEQ.S	@1						; if false, then done						<C751/03Feb87> DAF
+		MOVE.W	CTTable+value(A0,D0.W*8),D1 ; get value field of affected colorSpec	<C751/03Feb87> DAF
+		MOVE.L	([theGDevice]),A1 		; get pointer to theGDevice					<C751/03Feb87> DAF
+		MOVE.B	GDID+1(A1),CTTable+value+1(A0,D0.W*8) ; set clientID (lo byte of GDID) 	<C777/09Feb87> DAF
+
+@1
+		CLR.L	-(SP)					; make room for function return				<C777/09Feb87> DAF
+		_rGetCTSeed						; get the next seed							<BAL 04Sep88>
+		MOVE.L	(SP)+,CTSeed(A0)		; and put it in the table					<C777/09Feb87> DAF
+		RTD		#4						; return to caller
+
+;
+; procedure SetClientID ( id : integer );
+;
+;	SetClientID updates the clientID field of theGDevice.  This field is 
+;	used by the search and complement procedures to determine if they
+;	should operate on a particular request.
+
+SetClientID		PROC	EXPORT
+		MOVE.L	([theGDevice]),A0		; get the current device pointer
+		MOVE.W	4(SP),GDID(A0)			; set it
+		RTD		#2						; return
+
+;
+; procedure AddSearch (SearchProc : ProcPtr);
+;
+;	This routine adds a search procedure to the head of the list of 
+;	searchprocs in theGDevice.
+;
+
+AddSearch	PROC	EXPORT
+			EXPORT	AddComp
+
+			CLR.W	QDErr					; clear the error register			<C387/09Nov86> DAF
+			MOVE.L	(SP)+,D2				; grab the return address
+			MOVE.L	(SP)+,D1				; grab the searchProc pointer
+			BEQ.S	AllDone					; if NIL, don't install
+			MOVE.L	#sProcSize,D0			; allocate a new proc element
+			_NewHandle						; get that memory					<C666/22Jan87> DAF
+			BNE.S	ProcMemFailure			; couldn't get it
+
+			move.l	d1,d0					; get procPtr in d0					<BAL 14Mar89>
+			_rTranslate24to32				; clean up the address				<BAL 14Mar89>
+
+			MOVE.L	([theGDevice]),A1		; get the current device pointer
+			MOVE.L	GDSearchProc(A1),D1		; hold the current search proclist element
+			MOVE.L	A0,GDSearchProc(A1)		; install the new element
+			MOVE.L	(A0),A0					; get the procList pointer			<C666/22Jan87> DAF
+			MOVE.L	D0,SRCHPROC(A0)			; put in the list					<C666/22Jan87> DAF
+			MOVE.L	D1,NXTSRCH(A0)			; link up chain						<C666/22Jan87> DAF
+
+; Get a unique seed for this device to force the search proc to get called and the Itab rebuilt
+;											 									<BAL/dvb/RAJ 03Mar89>
+	;  Removed for PhotoMac compatibility	<BAL 26Mar89>
+	;		MOVE.L	([GDPMap,A1]),A1		; get the device pixelmap pointer
+	;		MOVE.L	pmTable(A1),d0			; get the device clut handle		<BAL 21Mar89>
+	;		beq.s	AllDone					; skip if no clut					<BAL 21Mar89>
+	;		move.l	d0,a1
+	;		MOVE.L	(a1),A1					; get the device clut pointer
+	;		CLR.L	-(SP)					; make room for function return
+	;		_rGetCTSeed						; get the next seed
+	;		MOVE.L	(SP)+,CTSeed(A1)		; and put it in the table			<BAL/dvb/RAJ 03Mar89>
+AllDone		JMP		(ZA0,D2.L)				; return home
+
+
+ProcMemFailure
+			MOVE.W	#cNoMemErr,QDErr		; load memory error code			<C387/09Nov86> DAF
+			BRA.S	AllDone					; 									<C387/09Nov86> DAF
+
+;
+; procedure AddComp (CompProc : ProcPtr);
+;
+;	This routine adds a complement procedure to the head of the list of 
+;	compprocs in theGDevice.  
+;
+
+AddComp
+
+			CLR.W	QDErr					; clear the error register			<C666/22Jan87> DAF
+			MOVE.L	(SP)+,D2				; grab the return address
+			MOVE.L	(SP)+,D1				; grab the compProc pointer
+			BEQ.S	AllDunn 				; if NIL, don't install
+			MOVE.L	#sProcSize,D0			; allocate a new proc element
+			_NewHandle						; get that memory					<C666/22Jan87> DAF
+			BNE.S	ProcMemFailure			; couldn't get it
+
+			move.l	d1,d0					; get procPtr in d0					<BAL 14Mar89>
+			_rTranslate24to32				; clean up the address				<BAL 14Mar89>
+
+			MOVE.L	([theGDevice]),A1		; get the current device pointer
+			MOVE.L	GDCompProc(A1),D1		; hold the current complement proclist element	<C666/22Jan87> DAF
+			MOVE.L	A0,GDCompProc(A1)		; install the new element
+			MOVE.L	(A0),A0					; get procList pointer				<C666/22Jan87> DAF
+			MOVE.L	D0,COMPPROC(A0)			; put in the list					<C666/22Jan87> DAF
+			MOVE.L	D1,NXTCOMP(A0)			; link up chain						<C666/22Jan87> DAF
+AllDunn		JMP		(ZA0,D2.L)				; return home
+
+
+;
+; procedure DelSearch ( SearchProc : ProcPtr );
+;
+;	This routine removes a search proc (identified by it's procPtr from theGDevice's search list
+;
+
+; contains fix from QDciPatchROM.a to clean up the address before searching		<sm 6/9/92>stb
+
+DelSearch	PROC	EXPORT					; <C666/22Jan87> DAF
+
+			MOVE.L	4(SP),D0				; get the SearchProc pointer
+			_rTranslate24to32				; clean up the address				<KON 29May90>
+
+			MOVE.L	([theGDevice]),A1		; get the current device pointer
+
+; Get a unique seed for this device to force the Itab to get rebuilt	 		<BAL/dvb/RAJ 03Mar89>
+
+	;  Removed for PhotoMac compatibility	<BAL 26Mar89>
+	;		MOVE.L	([GDPMap,A1]),A0		; get the device pixelmap pointer 	<BAL/dvb/RAJ 03Mar89>
+	;		MOVE.L	pmTable(A0),d0			; get the device clut handle		<BAL 21Mar89>
+	;		beq.s	skipSeed				; skip if no clut					<BAL 21Mar89>
+	;		move.l	d0,a0
+	;		MOVE.L	(a0),A0					; get the device clut pointer
+	;		CLR.L	-(SP)					; make room for function return	 	<BAL/dvb/RAJ 03Mar89>
+	;		_rGetCTSeed						; get the next seed			 		<BAL/dvb/RAJ 03Mar89>
+	;		MOVE.L	(SP)+,CTSeed(A0)		; and put it in the table			<BAL/dvb/RAJ 03Mar89>
+skipSeed
+			LEA		GDSearchProc(A1),A1		; get pointer to "nxtSearch" field
+			MOVE.L	(A1),D2					; hold the current search proclist handle
+
+@1
+			BEQ.S	DSrchDone				; if nil, then end of chain
+			MOVE.L	D2,A0					; copy to an addr register
+			MOVE.L	(A0),A0					; get the pointer to proc list elem
+			CMP.L	srchProc(A0),D0			; do they match?
+			BEQ.S	RmvSrch					; yes, so splice it out
+			LEA		NxtSrch(A0),A1			; get addr of this NxtSrch field
+			MOVE.L	NxtSrch(A0),D2			; go to the next one
+			BRA.S	@1
+RmvSrch
+			MOVE.L		NxtSrch(A0),(A1)	; relink the chain around this element
+			MOVE.L		D2,A0				; setup for Dispose
+			_DisposHandle					; dispose the procLstElem
+DSrchDone
+			RTD		#4						; strip params and return
+
+
+;
+; procedure DelComp ( complementProc : ProcPtr );
+;
+;	This routine removes a complement proc (identified by it's procPtr from theGDevice's search list
+;
+; contains fix from QDciPatchROM.a to clean up the address before searching		<sm 6/9/92>stb
+
+DelComp		PROC	EXPORT					; <C666/22Jan87> DAF
+
+			MOVE.L	4(SP),D0				; get the CompProc pointer
+			_rTranslate24to32				; clean up the address				<KON 29May90>
+			MOVE.L	([theGDevice]),A1		; get the current device pointer
+			LEA		GDCompProc(A1),A1		; get pointer to "nxtComp" field
+			MOVE.L	(A1),D2					; hold the current complement proclist handle
+
+@1
+			BEQ.S	DCompDone				; if nil, then end of chain
+			MOVE.L	D2,A0					; copy to an addr register
+			MOVE.L	(A0),A0					; get the pointer to proc list elem
+			CMP.L	CompProc(A0),D0			; do they match?
+			BEQ.S	RmvComp					; yes, so splice it out
+			LEA		NxtComp(A0),A1			; get addr of this NxtSrch field
+			MOVE.L	NxtComp(A0),D2			; go to the next one
+			BRA.S	@1
+RmvComp
+			MOVE.L		NxtComp(A0),(A1)	; relink the chain around this element
+			MOVE.L		D2,A0				; setup for Dispose
+			_DisposHandle					; dispose the procLstElem
+DCompDone
+			RTD		#4						; strip params and return
+
+
+; 
+; procedure GetSubTable (VAR myColors:CTabHandle;
+;						 iTabRes:integer;
+;						 TargetTbl:CTabHandle);
+;
+;	This routine takes a colorTable pointed at by myColors, and determines
+;	the best match index values for each rgb in myColors.  These best
+;	matches are returned in the .value fields of myColor's colorSpecs.
+;	The values returned are best matches to the RGBs in TargetTbl and 
+;	the returned indices are TargetTbl's .values.  Best matches are 
+;	calculated using Color2Index and all applicable rules apply.
+;	iTabRes controls the channel size of the iTable that is built.
+;	If TargetTbl is NIL, then theGDevice's colortable is used as the target
+;	and no inverse table is built.
+;
+
+GetSubTable	PROC	EXPORT
+
+; offsets to parameters					; offsets corrected						<C491/06Dec86> DAF
+myColors	EQU		14					;
+iTabResolution		EQU		12					;
+TargetTbl	EQU		8					;
+ITHndl		EQU		-4					; temporary handle for iTable
+SavHndl		EQU		-8					; save theGDevice's iTable here
+SavCol		EQU		-12					; save theGDevice's colortable here				<CXXX>
+LinkSize	EQU		SavCol				;												<CXXX>
+
+			LINK	A6,#LinkSize			; make a stack frame
+			MOVEM.L	A2/D3,-(SP)				; save some registers						<C491/06Dec86> DAF
+			TST.L	TargetTbl(A6)			; is target table NIL?
+			BEQ.S	@UseOldTable			; nope, so make an ITable
+
+			_NewEmptyHandle					; make a temp handle for iTable
+			MOVE.L	A0,ITHndl(A6)			; save the handle
+			MOVE.L	TargetTbl(A6),-(SP)		; push the source cTable
+			MOVE.L	A0,-(SP)				; push the iTable handle
+			MOVE.W	iTabResolution(A6),-(SP)		; push the resolution
+			_MakeITable						; make an inverse table
+
+			TST.W	QDErr					; did it fail?								<C777/09Feb87> DAF
+			BNE.S	@BailOut				; clean up an quit leaving the QDErr		<C777/09Feb87> DAF
+
+			MOVE.L	([theGDevice]),A1		; get a pointer to the device port
+			MOVE.L	GDITable(A1),SavHndl(A6) ; save the current iTable here
+			MOVE.L	ITHndl(A6),GDITable(A1) ; and substitute this iTable
+			MOVE.L	([GDPMap,A1]),A1		; get pixMap's pointer						<C777/09Feb87> DAF
+			MOVE.L	PMTable(A1),SavCol(A6)	; save the current colorTable here			<CXXX>
+			MOVE.L	myColors(A6),PMTable(A1) ; and substitute this colorTable			<CXXX>
+			MOVE.L	([PMTable,A1]),A1		; copy colorTable's ctSeed into iTable		<C695/26Jan87> DAF
+			MOVE.L	ctSeed(A1),D0			; get the ctSeed (to avoid rebuilds)		<C695/26Jan87> DAF
+			MOVE.L	([ITHndl,A6]),A1		; copy seed into the temp inverseTable		<C695/26Jan87> DAF
+			MOVE.L	D0,ITabSeed(A1)			; put seed into the iTable					<C695/26Jan87> DAF
+
+@UseOldTable
+			MOVE.L	myColors(A6),A0			; get source's cTabHndl
+			_HLock							; just for security							<C491/06Dec86> DAF
+			MOVE.L	(A0),A2					; get a pointer								<C491/06Dec86> DAF
+			MOVE.W	CTSize(A2),D3			; get the number of entries					<C491/06Dec86> DAF
+
+@0
+			SUBQ	#4,SP					; make room for function return				<C491/06Dec86> DAF
+			PEA		CTTable+rgb(A2,D3*8)	; push the entry's rgb addr					<C491/06Dec86> DAF
+			_Color2Index					; get the value
+			ADDQ	#2,SP					; throw away hi word of result				<C491/06Dec86> DAF
+			MOVE.W	(SP)+,CTTable+value(A2,D3*8) ; place result in table				<C491/06Dec86> DAF
+			DBRA	D3,@0					; loop on all entries
+
+			MOVE.L	myColors(A6),A0			; get source's cTabHndl						<C491/06Dec86> DAF
+			_HUnlock						; and free it								<C491/06Dec86> DAF
+
+			TST.L	TargetTbl(A6)			; was it NIL?
+			BEQ.S	@1						; if it was, then skip the restorations
+
+			MOVE.L	([theGDevice]),A1		; get a pointer to the device port
+			MOVE.L	SavHndl(A6),GDITable(A1) ; restore the device inverse table
+			MOVE.L	([GDPMap,A1]),A1		; get pixMap's pointer						<C777/09Feb87> DAF
+			MOVE.L	SavCol(A6),PMTable(A1) 	; and substitute this colorTable			<CXXX>
+@BailOut
+			MOVE.L	ITHndl(A6),A0			; get the temp iTabHndl again
+			_DisposHandle					; all done, so dispose
+@1
+			MOVEM.L	(SP)+,A2/D3				; restore saved registers					<C666/22Jan87> DAF
+			UNLK	A6						; release stack frame
+			RTD		#10						; return									<C491/06Dec86> DAF
+
+
+;
+; function QDError : integer;								<C387/09Nov86> DAF
+;
+; This function returns the current value of QDErr, which reflects error conditions
+;	following the previous QuickDraw/Color Manager call.
+;
+
+QDError		PROC	EXPORT
+
+			MOVE.W	QDErr,4(SP)				; move error code to function return
+			CLR.W	QDErr					; and clear the code
+			RTS
+
+
+
+
+;---------------------------------------------------
+;
+; FUNCTION DeltaRGB(ColorInfo,ColorSpec:Ptr):integer; LOCAL;
+;
+
+DeltaRGB	FUNC	EXPORT
+
+ParamSize	equ		8						; total bytes of params
+
+Delta		equ		ParamSIze+10-2			; integer result
+RGB1		equ		Delta-4					; palette entry pointer
+RGB2		equ		RGB1-4					; color table entry pointer
+
+VarSize		equ		0						; size of variables
+
+			Link	A6,#VarSize				; build stack frame
+			MOVEM.L	A0-A1/D0-D1,-(SP)
+
+			Move.L	RGB1(A6),A0				; get first RGBColor
+			Move.L	RGB2(A6),A1				; get second RGBColor
+
+			Move	(A1)+,D0				; grab index red
+			Sub		(A0)+,D0				; subtract entry red
+			Bhs.S	NotNeg1					; take abs(Index.Red-ColorInfo.Red)
+			Neg		D0						; negate it
+NotNeg1		Move	(A1)+,D1				; grab index green
+			Sub		(A0)+,D1				; subtract entry green
+			Bhs.S	NotNeg2					; take abs(Index.Green-ColorInfo.Green)
+			Neg		D1						; negate it
+NotNeg2		Cmp		D0,D1					; leave greater unsigned value in D0
+			Blo.S	DontSwitch1				; D1 < D0 => D0 is already greater
+			Move	D1,D0					; green value is greater
+DontSwitch1	Move	(A1),D1					; grab index blue
+			Sub		(A0),D1					; subtract entry blue
+			Bhs.S	NotNeg3					; take abs(Index.Blue-ColorInfo.Blue)
+			Neg		D1						; negate it
+NotNeg3		Cmp		D0,D1					; leave greater unsigned value in D0
+			Blo.S	FixResult				; D1 < D0 => D0 is already greater
+			Move	D1,D0					; blue value is greater
+FixResult	Move	D0,Delta(A6)			; set result
+			MOVEM.L	(SP)+,A0-A1/D0-D1
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+			ENDF
+
+
+;---------------------------------------------------
+;
+; FUNCTION myGetCTable(ID:INTEGER):Handle;
+;
+; Get a 'clut' resource of the specified ID, as a non-resource
+; handle. Unless, of course, the number is 32+[1,2,4,8] in which
+; case we return a gray scale of that size. Or if the number is
+; 64+[1,2,4,8] we'll return a clut with a hilite modification.
+;
+; Passing 64 plus other than 1, 2, 4, or 8 will yield strange results.
+;
+; stack like this: (SP) return.L, 4(SP) depth.W, 6(SP) result handle.L
+;
+; <dvb8> for whole routine
+
+				PROC
+				EXPORT	GetCTable
+
+GrayMuls	DC.W	$FFFF,$5555,$0000,$1111,$0000,$0000,$0000,$0101			;		<BAL 06Jun89>
+; gray multiplier    1-bit 2-bit       4-bit                   8-bit
+
+doGrayClut		AND		#$F,D0					; Mask the graybit
+				MOVE	D0,4(SP)				; Put it in the passed param
+				CLR.L	D1
+				ADDQ	#3,D0					; + 3 becomes * 8 on next line, for c-Spec size
+				BSET	D0,D1					; 2 to the nth
+				ADDQ.L	#8,D1					; Add size of ctab header
+				MOVE.L	D1,D0					; Here, for newhandle
+				_NewHandle						; Get a brand new colortable
+				BEQ.S	@gotGrayH				; Did we?
+
+				CLR.L	6(SP)					; No=>return nil
+				RTD		#2
+
+@gotGrayH		MOVE	4(SP),D0				; Get depth again
+				LEA		GrayMuls-2,A1			; A1->our gray multiplier table					<2.1>
+				MOVE.w	(A1,D0*2),D1			; D1.w = color step for this bit depth			<BAL 06Jun89>
+				move.w	d1,d2					; copy into d2									<BAL 06Jun89>
+				swap	d2						; set up high word								<BAL 06Jun89>
+				move.w	d1,d2					; replicate throughout long						<BAL 06Jun89>
+				MOVE.L	(A0),A1					; A1->our brand new ctable clut
+				move.w	#$8000,transIndex(A1)	; mark as device clut
+				CLR		D1						; From bit depth,
+				BSET	D0,D1					; Generate number of entries
+				SUBQ	#1,D1					; Minus one, for ctSize silliness
+				MOVE	D1,ctSize(A1)			; Set size of colortable
+				CMPI	#3,D0					; Size 1 or 2 bits?								<dvb>
+				BLT.S	@graySeed				; Yes => don't call it GrayScale by seed		<dvb>
+				ADD		#32,D0					; Constant +32 for GrayScale seeds
+@graySeed		MOVE.L	D0,ctSeed(A1)			; Jam seed										<dvb>
+				LEA		ctTable(A1),A1			; A1->first colorSpec
+				MOVEQ	#-1,D0					; Lowest index is white
+				MOVEQ	#0,D1					; D1 will be .value fields						<dvb>
+@grayLoop		MOVE	D1,(A1)+				; put pixel value in .value field				<dvb>
+				ADDQ	#1,D1					; 												<dvb>
+				MOVE.L	D0,(A1)+				; Stash red and green
+				MOVE	D0,(A1)+				; Stash blue, A1->next cSpec
+				SUB.L	D2,D0					; Bump D0 to next reasonable value
+				BCC.S	@grayLoop				; Until we go under zero, beyond black
+				BRA		GoHome
+
+doHiliteClut	AND		#$F,D0					; Mask the hilitebit
+				MOVE	D0,-(SP)				; Push it for the Resource read
+				BSR		ReadIt					; Okay, read it.
+				MOVE.L	A0,D0					; A good thing?
+				BEQ		GoHome					; No=>go home (with NIL from A0)
+				MOVE.L	(A0),A1					; A1->color table
+				SUBQ	#4,SP					; Space for new seed
+				_GetCTSeed						; Get that new seed
+				MOVE.L	(SP)+,ctSeed(A1)		; Put seed into synthetic table
+				MOVE	4(SP),D0				; D0 = clutID again
+				BTST	#1,D0					; Two bit mode?
+				BEQ.S	checkFour				; No=>check other stuff
+
+												; If the hilite color is a gray then CLUT is OK	<2.2>
+				LEA		HiliteRGB,A1			; Point at hilite color							<2.2>
+				MOVE.B	red(A1),D1				; Get red msb									<2.2>
+				CMP.B	green(A1),D1			; green same as red?							<2.2>
+				BNE.S	@notGray				; no, go use it.								<2.2>
+				CMP.B	blue(A1),D1				; blue same as red and green?					<2.2>
+				BEQ		GoHome					; yes, leave clut alone.						<2.2>
+
+@notGray		MOVE.L	(A0),A1					; A1->color table								<2.2>
+				LEA		ctTable+8+rgb(A1),A1	; Bump A1 to 2nd entry.rgb.red
+				MOVE.L	#$7FFF7FFF,(A1)+		; Put 50% gray into red,green
+				MOVE	#$7FFF,(A1)+			; and blue
+				ADDQ	#2,A1					; Bump past .value field in third entry
+				MOVE.L	HiliteRGB,(A1)+			; Put hilite color into red,green
+				MOVE	HiliteRGB+blue,(A1)		; and blue.
+				BRA		GoHome
+
+checkFour		BTST	#2,D0					; Four bit mode?
+				BEQ		GoHome					; No => must be 1 or 8-bit, so we're done.
+
+				MOVE	#14,D2					; DBRA counter, skipping white
+				MOVE.L	#$0001FFFF,D1			; Lo word = error distance, Hi word = best index
+@B4loop			SUBQ	#2,SP					; space for result
+				PEA		HiliteRGB				; push system hilite color
+				PEA		ctTable+rgb(A1,D2*8)	; push color we're checking
+				JSR		DeltaRGB
+				MOVE	(SP)+,D0
+				CMP		D0,D1
+				BLS.S	@B4loopEnd
+				MOVE	D0,D1					; Get new smallest delta
+				SWAP	D1						; D1 = Get index number in low word
+				MOVE	D2,D1					; Get new closest index
+				SWAP	D1						; D1 = Put delta back to low word
+@B4loopEnd		SUBQ	#1,D2
+				BNE.S	@B4loop					; Loop on down, but skip zero
+				CMPI	#$3000,D1				; Are we pretty darned tolerant?
+				BLS.S	GoHome					; Yes=> we're fine, go home
+
+				SWAP	D1
+				LEA		ctTable+rgb+red(A1,D1*8),A1	; A1->RGB to tweak
+@realClose		MOVE.L	HiliteRGB+red,D0			; D0 = hilite r,g
+				SWAP	D0						; D0.W = red
+				ADD		red(A1),D0				; D0.W = hilite red+old red
+				ROXR	#1,D0					; Average
+				MOVE	D0,red(A1)				; write red
+				SWAP	D0
+				ADD		green(A1),D0			; D0.W = hilite green+old green
+				ROXR	#1,D0					; Average
+				MOVE	D0,green(A1)			; write green
+				MOVE	HiliteRGB+blue,D0		; D0.W = hilite blue
+				ADD		blue(A1),D0
+				ROXR	#1,D0					; Average
+				MOVE	D0,blue(A1)				; write blue
+				SUBQ	#2,SP					; space for result
+				PEA		HiliteRGB				; Have we really got the hilite
+				PEA		(A1)					; color within a reasonable range?
+				JSR		DeltaRGB				; Let's see.
+				CMPI	#$3000,(SP)+			; 3000 is good enough to look decent.
+				BHI.S	@realClose				; But, its not there yet, so avg again.
+				BRA.S	GoHome
+
+GetCTable		clr.l	6(sp)					; NIL return if call fails.					<KON 6NOV90>
+				MOVE	4(SP),-(SP)				; First, try to read a resource
+				BSR.S	ReadIt					; (do that)
+				MOVE.L	A0,D0					; Get anything?
+				BEQ.S	notRes					; No=>try other means
+GoHome			MOVE.L	A0,6(SP)				; Yes=>stash it
+RTD2			RTD		#2						; roger and out.
+
+notRes			MOVE	4(SP),D0				; Get requested ID
+				CMPI	#72,D0					; 72 is the highest we can noodle
+				BHI.S	RTD2
+				MOVE.L	#$00000116,D1			; Bits 1, 2, 4, and 8 are set
+				BTST	D0,D1					; Are low 5 bits in [1,2,4,8]?
+				BEQ.S	RTD2
+				BTST	#5,D0
+				BNE.S	doGrayClut				; 32+[1,2,4,8]
+				BTST	#6,D0
+				BNE.S	doHiliteClut			; 64+[1,2,4,8]
+				BRA.S	RTD2
+
+
+readIt			MOVEM.L	D6/D7,-(SP)				; Save some work registers					<SAM 27SEP93>
+				MOVE.W	#mapTrue,ROMMapInsert	; Put the ROM map at the lend of the list
+				SUBQ	#4,A7					; space for result
+				MOVE.L	#'clut',-(SP)			; resource type
+				MOVE	20(SP),-(SP)			; push ID number
+				_GetResource					; Get it.
+				MOVE.L	(SP)+,D7				; Did we get the resource?
+				BEQ.S	@readFail				; -> Nope, Clear A0 and exit.
+
+				MOVE.L	D7,-(SP)				; Push the Resource Handle
+				_DetachResource					; Free it from the Map
+
+				MOVE.L	D7,D6					; Put the orig in D6
+				MOVE.L	D7,A0					; Get the handle in A0
+				MOVE.L	D7,A1					; Get the handle in A1
+				
+				MOVE.L	(A1),A1					; Get the ptr
+				CMP.L	ROMBase,A1				; Is the clut in ROM?
+				BLO.S	@SetTheSeed				; -> No. Its in RAM. Set the seed and leave
+				
+				_HandToHand						; Make a copy in a new handle in RAM
+				MOVE.L	A0,D6					; Save the copy in D6
+												
+				MOVE.L	D7,A0					; Get the resource handle in A0
+				_DisposHandle					; Free the ROM handle
+				
+				MOVE.L	D6,A0					; Move the copy into A0						<SM9>
+				TST.L	D6						; Did we get the copy?
+				BEQ.S	@ReadFail				; -> No. Clear A0 and exit
+				
+@SetTheSeed		CMPI.W	#1023,18(SP)			; Is this a request for a system clut?		<MC4><MC5>
+				BLS.S	@done					; -> Yes, leave the seed alone!				<MC4>
+				
+				CLR.L	-(SP)					; make room for function return
+				_rGetCTSeed						; get the next seed and leave it on the stack
+				MOVE.L	D6,A0					; Get the copy in A0
+				MOVE.L	(SP)+,([A0],ctSeed)		; Set the Seed in the copy
+				
+				_HNoPurge						; Make sure it doesn't go away
+				BRA.S	@Done					; -> Got It!
+
+@readFail		SUBA.L	A0,A0					; A miserable failure.
+@done			MOVEM.L	(SP)+,D6/D7				; Restore the work registers
+				RTD		#2						; Lose ID, and go home.
+
+

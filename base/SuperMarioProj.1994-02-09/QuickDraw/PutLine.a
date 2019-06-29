@@ -1,0 +1,257 @@
+;
+;	File:		PutLine.a
+;
+;	Contains:	PUTLINE - Decompose a line segment into a list of inversion points
+;
+;	Copyright:	© 1981-1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:   Mac32 Bigbang Sys606
+;
+;	Change History (most recent first):
+;
+;		 <4>	 9/18/90	BG		Removed <2>, <3>. All the offending NOPs have been ripped out.
+;									040s are behaving more reliably now.
+;		 <3>	 8/15/90	SMC		Removed the jiSetHSize jump island that's conditionally used for
+;									eclipse debugging, and replaced it with a BigJsr to SetHSize.
+;									The file containing that macro is only included if
+;									eclipseDebug-ing.
+;		 <2>	 6/28/90	BG		Added a jump island for SetHSize.  Due to the addition of
+;									various NOPs throughout QD, the distance between PUTLINE and
+;									SetHSize grew just a bit too long.  This is conditionalized so
+;									that it only happens on builds with -eclipseDebug- and will
+;									ultimately be removed.
+;	  <•1.4>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;
+
+		BLANKS	ON
+		STRING	ASIS
+
+;-----------------------------------------------------------
+;
+;  -->	PUTLINE.TEXT
+;
+;  Decompose a line segment into a list of inversion points.
+;
+;
+
+
+PUTLINE PROC  EXPORT
+
+		IMPORT	SetHSize
+
+;------------------------------------------------------------------
+;
+;  PROCEDURE PutLine(pt1,pt2: Point; dst: Handle; VAR index,bufMax: INTEGER);
+;
+;  INVERSION POINTS FOR A LINE SEGMENT
+;
+;  SP OFFSETS OF PARAMETERS:
+;
+PARAMSIZE		EQU 	20				;TOTAL SIZE OF PARAMETERS
+PT1 		EQU 	PARAMSIZE+4-4			;LONG, POINT (VALUE)
+PT2 		EQU 	PT1-4				;LONG, POINT (VALUE)
+BUF 		EQU 	PT2-4				;LONG, HANDLE
+INDEX			EQU 	BUF-4				;LONG, (VAR)
+BUFMAX			EQU 	INDEX-4 			;LONG, (VAR)
+
+
+
+		MOVEM.L D3-D7/A2-A4,-(SP)			;SAVE REGS, 8*4 ==> 32
+
+
+;-----------------------------------------------------
+;
+;  IF LINE IS VERTICAL, IGNORE IT.
+;
+		MOVE	PT1+H+32(SP),D2 			;GET 1ST POINT'S HORIZ
+		MOVE	PT2+H+32(SP),D4 			;GET 2ND POINT'S HORIZ
+		CMP 	D2,D4					;IS THIS A VERTICAL LINE ?
+		BEQ 	GOHOME					;YES, IGNORE IT
+
+
+;------------------------------------------------------
+;
+;  CALC BYTESNEEDED = 8 * ( Min(ABS(dh),ABS(dv)) + 1)
+;
+		MOVE	D2,D0					;GET H1
+		SUB 	D4,D0					;SUBTRACT H2
+		BPL.S	DHPOS					;BR IF DH POS
+		NEG 	D0					;ELSE TAKE ABSOLUTE VALUE
+DHPOS	MOVE	PT1+V+32(SP),D1 			;GET V1
+		SUB 	PT2+V+32(SP),D1 			;SUBTRACT V2
+		BPL.S	DVPOS					;BR IF DV POS
+		NEG 	D1					;ELSE TAKE ABSOLUTE VALUE
+DVPOS	CMP 	D1,D0					;IS DH <= DV ?
+		BLE.S	DHLESS					;YES, CONTINUE
+		MOVE	D1,D0					;NO, PUT MIN(DH,DV) INTO D0
+DHLESS	ADD 	#1,D0					;CALC MIN(DH,DV)+1
+		ext.l	d0						;make into a long				<BAL 28Apr89>
+		LSL.l 	#3,D0					;TIMES EIGHT FOR BYTESNEEDED	<BAL 28Apr89>
+
+
+		MOVE.L	BUF+32(SP),A3				;GET DSTHANDLE
+		MOVE.L	INDEX+32(SP),A4 			;POINT TO CURRENT INDEX
+
+;-----------------------------------------------------
+;
+;  GROW POINT BUFFER AS NECESSARY TO HOLD BYTESNEEDED
+;
+		moveq	#0,d1						;clear out high end			<BAL 28Apr89>
+		move	(a4),d1						;get index as a long		<BAL 28Apr89>
+		ADD.l 	d1,d0 						;NEWSIZE := INDEX + BYTESNEEDED
+		cmp.l	#65536-512,d0				;are we about to overflow?	<BAL 28Apr89>
+		blt.s	@sizeOK						;no, don't worry; be happy	<BAL 28Apr89>
+		move	#-147,qdErr					;indicate rgnTooBigErr		<BAL 28Apr89>
+		bra 	GOHOME						;skip this line				<BAL 28Apr89>
+		
+@sizeOK	MOVE.L	BUFMAX+32(SP),A0			;POINT TO BUFMAX
+		CMP 	(A0),D0 					;DO WE HAVE TO GROW DSTBUF ?
+		bls.s	NOGROW						;NO, CONTINUE				<BAL 28Apr89>
+		ADD 	#512,D0 					;GROW IN CHUNKS
+		MOVE	D0,(A0) 					;UPDATE NEW BUFMAX
+		MOVE.L	A3,-(SP)					;PUSH DSTBUF HANDLE
+		MOVE	D0,-(SP)					;PUSH NEW BUFMAX
+
+;	Even without -eclipseDebug- being set, the access to SetHSize		<4>
+;	requires a BigJSR to get to it.  I took out the						<4>
+;																		<4>
+;		INCLUDE InternalOnlyEQU.a										<4>
+;																		<4>
+;	so that it doesn't somehow, someway, screw up one of the QD			<4>
+;	builds.  Instead, here is the code that BigJSR expands to			<4>
+
+;		JSR 	SetHSize 					;MAKE THE BUFFER BIGGER		<4>
+
+  		LEA 	(SetHSize-*).L,A0			; == BigJSR	SetHSize,A0		<4>
+  		JSR 	*-6(PC,A0.L)				;							<4>
+
+		MOVE	PT1+H+32(SP),D2 			;RESTORE CLOBBERED REG
+
+NOGROW
+
+
+		MOVE.L	(A3),A3 					;DE-REFERENCE DSTHANDLE
+		moveq	#0,d0						;clear out high end			<BAL 28Apr89>
+		move.w	(a4),d0						;get index as a long		<BAL 28Apr89>
+		add.l 	d0,A3 						;ADD INDEX TO BUFPTR		<BAL 28Apr89>
+
+;-----------------------------------------------------
+;
+;  IF LINE IS HORIZONTAL, PUT ITS TWO ENDPOINTS
+;
+		MOVE	PT1+V+32(SP),D1 			;GET 1ST POINT'S VERT
+		MOVE	PT2+V+32(SP),D3 			;GET 2ND POINT'S VERT
+		CMP 	D1,D3						;IS THIS A HORIZONTAL LINE ?
+		BNE.S	SLANTED 					;NO, BRANCH
+		MOVE	D1,(A3)+					;PUT V1 VERT COORD
+		MOVE	D2,(A3)+					;PUT H1 HORIZ COORD
+		MOVE	D3,(A3)+					;PUT V2 VERT COORD
+		MOVE	D4,(A3)+					;PUT H2 HORIZ COORD
+		BRA.S	DONE						;UPDATE INDEX AND QUIT
+
+
+;------------------------------------------------------
+;
+;  LINE IS SLANTED.  DIVIDE IT INTO HORIZONTAL SLABS
+;  AND PUT THE TWO ENDPOINTS OF EACH SLAB.
+;
+;  START BY SORTING POINTS VERTICALLY.
+;
+SLANTED BGT.S	NOSWAP						;SKIP IF ALREADY IN ORDER
+		EXG 	D1,D3						;SORT POINTS BY VERTICAL
+		EXG 	D2,D4						;SWAP HORIZ TO MATCH
+NOSWAP	MOVE	D1,D6						;INIT V TO TOPV
+
+
+;------------------------------------------------------------
+;
+;  CALCULATE FIXED POINT SLOPE = FixRatio(dh,dv);
+;
+		CLR.L	-(SP)						;MAKE ROOM FOR FCN RESULT
+		MOVE	D4,-(SP)					;PUSH BOTTOM HORIZ
+		SUB 	D2,(SP) 					;CALC DH
+		MOVE	D3,-(SP)					;PUSH BOTTOM VERT
+		SUB 	D1,(SP) 					;CALC DV
+		_FixRatio							;CALC FIXED POINT SLOPE
+		MOVE.L	(SP)+,D7					;POP RESULT
+
+
+;---------------------------------------------------------
+;
+;  SET UP STARTING HORIZ FIXED POINT.
+;
+		MOVE.W	D2,D1
+		SWAP	D1							;HORIZ.INT := TOP HORIZ
+		MOVE.W	#$8000,D1					;HORIZ.FRACT := 1/2
+;
+;  ADJUST HORIZ DEPENDING ON SIGN AND MAGNITUDE OF SLOPE
+;
+		MOVE.L	D7,D0						;COPY SLOPE
+		ASR.L	#1,D0						;CALC SLOPE/2
+		ADD.L	D0,D1						;HORIZ := HORIZ + SLOPE/2
+
+		MOVE.L	#$00010000,D0
+
+		TST.L	D7							;IS SLOPE NEG ?
+		BMI.S	NEGSLOPE					;YES, CONTINUE
+
+		CMP.L	D0,D7						;IS SLOPE < ONE ?
+		BGE.S	SLOPEOK 					;NO, CONTINUE
+		ADD.L	D7,D1						;ADD SLOPE TO LEFTEDGE
+		BRA.S	SLOPEOK 					;CONTINUE
+
+NEGSLOPE CMP.L	#$FFFF0000,D7				;IS SLOPE > -ONE ?
+		BGE.S	SLOPEOK 					;YES, CONTINUE
+		ADD.L	D0,D1						;YES, HORIZ := HORIZ + 1
+
+SLOPEOK
+
+
+
+;------------------------------------------------------
+;
+;  FOR VERT:=TOPV TO BOTV-1 ADD SLOPE TO HORIZ AND PUT SLABS
+;
+		MOVE	D2,D5						;H:=TOPH
+LOOP	SWAP	D1							;GET HORIZ.INT INTO D1 LOWER
+		CMP 	D1,D5						;HAS HORIZ.INT CHANGED ?
+		BEQ.S	NOCHNG						;NO, CONTINUE
+		MOVE	D6,(A3)+					;YES, PUT VERT COORD
+		MOVE	D5,(A3)+					;PUT OLD HORIZ COORD
+		MOVE.W	D1,D5						;OLDH := HORIZ.INT
+		MOVE	D6,(A3)+					;PUT VERT COORD
+		MOVE	D5,(A3)+					;PUT NEW HORIZ COORD
+NOCHNG	SWAP	D1							;PUTBACK HORIZ.INT INTO D1 UPPER
+		ADD 	#1,D6						;VERT:=VERT+1
+		ADD.L	D7,D1						;ADD SLOPE TO HORIZ
+		CMP 	D6,D3						;IS VERT AT BOTTOM VERT YET ?
+		BNE 	LOOP						;NO, GO FOR MORE
+
+
+;-------------------------------------------------
+;
+;  FINISH UP LAST SLAB
+;
+		CMP 	D4,D5						;IS OLDH = BOTTOM H ?
+		BEQ.S	DONE						;YES, CONTINUE
+		MOVE	D6,(A3)+					;NO, PUT VERT COORD
+		MOVE	D5,(A3)+					;PUT HORIZ COORD
+		MOVE	D6,(A3)+					;PUT VERT COORD
+		MOVE	D4,(A3)+					;PUT BOTTOM H COORD
+
+
+;---------------------------------------------------
+;
+;  UPDATE INDEX TO REFLECT POINTS ADDED.
+;
+DONE	MOVE.L	BUF+32(SP),A0				;GET DSTHANDLE
+		SUB.L	(A0),A3 					;INDEX := BUFPTR-BUFSTART
+		MOVE	A3,(A4) 					;UPDATE INDEX
+
+GOHOME	MOVEM.L (SP)+,D3-D7/A2-A4			;RESTORE REGS
+		MOVE.L	(SP)+,A0
+		ADD.W	#PARAMSIZE,A7
+		JMP 	(A0)
+
+
+		ENDPROC 

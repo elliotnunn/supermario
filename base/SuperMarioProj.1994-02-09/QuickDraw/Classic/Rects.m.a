@@ -1,0 +1,691 @@
+;EASE$$$ READ ONLY COPY of file “RECTS.m.a”
+; 1.1	CCH 11/11/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.2	CCH 10/12/1988 Changed “m.GrafType.a” to “GrafType.m.a”.
+; 1.1	MSH 5/18/88 Changed inclides to use m.GRAPHTYPES to work under EASE.
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+
+
+		BLANKS	ON
+		STRING	ASIS
+
+		INCLUDE   'GRAFTYPES.m.a'
+;-----------------------------------------------------------
+;
+;
+;	  ****	 *****	 ***   *****   ***
+;	  *   *  *		*	*	 *	  *   *
+;	  *   *  *		*		 *	  *
+;	  ****	 ***	*		 *	   ***
+;	  * *	 *		*		 *		  *
+;	  *  *	 *		*	*	 *	  *   *
+;	  *   *  *****	 ***	 *	   ***
+;
+;
+;
+;  Procedures for operating on rectangles.
+;
+
+
+StdRect PROC  EXPORT
+		IMPORT CheckPic,PutPicVerb,PutPicRect
+		IMPORT PutRect,FrRect,PushVerb,DrawRect
+;---------------------------------------------------------------
+;
+;  PROCEDURE StdRect(verb: GrafVerb; r: Rect);
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+PARAMSIZE		EQU 	6
+VERB			EQU 	PARAMSIZE+8-2			;GRAFVERB
+RECT			EQU 	VERB-4				;LONG, ADDR OF RECT
+
+		LINK	A6,#0					;NO LOCALS
+		MOVEM.L D7/A3-A4,-(SP)				;SAVE REGS
+		MOVE.B	VERB(A6),D7 			;GET VERB
+		JSR 	CHECKPIC				;SET UP A4,A3 AND CHECK PICSAVE
+		BLE.S	NOTPIC					;BRANCH IF NOT PICSAVE
+
+		MOVE.B	D7,-(SP)				;PUSH VERB
+		JSR 	PutPicVerb				;PUT ADDIONAL PARAMS TO THEPIC
+		MOVEQ	#$30,D0 				;GET RECTNOUN IN HI NIBBLE
+		ADD 	D7,D0					;PUT VERB IN LO NIBBLE
+		MOVE.B	D0,-(SP)				;PUSH OPCODE
+		MOVE.L	RECT(A6),-(SP)				;PUSH ADDR OF RECT
+		JSR 	PutPicRect				;PUT OPCODE AND RECTANGLE
+
+NOTPIC	MOVE.L	RECT(A6),-(SP)				;PUSH RECT FOR FrRect or DrawRect
+		TST.B	D7					;IS VERB FRAME ?
+		BNE.S	NOTFR					;NO, CONTINUE
+		TST.L	RGNSAVE(A3) 			;YES, IS RGNSAVE TRUE ?
+		BEQ.S	NOTRGN					;NO, CONTINUE
+
+		MOVE.L	RECT(A6),-(SP)				;YES, PUSH ADDR OF RECT
+		MOVE.L	RGNBUF(A4),-(SP)			;PUSH RGNBUF
+		PEA 	RGNINDEX(A4)				;PUSH VAR RGNINDEX
+		PEA 	RGNMAX(A4)				;PUSH VAR RGNMAX
+		JSR 	PutRect 				;ADD A RECT TO THERGN
+
+NOTRGN	JSR 	FrRect					;FrRect(rect)
+		BRA.S	GOHOME
+
+NOTFR	JSR 	PushVerb				;PUSH MODE AND PATTERN
+		JSR 	DRAWRECT				;DrawRect(rect,mode,pat);
+
+GOHOME	MOVEM.L (SP)+,D7/A3-A4				;RESTORE REGS
+		UNLINK	PARAMSIZE,'STDRECT '
+
+
+
+PushVerb PROC  EXPORT
+;----------------------------------------------------------
+;
+;  PUSH A MODE AND A PATTERN, BASED ON VERB
+;  ENTER WITH VERB IN D7, GRAFGLOBALS IN A4, THEPORT IN A3.
+;
+;  CLOBBERS A0.
+;
+;	 frame:  pnMode,  pnPat
+;	 paint:  pnMode,  pnPat
+;	 erase:  patCopy, bkPat
+;	 invert: patXor,  black
+;	 fill:	 patCopy, fillPat
+;
+		MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		MOVE	#8,-(SP)				;PUSH MODE = PATCOPY (IE. DEFAULT)
+		CMP.B	#1,D7					;CASE ON VERB
+		BLE.S	PAINT1
+		CMP.B	#3,D7
+		BLT.S	ERASE1
+		BEQ.S	INVERT1
+
+FILL1	PEA 	FILLPAT(A3) 			;PUSH PAT := FILLPAT
+		BRA.S	DONE
+
+ERASE1	PEA 	BKPAT(A3)				;PUSH PAT = BKPAT
+		BRA.S	DONE
+
+INVERT1 ADD.W	#2,(SP) 				;ADJUST, PUSH MODE = PATXOR
+		PEA 	BLACK(A4)				;PUSH PAT = BLACK
+		BRA.S	DONE
+
+PAINT1	MOVE	PNMODE(A3),(SP) 			;REPLACE, PUSH MODE = PNMODE
+		PEA 	PNPAT(A3)				;PUSH PAT = PNPAT
+
+DONE	JMP 	(A0)					;RETURN TO CALLER
+
+
+
+FillRect PROC  EXPORT	
+		EXPORT CallRect,FrameRect,PaintRect,EraseRect,InvertRect
+;----------------------------------------------------------
+;
+;  PROCEDURE FillRect(r: Rect; pat: Pattern);
+;
+		MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		MOVE.L	(SP)+,A1				;POP ADDR OF PATTERN
+		MOVE.L	A0,-(SP)				;PUT RETURN ADDR BACK
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		LEA 	FILLPAT(A0),A0				;POINT TO FILLPAT
+		MOVE.L	(A1)+,(A0)+ 			;COPY PAT INTO FILLPAT
+		MOVE.L	(A1)+,(A0)+ 			;ALL EIGHT BYTES
+		MOVEQ	#FILL,D0				;VERB = FILL
+		BRA.S	CallRect				;SHARE COMMON CODE
+
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE FrameRect(r: Rect);
+;
+FrameRect
+		MOVEQ	#FRAME,D0				;VERB = FRAME
+		BRA.S	CallRect				;SHARE COMMON CODE
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE PaintRect(r: Rect);
+;
+PaintRect
+		MOVEQ	#PAINT,D0				;VERB = PAINT
+		BRA.S	CallRect				;SHARE COMMON CODE
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE EraseRect(r: Rect);
+;
+EraseRect
+		MOVEQ	#ERASE,D0				;VERB = ERASE
+		BRA.S	CallRect				;SHARE COMMON CODE
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE InvertRect(r: Rect);
+;
+InvertRect
+		MOVEQ	#INVERT,D0				;VERB = INVERT
+		BRA.S	CallRect				;SHARE COMMON CODE
+
+
+;---------------------------------------------------------------
+;
+;  PROCEDURE CallRect(r: Rect);
+;
+;  code shared by FrameRect, PaintRect, EraseRect, InvertRect, and FillRect.
+;  enter with verb in D0.
+;
+CallRect
+		MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		MOVE.L	(SP)+,A1				;POP ADDR OF RECT
+		MOVE.B	D0,-(SP)				;PUSH VERB
+		MOVE.L	A1,-(SP)				;PUSH ADDR OF RECT
+		MOVE.L	A0,-(SP)				;RESTORE RETURN ADDR
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE.L	GRAFPROCS(A0),D0			;IS GRAFPROCS NIL ?
+		MOVE.L	JStdRect,A0 			;get piece of trap table
+		BEQ.S	USESTD					;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	RECTPROC(A0),A0 			;NO, GET PROC PTR
+USESTD	JMP 	(A0)					;GO TO IT
+
+
+DrawRect PROC  EXPORT	
+		IMPORT RgnBlt
+;----------------------------------------------------------
+;
+;  PROCEDURE DrawRect(r: Rect; mode: INTEGER; pat: Pattern);
+;
+;  Rectangle is given in local coordinates.
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	10				;TOTAL BYTES OF PARAMS
+DSTRECT 		EQU 	PARAMSIZE+8-4			;LONG, ADDR OF RECT
+MODE			EQU 	DSTRECT-2			;WORD
+PAT 		EQU 	MODE-4				;LONG, ADDR OF PAT
+
+		LINK	A6,#0					;NO LOCAL VARS
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A1				;GET CURRENT GRAFPORT
+		TST 	PNVIS(A1)				;IS PNVIS >= 0 ?
+		BLT.S	GOHOME					;NO, QUIT
+		PEA 	PORTBITS(A1)				;PUSH SRCBITS = DSTBITS
+		MOVE.L	(SP),-(SP)				;PUSH DSTBITS
+		MOVE.L	DSTRECT(A6),-(SP)			;PUSH SRCRECT = DSTRECT
+		MOVE.L	(SP),-(SP)				;PUSH DSTRECT
+		MOVE	MODE(A6),-(SP)				;PUSH MODE
+		MOVE.L	PAT(A6),-(SP)				;PUSH ADDR OF PATTERN
+		MOVE.L	CLIPRGN(A1),-(SP)			;PUSH CLIPRGN
+		MOVE.L	VISRGN(A1),-(SP)			;PUSH VISRGN
+		MOVE.L	WIDEOPEN(A0),-(SP)			;PUSH WIDE OPEN
+		JSR 	RGNBLT					;CALL RGNBLT
+GOHOME	UNLINK	PARAMSIZE,'DRAWRECT'
+
+
+
+FrRect	PROC  EXPORT
+		IMPORT RgnBlt
+;----------------------------------------------------------
+;
+;  PROCEDURE FrRect(r: Rect);
+;  Draws an outline inside a rect.
+;
+;  A6 OFFSETS OF PARAMETERS AND LOCALS AFTER LINK:
+;
+DSTRECT 		EQU 	8				;LONG, ADDR OF RECT
+H1			EQU 	-2				;WORD
+H2			EQU 	H1-2				;WORD
+H3			EQU 	H2-2				;WORD
+H4			EQU 	H3-4				;WORD
+V1			EQU 	H4-2				;WORD
+V2			EQU 	V1-2				;WORD
+V3			EQU 	V2-2				;WORD
+V4			EQU 	V3-4				;WORD
+TEMPRECT		EQU 	V4-8				;RECT
+VARSIZE 		EQU 	TEMPRECT			;TOTAL SIZE OF LOCALS
+
+
+		LINK	A6,#VARSIZE 			;SET UP STACK FRAME
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		TST 	PNVIS(A0)				;IS PNVIS NEGATIVE ?
+		BLT 	GOHOME					;YES, DON'T DRAW AT ALL
+		MOVE.L	DSTRECT(A6),A1				;POINT TO INPUT RECT
+		MOVE.L	(A1)+,TEMPRECT+TOPLEFT(A6)		;COPY INPUT RECT
+		MOVE.L	(A1)+,TEMPRECT+BOTRIGHT(A6)
+;
+;  Now set up h1,h2,h3,h4 and v1,v2,v3,v4
+;
+		LEA 	TEMPRECT(A6),A1 			;POINT TO COPIED RECT
+		MOVE	PNSIZE+H(A0),D2 			;GET PEN WIDTH
+		MOVE	LEFT(A1),D0
+		MOVE	D0,H1(A6)				;H1:=LEFT
+		ADD 	D2,D0
+		MOVE	D0,H2(A6)				;H2:=LEFT+PENWIDTH
+		MOVE	RIGHT(A1),D1
+		MOVE	D1,H4(A6)				;H4:=RIGHT
+		SUB 	D2,D1
+		MOVE	D1,H3(A6)				;H3:=RIGHT-PENWIDTH
+		CMP 	D1,D0					;IS H2 >= H3 ?
+		BGE.S	@1					;YES, FILL IT IN SOLID
+
+		MOVE	PNSIZE+V(A0),D2 			;GET PEN HEIGHT
+		MOVE	TOP(A1),D0
+		MOVE	D0,V1(A6)				;V1:=TOP
+		ADD 	D2,D0
+		MOVE	D0,V2(A6)				;V2:=TOP+PENHEIGHT
+		MOVE	BOTTOM(A1),D1
+		MOVE	D1,V4(A6)				;V4:=BOTTOM
+		SUB 	D2,D1
+		MOVE	D1,V3(A6)				;V3:=BOTTOM-PENHEIGHT
+		CMP 	D1,D0					;IS V2 >= V3 ?
+		BGE.S	@1					;YES, FILL IT IN SOLID
+
+;
+;  PEN IS NOT SO BIG AS TO FILL IN SOLID.  BREAK RECT INTO 4 EDGES.
+;
+		MOVE	H1(A6),TEMPRECT+LEFT(A6)
+		MOVE	H3(A6),TEMPRECT+RIGHT(A6)
+		MOVE	V1(A6),TEMPRECT+TOP(A6)
+		MOVE	V2(A6),TEMPRECT+BOTTOM(A6)
+		BSR.S	DORECT					;PAINT TOP EDGE
+
+		MOVE	H3(A6),TEMPRECT+LEFT(A6)
+		MOVE	H4(A6),TEMPRECT+RIGHT(A6)
+		MOVE	V3(A6),TEMPRECT+BOTTOM(A6)
+		BSR.S	DORECT					;PAINT RIGHT EDGE
+
+		MOVE	H2(A6),TEMPRECT+LEFT(A6)
+		MOVE	V3(A6),TEMPRECT+TOP(A6)
+		MOVE	V4(A6),TEMPRECT+BOTTOM(A6)
+		BSR.S	DORECT					;PAINT BOTTOM EDGE
+
+		MOVE	H1(A6),TEMPRECT+LEFT(A6)
+		MOVE	H2(A6),TEMPRECT+RIGHT(A6)
+		MOVE	V2(A6),TEMPRECT+TOP(A6)
+@1		BRA.S	FILLED					;PAINT LEFT EDGE
+
+
+;--------------------------------------------------------
+;
+;  LOCAL ROUTINE TO PAINT TEMPRECT, GIVEN IN LOCAL COORDS
+;
+DORECT	MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A1				;POINT TO CURRENT GRAFPORT
+		PEA 	PORTBITS(A1)				;PUSH SRCBITS = DSTBITS
+		MOVE.L	(SP),-(SP)				;PUSH DSTBITS
+		PEA 	TEMPRECT(A6)				;PUSH SRCRECT = DSTRECT
+		MOVE.L	(SP),-(SP)				;PUSH DSTRECT, LOCAL COORDS
+		MOVE	PNMODE(A1),-(SP)			;PUSH PEN MODE
+		PEA 	PNPAT(A1)				;PUSH ADDR OF PEN PATTERN
+		MOVE.L	CLIPRGN(A1),-(SP)			;PUSH CLIPRGN
+		MOVE.L	VISRGN(A1),-(SP)			;PUSH VISRGN
+		MOVE.L	WIDEOPEN(A0),-(SP)			;PUSH WIDE OPEN
+		JSR 	RGNBLT					;CALL RGNBLT
+		RTS
+
+FILLED	BSR 	DORECT					;FILL TEMPRECT SOLID
+GOHOME	UNLINK	4,'FRRECT  '
+
+
+
+SetRect PROC  EXPORT
+;----------------------------------------------------------
+;
+;  PROCEDURE SetRect(VAR r: Rect; left,top,right,bottom: INTEGER);
+;  { assign 4 integers into a rectangle }
+;
+		MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		MOVE.L	(SP)+,D1				;POP BOTRIGHT POINT
+		MOVE.L	(SP)+,D0				;POP TOPLEFT POINT
+		MOVE.L	(SP)+,A1				;POP ADDR OF RECT
+		MOVE.L	D0,(A1)+				;INSTALL TOPLEFT
+		MOVE.L	D1,(A1)+				;INSTALL BOTRIGHT
+		JMP 	(A0)					;RETURN
+
+
+
+EqualRect FUNC	EXPORT	
+;----------------------------------------------------------
+;
+;  FUNCTION  EqualRect(rect1,rect2: Rect): BOOLEAN;
+;
+;  CLOBBERS D0,A0,A1.
+;
+		MOVE.L	(SP)+,D0				;POP RETURN ADDR
+		MOVE.L	(SP)+,A1				;POP ADDR OF RECT2
+		MOVE.L	(SP)+,A0				;POP ADDR OF RECT1
+		CMPM.L	(A0)+,(A1)+ 			;IS TOPLEFT SAME ?
+		BNE.S	FALSE					;NO, RETURN FALSE
+		CMPM.L	(A0)+,(A1)+ 			;YES, IS BOTRIGHT SAME TOO ?
+		BNE.S	FALSE					;NO, RETURN FALSE
+		MOVE.B	#1,(SP) 				;YES, RETURN TRUE
+		BRA.S	DONE					;AND QUIT
+FALSE	CLR.B	(SP)					;RETURN FALSE
+DONE	MOVE.L	D0,-(SP)				;PUSH RETURN ADDR
+		RTS 					;AND RETURN
+
+
+
+EmptyRect FUNC	EXPORT	
+;----------------------------------------------------------
+;
+;  FUNCTION  EmptyRect(r: Rect): BOOLEAN;
+;
+;  CLOBBERS D0,D1,A0,A1.
+;
+		MOVE.L	(SP)+,A1				;POP RETURN ADDR
+		MOVE.L	(SP)+,A0				;POP ADDR OF RECT
+		MOVE	(A0)+,D0				;GET TOP
+		MOVE	(A0)+,D1				;GET LEFT
+		CMP 	(A0)+,D0				;IS TOP >= BOTTOM ?
+		BGE.S	EMPTY					;YES, RETURN TRUE
+		CMP 	(A0)+,D1				;IS LEFT >= RIGHT ?
+		BGE.S	EMPTY					;YES, RETURN TRUE
+		CLR.B	(SP)					;NOT EMPTY, RETURN FALSE
+		BRA.S	DONE					;AND QUIT
+EMPTY	MOVE.B	#1,(SP) 				;RETURN TRUE
+DONE	JMP 	(A1)					;RETURN
+
+
+
+OffsetRect PROC  EXPORT 	
+;----------------------------------------------------------
+;
+;  PROCEDURE OffsetRect(VAR r: Rect; dh,dv: INTEGER);
+;
+		MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		MOVE	(SP)+,D1				;POP DV
+		MOVE	(SP)+,D0				;POP DH
+		MOVE.L	(SP)+,A1				;POP ADDR OF RECT
+		ADD 	D1,(A1)+				;TOP:=TOP+DV
+		ADD 	D0,(A1)+				;LEFT:=LEFT+DH
+		ADD 	D1,(A1)+				;BOTTOM:=BOTTOM+DV
+		ADD 	D0,(A1)+				;RIGHT:=RIGHT+DH
+		JMP 	(A0)					;RETURN
+
+
+InsetRect PROC	EXPORT	
+;----------------------------------------------------------
+;
+;  PROCEDURE InsetRect(VAR r: Rect; dh,dv: INTEGER);
+;  { inset a rectangle on all 4 sides }
+;
+		MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		MOVE	(SP)+,D1				;POP DV
+		MOVE	(SP)+,D0				;POP DH
+		MOVE.L	(SP)+,A1				;POP ADDR OF RECT
+		ADD 	D1,(A1)+				;ADD DV TO TOP
+		ADD 	D0,(A1)+				;ADD DH TO LEFT
+		SUB 	D1,(A1)+				;SUBTRACT DV FROM BOTTOM
+		SUB 	D0,(A1)+				;SUBTRACT DH FROM RIGHT
+DONE	JMP 	(A0)					;RETURN
+
+
+
+SectRect FUNC  EXPORT	
+		EXPORT RSect
+;---------------------------------------------------------
+;
+;  FUNCTION SectRect(srcA,srcB: Rect; VAR dstC: Rect): BOOLEAN;
+;
+;  Returns TRUE and intersection in dst,
+;  else FALSE and dst = 0,0,0,0.
+;  Dst may also be used as one of the inputs
+;
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	12				;SIZE OF PARAMETERS
+RESULT			EQU 	PARAMSIZE+8 		;BOOLEAN RESULT
+SRCA			EQU 	RESULT-4			;LONG, ADDR OF RECTANGLE
+SRCB			EQU 	SRCA-4				;LONG, ADDR OF RECTANGLE
+DST 		EQU 	SRCB-4				;LONG, ADDR OF RECTANGLE
+
+
+		LINK	A6,#0					;NO LOCAL VARS
+		MOVE.L	SRCA(A6),-(SP)				;PUSH SRCA POINTER
+		MOVE.L	SRCB(A6),-(SP)				;PUSH SRCB POINTER
+		MOVE	#2,-(SP)				;PUSH NRECTS=2
+		MOVE.L	DST(A6),-(SP)				;PUSH DST POINTER
+		BSR.S	RSECT					;CALC INTERSECTION
+		SNE 	RESULT(A6)				;STORE BOOLEAN RESULT
+		NEG.B	RESULT(A6)				;CONVERT $FF TO $01
+NOTEMPTY UNLINK  PARAMSIZE,'SECTRECT'
+
+
+;---------------------------------------------------
+;
+;  ASSEMBLY CALLABLE ROUTINE TO COMPUTE THE INTERSECTION OF
+;  ANY NUMBER OF RECTANGLES.
+;
+;  INPUTS: PUSH ADDRESSES OF EACH INPUT RECTANGLE (LONGS)
+;	   PUSH # OF RECTANGLES (WORD)
+;	   PUSH ADDRESS OF OUTPUT RECTANGLE (LONG)
+;
+;  RETURNS DST=(0,0,0,0) AND Z-FLAG SET IF NO INTERSECTION
+;
+;  CLOBBERS: D0,A0
+;
+RSECT	LINK A6,#0
+		MOVEM.L D1-D4/A1,-(SP)				;SAVE REGS
+		LEA 	12(A6),A1				;POINT TO NRECTS
+		MOVE	(A1)+,D0				;GET NRECTS COUNT
+		BLE.S	EMPTY					;EMPTY IF NRECTS <= 0
+		MOVE.L	(A1)+,A0				;POINT TO FIRST RECT
+		MOVEM.W (A0)+,D1/D2/D3/D4			;GET TOP, LEFT, BOT, RIGHT
+		SUB 	#1,D0					;DECREMENT RECT COUNT
+		BRA.S	RTOK					;CHECK THIS RECT AND LOOP
+
+NEXTRECT MOVE.L (A1)+,A0				;POINT TO NEXT RECT
+		CMP    (A0)+,D1 				;IS TOP < NEXT TOP ?
+		BGE.S	TOPOK					;NO, CONTINUE
+		MOVE	-2(A0),D1				;YES, TOP:=NEXT TOP
+TOPOK	CMP 	(A0)+,D2				;IS LEFT < NEXT LEFT ?
+		BGE.S	LEFTOK					;NO, CONTINUE
+		MOVE	-2(A0),D2				;YES, LEFT:=NEXT LEFT
+LEFTOK	CMP 	(A0)+,D3				;IS BOTTOM > NEXT BOT ?
+		BLE.S	BOTOK					;NO, CONTINUE
+		MOVE	-2(A0),D3				;YES, BOTTOM:=NEXT BOT
+BOTOK	CMP 	(A0)+,D4				;IS RIGHT > NEXT RIGHT ?
+		BLE.S	RTOK					;NO, CONTINUE
+		MOVE	-2(A0),D4				;YES, RIGHT:=NEXT RIGHT
+RTOK	CMP 	D1,D3					;IS BOTTOM <= TOP ?
+		BLE.S	EMPTY					;YES, EMPTY
+		CMP 	D2,D4					;IS RIGHT <= LEFT ?
+		BLE.S	EMPTY					;YES, EMPTY
+		DBRA	D0,NEXTRECT 			;LOOP FOR ALL RECTANGLES
+		BRA.S	DONE
+
+EMPTY	CLR 	D1					;ALL EMPTY RECTS ARE (0,0,0,0)
+		CLR 	D2
+		CLR 	D3
+		CLR 	D4
+DONE	MOVE.L	8(A6),A0				;GET DST ADDR
+		MOVE	D1,(A0)+				;STORE DST TOP
+		MOVE	D2,(A0)+				;DST LEFT
+		MOVE	D3,(A0)+				;DST BOT
+		MOVE	D4,(A0)+				;DST RIGHT
+		MOVE	12(A6),D0				;GET NRECTS COUNT AGAIN
+		LSL 	#2,D0					;TIMES 4 BYTES PER RECTANGLE
+		ADD 	#6,D0					;PLUS 6 BYTES FOR NRECTS AND DSTPTR
+		CMP 	D1,D3					;SET Z-FLAG IF EMPTY RECT
+		MOVEM.L (SP)+,D1-D4/A1				;RESTORE REGS
+		UNLK	A6					;RELEASE STATIC FRAME PTR
+		MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		ADD 	D0,SP					;STRIP VARIABLE NUMBER OF PARAMS
+		JMP 	(A0)					;RETURN WITH Z-FLAG IF EMPTY
+
+
+UnionRect PROC	EXPORT	
+		EXPORT Pt2Rect
+;----------------------------------------------------------
+;
+;  PROCEDURE UnionRect(* src1,src2: Rect; VAR dst: Rect *);
+;
+;  { compute smallest rectangle containing both input rectangles   }
+;  { works correctly even if one of the sources is the destination }
+;
+		MOVE.L	12(SP),A0			;GET ADDR OF SRC1
+		MOVE.L	8(SP),A1			;GET ADDR OF SRC2
+
+		MOVE	(A0)+,D0			;TOP:=TOP1
+		CMP 	(A1)+,D0			;IS TOP2 < TOP ?
+		BLE.S	TOPOK				;NO, CONTINUE
+		MOVE	-2(A1),D0			;YES, TOP:=TOP2
+TOPOK	SWAP	D0				;PUT TOP IN HI WORD
+		MOVE	(A0)+,D0			;LEFT:=LEFT1
+		CMP 	(A1)+,D0			;IS LEFT2 < LEFT ?
+		BLE.S	LEFTOK				;NO, CONTINUE
+		MOVE	-2(A1),D0			;YES, LEFT:=LEFT2
+LEFTOK	MOVE	(A0)+,D1			;BOTTOM:=BOTTOM1
+		CMP 	(A1)+,D1			;IS BOTTOM2 > BOTTOM ?
+		BGE.S	BOTOK				;NO, CONTINUE
+		MOVE	-2(A1),D1			;YES, BOTTOM:=BOTTOM2
+BOTOK	SWAP	D1				;PUT BOTTOM IN HI WORD
+		MOVE	(A0)+,D1			;RIGHT:=RIGHT1
+		CMP 	(A1)+,D1			;IS RIGHT2 > RIGHT1 ?
+		BGE.S	RIGHTOK 			;NO, CONTINUE
+		MOVE	-2(A1),D1			;YES, RIGHT:=RIGHT2
+RIGHTOK MOVE.L	4(SP),A0			;POINT TO DST RECT
+		MOVE.L	D0,(A0)+			;INSTALL TOPLEFT
+		MOVE.L	D1,(A0)+			;INSTALL BOTRIGHT
+		BRA.S	SHARE				;STRIP 3 PARAMETERS AND RETURN
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE Pt2Rect(* pt1,pt2: Point; VAR dst: Rect *);
+;
+;  { make a rectangle from two points }
+;
+Pt2Rect MOVE.L	4(SP),A0			;POINT TO DST RECT
+		MOVE	14(SP),D0			;GET H1
+		MOVE	10(SP),D1			;GET H2
+		CMP 	D0,D1				;IS H2 < H1 ?
+		BGE.S	HOK 			;NO, CONTINUE
+		EXG 	D0,D1				;YES, SWAP THEM
+HOK 	MOVE	D0,LEFT(A0) 		;INSTALL DST LEFT  = MIN(H1,H2)
+		MOVE	D1,RIGHT(A0)			;INSTALL DST RIGHT = MAX(H1,H2)
+		MOVE	12(SP),D0			;GET V1
+		MOVE	8(SP),D1			;GET V2
+		CMP 	D0,D1				;IS V2 < V1 ?
+		BGE.S	VOK 			;NO, CONTINUE
+		EXG 	D0,D1				;YES, SWAP THEM
+VOK 	MOVE	D0,TOP(A0)			;INSTALL DST TOP	= MIN(V1,V2)
+		MOVE	D1,BOTTOM(A0)			;INSTALL DST BOTTOM = MAX(V1,V2)
+SHARE	MOVE.L	(SP)+,A0			;POP RETURN ADDR
+		ADD 	#12,SP				;STRIP 3 PARAMETERS
+		JMP 	(A0)				;AND RETURN
+
+
+
+PtInRect FUNC  EXPORT	
+;------------------------------------------------------------
+;
+;  FUNCTION PtInRect(pt: Point; r: Rect): BOOLEAN;
+;
+;  Returns TRUE if point is within the rectangle.
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	8				;SIZE OF PARAMETERS
+RESULT			EQU 	PARAMSIZE+8 		;A6 OFFSETS AFTER LINK
+PT			EQU 	RESULT-4			;POINT, VALUE
+R			EQU 	PT-4				;LONG, ADDR OF RECTANGLE
+
+		LINK	A6,#0					;NO LOCAL VARS
+		MOVE.L	R(A6),A0				;GET RECT PTR
+		MOVE	PT+H(A6),D0 			;GET HORIZ COORD
+		MOVE	PT+V(A6),D1 			;GET VERT COORD
+		CLR.B	RESULT(A6)				;INIT BOOLEAN TO FALSE
+		CMP 	(A0)+,D1				;IS PT.V < TOP ?
+		BLT.S	FALSE					;YES, QUIT
+		CMP 	(A0)+,D0				;IS PT.H < LEFT ?
+		BLT.S	FALSE					;YES, QUIT
+		CMP 	(A0)+,D1				;IS PT.V >= BOTTOM ?
+		BGE.S	FALSE					;YES, QUIT
+		CMP 	(A0)+,D0				;IS PT.H >= RIGHT ?
+		BGE.S	FALSE					;YES, QUIT
+		ADDQ.B	#1,RESULT(A6)				;RETURN BOOLEAN TRUE
+FALSE	UNLINK	PARAMSIZE,'PTINRECT'
+
+
+
+PutRect PROC  EXPORT
+		IMPORT SETHSIZE
+;----------------------------------------------------------------
+;
+;  PROCEDURE PutRect(r: Rect; bufHandle: Handle; VAR index,size: INTEGER);
+;
+;  Puts the four inversion points of a rectangle
+;
+;  Clobbers D0,A0,A1
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	16				;TOTAL SIZE OF PARAMETERS
+RECT			EQU 	PARAMSIZE+8-4			;LONG, ADDR OF RECT
+BUFHANDLE		EQU 	RECT-4				;LONG, HANDLE
+INDEX			EQU 	BUFHANDLE-4 		;LONG, ADDR OF INTEGER
+SIZE			EQU 	INDEX-4 			;LONG, ADDR OF INTEGER
+
+
+		LINK	A6,#0					;NO LOCAL VARIABLES
+
+;------------------------------------------------------------
+;
+; IS THERE ROOM FOR FOUR NEW POINTS IN THE POINT BUFFER ?
+;
+		MOVE.L	INDEX(A6),A0				;POINT TO INDEX
+		MOVE.L	SIZE(A6),A1 			;POINT TO SIZE
+		MOVEQ	#16,D0
+		ADD 	(A0),D0 				;GET CURRENT INDEX + 16
+		CMP 	(A1),D0 				;IS NEW INDEX > SIZE ?
+		BLE.S	SIZEOK					;NO, CONTINUE
+
+
+;-------------------------------------------------------------
+;
+;  NO, GROW THE POINT BUFFER ENOUGH FOR 256 MORE POINTS
+;
+		ADD 	#1024,(A1)				;ADD 1024 TO SIZE
+		MOVEM.L D3/A2,-(SP) 			;SAVE REGS
+		MOVE.L	BUFHANDLE(A6),-(SP) 		;PUSH HANDLE PARAM
+		MOVE	(A1),-(SP)				;PUSH NEW SIZE
+		JSR 	SETHSIZE 				;MAKE THE BUFFER BIGGER
+		MOVEM.L (SP)+,D3/A2 			;RESTORE REGS
+		MOVE.L	INDEX(A6),A0				;POINT TO INDEX AGAIN
+
+
+;------------------------------------------------------------
+;
+;  NOW INSTALL THE 4 NEW INVERSION POINTS
+;
+SIZEOK	MOVE.L	BUFHANDLE(A6),A1			;GET BUFHANDLE
+		MOVE.L	(A1),A1 				;DE-REFERENCE HANDLE
+		ADD 	(A0),A1 				;ADD INDEX FOR POINTER
+		ADD 	#16,(A0)				;BUMP INDEX
+		MOVE.L	RECT(A6),A0 			;POINT TO RECTANGLE
+		MOVE.L	TOPLEFT(A0),(A1)+			;PUT TOPLEFT POINT
+		MOVE	TOP(A0),(A1)+				;PUT TOP-RIGHT POINT
+		MOVE	RIGHT(A0),(A1)+
+		MOVE	BOTTOM(A0),(A1)+			;PUT BOTTOM-LEFT POINT
+		MOVE	LEFT(A0),(A1)+
+		MOVE.L	BOTRIGHT(A0),(A1)+			;PUT BOTRIGHT POINT
+		UNLINK	PARAMSIZE,'PUTRECT '
+
+
+
+		END 
+
+
+
+

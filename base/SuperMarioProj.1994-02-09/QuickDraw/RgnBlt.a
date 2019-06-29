@@ -1,0 +1,4251 @@
+;
+;	File:		RgnBlt.a
+;
+;	Contains:	Low level block transfer clipped to an arbitrary region.
+;				Called by StretchBits only.
+;
+;	Copyright:	© 1981-1990, 1992-1993 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:   Mac32 Bigbang Sys606
+;
+;	Change History (most recent first):
+;
+;	   <SM4>	  6/3/93	CSS		Per Shannon Holland and KON, The code RgnBlt checks for a
+;									pattern which is solid background color when it should check for
+;									a pattern which is a solid foreground color.
+;	   <SM3>	01/06/93	HI		#1052740: Modified D0 to D3 in RgnBlt in rcMASK0 section.
+;									Previously, it was masking out the destination instead of
+;									the source; so the images were drawn incorrectly. ANDing
+;									with D3 masks out the source and fixes the bug. (Hoon Im)
+;	   <SM2>	 6/12/92	stb		<sm 6/9/92>stb Synch with QDciPatchROM.a; added comments to
+;									rMASK8, rXMASK8, rslowHilite, rTransparent.
+;		<11>	11/26/90	SMC		Fixed pattern hiliting once and for all.  With BAL.
+;		<10>	10/31/90	SMC		Fixed alpha channel bugs with BAL.
+;		 <9>	10/18/90	SMC		Made speed/size improvements to rcMASK0,1,3. With KON.
+;		 <8>	 9/26/90	SMC		Removed optimization in rTransparent that was losing pattern
+;									data. Also removed jmp to next instruction in rslowHilite.
+;		 <7>	 9/18/90	BG		Removed <3>. 040s are behaving more reliably now.
+;		 <6>	 8/20/90	SMC		Changed use of pattern offset in big pattern copy (rXMASK8) from
+;									signed to unsigned.
+;		 <5>	  8/1/90	SMC		Added real non-black pattern and source hilite mode blit loop.
+;		 <4>	 7/20/90	gbm		Change a few identifiers so conflicts go away
+;		 <3>	 6/27/90	BG		Added EclipseNOPs for flakey 040s.
+;		 <2>	 5/24/90	KON		Remove checks on BGnotWhite, and add slop factor to stack frame.
+;	   <1.7>	11/18/89	BAL		Incorporated QuickerDraw's 8-bit arithmetic transfer loops
+;	  <•1.6>	 7/14/89	BAL		For Aurora: Final CQD
+;	   <1.5>	 6/30/89	BAL		Now uses qdStackXtra equate.
+;	  <•1.4>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;	  <•1.3>	 4/12/89	BAL		Blasting in 32-Bit QuickDraw 1.0B1
+;				 11/5/88	BAL		Set transfer direction (RUNBUMP) for seekMask.
+;				 9/22/88	BAL		Moved initialization of region state records into GetSeek.
+;				 9/21/88	BAL		Added allocation of RUNBUF for new run-based clipping
+;				 9/18/88	BAL		Altered to use common stack frame file 'Drawing Vars.a'
+;				 11/8/87	BAL		Fixed computation of bufSize for more accurate region clipping
+;									at at depths greater than 1. <C954>
+;_______________________________ Post Mac II ____________________________________________
+;				12/12/86	CRC		Added arithmetic modes
+;				 7/29/86	EHB		Use new stack-based EXPAT buffer
+;				 7/24/86	EHB		Added support for patterns wider than one long
+;				 7/22/86	EHB		Added color to pattern OR and pattern BIC transfer modes
+;				  7/5/86	EHB		New routine GetSeek replaces seekMask and getXRtn
+;				 6/24/86	EHB		Big re-org: all shared fields set up by stretchbits before
+;									calling here. All parms in stack frame or registers.
+;				 6/22/86	EHB		Call new patexpand for patterns with depths
+;				 6/20/86	EHB		New params to COLORMAP Added FCOLOR and BCOLOR to stack frame
+;				 6/19/86	EHB		Do horiz calculations as longs for big pixels Removed SRCPIX and
+;									DSTPIX from frame, since always called with pixMaps as params
+;									(by StretchBits).
+;				 6/15/86	EHB		Modified to use longword aligned buffers (Missed it before!) If
+;									one 1-bit region, play directly into RGNBUFFER Convert BitsToPix
+;									and use pixelSize Make sure stack is longword aligned (for fast
+;									buffers)
+;				 6/14/86	EHB		Call GetXRtn to set expand routine for SeekMask Added SRCPIX and
+;									DSTPIX to stack frame
+;				 6/13/86	EHB		Moved SeekMask to another file Rearranged stack frame with
+;									SeekMask stuff at top
+;				  6/8/86	EHB		Took HBUMP out of inner loop (use D3 instead). Use BFEXTU to
+;									extract aligned longs in scanline loops
+;				  6/5/86	EHB		Masked off flag bits in all references to rowBytes
+
+
+		BLANKS	ON 
+		STRING	ASIS
+		
+		MACHINE MC68020
+
+RgnBlt	PROC  EXPORT
+		EXPORT rMASK0, rMASK1, rMASK2, rMASK3, rMASK8, rMASK9, rMASK10, rMASK11, rXMASK8
+		EXPORT rXMASK9, rXMASK10, rXMASK11, rAvg, rAddPin, rAddOver, rSubPin, rTransparent
+		EXPORT rMax, rSubOver, rMin, rcMask0, rcMask1, rslowHilite, rcMask3, rHilite
+		EXPORT rArith16Tab, rArith32Tab, rHiliteTab
+
+;--------------------------------------------------------------
+;
+;  PROCEDURE RgnBlt(srcPix,dstPix: PixMap;
+;			srcRect,dstRect: Rect;
+;			mode: INTEGER; pat: Pattern;
+;			rgnA,rgnB,rgnC: RgnHandle);
+;
+;  TRANSFERS A RECTANGULAR BLOCK OF BITS CLIPPED TO THE DESTINATION
+;  BITMAP'S BOUNDS AND TO THE INTERSECTION OF THREE REGIONS.
+;  MODE SPECIFIES THE TRANSFER MODE AND WHETHER THE SOURCE SHOULD COME
+;  FROM THE SOURCE BITMAP OR FROM A REPEATING PATTERN.
+;
+;  STRECHBITS DOES ALL TRANSFERS BETWEEN SOURCE AND DESTINATION OF DIFFERENT
+;  DEPTHS, SO WE CAN ASSUME THAT SOURCE DEPTH = DEST DEPTH.
+;
+;  COPYRIGHT APPLE COMPUTER INC.
+;  DESIGNED AND WRITTEN BY BILL ATKINSON
+;
+;  THIS CODE IS POSITION INDEPENDENT, RE-ENTRANT, AND READ-ONLY.
+;  CLOBBERS ONLY A0.
+;
+;	mode bit meaning
+;  	7	6	5	4	3	2	1	0
+;	0	msk	ari	hil pat	not	coxb-
+;
+;  MODES:  0 SRC	 	 --> DST
+;		   1 SRC OR  DST --> DST
+;		   2 SRC XOR DST --> DST
+;		   3 SRC BIC DST --> DST
+;
+;		   4 (NOT SRC)	       --> DST
+;		   5 (NOT SRC) OR  DST --> DST
+;		   6 (NOT SRC) XOR DST --> DST
+;		   7 (NOT SRC) BIC DST --> DST
+;
+;		   8 PATTERN	 	 --> DST
+;		   9 PATTERN OR  DST --> DST
+;		  10 PATTERN XOR DST --> DST
+;		  11 PATTERN BIC DST --> DST
+;
+;		  12 (NOT PATTERN)		   --> DST
+;		  13 (NOT PATTERN) OR  DST --> DST
+;		  14 (NOT PATTERN) XOR DST --> DST
+;		  15 (NOT PATTERN) BIC DST --> DST
+;
+;		  16 … 31 unassigned (but 16 is used temporarily to note that hiliting is fast)
+;
+;		  32 AVG(SRC, DST, WEIGHT) --> DST
+;		  33 SRC + DST --> DST (pin TO MAX)
+;		  34 SRC + DST --> DST (no pin)
+;		  35 DST - SRC --> DST (pin TO MIN)
+;		  36 SRC less bg --> DST
+;		  37 MAX(SRC, DST) --> DST
+;		  38 DST - SRC --> DST (no pin)
+;		  39 MIN(SRC, DST) --> DST
+
+;		  40 AVG(PAT, DST, WEIGHT) --> DST
+;		  41 PAT + DST --> DST (pin TO MAX)
+;		  42 PAT + DST --> DST (no pin)
+;		  43 DST - PAT --> DST (pin TO MIN)
+;		  44 PAT less bg --> DST
+;		  45 MAX(PAT, DST) --> DST
+;		  46 DST - PAT --> DST (no pin)
+;		  47 MIN(PAT, DST) --> DST
+
+;		  48 … 49 unassigned
+;		  50 src as mask, Hilite Dst (bg color <--> hilite color)
+;		  51 … 57 unassigned
+
+;		  58 pat as mask, Hilite Dst (bg color <--> hilite color)
+
+
+;----------------------------------------------------
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	44					;SIZE OF PARAMETERS
+SRCBITS 		EQU 	PARAMSIZE+8-4		;LONG, ADDR OF BITMAP
+MASKBITS 		EQU 	SRCBITS-4			;LONG, ADDR OF BITMAP
+DSTBITS 		EQU 	MASKBITS-4			;LONG, ADDR OF BITMAP
+SRCRECT 		EQU 	DSTBITS-4			;LONG, ADDR OF RECT
+MASKRECT 		EQU 	SRCRECT-4			;LONG, ADDR OF RECT
+DSTRECT 		EQU 	MASKRECT-4			;LONG, ADDR OF RECT
+MODE			EQU 	DSTRECT-2			;WORD
+PAT 			EQU 	MODE-4				;LONG, ADDR OF PATTERN
+RGNA			EQU 	PAT-4				;LONG, RGNHANDLE
+RGNB			EQU 	RGNA-4				;LONG, RGNHANDLE
+RGNC			EQU 	RGNB-4				;LONG, RGNHANDLE
+multColor		EQU		RGNC-2				;byte	set if source contains non black/white colors
+
+
+;----------------------------------------------------
+;
+;  A6 OFFSETS OF LOCAL VARIABLES AFTER LINK:
+;
+;  STACKFRAME LINKED AND LOCALS INITIALIZED BY STRETCHBITS.
+;
+&CurFile	SETC	'RGNBLT'
+			
+			INCLUDE	'DrawingVars.a'
+
+
+;--------------------------------------------------------------
+;
+;  RGNBLT CALLED WITH STACK FRAME SET UP AS SHOWN ABOVE.
+;  CALLER TAKES CARE OF CURSOR
+;
+;  REGISTER USE:
+;
+;		A2:	SRCRECT
+;		A3:	DSTRECT
+;		A4: SRCPIX
+;		A5: DSTPIX
+;
+;		D3:	SRCSHIFT
+;		D4:	DSTSHIFT
+;		D7: INVERTFLAG
+;
+;  ONLY A6,A7 MUST BE PRESERVED
+
+;-----------------------------------
+;
+;  SAVE STACK FOR NOW, BECAUSE WE'RE STILL ALLOCATING SCANLINE BUFFERS
+;
+		MOVE.L	SP,SAVESTK2(A6)				;PRESERVE STACK POINTER
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	RgnBlt and everyone else (stretch,drawline,drawarc) compute bufSize as:
+;
+;		[ (minRect.right-minRect.left) div 32 + 1 ] * pixelsize - 1
+;		
+;	This will result in an excess of upto (pixelsize-1) longs to be accessed during the
+;	region masked drawing.  Since region masks are created as long aligned 1-bit deep masks
+;	which are then expanded to the proper depth the RGNBUFFER on the stack must be the bulky
+;	size computed above (until seekMask is changed to be more intelligent) but the stackFrame
+;	variable bufSize which determines the width of the scanline actually written to can more
+;	accurately be computed as:
+;
+;		[ (minRect.right-minRect.left)  * pixelsize - 1 ] div 32		<C954> 08Nov87 BAL
+;		
+;-----------------------------------
+;
+;  CALC BUFLEFT AND BUFSIZE  (BUFSIZE = DSTSIZE)
+;
+		MOVE	MINRECT+LEFT(A6),D1 		;GET MINRECT LEFT
+		SUB 	BOUNDS+LEFT(A5),D1			;CONVERT TO GLOBAL COORDS
+		EXT.L	D1							;CLEAR HI WORD
+		LSL.L	D4,D1						;CONVERT PIXELS TO BITS
+		AND		#$FFE0,D1					;TRUNC TO MULT OF 32
+		LSR.L	D4,D1						;CONVERT BITS TO PIXELS
+		ADD 	BOUNDS+LEFT(A5),D1			;CONVERT BACK TO LOCAL
+		MOVE	D1,BUFLEFT(A6)				;SAVE AS BUFLEFT
+		MOVE	MINRECT+RIGHT(A6),D0		;GET MINRECT RIGHT
+		SUB 	D1,D0						;CALC WIDTH IN DOTS (=SCANSIZE)
+		move	d0,d1						;save for expansion scanline buffer	<C954>
+		
+		ext.l	d1							;clear out high word				<C954>
+		lsl.l	d4,d1						;convert to bits					<C954>
+		subq.l	#1,d1						;force downward round				<C954>
+		LSR.l	#5,D1						;GET NUMBER OF LONGS IN SCANBUF - 1	<C954>
+		MOVE	D1,BUFSIZE(A6)				;BUFSIZE = # LONGS -1				<C954>
+		
+		LSR		#5,D0						;get (pixels in scanbuf)/32			<C954>
+		ADDQ	#1,D0						;MAKE IT ONE BASED
+		LSL		D4,D0						;MULTIPLY BY DEPTH
+;		SUBQ	#1,D0						;MAKE SIZE 0 BASED
+
+		addQ	#4,D0						;add in slop for 4-bit			<BAL solo>
+
+;-----------------------------------------------------------------------
+;
+;  ALLOCATE AND CLEAR A SCANLINE BUFFER FOR THE COMPOSITE MASK.
+;
+CLRMASK CLR.L	-(SP)						;ALLOCATE AND CLEAR
+		DBRA	D0,CLRMASK					;LOOP TILL DONE
+		MOVE.L	SP,RGNBUFFER(A6)	 		;REMEMBER WHERE RGNBUFFER IS
+
+
+;--------------------------------------------------------------------
+;
+;  ALLOCATE BUFFERS AND INIT STATE RECORDS FOR EACH NON-RECT REGION
+;  GET SEEK ROUTINE INTO SEEKMASK(A6)
+;  GET EXPAND ROUTINE INTO EXRTN(A6) FOR SEEK ROUTINE
+;  Clobbers: A0-A3, D0-D4
+;
+
+		MOVEQ	#-1,D0						;assume run clipping			Start of <11>
+		MOVE	LOCMODE(A6),D2 				;GET TRANSFER MODE
+		CMP		#32,D2						;new arithmetic mode?
+		BLO		@newWay
+		CMP		#64,D2
+		BHS		Done						;unimplemented mode
+		CMP		#48,D2
+		BLT.S	@noHilite
+		CMP		#50,D2						;source highlight mode?
+		BEQ.S	@oldWay						;if so, can't be fast pattern case
+		CMP		#58,D2						;pattern highlight mode?
+		BNE		Done						;if not, it is unimplemented
+		TST		PATROW(A6)					;BIG PATTERN?
+		BNE.S	@oldWay						;if so, assume pattern contains background color
+		MOVE.L	exPat(A6),A0				;check if non-background pattern
+		MOVE.L	FCOLOR(A6),D1				;get foreground color <SM4> CSS
+		MOVEQ	#$0F,D0						;number of longs in a short pattern
+@nextPatRow
+		CMP.L	(A0)+,D1					;is the row non-background?
+		DBEQ	D0,@nextPatRow				;if so, check for more rows
+ 		BNE.S	@oldWay						;if not, can’t do fast hiliting <SM4> CSS
+		MOVE	#$10,locMode(A6)			;set the mode to the fast hilite variety
+		BRA.S	@newWay						;assume D0 = -1
+@noHilite
+		CMP.W	#4,d4						;is dst 16 or 32 bits/pixel?
+		BGE.S	@newWay						;yes, handle new way
+		CMP.W	#32,D2						;is it an arithmetic mode?
+		BLT.S	@newWay						;no, handle new way
+		CMP.W	#47,D2						;is it an arithmetic mode?
+		BGT.S	@newWay						;no, handle new way (hilite mode)
+@oldWay	MOVEQ	#0,D0						;don't use run clipping
+@newWay										;								End of <11>
+		move.l	d0,runBuf(a6)				;set non-zero for run clipping 	<1.5> BAL
+		MOVE.L	RGNC(A6),-(SP)				;PUSH USER RGNHANDLE
+		MOVE.L	RGNB(A6),-(SP)				;PUSH VIS RGNHANDLE
+		MOVE.L	RGNA(A6),-(SP)				;PUSH CLIP RGNHANDLE
+		MOVE.L	#2,-(SP)					;PUSH HANDLE COUNT - 1
+		_GETSEEK							;GET EXPAND ROUTINE INTO EXRTN(A6)
+											;AND SEEK ROUTINE INTO SEEKMASK(A6)
+		MOVE.W	DSTSHIFT(A6),D4				;RESTORE DSTSHIFT
+		MOVE.L	DSTRECT(A6),A3				;RESTORE DSTRECT
+											
+
+;----------------------------------------------------------
+;
+;  ASSUME WE WILL BE DRAWING DOWNWARD AND TO RIGHT.
+;
+		MOVE	MINRECT+TOP(A6),FIRSTV(A6)		;FIRSTV:=MINRECT TOP
+		MOVE	MINRECT+BOTTOM(A6),LASTV(A6)	;LASTV:=MINRECT BOTTOM
+		MOVE.L	#$00040001,HBUMP(A6)			;HBUMP:=4 BYTES, VBUMP:=1 SCAN
+		MOVE.L	RGNBUFFER(A6),RGNADDR(A6) 		;RGNADDR:=RGNBUFFER
+
+
+ScaleColorBit	EQU		3
+SwapFGBGBit		EQU		4
+UseStretchBit	EQU		5
+InvertItBit		EQU		7
+ColorizeInModeCaseBit	EQU	8
+ColorizeInSrcBufBit		EQU	9
+
+
+;--------------------------------------------------
+;
+;  CALCULATE CASE JUMP FOR DIFFERENT TRANSFER MODES
+;  GET INVERTFLAG INTO D7
+;
+SETMODE MOVE	LOCMODE(A6),D2 				;GET TRANSFER MODE
+		MOVE	D2,D1						;SAVE MODE
+		
+		CMP.W	#$10,D2						;fast hilite mode?								<11>
+		BNE.S	@notFastHilite				;												<11>
+		MOVE.L	rHiliteTabPtr,A0			;get address of table (from trap table)
+		ADD.L	-4(a0,D4*4),a0				;select routine based on destination depth
+		MOVE.L	A0,ModeCase(A6)				;set up jump
+		MOVE	dstPix+pixelSize(A6),D7		;how far to extract to get a pixel worth
+		BFEXTU	hilitColor(A6){0:D7},D3		;and a pixel sized highlight color
+		BFEXTU	transColor(A6){0:D7},D6		;set up a pixel sized background color
+		CLR		patRow(A6)					;no pattern
+		BRA		GetDst						;go to it
+@notFastHilite
+		CMP.W	#$20,D2						;non-arithmetic mode?							<11>
+		BLO		@doOldWay					;yes, skip a bunch of setup						<11>
+		AND		#$37,D2						;treat mode MOD $07 + arithmetic bit, hilite bit
+		BCLR	#4,D2						;and clear the hilite bit
+		BNE.S	@Hilite
+
+	if Quicker then
+	
+		cmp.w	#3,d4						;is dest 8, 16 or 32 bits/pixel?		<1.7> BAL
+		blt.s	@noHilite					;no use indexed arith mode tab
+		cmp.w	#4,d4						;is dest 16 or 32 bits/pixel?			<1.7> BAL
+		blt.s	@chk8Bit					;determine if Andy wants this one		<1.7> BAL
+
+	else
+	
+		cmp.w	#4,d4						;is dest 16 or 32 bits/pixel?		<1.7> BAL
+		blt.s	@noHilite					;no use indexed arith mode tab
+
+	endif
+
+		move.l	rArith32TabPtr,A0			;point to 32 bit/pixel loops (preserves cc's)
+		bne.s	@32ok						;if 16 bit use alternate table
+		move.l	rArith16TabPtr,A0
+@32ok	sub		#$20,d2						;make average tbl entry zero
+		beq.s	@chkHalf					;mode is average, check for fast case
+@notHalf
+		add.l	(a0,d2*4),a0				;get modecase based on d2
+		move.l	a0,modeCase(a6)				;save routine for later
+		bra.s	GetPat
+
+@chk8Bit
+
+	if Quicker then
+	
+	;	tst.w	hBump(a6)					;right to left?							<1.7> BAL
+	;	bmi.s	@noHilite					;if so, skip							<1.7> BAL
+		lea		rArith8Tab,A0				;point to 8 bit vector table			<1.7> BAL
+		MOVE.L	INVERTFLAG(A6),D7			;GET INVERTFLAG INTO D7
+		bra.s	@32ok						;										<1.7> BAL
+		
+	endif
+	
+@chkHalf
+		lea 	weight(a6),a1				;point to weights
+		move.w	(a1)+,d0
+		cmp.w	(a1)+,d0					;is opColor gray?
+		bne.s	@notHalf
+		cmp.w	(a1),d0
+		bne.s	@notHalf
+		addq	#1,d0						;yes, check for gray values of $8000 or $7fff
+		and.w	#$fffe,d0
+		cmp.w	#$8000,d0
+		bne.s	@notHalf
+		addq	#8,d2						;use fast 50% blend routine instead
+		bra.s	@notHalf
+
+@Hilite
+		ADDQ	#8,D2						;if slow hilite, advance to next range
+@noHilite
+		ADD		D2,D2						;make it a word offset (40 … 4E, 54)
+		SUB		#$28,D2						;(mode AND ($27)) * 2 - jump table offsets (40 - 18)
+		BRA.S	@0							;jump table offsets = 18 … 26, 2C
+@doOldWay
+		AND 	#$B,D2						;TREAT MODE MOD 16, KILL INVERT BIT
+		MOVEQ	#3,D0
+		AND 	D2,D0						;GET BOTTOM 2 BITS OF MODE
+		ADD 	D0,D2						;MODIFY MODE FOR INDEX
+		CMP		#8,D2						;pattern?
+		BGE.S	@checkBigPat				;don’t worry about color src blt loops if so
+		CMP		#4,D2						;xor?
+		BEQ.S	@0							;skip if so
+
+		BTST	#ColorizeInModeCaseBit, XLateFlag(a6)		;colorize?
+;		tst.w	BGnotWhite(A6)				;backcolor white and forecolor black?
+		BEQ.S	@0							;Yes, don’t use color loops
+		
+		ADD		#$28,D2						;use color loops
+@checkBigPat
+		TST		PATROW(A6)					;BIG PATTERN?
+		BEQ.S	@0							;=>NO
+		ADD		#8,D2						;YES, BUMP INDEX
+@0		LEA 	RgnBltModeTab,A0			;POINT TO MODE TABLE
+		MOVE.L	0(A0,D2*2),MODECASE(A6) 	;SAVE ROUTINE ADDRESS FOR LATER
+		MOVE.L	INVERTFLAG(A6),D7			;GET INVERTFLAG INTO D7
+
+GetPat
+;-------------------------------------------------
+;
+;  SET UP D6 AND D7 FOR PATTERNS
+;
+		BTST	#3,D1						;WILL PATTERN BE USED ?
+		BEQ.S	USESRC						;NO, USE SOURCE INSTEAD
+		MOVE.L	EXPAT(A6),SRCADDR(A6)		;SAVE PTR TO EXPANDED PATTERN AS SRC PTR
+		MOVE	PATROW(A6),D1				;WILL BIG PATTERN BE USED?
+		BEQ.S	SMALLPAT					;=>NO, OLD PAT
+
+;  NEW PATTERN.  SET STARTING VERT POSITION, SET FLAG.
+
+		MOVEQ	#0,D6						;CLEAR HIGH WORD
+		MOVE	PATVMASK(A6),D6				;GET VERTICAL MASK
+		ADDQ	#1,D6						;CONVERT TO COUNT
+		DIVU	PATROW(A6),D6				;DIVIDE BY ROWSIZE
+		SUBQ	#1,D6						;CONVERT TO ROW MASK
+		AND		MINRECT+TOP(A6),D6			;GET TOP VERT COORD
+		MULU	D1,D6						;GET PATVPOS INTO D6
+		SWAP	D6							;LEAVE PATVPOS IN HIGH WORD OF D6
+											;WE DON'T KNOW PATHPOS FOR D6 YET
+		MOVE	PATHMASK(A6),D7				;SET UP HMASK IN D7
+		BRA		GETDST						;SKIP OVER SRC STUFF
+		
+;  SET UP (VERT * 4) MOD 64 AS PATTERN SELECTOR
+;  GET PATTERN SELECTOR INTO D7, FIRST PATTERN INTO D6
+
+SMALLPAT MOVEQ	#$F,D7						;TREAT COORD MOD 16
+		AND 	MINRECT+TOP(A6),D7			;GET TOP VERT COORD
+		MOVE.L	([EXPAT,A6],D7*4),D6 		;GET FIRST PATTERN DATA
+		BRA 	GETDST						;SKIP OVER SRC STUFF
+
+
+;--------------------------------------------------------------
+;
+;  SRC WILL BE USED.  CHECK FOR OVERLAP AND CHOOSE DIRECTION SO
+;  THAT SRC WONT GET CLOBBERED BEFORE IT IS USED.
+;
+USESRC	MOVE.L	SRCRECT(A6),A2				;POINT TO SRCRECT
+		LEA		SRCPIX(A6),A4				;POINT TO SRCPIX
+		MOVE.L	BASEADDR(A4),D0 			;GET SRC BASEADDR
+		CMP.L	BASEADDR(A5),D0 			;ARE SRC AND DST SAME BITMAP ?
+		BNE.S	SRCOK						;NO, DON'T WORRY ABOUT OVERLAP
+
+		MOVE	TOP(A3),D0					;GET DST TOP
+		SUB 	BOUNDS+TOP(A5),D0			;CONVERT TO GLOBAL
+		MOVE	TOP(A2),D1					;GET SRC TOP
+		SUB 	BOUNDS+TOP(A4),D1			;CONVERT TO GLOBAL
+		SUB 	D1,D0						;CALC DV:=DSTTOP-SRCTOP
+		BLT.S	SRCOK						;EVERYTHING FINE IF SCROLLING UP
+		BGT.S	UPSIDE						;UPSIDE DOWN IF SCROLLING DOWN
+
+
+;------------------------------------------------------------
+;
+;  DV=0. IF DH > 0 THEN WE MUST TRANSFER BACKWARDS FROM RIGHT.
+;
+		MOVE	LEFT(A3),D0 				;GET DST LEFT
+		SUB 	BOUNDS+LEFT(A5),D0			;CONVERT TO GLOBAL
+		MOVE	LEFT(A2),D1 				;GET SRC LEFT
+		SUB 	BOUNDS+LEFT(A4),D1			;CONVERT TO GLOBAL
+		cmp 	D1,D0						;DH := DSTLEFT-SRCLEFT			<BAL 4Mar89>
+		BLE.S	SRCOK						;IF DH <= 0, WE'RE FINE
+		MOVE	right(A2),D1 				;GET SRC right					<BAL 4Mar89>
+		SUB 	BOUNDS+LEFT(A4),D1			;CONVERT TO GLOBAL				<BAL 4Mar89>
+		cmp		d1,d0						;is the srcRight < dstLeft ?	<BAL 4Mar89>
+		bge.s	srcOK						;yes, they don't overlap!		<BAL 4Mar89>
+		NEG 	HBUMP(A6)					;ELSE BUMP TOWARD LEFT
+		BRA.S	SRCOK						;CONTINUE
+
+
+;------------------------------------------------------------
+;
+;  DV IS POSITIVE, WE MUST TRANSFER UPSIDE-DOWN FROM BOTTOM.
+;
+UPSIDE	NEG 	VBUMP(A6)					;VBUMP:=-1, BUMP UPWARD
+		NEG.L	SRCROW(A6)					;SRCROW:=-SRC ROWBYTES
+		NEG.L	DSTROW(A6)					;DSTROW:=-DST ROWBYTES
+		MOVE	MINRECT+BOTTOM(A6),FIRSTV(A6)
+		SUB 	#1,FIRSTV(A6)				;FIRSTV:=BOTTOM-1
+		MOVE	MINRECT+TOP(A6),LASTV(A6)
+		SUB 	#1,LASTV(A6)				;LASTV:=TOP-1
+
+
+;----------------------------------------------
+;
+;  CALC SHIFTCNT
+;
+SRCOK	MOVE	LEFT(A3),D6 				;GET DST LEFT LOCAL COORDS
+		SUB 	BOUNDS+LEFT(A5),D6			;CONVERT TO GLOBAL
+		EXT.L	D6							;MAKE LONG FOR BIG PIXELS
+		LSL.L	D4,D6						;CONVERT DST PIXELS TO BITS
+		MOVE	LEFT(A2),D1 				;GET SRC LEFT LOCAL COORDS
+		SUB 	BOUNDS+LEFT(A4),D1			;CONVERT TO GLOBAL
+		EXT.L	D1							;MAKE LONG FOR BIG PIXELS
+		LSL.L	D4,D1						;CONVERT SRC PIXELS TO BITS
+		SUB.L	D1,D6						;CALC DELTA HORIZ BITS
+		MOVEQ	#$1F,D0						;NEED DELTA HORIZ MOD 32
+		AND.L	D0,D6						;MOD 32 FOR SHIFTCNT
+		NEG.L	D6							;CHANGE SHIFT TO OFFSET
+											;leave d6 as neg(# bits to shift right)
+
+;------------------------------------
+;
+;  CALC STARTING SRCADDR
+;
+		MOVE	FIRSTV(A6),D0				;GET FIRST DST VERTICAL
+		SUB 	TOP(A3),D0					;SUBTRACT DSTRECT TOP
+		ADD 	TOP(A2),D0					;ADD SRCRECT TOP
+		SUB 	BOUNDS+TOP(A4),D0			;CONVERT SRCV TO GLOBAL
+		MOVE	ROWBYTES(A4),D1				;GET SRC ROWBYTES
+		AND 	#nuRBMask,D1					;AND MASK OFF FLAG BITS
+		MULS	D1,D0 						;MULT BY SRC ROWBYTES		BAL	02Dec88
+		MOVE.L	BASEADDR(A4),A0 			;GET START OF BITMAP
+		ADD.L	D0,A0						;ADD OFFSET TO BASEADDR
+
+		MOVE	MINRECT+LEFT(A6),D0 		;GET DST LEFT
+		SUB 	LEFT(A3),D0 				;CONVERT FROM DST COORDS
+		ADD 	LEFT(A2),D0 				;TO SRC COORDS
+		SUB 	BOUNDS+LEFT(A4),D0			;CONVERT TO GLOBAL SRC
+		EXT.L	D0							;MAKE LONG FOR BIG PIXELS
+		LSL.L	D4,D0						;CONVERT SRC PIXELS TO BITS
+		SUB.L	D6,D0						;ADD SHIFTCNT
+		ASR.L	#5,D0						;CONVERT BITS TO LONGS
+		LSL.L	#2,D0						;CONVERT LONGS TO BYTES
+		ADD.L	D0,A0						;ADD HORIZ OFFSET
+		MOVE.L	A0,SRCADDR(A6)				;SAVE AS SRCADDR
+
+
+;------------------------------------
+;
+;  CALC STARTING DSTADDR
+;
+GETDST	MOVE	FIRSTV(A6),D0				;GET FIRST DST VERT
+		SUB 	BOUNDS+TOP(A5),D0			;CONVERT TO GLOBAL
+		MOVE	ROWBYTES(A5),D1				;GET DST ROWBYTES
+		AND		#nuRBMask,D1					;AND MASK OFF FLAG BITS
+		MULS	D1,D0 						;MULT BY ROWBYTES		BAL	02Dec88
+		MOVE.L	BASEADDR(A5),A0 			;GET START OF BITMAP
+		ADD.L	D0,A0						;ADD VERTICAL OFFSET
+
+		MOVE	MINRECT+LEFT(A6),D0 		;GET DST LEFT
+		SUB 	BOUNDS+LEFT(A5),D0			;CONVERT TO GLOBAL
+		EXT.L	D0							;MAKE LONG FOR BIG PIXELS
+		LSL.L	D4,D0						;CONVERT DST PIXELS TO BITS
+		LSR.L	#5,D0						;CONVERT BITS TO LONGS
+		LSL.L	#2,D0						;CONVERT LONGS TO BYTES
+		MOVE	D0,D1						;SAVE GLOBAL DSTLEFT
+		ADD.L	A0,D0						;ADD HORIZ OFFSET
+		MOVE.L	D0,DSTADDR(A6)				;SAVE AS DSTADDR
+		
+;------------------------------------
+;
+;  SET UP D6 FOR BIG PATTERNS
+;
+		TST		PATROW(A6)					;DOING BIG PATTERN?
+		BEQ.S	NOTBIGPAT					;=>NO
+		AND		D7,D1						;MASK HORIZ OFFSET INTO PATTERN
+		MOVE	D1,PATHPOS(A6)				;SAVE HORIZONTAL OFFSET
+		MOVE	D1,D6						;SAVE PATHPOS IN D6
+		SWAP	D6							;GET PATVPOS IN LOW WORD
+
+NOTBIGPAT
+;------------------------------------------------------------------------
+;
+;  ADJUST SRCADDR,DSTADDR,RGNADDR IF WE ARE BUMPING BACKWARDS FROM RIGHT
+;
+		MOVE	locMode(A6),D2
+		MOVE.L	hilitColor(A6),D4			;set up hilite color
+		CMP		#$10,D2						;if fast hilite, bump left -> right is fine,
+		BEQ.S	skipBump					;& D3 is already set up to background pixel
+		tst.l	runBuf(a6)					;are we run clipping?			<1.5> BAL
+		bne.s 	HBUMPOK						;if so, do new way
+		
+; the following is only used by old arithmetic modes
+; which don't work right to left anyway 
+
+		TST 	HBUMP(A6)					;BUMPING BACKWARD ?
+		BPL.S	HBUMPOK 					;NO, CONTINUE
+		MOVE	BUFSIZE(A6),D0				;GET BUFFER SIZE
+		EXT.L	D0							;CLEAR HI WORD
+		LSL.L	#2,D0						;QUAD FOR # BYTES
+		ADD.L	D0,DSTADDR(A6)				;ADJUST DSTADDR
+		ADD.L	D0,RGNADDR(A6) 				;ADJUST RGNADDR
+		ADD.L	D0,SRCADDR(A6)				;ADJUST SRCADDR
+
+HBUMPOK	MOVE	HBUMP(A6),D3				;GET HBUMP
+		MOVE.L	FCOLOR(A6),D4				;GET FG COLOR
+		MOVE.L	BColor(A6),D5				;GET BK COLOR				<BAL 11Jan89>
+skipBump
+		MOVE	FIRSTV(A6),VERT(A6) 		;INIT CURRENT VERTICAL
+		
+		;set up any needed registers for new modes
+		BTST	#5,D2						;a new arithmetic mode?
+		BEQ		@skipArithmetic
+		
+		MOVEQ	#0,D1					;zero high word
+		MOVE	dstPix+pixelSize(A6),D1	;get number of bits in a pixel
+		MOVE.L	transColor(A6),D5		;get background color for hilite/transparent
+		
+		BTST	#3,D2					;is the pattern bit set?
+		BEQ.S	@newSource				;if not, must be source
+		TST		patRow(A6)
+		BEQ.S	@smallPattern			;if no pat row, pattern is small
+
+; big pattern case
+
+		MOVE.B	#1,endSwitch(A6)		;note that this is a big pattern
+		MOVE	D6,patPos(A6)			;set up large pattern vertical offset
+		MOVE.L	srcAddr(A6),A0			;bump pattern pointer as well
+		ADD		D6,A0
+		MOVE.L	A0,srcAddr(A6)
+		
+		CLR		D6						;clear high word for bit operations
+		SWAP	D6
+		ASL.L	#3,D6					;scale from bytes to bits for bit operation offset
+		MOVE.L	D6,patOffset(A6)		;set up initial horizontal offset
+		
+; need to scale patHMask from longs to pixels
+
+		MOVE	D1,D3					;get number of bits in a pixel
+		SUBQ	#1,D3					;make into a mask
+		NOT		D3						;turn on bits equal to & greater than pixelSize		
+		MOVE	patRow(A6),D0			;get pattern row size
+		ASL		#3,D0					;convert from bytes to bits			
+		SUBQ	#1,D0					;make it a mask
+		AND		D3,D0					;force pixel alignment
+		MOVE	D0,patHMask(A6)
+		BRA.S	@skipMaskSetup
+		
+; small pattern case
+
+@smallPattern
+		CLR.B	endSwitch(A6)			;note that this is a small pattern
+		LEA		([EXPAT,A6],D7*4),A3 	;GET FIRST PATTERN DATA
+		MOVE.L	A3,srcAddr(A6)
+		MOVE	D7,patPos(A6)			;save initial offset as well
+		MOVEQ	#0,D6
+		MOVE.L	D6,patOffset(A6)
+		MOVE	#$001F,patHMask(A6)		;set up patHMask for old patterns (must fit into a long)
+		BRA.S	@skipMaskSetup			
+		
+; source case
+
+@newSource
+		ST		endSwitch(A6)			;note that this is a source (set negative)
+		MOVE.L	D6,patOffset(A6)		;save initial offset for next scan line
+		MOVE	#-1,patHMask(A6)		;do not restrict source range if mode is source
+@skipMaskSetup
+		cmp.w	#16,d1					;is dst 16 or 32 bits/pixel?		<05Mar89 BAL>
+		blt.s	@notDirect				;no, leave patOffset,patHMask in bits
+		
+		asr.l	#3,d6					;yes, make patOffset,patHMask into bytes
+		move.l	d6,patOffset(a6)
+		move.w	patHMask(a6),d0			;									<10Jan89 BAL>
+		asr.w	#3,d0
+		move.w	d0,patHMask(a6)			;									<10Jan89 BAL>
+
+@notDirect
+		MOVE	D1,D7					;set up bits per pixel depth
+		AND		#$37,D2					;ignore the pattern info
+		CMP		#$24,D2					;skip this part if mode is transparent
+		BEQ.S	@skipColorTable
+		MOVE	invSize(A6),D5			;set up inverse table resolution in a register
+@skipColorTable		
+		CMP		#$32,D2					;hilite?
+		BNE.S	@notHilite
+		BFEXTU	hilitColor(A6){0:D7},D5 ;set up a pixel of the hilite color
+@notHilite
+		; D4 first destination/mask pixel position
+		
+		MOVEQ	#5,D4					;shift amt for 32 bits
+		SUB.W	DSTSHIFT(A6),D4			;get 5-DSTSHIFT
+		MOVEQ	#1,D0					;
+		LSL		D4,D0					;compute 32/pixelsize
+		MOVE	D0,pixInLong1(A6)
+		MOVE	D0,D2					;keep a copy around
+		MOVEQ	#0,D4					;assume destination offset is 0
+		MOVE.L	D7,D3					;assume bump is positive
+		MOVEQ	#32,D1					;positive long bump for transparent
+		TST		hBump(A6)				;bumping postive or negative?
+		BPL.S	@bumpOK
+		NEG.L	D3						;make pixel bump negative
+		NEG		D1						;make long bump negative
+		MOVEQ	#32,D4
+		SUB		D0,D4					;D4 set to first destination pixel position
+		ADD.L	D4,D6					;D6 set to first source pixel position
+@bumpOK
+		MOVE	D4,destPixOffset(A6)
+		MOVE	D1,longBump(A6)			;set up long bump for transparent
+		MOVE	bufSize(A6),D0
+		ADDQ	#1,D0					;make it 1 based
+		MULU	D2,D0					;scale up by pixels in a long
+		SUBQ	#1,D0					;make it zero based again for DBRA
+		MOVE	D0,bufSize(A6)
+@skipArithmetic
+
+;----------------------------------------------------------
+;
+;  Jump into 32 bit addressing mode for blitting.								@@@@	BAL	09Apr88
+;
+
+		moveq	#true32b,d0					;switch to 32 bit addressing		@@@@	BAL	09Apr88
+		_rSwapMMUMode			;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+		move.b	d0,MMUsave(a6)				;save previous state for later		@@@@	BAL	09Apr88
+	
+	
+;-------------------------------------------------------
+;
+;  MAKE REGION BUFFER CURRENT FOR THIS VERTICAL.
+;  THEN SET UP AND DRAW CURRENT SCANLINE.
+;
+		tst.l	runBuf(a6)					;are we run clipping?			<1.5> BAL
+		bne.s 	FirstRunMask				;if so, do new way				<1.5> BAL
+
+NXTMASK
+		JSR 	([SEEKMASK,A6])				;MAKE MASK BUFFER CURRENT
+		MOVE.L	SRCADDR(A6),A3				;INIT SRCPTR
+		MOVE.L	DSTADDR(A6),A5				;INIT DSTPTR FOR ROW
+		MOVE.L	RGNADDR(A6),A4 				;INIT RGNPTR FOR ROW
+		MOVE	BUFSIZE(A6),D2				;INIT COUNT OF LONGS or pixels
+		MOVE.L	MODECASE(A6),A2 			;GET MODE CASE JUMP
+		JMP 	(A2)						;TAKE MODE JUMP
+
+FirstRunMask
+		MOVE.L	DSTADDR(A6),A5				;INIT DSTPTR
+		MOVE.L	runBuf(A6),A4 				;INIT runBuf ptr
+		move.w	hBump(a6),RUNBUMP(a6)		;set transfer direction for seekmask
+		btst	#5,locMode+1(A6)			;arithmetic transfer mode?
+		beq.s	@notArith					;no, registers are ok
+		move.w	hBump(a6),a4				;set up a4, and d4 for arith loops
+		move.w	patHMask(a6),d4
+@notArith
+		tst		DstRow(a6)					;top to bottom transfer?
+		bpl.s	topDown						;yes, skip scan count hack
+		addq	#1,vert(a6)					;begin one below the bottom
+		JSR 	([SEEKMASK,A6])				;preseek past bottom
+		subq	#1,vert(a6)					;reposition to last scan
+		bra.s	topDown						;continue
+
+nextMask
+		move	d0,vert(a6)					;update vert
+		MOVE.L	a3,SRCADDR(A6)				;update SRCPTR
+
+topDown	JSR 	([SEEKMASK,A6])				;MAKE MASK BUFFER CURRENT
+		move	d2,d1						;get scan count in d1
+		JSR 	([RUNRTN,A6])				;MAKE RUN BUFFER CURRENT
+		move.w	vert(a6),d0					;reload vert position
+		move.l	DstRow(a6),d2				;set up dest rowbytes
+		MOVE.L	SRCADDR(A6),A3				;reload SRCPTR
+		MOVE.L	MODECASE(A6),A2 			;GET MODE CASE JUMP
+		JMP 	(A2)						;TAKE MODE JUMP
+
+NEXTSRC MOVE.L	SRCROW(A6),D0				;GET SRC ROWBYTES
+		ADD.L	D0,SRCADDR(A6)				;BUMP SRC TO NEXT ROW
+		BRA.S	BUMPV						;CONTINUE WITH NEXT ROW
+		
+NEXTBIGPAT
+		MOVE	PATHPOS(A6),D6				;GET HORIZONTAL POSITION
+		SWAP	D6							;GET VERT POSITION IN PATTERN
+		ADD		PATROW(A6),D6				;BUMP TO NEXT SCAN
+		AND		PATVMASK(A6),D6				;AND MASK WITHIN PATTERN
+											;LEAVE PATVPOS IN D6
+		BRA.S	BUMPV						;=>CONTINUE WITH NEXT ROW
+		
+NEXTPAT ADD 	#1,D7						;BUMP PATTERN SELECTOR
+		AND 	#$F,D7 						;MOD 16 FOR 16 LONG REPEAT
+		MOVE.L	([EXPAT,A6],D7*4),D6 		;GET PATTERN FOR NEXT ROW
+
+
+;-----------------------------------------------------
+;
+;  BUMP DESTINATION VERTICALLY AND LOOP FOR ALL ROWS
+;
+BUMPV	MOVE.L	DSTROW(A6),D0				;GET DST ROWBYTES
+		ADD.L	D0,DSTADDR(A6)				;BUMP DST TO NEXT ROW
+		MOVE	VERT(A6),D0 				;GET CURRENT VERT
+		ADD 	VBUMP(A6),D0				;BUMP UP OR DOWN A SCAN LINE
+		MOVE	D0,VERT(A6) 				;UPDATE CURRENT VERT
+		CMP 	LASTV(A6),D0				;ARE WE AT THE LAST SCAN LINE ?
+		BNE 	NXTMASK 					;NO, LOOP FOR ALL SCAN LINES
+
+
+;-----------------------------------------------------------------
+;
+;  ENTIRE RGNBLT COMPLETE. JUST RETURN
+;
+DONE	MOVE.L	SAVESTK2(A6),SP				;RESTORE STACK POINTER
+		RTS									;AND RETURN TO STRETCHBITS
+
+;---------------------------------------------------------------;
+;
+;	Standard 1-8 bit Arithmetic transfer mode scan line loop
+;	for classic region masking only.
+;
+
+NxtNewSrc
+		MOVE	destPixOffset(A6),D4	;set up destination horizontal offset
+		MOVE.L	patOffset(A6),D6		;set up source horizontal offset
+		TST.B	endSwitch(A6)
+		BEQ.S	@nxtNewPat
+		BMI.S	NextSrc
+; nxtNewBigPat
+		moveq	#0,d0					;patPos should be a long
+		MOVE	patPos(A6),D0			;GET VERT POSITION IN PATTERN
+		SUB.l	D0,A3					;GET BACK PAT BASE
+		ADD		PATROW(A6),D0			;BUMP TO NEXT SCAN
+		AND		PATVMASK(A6),D0			;AND MASK WITHIN PATTERN
+		ADD.l	D0,A3					;BUMP TO PROPER VERT
+		MOVE	D0,patPos(A6)			;SAVE VERTICAL POSITION
+		BRA.S	@saveSrcAddr
+@nxtNewPat	
+		MOVE	patPos(A6),D0
+		ADD 	#1,D0					;BUMP PATTERN SELECTOR
+		AND 	#$F,D0 					;MOD 16 FOR 16 LONG REPEAT
+		LEA		([EXPAT,A6],D0*4),A3 	;GET PATTERN FOR NEXT ROW
+		MOVE	D0,patPos(A6)
+@saveSrcAddr
+		MOVE.L	A3,srcAddr(A6)			;point source address to it
+		BRA.S	BumpV
+		
+		
+	ALIGN Alignment	
+		
+		
+;---------------------------------------------------------------;
+;
+;	Run masked Arithmetic transfer mode scan line loop
+;	for 32 bit pixels only.
+;
+
+NxtNewSrc32b
+		move.l	a2,d1			;restore scanCount
+NxtNewSrc32
+		MOVE.L	patOffset(A6),D6		;set up source horizontal offset
+		TST.B	endSwitch(A6)
+		BEQ.S	nxtNewPat32
+		BMI.S	NextSrc32
+;nxtNewBigPat32
+		moveq	#0,d0					;patPos should be a long
+		MOVE	patPos(A6),D0			;GET VERT POSITION IN PATTERN
+		SUB.l	D0,A3					;GET BACK PAT BASE
+		ADD		PATROW(A6),D0			;BUMP TO NEXT SCAN
+		AND		PATVMASK(A6),D0			;AND MASK WITHIN PATTERN
+		ADD.l	D0,A3					;BUMP TO PROPER VERT
+		MOVE	D0,patPos(A6)			;SAVE VERTICAL POSITION
+		BRA.S	doItAgain32
+nxtNewPat32	
+		MOVE	patPos(A6),D0
+		ADD 	#1,D0					;BUMP PATTERN SELECTOR
+		AND 	#$F,D0 					;MOD 16 FOR 16 LONG REPEAT
+		LEA		([EXPAT,A6],D0*4),A3 	;GET PATTERN FOR NEXT ROW
+		MOVE	D0,patPos(A6)
+		bra.s	doItAgain32
+NextSrc32
+		add.l	srcRow(a6),a3			;BUMP src TO NEXT ROW
+
+doItAgain32
+		move.l	dstAddr(a6),a5	;reload dst ptr
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		move.l	a5,dstAddr(a6)	;save dst ptr
+		move.w	vert(a6),d0		;reload vert position
+		ADD 	VBUMP(A6),D0	;BUMP UP OR DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		beq 	DONE	 		;YES, BAIL
+		subq	#1,d1
+		ble.s	nextMask
+		move.w	d0,vert(a6)		;save vert position
+		MOVE.L	MODECASE(A6),A2 ;GET MODE CASE JUMP
+		JMP 	(A2)			;TAKE MODE JUMP
+		
+		
+;---------------------------------------------------------------;
+;																;
+;  INTERFACE TO EACH OF THE RGNBLT SCANLINE LOOPS:				;
+;																;
+;  REGISTERS:	A0: 				D0: 						;
+;				A1: 				D1: 						;
+;				A2: 				D2: LONGCNT 				;
+;				A3: SRCPTR/PATPTR	D3: HBUMP					;
+;				A4: MASKPTR 		D4: FCOLOR					;
+;				A5: DSTPTR			D5: BCOLOR					;
+;				A6: 				D6: SHIFTCNT OR PATTERN 	;
+;										OR INDEX INTO PATTERN	;
+;				A7: 				D7: INVERTFLAG OR PAT-SEL		;
+;																;
+;---------------------------------------------------------------;
+
+	IF	0 THEN
+MODETAB DC.W	 MASK0-MODETAB		;0
+		DC.W	 MASK1-MODETAB		;2
+		DC.W	 MASK2-MODETAB		;4
+		DC.W	 MASK3-MODETAB		;6
+		DC.W	 MASK8-MODETAB		;8
+		DC.W	 MASK9-MODETAB		;A
+		DC.W	 MASK10-MODETAB		;C
+		DC.W	 MASK11-MODETAB		;E
+		DC.W	 XMASK8-MODETAB		;10
+		DC.W	 XMASK9-MODETAB		;12
+		DC.W	 XMASK10-MODETAB	;14
+		DC.W	 XMASK11-MODETAB	;16
+
+		DC.W	Avg-ModeTab			;18 AVG(SRC, DST, WEIGHT) --> DST
+		DC.W	AddPin-ModeTab		;1A SRC + DST --> DST (pin to max)
+		DC.W	AddOver-ModeTab		;1C SRC + DST --> DST (no pin)
+		DC.W	SubPin-ModeTab		;1E DST - SRC --> DST (pin to min)
+		DC.W	Transparent-ModeTab ;20 SRC less bg --> DST
+		DC.W	Max-ModeTab			;22 MAX(SRC, DST) --> DST
+		DC.W	SubOver-ModeTab		;24 DST - SRC --> DST (no pin)
+		DC.W	Min-ModeTab			;26 MIN(SRC, DST) --> DST
+
+		DC.W	cMask0-ModeTab		;28
+		DC.W	cMask1-ModeTab		;2A
+		DC.W	slowHilite-ModeTab	;2C (src, pat as mask) hilite color <--> background color
+		DC.W	cMask3-ModeTab		;2E
+	ENDIF
+
+
+	ALIGN 4	
+
+	if Quicker then
+	
+		IMPORT		rAddOver8
+		IMPORT		rSubOver8
+		IMPORT		rAddPin8
+		IMPORT		rSubPin8
+		IMPORT		rMax8
+		IMPORT		rMin8
+		IMPORT		rAvg8,rTransparent8
+			
+rArith8Tab		
+		DC.L	rAvg8-rArith8Tab			;18 AVG(SRC, DST, WEIGHT) --> DST
+		DC.L	rAddPin8-rArith8Tab			;1A SRC + DST --> DST (pin to max)
+		DC.L	rAddOver8-rArith8Tab		;1C SRC + DST --> DST (no pin)
+		DC.L	rSubPin8-rArith8Tab			;1E DST - SRC --> DST (pin to min)
+		DC.L	rTransparent8-rArith8Tab	;20 SRC less bg --> DST
+		DC.L	rMax8-rArith8Tab			;22 MAX(SRC, DST) --> DST
+		DC.L	rSubOver8-rArith8Tab		;24 DST - SRC --> DST (no pin)
+		DC.L	rMin8-rArith8Tab			;26 MIN(SRC, DST) --> DST
+		DC.L	rAvg8-rArith8Tab			;50% case
+
+	endif
+			
+rArith16Tab		
+		DC.L	rAvg16-rArith16Tab			;18 AVG(SRC, DST, WEIGHT) --> DST
+		DC.L	rAddPin16-rArith16Tab		;1A SRC + DST --> DST (pin to max)
+		DC.L	rAddOver16-rArith16Tab		;1C SRC + DST --> DST (no pin)
+		DC.L	rSubPin16-rArith16Tab		;1E DST - SRC --> DST (pin to min)
+		DC.L	rTransparent16-rArith16Tab	;20 SRC less bg --> DST
+		DC.L	rMax16-rArith16Tab			;22 MAX(SRC, DST) --> DST
+		DC.L	rSubOver16-rArith16Tab		;24 DST - SRC --> DST (no pin)
+		DC.L	rMin16-rArith16Tab			;26 MIN(SRC, DST) --> DST
+		DC.L	rAvg16Half-rArith16Tab		;28
+
+rArith32Tab		
+		DC.L	rAvg32-rArith32Tab			;18 AVG(SRC, DST, WEIGHT) --> DST
+		DC.L	rAddPin32-rArith32Tab		;1A SRC + DST --> DST (pin to max)
+		DC.L	rAddOver32-rArith32Tab		;1C SRC + DST --> DST (no pin)
+		DC.L	rSubPin32-rArith32Tab		;1E DST - SRC --> DST (pin to min)
+		DC.L	rTransparent32-rArith32Tab	;20 SRC less bg --> DST
+		DC.L	rMax32-rArith32Tab			;22 MAX(SRC, DST) --> DST
+		DC.L	rSubOver32-rArith32Tab		;24 DST - SRC --> DST (no pin)
+		DC.L	rMin32-rArith32Tab			;26 MIN(SRC, DST) --> DST
+		DC.L	rAvg32Half-rArith32Tab		;28
+
+rHiliteTab									; (1-bit hilite converted to Xor)
+		DC.L	rHilite-rHiliteTab			; 2-bit
+		DC.L	rHilite-rHiliteTab			; 4-bit
+		DC.L	rHilite-rHiliteTab			; 8-bit
+		DC.L	rHilite-rHiliteTab			;16-bit
+		DC.L	rHilite32-rHiliteTab		;32-bit
+
+
+
+
+
+	ALIGN Alignment	
+		
+;---------------------------------------------------------------;
+;																;
+;  INTERFACE TO EACH OF THE RUN MASKED SCANLINE LOOPS:			;
+;																;
+;		a0 = tmpsrc			d0 = vert
+;		a1 = tmpmask		d1 = scanCount
+;		a2 = tmpdst			d2 = dstRow/left shift cnt
+;		a3 = srcPtr/patPtr	d3 = run cnt/hBump/scratch
+;		a4 = runPtr			d4 = fColor/scratch
+;		a5 = dstPtr			d5 = bColor/scratch
+;		a6 = locals			d6 = pattern/pat index/rgt shift cnt
+;		a7 = 				d7 = pat select/INVERTFLAG
+;-------------------------------------------------------
+;
+;		move.l	(a0)+,d4		;  1 read cycle
+;		
+;		lsl.l	d6,d5			;	3,	6,	6
+;		move.l	d4,d7			;	0,	2,	3
+;		lsr.l	d2,d7			;	3,	6,	6
+;		or.l	d5,d7			;	0,	2,	3
+;		move.l	d7,(a2)+
+;		move.l	d4,d5			;	0,	2,	3
+;							    ---------------
+;								;	6,	18,	21 		+ 1 read cycle
+;								
+;		bfextu	(A3){D6:0},D0	;	18,	18,	18		+ 2 read cycles
+;		
+;-------------------------------------------------------
+;
+;  MODE 0 OR 4: SRC --> DST
+;
+rMASK0	
+		
+		tst.l	d7						;must src be inverted?
+		bne.s	@slow					;yes, go slow
+		tst.w	d3						;is hBump negative
+		bmi.s	@slow					;yes, go slow
+		neg.l	d6						;make d6 # bits to shift right
+		move	d6,d4					;get shift cnt
+		and		#7,d4					;is it a multiple of 8?
+		bne.s	@med					;no, can't go fast
+
+@fast	asr.w	#3,d6					;compute byte shift
+		sub.w	d6,a3					;adjust src ptr by byte shift
+		lea		rSrcCopyFast,a2
+@go		move.l	a2,modeCase(a6)			;go there from now on
+		jmp		(a2)
+		
+@med	moveq	#32,d3					;compute left shift from right shift cnt
+		sub		d6,d3
+		lea		rSrcCopyLtoR,a2
+		bra.s	@go
+	
+@slow	lea		rSrcCopySlow,a2
+		bra.s	@go
+		
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;rSrcCopySlow
+;  Run masked src copy mode where:
+;
+;				HBump may be negative
+;				Src may be inverted
+;
+nxtScan0
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a3	;BUMP DST TO NEXT ROW
+		ADD 	VBUMP(A6),D0	;BUMP UP OR DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		beq 	DONE	 		;YES, BAIL
+		subq	#1,d1			;decrement scan count
+		ble.s	nextMask
+		
+rSrcCopySlow
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		move.l	a3,a0			;init tmp src ptr
+				
+@inst	move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	nxtScan0		;if high bit set then done with scan
+		add.w	d2,a2			;bump destptr by skip amount
+		add.w	d2,a0			;bump srcptr by skip amount
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	BFEXTU	(A0){D6:0},D4	;get an aligned long of src
+		add		d3,a0			;%%%bump src right or left
+		eor.l	d7,d4			;conditionally invert src
+		move.l	(a1)+,d5		;fetch mask
+		and.l	d5,d4			;mask src
+		not.l	d5
+		and.l	(a2),d5
+		or.l	d5,d4
+		move.l	d4,(a2)			;write back result
+		add		d3,a2			;%%%bump dst
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	BFEXTU	(A0){D6:0},D4	;get an aligned long of src
+		add		d3,a0			;%%%bump src right or left
+		eor.l	d7,d4			;conditionally invert src
+		move.l	d4,(a2)
+		add		d3,a2			;%%%bump dst
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+		
+		
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;rSrcCopyLtoR
+;
+;  Run masked src copy mode where:
+;
+;				HBump is positive (+4)
+;				ShiftCnt is not a multiple of 8
+;				Src is not inverted
+;
+nxtScan1
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a3	;BUMP DST TO NEXT ROW
+		ADD 	VBUMP(A6),D0	;BUMP UP OR DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		beq 	DONE	 		;YES, BAIL
+		subq	#1,d1			;decrement scan count
+		ble.s	nextMask
+		
+rSrcCopyLtoR
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		move.l	a3,a0			;init tmp src ptr
+
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	nxtScan1		;if high bit set then done with scan
+		add.w	d2,a2			;bump destptr by skip amount
+		add.w	d2,a0			;bump srcptr by skip amount
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@fblit			;no mask, so go fast
+		
+@fmask	move.l	-4(a0),d5		;fill pipeline with prefetch
+@mask	move.l	(a0)+,d4		;  1 read cycle
+		lsl.l	d3,d5			;	3,	6,	6
+		move.l	d4,d7			;	0,	2,	3
+		lsr.l	d6,d7			;	3,	6,	6
+		or.l	d5,d7			;	0,	2,	3
+		move.l	(a1)+,d5		;fetch mask
+		and.l	d5,d7
+		not.l	d5
+		and.l	(a2),d5
+		or.l	d5,d7
+		move.l	d7,(a2)+
+		move.l	d4,d5			;	0,	2,	3
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@fblit	move.l	-4(a0),d5		;fill pipeline with prefetch
+@blit	move.l	(a0)+,d4		;  1 read cycle
+		lsl.l	d3,d5			;	3,	6,	6
+		move.l	d4,d7			;	0,	2,	3
+		lsr.l	d6,d7			;	3,	6,	6
+		or.l	d5,d7			;	0,	2,	3
+		move.l	d7,(a2)+
+		move.l	d4,d5			;	0,	2,	3
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+		
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;rSrcCopyFast
+;
+;  Run masked src copy mode where:
+;
+;				HBump is positive (+4)
+;				ShiftCnt is a multiple of 8  (e.g. bit depth >= 8)
+;				Src is not inverted
+;
+nxtScan2
+		add.l	d2,a5			;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a3	;BUMP DST TO NEXT ROW
+		ADD 	VBUMP(A6),D0	;BUMP UP OR DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		beq 	DONE	 		;YES, BAIL
+		subq	#1,d1			;decrement scan count
+		ble.s	nextMask
+		
+rSrcCopyFast
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		move.l	a3,a0			;init tmp src ptr
+
+@inst
+		move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	nxtScan2		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		add.w	d3,a0			;bump srcptr by skip amount
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	move.l	(a0)+,d4		;  1-2 read cycles
+		move.l	(a1)+,d5		;fetch mask
+		and.l	d5,d4
+		not.l	d5
+		and.l	(a2),d5
+		or.l	d4,d5
+		move.l	d5,(a2)+
+		DBRA	D3,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+; 	Here's the unwound loop to blast the # of longwords in D3 + 1 out.
+; 	(courtesy of Gary)
+
+@blit
+		MOVEQ	#$F,D4
+		AND.W	D3,D4			;partial block size
+		NEG.W	D4				;back up from end
+		LSR		#4,D3			;cnt of 16 long blocks
+		JMP		(@Start,D4.W*2)	;blast them out
+
+@DoSixteen
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+		MOVE.L	(a0)+,(a2)+
+@Start	MOVE.L	(a0)+,(a2)+
+		DBRA	D3,@DoSixteen
+		BRA.S	@inst
+
+		
+		
+	ALIGN Alignment	
+
+rSrcOr		
+;-------------------------------------------------------
+;
+;  MODE 1 OR 5: SRC OR DST --> DST  (Common for Text)
+;
+;-------------------------------------------------------
+;rSrcOr
+;  Run masked src OR mode where:
+;
+;				HBump may be negative
+;				Src may be inverted
+;
+@nxtScan
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a3	;BUMP DST TO NEXT ROW
+		ADD 	VBUMP(A6),D0	;BUMP UP OR DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		beq 	DONE	 		;YES, BAIL
+		subq	#1,d1			;decrement scan count
+		ble.s	nextMask
+		
+@runs
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		move.l	a3,a0			;init tmp src ptr
+				
+@inst	move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d2,a2			;bump destptr by skip amount
+		add.w	d2,a0			;bump srcptr by skip amount
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	BFEXTU	(A0){D6:0},D4	;get an aligned long of src
+		add		d3,a0			;%%%bump src right or left
+		eor.l	d7,d4			;conditionally invert src
+		and.l	(a1)+,d4		;fetch mask and mask src
+		or.l	d4,(a2)			;OR result into dst
+		add		d3,a2			;%%%bump dst
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	BFEXTU	(A0){D6:0},D4	;get an aligned long of src
+		add		d3,a0			;%%%bump src right or left
+		eor.l	d7,d4			;conditionally invert src
+		or.l	d4,(a2)
+		add		d3,a2			;%%%bump dst
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+rMASK1		EQU		@runs
+
+		
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 2 OR 6: SRC XOR DST --> DST
+;
+;-------------------------------------------------------
+;rSrcXOr
+;  Run masked src XOR mode where:
+;
+;				HBump may be negative
+;				Src may be inverted
+;
+@nxtScan
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a3	;BUMP DST TO NEXT ROW
+		ADD 	VBUMP(A6),D0	;BUMP UP OR DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		beq 	DONE	 		;YES, BAIL
+		subq	#1,d1			;decrement scan count
+		ble.s	nextMask
+
+;rMASK2		
+@runs
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		move.l	a3,a0			;init tmp src ptr
+				
+@inst	move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d2,a2			;bump destptr by skip amount
+		add.w	d2,a0			;bump srcptr by skip amount
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	BFEXTU	(A0){D6:0},D4	;get an aligned long of src
+		add		d3,a0			;%%%bump src right or left
+		eor.l	d7,d4			;conditionally invert src
+		and.l	(a1)+,d4		;fetch mask and mask src
+		eor.l	d4,(a2)			;XOR result into dst
+		add		d3,a2			;%%%bump dst
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	BFEXTU	(A0){D6:0},D4	;get an aligned long of src
+		add		d3,a0			;%%%bump src right or left
+		eor.l	d7,d4			;conditionally invert src
+		eor.l	d4,(a2)
+		add		d3,a2			;%%%bump dst
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+rMASK2		EQU		@runs
+		
+		
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 3 OR 7: SRC BIC DST --> DST
+;
+;-------------------------------------------------------
+;rSrcBIC
+;  Run masked src BIC mode where:
+;
+;				HBump may be negative
+;				Src may be inverted
+;
+@nxtScan
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a3	;BUMP DST TO NEXT ROW
+		ADD 	VBUMP(A6),D0	;BUMP UP OR DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		beq 	DONE	 		;YES, BAIL
+		subq	#1,d1			;decrement scan count
+		ble.s	nextMask
+
+;rMASK3	
+@runs
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		move.l	a3,a0			;init tmp src ptr
+				
+@inst	move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d2,a2			;bump destptr by skip amount
+		add.w	d2,a0			;bump srcptr by skip amount
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	BFEXTU	(A0){D6:0},D4	;get an aligned long of src
+		add		d3,a0			;%%%bump src right or left
+		eor.l	d7,d4			;conditionally invert src
+		and.l	(a1)+,d4		;fetch mask and mask src
+		not.l	d4				;invert for BIC
+		and.l	d4,(a2)			;apply result into dst
+		add		d3,a2			;%%%bump dst
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	BFEXTU	(A0){D6:0},D4	;get an aligned long of src
+		add		d3,a0			;%%%bump src right or left
+		eor.l	d7,d4			;conditionally invert src
+		not.l	d4				;invert for BIC
+		and.l	d4,(a2)
+		add		d3,a2			;%%%bump dst
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs	
+
+rMASK3		EQU		@runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 0 OR 4: SRC --> DST (fg ≠ black or bg ≠ white)
+;
+;	<18Oct90 SMC> <9>
+;		Made register usage more efficient and used a
+;		faster, smaller colorizing method.
+;
+;-------------------------------------------------------
+;rcSrcCopy
+;  Run masked colorizing src COPY mode where:
+;
+;				HBump may be negative
+;				Src may be inverted
+;
+rcMASK0	move.w	hBump(a6),a4	;get hbump in a4
+		bra.s 	@runs			;go use run mask
+
+@nxtScan
+		EOR.L	D5,D4			;unmunge bkcolor into fgcolor		<9>
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a3	;BUMP DST TO NEXT ROW
+		MOVE	vert(A6),D0		;									<9>
+		ADD 	VBUMP(A6),D0	;BUMP UP OR DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		beq 	DONE	 		;YES, BAIL
+		subq	#1,d1			;decrement scan count				<9>
+		ble.s	nextMask		;									<9>
+		MOVE	D0,vert(A6)		;									<9>
+
+@runs	move.l	a5,a2			;init tmp dst ptr
+		move.l	RunBuf(a6),a1	;point to run encoded mask buffer
+		move.l	a3,a0			;init tmp src ptr
+		EOR.L	D5,D4			;munge bkcolor into fgcolor			<9>
+				
+@inst	move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d2,a2			;bump destptr by skip amount
+		add.w	d2,a0			;bump srcptr by skip amount
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	BFEXTU	(A0){D6:0},D3	;get an aligned long of src
+		add		a4,a0			;%%%bump src right or left
+		eor.l	d7,d3			;conditionally invert src
+		AND.L	D4,D3			;apply munged fgcolor to src		<9>
+		EOR.L	D5,D3			;apply bkcolor to src				<9>
+		MOVE.L	(A2),D0			;get dst							<9>
+		EOR.L	D0,D3			;apply it to src					<9>
+		AND.L	(A1)+,D3		;make it							<9> <SM3>
+		EOR.L	D0,D3			;reapply dst to src					<9>
+		MOVE.L	D3,(A2)			;move result to dst					<9>
+		add		a4,a2			;%%%bump dst
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	BFEXTU	(A0){D6:0},D3	;get an aligned long of src
+		add		a4,a0			;%%%bump src right or left
+		eor.l	d7,d3			;conditionally invert src
+		AND.L	D4,D3			;apply munged fgcolor to src		<9>
+		EOR.L	D5,D3			;apply bkcolor to src				<9>
+		MOVE.L	D3,(A2) 		;put colorized src to dst
+		add		a4,a2			;%%%bump dst
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+
+rcSrcOr		
+;-------------------------------------------------------
+;
+;  MODE 1 OR 5: SRC OR DST --> DST (fg ≠ black)
+;
+;	<18Oct90 SMC> <9>
+;		Eliminated one NuBus read and one NuBus write per long by
+;		freeing up an under-utilized register and, as a result,
+;		improving performance and shrinking code size.
+;
+;-------------------------------------------------------
+;rcSrcOr
+;  Run masked colorizing src OR mode where:
+;
+;				HBump may be negative
+;				Src may be inverted
+;
+@nxtScan
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a3	;BUMP DST TO NEXT ROW
+		MOVE	vert(A6),D0		;get vertical position				<9>
+		ADD 	VBUMP(A6),D0	;BUMP UP OR DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		beq 	DONE	 		;YES, BAIL
+		subq	#1,d1			;decrement scan count
+		ble.s	nextMask
+		MOVE	D0,vert(A6)		;save new vertical position			<9>
+
+;rcMASK1	
+@runs	move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		move.l	a3,a0			;init tmp src ptr
+				
+@inst	move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d2,a2			;bump destptr by skip amount
+		add.w	d2,a0			;bump srcptr by skip amount
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	BFEXTU	(A0){D6:0},D5	;get an aligned long of src
+		add		d3,a0			;%%%bump src right or left
+		eor.l	d7,d5			;conditionally invert src
+		and.l	(a1)+,d5		;fetch mask and mask src
+		NOT.L	D5				;make source a punch
+		MOVE.L	(A2),D0			;get dst							<9>
+		EOR.L	D4,D0			;combine src and forecolor			<9>
+		AND.L	D5,D0			;mask with source					<9>
+		EOR.L	D4,D0			;reapply forecolor to src			<9>
+		MOVE.L	D0,(A2)			;move the result to dst				<9>
+		add		d3,a2			;%%%bump dst
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	BFEXTU	(A0){D6:0},D5	;get an aligned long of src
+		add		d3,a0			;%%%bump src right or left
+		eor.l	d7,d5			;conditionally invert src
+		NOT.L	D5				;make source a punch
+		MOVE.L	(A2),D0			;get dst							<9>
+		EOR.L	D4,D0			;combine src and forecolor			<9>
+		AND.L	D5,D0			;mask with source					<9>
+		EOR.L	D4,D0			;reapply forecolor to src			<9>
+		MOVE.L	D0,(A2)			;move the result to dst				<9>
+		add		d3,a2			;%%%bump dst
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+rcMASK1		EQU		@runs
+
+
+;-------------------------------------------------------
+;
+;  MODE 3 OR 7: SRC BIC DST --> DST (bg ≠ white)
+;
+;	<18Oct90 SMC> <9>
+;		Folded BIC loop into OR loop by making forecolor equal backcolor.
+;
+;-------------------------------------------------------
+;rcSrcBIC
+;  Run masked colorizing src BIC mode where:
+;
+;				HBump may be negative
+;				Src may be inverted
+;
+
+rcMASK3	MOVE.L	D5,D4			;make bkcolor the fgcolor			<9>
+		LEA		rcMASK1,A2		;learn it							<9>
+		MOVE.L	A2,modeCase(A6)	;know it							<9>
+		JMP		(A2)			;live it							<9>
+
+
+
+;-------------------------------------------------------
+;
+;  MODE 8 OR 12: PATTERN --> DST (FILLING AREAS, DRAWING LINES)
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert
+;		a1 = tmpmask		d1 = scanCount
+;		a2 = tmpdst			d2 = dstRow
+;		a3 = srcPtr/patPtr	d3 = run cnt/hBump/scratch
+;		a4 = runPtr			d4 = fColor/scratch
+;		a5 = dstPtr			d5 = bColor/scratch
+;		a6 = locals			d6 = pattern/pat index/shift cnt
+;		a7 = 				d7 = pat select/invert
+;-------------------------------------------------------
+
+; <10>	Start of alpha changes block from QDciPatchROM.a 					<sm 6/9/92>stb
+										
+rMASK8	LEA		rMASK8G,A2		;get address of normal routine
+		TST.B	alphaMode(A6)	;drawing in alpha mode?
+		BEQ.S	@1				;no, use normal loop
+		LEA		rMASK8A,A2		;get address of alpha loop
+	@1:	MOVE.L	A2,modeCase(A6)	;save proc address
+		JMP		(A2)			;go there now
+
+	ALIGN Alignment	
+		
+@nxtScan
+		ADDQ 	#1,D7			;BUMP PATTERN SELECTOR
+		AND 	#$F,D7 			;MOD 16 FOR 16 LONG REPEAT
+		MOVE.L	(a3,D7*4),D6 	;GET PATTERN FOR NEXT ROW
+
+		add.l	d2,a5			;BUMP DST TO NEXT ROW
+		MOVE	vert(A6),D0
+		ADDQ 	#1,D0			;BUMP DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		bge 	DONE	 		;YES, BAIL
+		subq	#1,d1
+		ble.s	nextMask
+		MOVE	D0,vert(A6)
+
+;rMASK8A
+@runs	move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		MOVE.L	alphaMask(A6),D5 ;get alpha mask
+		
+@inst	move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	MOVE.L	D6,D0			;GET PATTERN DATA
+		MOVE.L	(A2),D4			;GET DST
+		EOR.L	D4,D0			;COMBINE DST WITH PATTERN
+		AND.L	(A1)+,D0		;APPLY REGION MASK
+		AND.L	D5,D0			;APPLY ALPHA MASK
+		EOR.L	D4,D0			;REAPPLY DST TO PATTERN
+		MOVE.L	D0,(A2)+		;PUT RESULT TO DST
+		DBRA	D3,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	MOVE.L	D6,D0			;GET PATTERN DATA
+		MOVE.L	(A2),D4			;GET DST
+		EOR.L	D4,D0			;COMBINE DST WITH PATTERN
+		AND.L	D5,D0			;APPLY ALPHA MASK
+		EOR.L	D4,D0			;REAPPLY DST TO PATTERN
+		MOVE.L	D0,(A2)+		;PUT RESULT TO DST
+		DBRA	D3,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+rMASK8A equ	@runs
+
+; <10>	End of alpha changes block
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 8 OR 12: PATTERN --> DST (FILLING AREAS, DRAWING LINES)
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert
+;		a1 = tmpmask		d1 = scanCount
+;		a2 = tmpdst			d2 = dstRow
+;		a3 = srcPtr/patPtr	d3 = run cnt/hBump/scratch
+;		a4 = runPtr			d4 = fColor/scratch
+;		a5 = dstPtr			d5 = bColor/scratch
+;		a6 = locals			d6 = pattern/pat index/shift cnt
+;		a7 = 				d7 = pat select/invert
+;-------------------------------------------------------
+		
+@nxtScan
+		ADDQ 	#1,D7			;BUMP PATTERN SELECTOR
+		AND 	#$F,D7 			;MOD 16 FOR 16 LONG REPEAT
+		MOVE.L	(a3,D7*4),D6 	;GET PATTERN FOR NEXT ROW
+
+		add.l	d2,a5			;BUMP DST TO NEXT ROW
+		ADDQ 	#1,D0			;BUMP DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		bge 	DONE	 		;YES, BAIL
+		subq	#1,d1
+		ble.s	nextMask
+
+;rMASK8		
+@runs
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan			;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	MOVE.L	D6,D5			;GET PATTERN DATA
+		MOVE.L	(A1)+,D4		;GET MASK
+		AND.L	D4,D5			;MASK PATTERN DATA
+		NOT.L	D4				;MAKE NOTMASK
+		AND.L	(A2),D4 		;GET DST DATA
+		OR.L	D4,D5			;MERGE WITH PAT DATA
+		MOVE.L	D5,(A2)+		;PUT RESULT TO DST
+		DBRA	D3,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+; 	Here's the unwound loop to blast the # of longwords in D3 + 1 out.
+; 	(courtesy of Gary)
+
+@blit
+		MOVEQ	#$F,D4
+		AND.W	D3,D4			;partial block size
+		NEG.W	D4				;back up from end
+		LSR		#4,D3			;cnt of 16 long blocks
+		JMP		(@Start,D4.W*2)	;blast them out
+
+@DoSixteen
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+	
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+		MOVE.L	D6,(a2)+
+@Start	MOVE.L	D6,(a2)+	
+		DBRA	D3,@DoSixteen
+		BRA.S	@inst
+
+rMASK8G		EQU		@runs	
+
+		
+	ALIGN Alignment	
+
+;-------------------------------------------------------
+;
+;  MODE 9 OR 13: PATTERN OR DST --> DST
+;
+@nxtScan
+		ADDQ 	#1,D7			;BUMP PATTERN SELECTOR
+		AND 	#$F,D7 			;MOD 16 FOR 16 LONG REPEAT
+		MOVE.L	(a3,D7*4),D6 	;GET PATTERN FOR NEXT ROW
+
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		ADDQ 	#1,D0			;BUMP DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		bge 	DONE	 		;YES, BAIL
+		subq	#1,d1
+		ble.s	nextMask
+		
+;rMASK9
+@runs
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		move.l	fcolor(a6),d2	;load fgColor (bkColor)
+		
+@inst
+		move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		beq.s	@blit1			;no mask, so go fast
+		
+@mask	MOVE.L	D6,D5			;GET PATTERN DATA
+		AND.L	(A1)+,D5		;MASK PATTERN DATA
+		move.l	d5,d4			;make a copy
+		not.l	d4				;make into mask
+		and.l	(a2),d4			;punch hole in dest
+		and.l	d2,d5			;apply fgColor (bkColor)
+		or.l	d5,d4			;merge in src
+		move.l	d4,(A2)+		;put to dst
+		DBRA	D3,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit1	move.l	d6,d5			;make a copy of pattern
+		not.l	d5				;use as mask
+		and.l	d2,d6			;apply fgColor (bkColor) - goodbye pattern
+@blit	move.l	d5,d4			;make a copy
+		and.l	(a2),d4			;punch hole in dest
+		or.l	d6,d4			;merge in src
+		move.l	d4,(A2)+		;put to dst
+		DBRA	D3,@blit		;LOOP ALL LONGS THIS ROW
+		move.l	d5,d6			;get not pattern
+		not.l	d6				;restore pattern
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+rMASK9		EQU		@runs		
+
+
+	ALIGN Alignment	
+
+;-------------------------------------------------------
+;
+;  MODE 10 OR 14: PATTERN XOR DST --> DST (INVERTING AREAS, XOR LINES)
+;
+@nxtScan
+		ADDQ 	#1,D7			;BUMP PATTERN SELECTOR
+		AND 	#$F,D7 			;MOD 16 FOR 16 LONG REPEAT
+		MOVE.L	(a3,D7*4),D6 	;GET PATTERN FOR NEXT ROW
+
+		add.l	d2,a5			;BUMP DST TO NEXT ROW
+		ADDQ 	#1,D0			;BUMP DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		bge 	DONE	 		;YES, BAIL
+		subq	#1,d1
+		ble.s	nextMask
+
+;rMASK10		
+@runs
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	a4,a1			;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	MOVE.L	D6,D5			;GET PATTERN DATA
+		AND.L	(A1)+,D5		;MASK PATTERN DATA
+		EOR.L	D5,(A2)+		;XOR RESULT INTO DST
+		DBRA	D3,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit
+	;	EOR.L	D6,(A2)+		;XOR RESULT INTO DST
+	;	DBRA	D3,@blit		;LOOP ALL LONGS THIS ROW
+	;	BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+		MOVEQ	#$F,D4
+		AND.W	D3,D4			;partial block size
+		NEG.W	D4				;back up from end
+		LSR		#4,D3			;cnt of 16 long blocks
+		JMP		(@Start,D4.W*2)	;blast them out
+
+@DoSixteen
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+	
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+		EOR.L	D6,(a2)+
+@Start	EOR.L	D6,(a2)+	
+		DBRA	D3,@DoSixteen
+		BRA.S	@inst
+
+rMASK10		EQU		@runs		
+
+
+;-------------------------------------------------------
+;
+;  MODE 11 OR 15: PATTERN BIC DST --> DST
+;
+rMASK11	
+		move.l	bColor(a6),fColor(a6)	;set up mask color for BIC mode
+		lea		rMask9,a2		;point to pattern OR loop
+		move.l	a2,modeCase(a6)	;go there from now on
+		jmp		(a2)
+
+
+
+;-------------------------------------------------------
+;
+;  MODE 8 OR 12: Big PATTERN --> DST (FILLING AREAS, DRAWING LINES)
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert
+;		a1 = tmpmask		d1 = scanCount
+;		a2 = tmpdst			d2 = dstRow
+;		a3 = srcPtr/patPtr	d3 = run cnt/hBump/scratch
+;		a4 = runPtr			d4 = fColor/scratch
+;		a5 = dstPtr			d5 = bColor/scratch
+;		a6 = locals			d6 = pattern/pat index/shift cnt
+;		a7 = 				d7 = pat select/invert
+;-------------------------------------------------------
+
+; <10>	Start of alpha changes block from QDciPatchROM.a 					<sm 6/9/92>stb
+
+rXMASK8	LEA		rXMASK8G,A2			;get address of normal loop
+		TST.B	alphaMode(A6)		;drawing in alpha mode?
+		BEQ.S	@1					;no, use normal loop
+		LEA		rXMASK8A,A2			;get address of alpha loop
+	@1:	MOVE.L	A2,modeCase(A6)		;save proc address
+		JMP		(A2)				;go there now
+
+
+	ALIGN Alignment	
+
+@nxtScan
+		MOVE	PATHPOS(A6),D6	;GET HORIZONTAL POSITION
+		SWAP	D6				;GET VERT POSITION IN PATTERN
+		ADD		PATROW(A6),D6	;BUMP TO NEXT SCAN
+		AND		PATVMASK(A6),D6	;AND MASK WITHIN PATTERN
+								;LEAVE PATVPOS IN D6
+		add.l	d2,a5			;BUMP DST TO NEXT ROW
+		MOVE	vert(A6),D0
+		ADDQ 	#1,D0			;BUMP DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		bge 	DONE	 		;YES, BAIL
+		subq	#1,d1
+		ble.s	nextMask
+		MOVE	D0,vert(A6)
+
+@runs	move.l	a5,a2			;set up destAddr
+		move.l	a3,a0			;set up srcAddr
+		MOVEQ	#0,D4			;clear out high word
+		MOVE	D6,D4			;get vert pattern offset
+		ADD.L	D4,A0			;BUMP TO PROPER ROW
+		SWAP	D6				;AND GET PATHPOS
+		move.l	a4,A1			;point to run encoded mask buffer
+		MOVE.L	alphaMask(A6),D5
+		
+@inst	move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan
+		add.w	d3,a2			;bump destptr by skip amount
+		ADD.W	D3,D6			;BUMP PATTERN POS
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		BEQ.S	@blit
+		
+@mask	MOVE.L	0(A0,D6),D0		;GET PATTERN DATA
+		ADDQ	#4,D6			;BUMP TO NEXT LONG OF PATTERN
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		MOVE.L	(A2),D4			;GET DST
+		EOR.L	D4,D0			;COMBINE DST AND PATTERN
+		AND.L	(A1)+,D0		;APPLY REGION MASK
+		AND.L	D5,D0			;APPLY ALPHA MASK
+		EOR.L	D4,D0			;REAPPLY DST TO PATTERN
+		MOVE.L	D0,(A2)+		;PUT RESULT TO DST
+		DBRA	D3,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	MOVE.L	0(A0,D6),D0		;GET PATTERN DATA
+		ADDQ	#4,D6			;BUMP TO NEXT LONG OF PATTERN
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		MOVE.L	(A2),D4			;GET DST
+		EOR.L	D4,D0			;COMBINE DST AND PATTERN
+		AND.L	D5,D0			;APPLY ALPHA MASK
+		EOR.L	D4,D0			;REAPPLY DST TO PATTERN	
+		MOVE.L	D0,(A2)+		;PUT RESULT TO DST
+		DBRA	D3,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.S	@inst			;LOOP BACK FOR MORE RUNS
+
+rXMASK8A equ	@runs
+
+; <10>	End of alpha changes block
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 8 OR 12: Big PATTERN --> DST (FILLING AREAS, DRAWING LINES)
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert
+;		a1 = tmpmask		d1 = scanCount
+;		a2 = tmpdst			d2 = dstRow
+;		a3 = srcPtr/patPtr	d3 = run cnt/hBump/scratch
+;		a4 = runPtr			d4 = fColor/scratch
+;		a5 = dstPtr			d5 = bColor/scratch
+;		a6 = locals			d6 = pattern/pat index/shift cnt
+;		a7 = 				d7 = pat select/invert
+;-------------------------------------------------------
+
+@nxtScan
+		MOVE	PATHPOS(A6),D6	;GET HORIZONTAL POSITION
+		SWAP	D6				;GET VERT POSITION IN PATTERN
+		ADD		PATROW(A6),D6	;BUMP TO NEXT SCAN
+		AND		PATVMASK(A6),D6	;AND MASK WITHIN PATTERN
+								;LEAVE PATVPOS IN D6
+
+		add.l	d2,a5			;BUMP DST TO NEXT ROW
+		ADDQ 	#1,D0			;BUMP DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		bge 	DONE	 		;YES, BAIL
+		subq	#1,d1
+		ble.s	nextMask
+;rXMASK8		
+@runs	move.l	a5,a2			;set up destAddr
+		move.l	a3,a0			;set up srcAddr
+		MOVEQ	#0,D5			;clear out high word				<SMC 20Aug90>
+		MOVE	D6,D5			;get vert pattern offset			<SMC 20Aug90>
+		ADD.L	D5,A0			;BUMP TO PROPER ROW					<SMC 20Aug90>
+		SWAP	D6				;AND GET PATHPOS
+		move.l	a4,A1			;point to run encoded mask buffer
+		
+@inst	move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		ADD.W	D3,D6			;BUMP PATTERN POS
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	MOVE.L	0(A0,D6),D5		;GET PATTERN DATA
+		ADDQ	#4,D6			;BUMP TO NEXT LONG OF PATTERN
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		MOVE.L	(A1)+,D4		;GET MASK
+		AND.L	D4,D5			;MASK PATTERN DATA
+		NOT.L	D4				;MAKE NOTMASK
+		AND.L	(A2),D4 		;GET DST DATA
+		OR.L	D4,D5			;MERGE WITH PAT DATA
+		MOVE.L	D5,(A2)+		;PUT RESULT TO DST
+		DBRA	D3,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	MOVE.L	0(A0,D6),(A2)+	;write pattern to dest
+		ADDQ	#4,D6			;BUMP TO NEXT LONG OF PATTERN
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		DBRA	D3,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+rXMASK8G	EQU		@runs	
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 9 OR 13: Big PATTERN OR DST --> DST
+;
+@nxtScan
+		MOVE	PATHPOS(A6),D6	;GET HORIZONTAL POSITION
+		SWAP	D6				;GET VERT POSITION IN PATTERN
+		ADD		PATROW(A6),D6	;BUMP TO NEXT SCAN
+		AND		PATVMASK(A6),D6	;AND MASK WITHIN PATTERN
+								;LEAVE PATVPOS IN D6
+
+		add.l	DstRow(a6),a5	;BUMP DST TO NEXT ROW
+		ADDQ 	#1,D0			;BUMP DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		bge 	DONE	 		;YES, BAIL
+		subq	#1,d1
+		ble.s	nextMask
+;rXMASK9		
+@runs
+		move.l	fColor(a6),d2	;set up color mask (should be loaded externally)
+		move.l	a5,a2			;set up destAddr
+		move.l	a3,a0			;set up srcAddr
+		ADD		D6,A0			;BUMP TO PROPER ROW
+		SWAP	D6				;AND GET PATHPOS
+		move.l	a4,A1			;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan
+		add.w	d3,a2			;bump destptr by skip amount
+		ADD.W	D3,D6			;BUMP PATTERN POS
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	MOVE.L	0(A0,D6),D5		;GET PATTERN DATA
+		ADDQ	#4,D6			;BUMP TO NEXT LONG OF PATTERN
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		and.l	(A1)+,D5		;MASK PATTERN DATA
+		move.l	D5,D4			;make a copy
+		NOT.L	D4				;MAKE NOTMASK
+		AND.L	(A2),D4 		;punch hole in DST DATA
+		and.l	d2,d5			;apply color to masked pattern
+		OR.L	D4,D5			;MERGE WITH PAT DATA
+		MOVE.L	D5,(A2)+		;PUT RESULT TO DST
+		DBRA	D3,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	MOVE.L	0(A0,D6),D5		;GET PATTERN DATA
+		move.l	d5,d4			;make a copy
+		not.l	d4				;make into mask
+		and.l	d2,d5			;apply color to pattern
+		and.l	(a2),d4			;punch hole in dest
+		ADDQ	#4,D6			;BUMP TO NEXT LONG OF PATTERN
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		or.l	d4,d5			;merge src with dst
+		MOVE.L	d5,(a2)+		;write pattern to dest
+		DBRA	D3,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+rXMASK9		EQU		@runs		
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 10 OR 14: Big PATTERN XOR DST --> DST (INVERTING AREAS, XOR LINES)
+;
+@nxtScan
+		MOVE	PATHPOS(A6),D6	;GET HORIZONTAL POSITION
+		SWAP	D6				;GET VERT POSITION IN PATTERN
+		ADD		PATROW(A6),D6	;BUMP TO NEXT SCAN
+		AND		PATVMASK(A6),D6	;AND MASK WITHIN PATTERN
+								;LEAVE PATVPOS IN D6
+
+		add.l	d2,a5			;BUMP DST TO NEXT ROW
+		ADDQ 	#1,D0			;BUMP DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		bge 	DONE	 		;YES, BAIL
+		subq	#1,d1
+		ble.s	nextMask
+;rXMASK10		
+@runs
+		move.l	a5,a2			;set up destAddr
+		move.l	a3,a0			;set up srcAddr
+		ADD		D6,A0			;BUMP TO PROPER ROW
+		SWAP	D6				;AND GET PATHPOS
+		move.l	a4,A1			;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan
+		add.w	d3,a2			;bump destptr by skip amount
+		ADD.W	D3,D6			;BUMP PATTERN POS
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		swap	d3				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d3 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	MOVE.L	0(A0,D6),D5		;GET PATTERN DATA
+		AND.L	(A1)+,D5		;MASK PATTERN DATA
+		ADDQ	#4,D6			;BUMP TO NEXT LONG OF PATTERN
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		EOR.L	D5,(A2)+		;XOR RESULT TO DST
+		DBRA	D3,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit	MOVE.L	0(A0,D6),D5		;GET PATTERN DATA
+		ADDQ	#4,D6			;BUMP TO NEXT LONG OF PATTERN
+		AND		D7,D6			;WRAP WHEN PATTERN REPEATS
+		EOR.L	d5,(a2)+		;xor pattern to dest
+		DBRA	D3,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+rXMASK10	EQU		@runs		
+
+
+	ALIGN Alignment	
+		
+
+;-------------------------------------------------------
+;
+;  MODE 11 OR 15: Big PATTERN BIC DST --> DST
+;
+rXMASK11 
+		move.l	bColor(a6),fColor(a6)	;set up mask color for BIC mode
+		lea		rxMask9,a2		;point to Big pattern OR loop
+		move.l	a2,modeCase(a6)	;go there from now on
+		jmp		(a2)
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = scratch/cTabPtr	d0 = scratch/result
+;		a1 = scratch/dest RGB	d1 = scratch/patHMask
+;		a2 = scratch/src RGB	d2 = pixel cnt
+;		a3 = srcPtr				d3 = hbump
+;		a4 = RGNBUFFER			d4 = offset into destination
+;		a5 = dstPtr				d5 = iTabRes
+;		a6 = locals				d6 = offset into src/pattern
+;		a7 = 					d7 = dst pixel size
+;-------------------------------------------------------
+;
+;  MODE 34, 42, 58: SRC + DST --> DST (no pin)
+		
+rAddOver
+rAddOverIndexed
+		MOVE.L	colorTable(A6),A0	;set up color table
+		MOVE	patHMask(A6),D1	;set up source constriction
+@loopTop
+		AND		D1,D6			;constrict to the source long if in a pattern mode
+		BFEXTU	(A4){D4:D7},D0	;a pixel of the mask region
+		BEQ.S	@skip
+	
+		BFEXTU	(A3){D6:D7},D0	;get a pixel of the source
+		LEA		red(A0,D0*8),A2	;figure out where it lives in the color table
+		BFEXTU	(A5){D4:D7},D0	;a pixel of the destination
+		LEA		red(A0,D0*8),A1	;figure out where destination lives
+		MOVE	(A2)+,D0		;red	get source color value
+		ADD		(A1)+,D0		;		combine source and destination
+		ASL.L	D5,D0			;		save the top bits in the top word
+		MOVE	(A2)+,D0		;green	get source color value
+		ADD		(A1)+,D0		;		combine source and destination
+		ASL.L	D5,D0			;		save the top bits in the top word
+		MOVE	(A2)+,D0		;blue	get source color value
+		ADD		(A1)+,D0		;		combine source and destination
+		ASL.L	D5,D0			;		save the top bits in the top word
+		SWAP	D0				;r, g, b in high word
+		MOVE.B	([invColor,A6],D0,itTable),D0 ;get the pixel value of the additive sum
+		BFINS	D0,(A5){D4:D7}	;move to the destination
+@skip
+		ADD.L	D3,D6			;BUMP SRCPTR LEFT OR RIGHT by 1 pixel
+		ADD.L	D3,D4			;bump destination and mask
+		DBRA	D2,@loopTop		;do it for all of the pixels on the line (or within the mask)
+		BRA 	NxtNewSrc		;LOOP BACK FOR MORE
+		
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = hi bit clring mask
+;		a1 = maskPtr		d1 = scanCount
+;		a2 = hi bit mask	d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = dst msb's
+;		a4 = hBump			d4 = src msb's
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rAddOver32
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+
+		move.l	#~$ff808080,d0	;get high bit clearing mask
+		move.l	#$00808080,a2	;get high bit mask
+		swap	d1				;move line count to high word
+		move.w	patHMask(a6),d1	;put pattern hmask in low word
+		
+@inst	swap	d1				;swap line count into low word
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32
+		swap	d1				;swap pattern hmask into low word
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d1,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+
+@blit	move.l	0(a0,d6),d7		;get src pixel
+		move.l	a2,d4			;copy high bit mask
+		and.l	d7,d4			;remember src msb's
+		and.l	d0,d7			;mask out stragglers
+
+		move.l	(a5),d5			;get dest pixel
+		move.l	a2,d3			;copy high bit mask
+		and.l	d5,d3			;remember dst msb's
+		and.l	d0,d5			;mask out stragglers
+
+		add.l	d7,d5			;merge src with dst
+		eor.l	d4,d3			;compute partial sum of msb's
+		eor.l	d3,d5			;compute partial sum of msb's
+
+		MOVE.L	d5,(a5)			;write pattern to dest
+		add		a4,a5			;bump dst ptr
+		add		a4,d6			;bump src index
+		and.w	d1,d6			;constrict to the source long if in a pattern mode
+
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = hi bit clring mask
+;		a1 = maskPtr		d1 = scanCount
+;		a2 = hi bit mask	d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = dst msb's
+;		a4 = hBump			d4 = src msb's
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rAddOver16
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+
+		move.w	#$3def,d0		;get high bit clearing mask
+		move.w	#$4210,a2		;get high bit mask
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	tst.l	(a1)+			;examine mask
+		bmi.s	@first			;blit only first word
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;dump out second pixel
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@first	bsr.s	@doOne			;dump out first pixel
+		addq	#4,a5			;bump dst ptr
+		addq	#4,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@doOne	move.w	0(a0,d6.w),d7	;get src pixel
+		move.w	a2,d4			;copy high bit mask
+		and.w	d7,d4			;remember src msb's
+		and.w	d0,d7			;mask out stragglers
+
+		move.w	(a5),d5			;get dest pixel
+		move.w	a2,d3			;copy high bit mask
+		and.w	d5,d3			;remember dst msb's
+		and.w	d0,d5			;mask out stragglers
+
+		add.w	d7,d5			;merge src with dst
+		eor.w	d4,d3			;compute partial sum of msb's
+		eor.w	d3,d5			;compute partial sum of msb's
+		move.w	d5,(a5)			;write pattern to dest
+		rts
+
+@blit	bsr.s	@doOne			;do first pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;do second pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+		
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 33, 41, 57: SRC + DST --> DST (pin to max)
+
+		; in addition to the registers set up for AddOver, this needs
+		; the 3 element word array pin(A6) to be set to the maximum g, b, r values (in that order)
+		; for comparison and pinning
+		; Note that AddPin is not unwound while AddOver is; unwinding AddPin would gain less than
+		; 10%; is it worth it?  (Would it make any difference to the cache?)
+		; Would anyone care?  Andy??
+		
+rAddPin
+rAddPinIndexed
+		MOVE.L	colorTable(A6),A0	;set up color table
+@loopTop
+		AND		patHMask(A6),D6	;constrict to the source long if in a pattern mode
+		BFEXTU	(A4){D4:D7},D0	;a pixel of the mask region
+		BEQ.S	@skip
+	
+		BFEXTU	(A3){D6:D7},D0	;get a pixel of the source
+		LEA		red(A0,D0*8),A2	;figure out where it lives in the color table
+		BFEXTU	(A5){D4:D7},D0	;a pixel of the destination
+		LEA		red(A0,D0*8),A1	;figure out where destination lives
+		MOVEQ	#2,D1			;repeat for r, g, & b
+@nextColor
+		MOVE	(A2)+,D0		;get source color value
+		ADD		(A1)+,D0		;combine source and destination
+		BCS.S	@tooBig
+		CMP		(pin,A6,D1*2),D0 ;bigger than pin value?
+		BLS.S	@notTooBig		;no, no problem
+@tooBig
+		MOVE	(pin,A6,D1*2),D0
+@notTooBig
+		ASL.L	D5,D0			;save the top bits in the top word
+		DBRA	D1,@nextColor
+		SWAP	D0				;r, g, b in high word
+		MOVE.B	([invColor,A6],D0,itTable),D0 ;get the pixel value of the additive sum
+		BFINS	D0,(A5){D4:D7}	;move to the destination
+@skip
+		ADD.L	D3,D6			;BUMP SRCPTR LEFT OR RIGHT by 1 pixel
+		ADD.L	D3,D4			;bump destination and mask
+		DBRA	D2,@loopTop		;do it for all of the pixels on the line (or within the mask)
+		BRA 	NxtNewSrc		;LOOP BACK FOR MORE
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = result/scratch
+;		a1 = maskPtr		d1 = lo3Bytes mask(scanCount)
+;		a2 = scanCount		d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = pin pixel 0rgb
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+rAddPin32
+		lea		AddPin32,a0		;point to main loop
+		move.l	a0,modeCase(a6)	;go there from now on
+		
+		;set up 8-8-8 pin pixel as 0rgb in D3
+		
+		moveq	#0,d3			;start fresh, waste iTabRes
+		move.b	pin+4(a6),d3	;pick up red
+		swap	d3				;put in byte 3
+		move.w	pin+2(a6),d3	;get green in byte 2
+		move.b	pin(a6),d3		;put blue in lo byte		
+
+AddPin32
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+		move.l	d1,a2			;save scanCount in a2
+
+		move.l	Lo3Bytes,d1		;pick up mask
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi		NxtNewSrc32b	;restore scanCount and bump to next scan
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+
+@blit	move.l	0(a0,d6),d7		;get src pixel
+		add		a4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+
+		and.l	d1,d7			;waste high byte
+		move.l	d7,d0			;make a copy of the src xrgb
+
+		move.l	(a5),d5			;get dest pixel
+		and.l	d1,d5			;waste high byte
+
+		clr.b	d0				;prevent carries from below
+		add.w	d5,d0			;add green components
+		BCS.S	@PinGreen
+		cmp.w	d3,d0			;do we need to pin result?
+		bls.s	@GreenOK
+@PinGreen
+		move.w	d3,d0			;use pin value instead
+@GreenOK
+		move.b	d7,d0			;get src blue
+		add.b	d5,d0			;add dest blue
+		BCS.S	@PinBlue
+		cmp.b	d3,d0			;do we need to pin result?
+		bls.s	@BlueOK
+@PinBlue
+		move.b	d3,d0			;use pin value instead
+@BlueOK		
+		clr.w	d5				;now d5 has only red in byte 3
+		add.l	d5,d0			;add red components
+		cmp.l	d3,d0			;compare red components
+		bls.s	@RedOK
+@PinRed
+		swap	d3				;get max red in lo word
+		swap	d0				;get too big red in lo word
+		move.w	d3,d0			;pin to max red
+		swap	d0				;get back 0rgb
+		swap	d3				;restore pin pixel
+@RedOK
+
+		MOVE.L	d0,(a5)			;write pattern to dest
+		add		a4,a5			;bump dst ptr
+
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = result/scratch
+;		a1 = maskPtr		d1 = lo3Bytes mask(scanCount)
+;		a2 = scanCount		d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = pin pixel 0rgb
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rAddPin16
+		lea		AddPin16,a0		;point to main loop
+		move.l	a0,modeCase(a6)	;go there from now on
+		
+		;set up 5-5-5 pin pixel as 0rgb in D3
+		
+		moveq	#0,d3			;start fresh, waste iTabRes
+		move.b	pin+4(a6),d3	;pick up red
+		lsr.b	#3,d3			;get right aligned 5 bits
+		swap	d3				;put in byte 3
+		move.w	pin+2(a6),d3	;get green in byte 2
+		lsr.w	#3,d3			;get right aligned 5 bits
+		move.b	pin(a6),d3		;put blue in lo byte		
+		lsr.b	#3,d3			;right flush blue
+
+AddPin16
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+
+		move.w	#$3def,d0		;get high bit clearing mask
+		move.w	#$4210,a2		;get high bit mask
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	tst.l	(a1)+			;examine mask
+		bmi.s	@first			;blit only first word
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;dump out second pixel
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@first	bsr.s	@doOne			;dump out first pixel
+		addq	#4,a5			;bump dst ptr
+		addq	#4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@doOne	moveq	#0,d7
+		move.w	0(a0,d6.w),d7	;get src pixel
+		add.w	d7,d7			;waste high bit
+		lsl.l	#5,d7			;but red in byte 3
+		lsr.w	#3,d7			;but green in byte 2, blue in lo byte
+		lsr.b	#3,d7			;right flush blue
+
+		moveq	#0,d5
+		move.w	(a5),d5			;get a pixel of the dest xrgb
+		add.w	d5,d5			;waste high bit
+		lsl.l	#5,d5			;but red in byte 3
+		lsr.w	#3,d5			;but green in byte 2, blue in lo byte
+		lsr.b	#3,d5			;right flush blue
+		
+		add.l	d5,d7			;add all components at once
+		move.l	d7,d0			;prime result with red
+		cmp.l	d3,d0			;do we need to pin result?
+		bls.s	@redOK			;no, don't pin
+		move.l	d3,d0			;use pin value instead
+@redOK
+		move.w	d7,d0			;prime result with green
+		cmp.w	d3,d0			;do we need to pin result?
+		bls.s	@greenOK		;no, don't pin
+		move.w	d3,d0			;use pin value instead
+@greenOK
+		move.b	d7,d0			;prime result with blue
+		cmp.b	d3,d0			;do we need to pin result?
+		bls.s	@blueOK			;no, don't pin
+		move.b	d3,d0			;use pin value instead
+@blueOK
+		lsl.b	#3,d0			;rejoin green/blue
+		lsl.w	#3,d0			;rejoin red/green/blue
+		lsr.l	#6,d0			;right flush red/green/blue
+		move.w	d0,(a5)			;move to the destination
+		rts
+
+@blit	bsr.s	@doOne			;do first pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;do second pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+		
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 38, 46, 62: DST - SRC --> DST (no pin)
+; 
+; 
+
+rSubOver
+rSubOverIndexed
+		MOVE.L	colorTable(A6),A0	;set up color table
+		MOVE	patHMask(A6),D1	;set up source constriction
+@loopTop
+		AND		D1,D6			;constrict to the source long if in a pattern mode
+		BFEXTU	(A4){D4:D7},D0	;a pixel of the mask region
+		BEQ.S	@skip
+	
+		BFEXTU	(A3){D6:D7},D0	;get a pixel of the source
+		LEA		red(A0,D0*8),A2	;figure out where it lives in the color table
+		BFEXTU	(A5){D4:D7},D0	;a pixel of the destination
+		LEA		red(A0,D0*8),A1	;figure out where destination lives
+		MOVE	(A1)+,D0		;red	get destination color value
+		SUB		(A2)+,D0		;		less source color value
+		ASL.L	D5,D0			;		save the top bits in the top word
+		MOVE	(A1)+,D0		;green	get destination color value
+		SUB		(A2)+,D0		;		less source color value
+		ASL.L	D5,D0			;		save the top bits in the top word
+		MOVE	(A1)+,D0		;blue	get destination color value
+		SUB		(A2)+,D0		;		less source color value
+		ASL.L	D5,D0			;		save the top bits in the top word
+		SWAP	D0				;r, g, b in high word
+		MOVE.B	([invColor,A6],D0,itTable),D0 ;get the pixel value of the additive sum
+		BFINS	D0,(A5){D4:D7}	;move to the destination
+@skip
+		ADD.L	D3,D6			;BUMP SRCPTR LEFT OR RIGHT by 1 pixel
+		ADD.L	D3,D4			;bump destination and mask
+		DBRA	D2,@loopTop		;do it for all of the pixels on the line (or within the mask)
+		BRA 	NxtNewSrc		;LOOP BACK FOR MORE
+		
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = hi bit clring mask
+;		a1 = maskPtr		d1 = high bit mask (scanCount)
+;		a2 = scanCount		d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = src msb's
+;		a4 = hBump			d4 = dst msb's
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rSubOver32
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+
+		move.l	d1,a2			;save scanCount in a2
+		move.l	#~$ff808080,d0	;get high bit clearing mask
+		move.l	#$00808080,d1	;get high bit mask
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi		NxtNewSrc32b	;restore scanCount and bump to next scan
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+
+@blit	move.l	0(a0,d6),d7		;get src pixel
+
+		move.l	d1,d3			;copy high bit mask
+		and.l	d7,d3			;remember src msb's
+		eor.l	d1,d3			;invert src msb's
+		and.l	d0,d7			;mask out stragglers
+		
+		move.l	(a5),d5			;get a pixel of the dest xrgb
+		move.l	d1,d4			;copy high bit mask
+		and.l	d5,d4			;remember dst msb's
+		and.l	d0,d5			;mask out high byte
+		or.l	d1,d5			;force high bits on
+		
+		sub.l	d7,d5			;compute dst - src
+		eor.l	d3,d4			;compute partial sum of msb's
+		eor.l	d4,d5			;compute partial sum of msb's
+		
+		MOVE.L	d5,(a5)			;write pattern to dest
+		add		a4,a5			;bump dst ptr
+		add		a4,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = hi bit clring mask
+;		a1 = maskPtr		d1 = high bit mask
+;		a2 = scancount		d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = dst msb's
+;		a4 = hBump			d4 = src msb's
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rSubOver16
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+
+		move.l	d1,a2			;save scancount
+		move.w	#$3def,d0		;get high bit clearing mask
+		move.w	#$4210,d1		;get high bit mask
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32b
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	tst.l	(a1)+			;examine mask
+		bmi.s	@first			;blit only first word
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;dump out second pixel
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@first	bsr.s	@doOne			;dump out first pixel
+		addq	#4,a5			;bump dst ptr
+		addq	#4,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@doOne	move.w	d1,d3			;copy high bit mask
+		move.w	0(a0,d6.w),d7	;get src pixel
+		and.w	d7,d3			;remember src msb's
+		eor.w	d1,d3			;invert src msb's
+		and.w	d0,d7			;mask out stragglers
+
+		move.w	(a5),d5			;get dest pixel
+		move.w	d1,d4			;copy high bit mask
+		and.w	d5,d4			;remember dst msb's
+		and.w	d0,d5			;mask out high byte
+		or.w	d1,d5			;force high bits on
+		
+		sub.w	d7,d5			;compute dst - src
+		eor.w	d3,d4			;compute partial sum of msb's
+		eor.w	d4,d5			;compute partial sum of msb's
+		move.w	d5,(a5)			;write pattern to dest
+		rts
+
+@blit	bsr.s	@doOne			;do first pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;do second pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 35, 43, 59: DST - SRC --> DST (pin to min)
+	
+rSubPin
+rSubPinIndexed
+		MOVE.L	colorTable(A6),A0	;set up color table
+@loopTop
+		AND		patHMask(A6),D6	;constrict to the source long if in a pattern mode
+		BFEXTU	(A4){D4:D7},D0	;a pixel of the mask region
+		BEQ.S	@skip
+	
+		BFEXTU	(A3){D6:D7},D0	;get a pixel of the source
+		LEA		red(A0,D0*8),A2	;figure out where it lives in the color table
+		BFEXTU	(A5){D4:D7},D0	;a pixel of the destination
+		LEA		red(A0,D0*8),A1	;figure out where destination lives
+		MOVEQ	#2,D1			;repeat for r, g, & b
+@nextColor
+		MOVE	(A1)+,D0		;get destination color value
+		SUB		(A2)+,D0		;less source color value
+		BCS.S	@tooBig
+		CMP		(pin,A6,D1*2),D0 ;bigger than pin value?
+		BHS.S	@notTooBig		;no, no problem
+@tooBig
+		MOVE	(pin,A6,D1*2),D0
+@notTooBig
+		ASL.L	D5,D0			;save the top bits in the top word
+		DBRA	D1,@nextColor
+		SWAP	D0				;r, g, b in high word
+		MOVE.B	([invColor,A6],D0,itTable),D0 ;get the pixel value of the additive sum
+		BFINS	D0,(A5){D4:D7}	;move to the destination
+@skip
+		ADD.L	D3,D6			;BUMP SRCPTR LEFT OR RIGHT by 1 pixel
+		ADD.L	D3,D4			;bump destination and mask
+		DBRA	D2,@loopTop		;do it for all of the pixels on the line (or within the mask)
+		BRA 	NxtNewSrc		;LOOP BACK FOR MORE
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = result/scratch
+;		a1 = maskPtr		d1 = lo3Bytes mask(scanCount)
+;		a2 = scanCount		d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = pin pixel 0rgb
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = src pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = dst pixel
+;-------------------------------------------------------
+
+rSubPin32
+		lea		SubPin32,a0		;point to main loop
+		move.l	a0,modeCase(a6)	;go there from now on
+
+		;set up 8-8-8 pin pixel as 0rgb in D3
+		
+		moveq	#0,d3			;start fresh, waste iTabRes
+		move.b	pin+4(a6),d3	;pick up red
+		swap	d3				;put in byte 3
+		move.w	pin+2(a6),d3	;get green in byte 2
+		move.b	pin(a6),d3		;put blue in lo byte		
+
+SubPin32
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+		move.l	d1,a2			;save scanCount in a2
+
+		move.l	Lo3Bytes,d1		;pick up mask
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi		NxtNewSrc32b	;restore scanCount and bump to next scan
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+
+@blit	move.l	0(a0,d6),d5		;get src pixel
+		add		a4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+
+		and.l	d1,d5			;waste high byte
+
+		move.l	(a5),d7			;get dest pixel
+		and.l	d1,d7			;waste high byte
+		move.l	d7,d0			;make a copy of the dst xrgb
+
+		st		d0				;prevent borrows from below
+		sub.w	d5,d0			;sub green components
+		BCS.S	@PinGreen
+		cmp.w	d3,d0			;do we need to pin result?
+		bhs.s	@GreenOK
+@PinGreen
+		move.w	d3,d0			;use pin value instead
+@GreenOK
+		move.b	d7,d0			;get dest blue
+		sub.b	d5,d0			;sub src blue
+		BCS.S	@PinBlue
+		cmp.b	d3,d0			;do we need to pin result?
+		bhs.s	@BlueOK
+@PinBlue
+		move.b	d3,d0			;use pin value instead
+@BlueOK		
+		clr.w	d5				;now d5 has only red in byte 3
+		sub.l	d5,d0			;sub red components
+		cmp.l	d3,d0			;compare red components
+		bge.s	@RedOK
+@PinRed
+		swap	d3				;get max red in lo word
+		swap	d0				;get too big red in lo word
+		move.w	d3,d0			;pin to max red
+		swap	d0				;get back 0rgb
+		swap	d3				;restore pin pixel
+@RedOK
+
+		MOVE.L	d0,(a5)			;write pattern to dest
+		add		a4,a5			;bump dst ptr
+
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+		
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = result/scratch
+;		a1 = maskPtr		d1 = lo3Bytes mask(scanCount)
+;		a2 = scanCount		d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = pin pixel 0rgb
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rSubPin16
+		lea		SubPin16,a0		;point to main loop
+		move.l	a0,modeCase(a6)	;go there from now on
+		
+		;set up 5-5-5 pin pixel as 0rgb in D3
+		
+		moveq	#0,d3			;start fresh, waste iTabRes
+		move.b	pin+4(a6),d3	;pick up red
+		lsr.b	#3,d3			;get right aligned 5 bits
+		swap	d3				;put in byte 3
+		move.w	pin+2(a6),d3	;get green in byte 2
+		lsr.w	#3,d3			;get right aligned 5 bits
+		move.b	pin(a6),d3		;put blue in lo byte		
+		lsr.b	#3,d3			;right flush blue
+		add.l	#$808080,d3		;prevent borrows from crossing byte boundaries
+		
+SubPin16
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+
+		move.l	d1,a2			;save scancount
+		move.l	#$808080,d1		;borrow stopper
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32b
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	tst.l	(a1)+			;examine mask
+		bmi.s	@first			;blit only first word
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;dump out second pixel
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@first	bsr.s	@doOne			;dump out first pixel
+		addq	#4,a5			;bump dst ptr
+		addq	#4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@doOne	moveq	#0,d5
+		move.w	0(a0,d6.w),d5	;get src pixel
+		add.w	d5,d5			;waste high bit
+		lsl.l	#5,d5			;but red in byte 3
+		lsr.w	#3,d5			;but green in byte 2, blue in lo byte
+		lsr.b	#3,d5			;right flush blue
+
+		moveq	#0,d7
+		move.w	(a5),d7			;get a pixel of the dest xrgb
+		add.w	d7,d7			;waste high bit
+		lsl.l	#5,d7			;but red in byte 3
+		lsr.w	#3,d7			;but green in byte 2, blue in lo byte
+		lsr.b	#3,d7			;right flush blue
+		add.l	d1,d7			;prevent borrows from crossing byte boundaries
+		
+		sub.l	d5,d7			;sub all components at once
+		move.l	d7,d0			;prime result with red
+		cmp.l	d3,d0			;do we need to pin result?
+		bhs.s	@redOK			;no, don't pin
+		move.l	d3,d0			;use pin value instead
+@redOK
+		move.w	d7,d0			;prime result with green
+		cmp.w	d3,d0			;do we need to pin result?
+		bhs.s	@greenOK		;no, don't pin
+		move.w	d3,d0			;use pin value instead
+@greenOK
+		move.b	d7,d0			;prime result with blue
+		cmp.b	d3,d0			;do we need to pin result?
+		bhs.s	@blueOK			;no, don't pin
+		move.b	d3,d0			;use pin value instead
+@blueOK
+
+		lsl.b	#3,d0			;rejoin green/blue
+		lsl.w	#3,d0			;rejoin red/green/blue
+		lsr.l	#6,d0			;right flush red/green/blue
+		move.w	d0,(a5)			;move to the destination
+		rts
+
+@blit	bsr.s	@doOne			;do first pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;do second pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 37, 45, 61: MAX(SRC, DST) --> DST
+;
+;  
+
+rMax
+rMaxIndexed
+		MOVE.L	colorTable(A6),A0	;set up color table
+		MOVE	patHMask(A6),D1	;set up source constriction
+@loopTop
+		AND		D1,D6			;constrict to the source long if in a pattern mode
+		BFEXTU	(A4){D4:D7},D0	;a pixel of the mask region
+		BEQ.S	@skip
+		BFEXTU	(A3){D6:D7},D0	;get a pixel of the source
+		LEA		red(A0,D0*8),A2	;figure out where it lives in the color table
+		BFEXTU	(A5){D4:D7},D0	;a pixel of the destination
+		LEA		red(A0,D0*8),A1	;figure out where destination lives
+		MOVE	(A2)+,D0		;red	get source color value
+		CMP		(A1),D0			;		compare source and destination
+		BHS.S	@gotTheMaxRed
+		MOVE	(A1),D0
+@gotTheMaxRed
+		ADDQ	#2,A1			;advance to next color
+		ASL.L	D5,D0			;		save the top bits in the top word
+		MOVE	(A2)+,D0		;green	get source color value
+		CMP		(A1),D0			;		compare source and destination
+		BHS.S	@gotTheMaxGreen
+		MOVE	(A1),D0
+@gotTheMaxGreen
+		ADDQ	#2,A1			;advance to next color
+		ASL.L	D5,D0			;		save the top bits in the top word
+		MOVE	(A2)+,D0		;blue	get source color value
+		CMP		(A1),D0			;		compare source and destination
+		BHS.S	@gotTheMaxBlue
+		MOVE	(A1),D0
+@gotTheMaxBlue
+		ASL.L	D5,D0			;save the top bits in the top word
+		SWAP	D0				;r, g, b in high word
+		MOVE.B	([invColor,A6],D0,itTable),D0 ;get the pixel value of the additive sum
+		BFINS	D0,(A5){D4:D7}	;move to the destination
+@skip
+		ADD.L	D3,D6			;BUMP SRCPTR LEFT OR RIGHT by 1 pixel
+		ADD.L	D3,D4			;bump destination and mask
+		DBRA	D2,@loopTop		;do it for all of the pixels on the line (or within the mask)
+		BRA 	NxtNewSrc		;LOOP BACK FOR MORE
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = result/scratch
+;		a1 = maskPtr		d1 = scanCount
+;		a2 = 				d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = 
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rMax32
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+
+@blit	move.l	0(a0,d6),d7		;get src pixel
+		add		a4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+
+		move.l	(a5),d5			;get dest pixel
+
+		move.l	d5,d0			;make a copy of the dest xrgb
+		cmp.w	d7,d0			;compare g,b components
+		BHI.S	@gotMaxGreen
+		move.w	d7,d0			;keep the bigger of the two
+		move.b	d5,d0			;prime for blue
+@gotMaxGreen
+		cmp.b	d7,d5			;compare blue components
+		BHI.S	@gotMaxBlue
+		move.b	d7,d0			;keep the bigger of the two
+@gotMaxBlue
+		swap	d7
+		swap	d0
+		cmp.b	d7,d0			;compare red components
+		BHI.S	@gotMaxRed
+		move.b	d7,d0			;keep the bigger of the two
+@gotMaxRed
+		swap	d0				;get new xrgb
+
+		MOVE.L	d0,(a5)			;write pattern to dest
+		add		a4,a5			;bump dst ptr
+
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = result/scratch
+;		a1 = maskPtr		d1 = 
+;		a2 = scanCount		d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = 
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rMax16
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	tst.l	(a1)+			;examine mask
+		bmi.s	@first			;blit only first word
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;dump out second pixel
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@first	bsr.s	@doOne			;dump out first pixel
+		addq	#4,a5			;bump dst ptr
+		addq	#4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@doOne	moveq	#0,d7
+		move.w	0(a0,d6.w),d7	;get src pixel
+		add.w	d7,d7			;waste high bit
+		lsl.l	#5,d7			;but red in byte 3
+		lsr.w	#3,d7			;but green in byte 2, blue in lo byte
+		lsr.b	#3,d7			;right flush blue
+
+		moveq	#0,d5
+		move.w	(a5),d5			;get a pixel of the dest xrgb
+		add.w	d5,d5			;waste high bit
+		lsl.l	#5,d5			;but red in byte 3
+		lsr.w	#3,d5			;but green in byte 2, blue in lo byte
+		lsr.b	#3,d5			;right flush blue
+
+		move.l	d7,d0			;prime result with src
+		cmp.l	d5,d0			;is dst greater?
+		bhs.s	@gotRed			;no, use src
+		move.l	d5,d0			;use dst value instead
+@gotRed
+		move.w	d7,d0			;prime result with src
+		cmp.w	d5,d0			;is dst greater?
+		bhs.s	@gotGreen		;no, use src
+		move.w	d5,d0			;use dst value instead
+@gotGreen
+		move.b	d7,d0			;prime result with src
+		cmp.b	d5,d0			;is dst greater?
+		bhs.s	@gotBlue		;no, use src
+		move.b	d5,d0			;use dst value instead
+@gotBlue
+
+		lsl.b	#3,d0			;rejoin green/blue
+		lsl.w	#3,d0			;rejoin red/green/blue
+		lsr.l	#6,d0			;right flush red/green/blue
+		move.w	d0,(a5)			;move to the destination
+		rts
+
+@blit	bsr.s	@doOne			;do first pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;do second pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 39, 47, 63: MIN(SRC, DST) --> DST
+;
+; Note:  D4 is unused
+
+rMin
+rMinIndexed
+		MOVE.L	colorTable(A6),A0	;set up color table
+		MOVE	patHMask(A6),D1	;set up source constriction
+@loopTop
+		AND		D1,D6			;constrict to the source long if in a pattern mode
+		BFEXTU	(A4){D4:D7},D0	;a pixel of the mask region
+		BEQ.S	@skip
+		BFEXTU	(A3){D6:D7},D0	;get a pixel of the source
+		LEA		red(A0,D0*8),A2	;figure out where it lives in the color table
+		BFEXTU	(A5){D4:D7},D0	;a pixel of the destination
+		LEA		red(A0,D0*8),A1	;figure out where destination lives
+		MOVE	(A2)+,D0		;red	get source color value
+		CMP		(A1),D0			;		compare source and destination
+		BLS.S	@gotTheMinRed
+		MOVE	(A1),D0
+@gotTheMinRed
+		ADDQ	#2,A1			;advance to next color
+		ASL.L	D5,D0			;		save the top bits in the top word
+		MOVE	(A2)+,D0		;green	get source color value
+		CMP		(A1),D0			;		compare source and destination
+		BLS.S	@gotTheMinGreen
+		MOVE	(A1),D0
+@gotTheMinGreen
+		ADDQ	#2,A1			;advance to next color
+		ASL.L	D5,D0			;		save the top bits in the top word
+		MOVE	(A2)+,D0		;blue	get source color value
+		CMP		(A1),D0			;		compare source and destination
+		BLS.S	@gotTheMinBlue
+		MOVE	(A1),D0
+@gotTheMinBlue
+		ASL.L	D5,D0			;save the top bits in the top word
+		SWAP	D0				;r, g, b in high word
+		MOVE.B	([invColor,A6],D0,itTable),D0 ;get the pixel value of the additive sum
+		BFINS	D0,(A5){D4:D7}	;move to the destination
+@skip
+		ADD.L	D3,D6			;BUMP SRCPTR LEFT OR RIGHT by 1 pixel
+		ADD.L	D3,D4			;bump destination and mask
+		DBRA	D2,@loopTop		;do it for all of the pixels on the line (or within the mask)
+		BRA 	NxtNewSrc		;LOOP BACK FOR MORE
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = result/scratch
+;		a1 = maskPtr		d1 = scanCount
+;		a2 = 				d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = 
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rMin32
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+
+@blit	move.l	0(a0,d6),d7		;get src pixel
+		add		a4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+
+		move.l	(a5),d5			;get dest pixel
+
+		move.l	d5,d0			;make a copy of the dest xrgb
+		cmp.w	d7,d0			;compare g,b components
+		BLS.S	@gotMinGreen
+		move.w	d7,d0			;keep the smaller of the two
+		move.b	d5,d0			;prime for blue
+@gotMinGreen
+		cmp.b	d7,d5			;compare blue components
+		BLS.S	@gotMinBlue
+		move.b	d7,d0			;keep the smaller of the two
+@gotMinBlue
+		swap	d7
+		swap	d0
+		cmp.b	d7,d0			;compare red components
+		BLS.S	@gotMinRed
+		move.b	d7,d0			;keep the smaller of the two
+@gotMinRed
+		swap	d0				;get new xrgb
+
+		MOVE.L	d0,(a5)			;write pattern to dest
+		add		a4,a5			;bump dst ptr
+
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = result/scratch
+;		a1 = maskPtr		d1 = 
+;		a2 = scanCount		d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = 
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rMin16
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	tst.l	(a1)+			;examine mask
+		bmi.s	@first			;blit only first word
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;dump out second pixel
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@first	bsr.s	@doOne			;dump out first pixel
+		addq	#4,a5			;bump dst ptr
+		addq	#4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@doOne	moveq	#0,d7
+		move.w	0(a0,d6.w),d7	;get src pixel
+		add.w	d7,d7			;waste high bit
+		lsl.l	#5,d7			;but red in byte 3
+		lsr.w	#3,d7			;but green in byte 2, blue in lo byte
+		lsr.b	#3,d7			;right flush blue
+
+		moveq	#0,d5
+		move.w	(a5),d5			;get a pixel of the dest xrgb
+		add.w	d5,d5			;waste high bit
+		lsl.l	#5,d5			;but red in byte 3
+		lsr.w	#3,d5			;but green in byte 2, blue in lo byte
+		lsr.b	#3,d5			;right flush blue
+
+		move.l	d7,d0			;prime result with src
+		cmp.l	d5,d0			;is dst greater?
+		bls.s	@gotRed			;no, use src
+		move.l	d5,d0			;use dst value instead
+@gotRed
+		move.w	d7,d0			;prime result with src
+		cmp.w	d5,d0			;is dst greater?
+		bls.s	@gotGreen		;no, use src
+		move.w	d5,d0			;use dst value instead
+@gotGreen
+		move.b	d7,d0			;prime result with src
+		cmp.b	d5,d0			;is dst greater?
+		bls.s	@gotBlue		;no, use src
+		move.b	d5,d0			;use dst value instead
+@gotBlue
+
+		lsl.b	#3,d0			;rejoin green/blue
+		lsl.w	#3,d0			;rejoin red/green/blue
+		lsr.l	#6,d0			;right flush red/green/blue
+		move.w	d0,(a5)			;move to the destination
+		rts
+
+@blit	bsr.s	@doOne			;do first pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;do second pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 32, 40, 56: AVG(SRC, DST, WEIGHT) --> DST
+
+rAvg 
+rAvgIndexed
+		MOVE.L	D3,A0			;free up data register, get pixel bump
+@loopTop
+		AND		patHMask(A6),D6	;constrict to the source long if in a pattern mode
+		BFEXTU	(A4){D4:D7},D0	;a pixel of the mask region
+		BEQ.S	@skip
+	
+		BFEXTU	(A3){D6:D7},D0	;get a pixel of the source (zeros top word)
+		LEA		([colorTable,A6],D0*8,red),A2	;figure out where it lives in the color table
+		BFEXTU	(A5){D4:D7},D0	;a pixel of the destination
+		LEA		([colorTable,A6],D0*8,red),A1	;figure out where destination lives
+		MOVEQ	#2,D0			;once for each color
+		MOVE	invSize(A6),D3 	;do once for r, b and g
+		ADD		D3,D3			;initialize at 2x for shift count
+		CLR		-(SP)			;make space & initialize average r, b, g
+@nextColor
+		MOVE	(A2)+,D1		;get source color value
+		MULU	(weight,A6,D0*2),D1 	;weight varies from 0 to 1
+		MOVE	(A1)+,D5		;get destination color value
+		MULU	(notWeight,A6,D0*2),D5 	;weight varies from 1 to 0
+		ADD.L	D5,D1			;add source + dest
+		SWAP	D1				;high word is interesting part
+		MOVE	rtShift(A6),D5	;amount to shift right
+		LSR		D5,D1			;get top bits only
+		LSL		D3,D1			;shift by 2x, 1x, or 0 (for r, g, & b)
+		OR		D1,(SP)			;combine r, g, b
+		SUB		invSize(A6),D3 	;decrement shift, weight index
+		DBRA	D0,@nextColor	;do for b & g as well
+		
+		MOVE	(SP)+,D0		;r, g, b
+		MOVE.B	([invColor,A6],D0,itTable),D0 ;get the pixel value of the additive sum
+		BFINS	D0,(A5){D4:D7}	;move to the destination
+@skip
+		ADD.L	A0,D6			;BUMP SRCPTR LEFT OR RIGHT by 1 pixel
+		ADD.L	A0,D4			;bump destination and mask
+		DBRA	D2,@loopTop		;do it for all of the pixels on the line (or within the mask)
+		MOVE.L	A0,D3			;restore bump for next time through
+		BRA 	NxtNewSrc		;LOOP BACK FOR MORE
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = high bit mask
+;		a1 = maskPtr		d1 = (scanCount)
+;		a2 = low bit mask	d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = lsb's of result
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rAvg32Half
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+
+		move.l	#~$ff808080,d0	;get high bit mask
+		move.l	#$10101,a2		;get low bit mask
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi		NxtNewSrc32		;bump to next scanline
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+
+@blit	move.l	0(a0,d6),d7		;get src pixel
+		add		a4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+
+		move.l	a2,d3			;copy low bit mask
+		and.l	d7,d3			;remember src lsb's
+		lsr.l	#1,d7			;get almost 1/2 of it
+		and.l	d0,d7			;mask out stragglers
+
+		move.l	(a5),d5			;get dest pixel
+		and.l	d5,d3			;compute carry out of lsb
+		lsr.l	#1,d5			;get almost 1/2 of it
+		and.l	d0,d5			;mask out stragglers
+				
+		add.l	d5,d7			;merge src with dst
+		add.l	d3,d7			;propagate carrys
+		MOVE.L	d7,(a5)			;write pattern to dest
+		add		a4,a5			;bump dst ptr
+
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = high bit mask
+;		a1 = maskPtr		d1 = (scanCount)
+;		a2 = low bit mask	d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = lsb's of result
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rAvg16Half
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+
+		move.w	#$3def,d0		;get high bit clearing mask
+		move.w	#$0421,a2		;get high bit mask
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	tst.l	(a1)+			;examine mask
+		bmi.s	@first			;blit only first word
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;dump out second pixel
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@first	bsr.s	@doOne			;dump out first pixel
+		addq	#4,a5			;bump dst ptr
+		addq	#4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@doOne	move.l	a2,d3			;copy low bit mask
+		move.w	0(a0,d6.w),d7	;get src pixel
+		and.w	d7,d3			;remember src lsb's
+		lsr.w	#1,d7			;get almost 1/2 of it
+		and.w	d0,d7			;mask out stragglers
+
+		move.w	(a5),d5			;get dest pixel
+		and.w	d5,d3			;compute carry out of lsb
+		lsr.w	#1,d5			;get almost 1/2 of it
+		and.w	d0,d5			;mask out stragglers
+		
+		add.w	d5,d7			;merge src with dst
+		add.w	d3,d7			;propagate carrys
+		move.w	d7,(a5)			;write pattern to dest
+		rts
+
+@blit	bsr.s	@doOne			;do first pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;do second pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = red weight
+;		a1 = maskPtr		d1 = blue/grn weight (scanCount)
+;		a2 = scratch		d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = scratch
+;		a4 = hBump			d4 = scratch
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+nxtScanRAvg32
+		move.w	(sp)+,d1		;reload scanCount
+		bra		NxtNewSrc32		;bump to next scanline
+
+rAvg32
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+		move.w	d1,-(sp)		;save scanCount
+
+		lea		weight(a6),a2	;point at blue weight
+		move.l	(a2)+,d1		;get blue/green weight
+		move.w	(a2),d0			;get red weight
+		
+@short0	moveq	#0,d4			;init last result
+		move.l	d4,d3			;init last src
+		move.l	d4,a2			;init last dst
+
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	nxtScanRAvg32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+
+@blit	move.l	0(a0,d6),d7		;get src pixel
+		add		a4,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		move.l	(a5),d5			;get dest pixel
+
+@short1	cmp.l	d3,d7			;same as last time?
+		bne.s	@blue			;no, go do it
+		cmp.l	a2,d5			;same as last time?
+		beq.s	@again			;yes, go fast
+		
+@blue	moveq	#0,d3			;clr out high end
+		move.b	d7,d3			;get src blue
+		swap	d1				;get blue weight
+		mulu.w	d1,d3			;% blue
+
+		moveq	#0,d4			;clr out high end
+		move.b	d5,d4			;get dst blue
+		neg.w	d1
+		mulu.w	d1,d4			;% blue
+		neg.w	d1
+		
+		add.l	d3,d4			;get 24 bits of dst blue
+		swap	d4				;dst blue
+		move.w	d4,a2			;a2 has 000B
+		
+@grn	move.w	d7,d3			;get src grn
+		lsr.w	#8,d3
+		swap	d1				;get grn weight
+		mulu.w	d1,d3			;% grn
+
+		move.w	d5,d4			;get dst grn
+		lsr.w	#8,d4
+		neg.w	d1
+		mulu.w	d1,d4			;% grn
+		neg.w	d1
+		
+		add.l	d3,d4			;get 24 bits of dst grn
+		swap	d4				;dst grn
+		lsl.w	#8,d4
+		add.w	d4,a2			;a2 has 00GB
+		
+@red	moveq	#0,d3			;clr out high end
+		swap	d7
+		move.b	d7,d3			;get src red
+		mulu.w	d0,d3			;% red
+
+		moveq	#0,d4			;clr out high end
+		swap	d5
+		move.b	d5,d4			;get dst red
+		neg.w	d0
+		mulu.w	d0,d4			;% red
+		neg.w	d0
+		
+		add.l	d3,d4			;get 24 bits of dst red
+		move.w	a2,d4			;d4 has 0RGB
+
+@short2	swap	d5				;get back dst
+		move.l	d5,a2			;save for short circuit
+		swap	d7				;get back src
+		move.l	d7,d3			;save for short circuit
+		
+@again	MOVE.L	d4,(a5)			;write pattern to dest
+		add		a4,a5			;bump dst ptr
+
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = red weight
+;		a1 = maskPtr		d1 = blue/grn weight (scanCount)
+;		a2 = scratch		d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = scratch
+;		a4 = hBump			d4 = scratch
+;		a5 = dstPtr			d5 = dest pixel
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rAvg16
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+		move.w	d1,-(sp)		;save scanCount
+
+		lea		weight(a6),a2	;point at blue weight
+		move.l	(a2)+,d1		;get blue/green weight
+		move.w	(a2),d0			;get red weight
+				
+@short0	moveq	#0,d4			;init last result
+		move.l	d4,d3			;init last src
+		move.l	d4,a2			;init last dst
+
+@inst	move.l	(a1)+,d2		;pick up next instruction long
+		bmi		nxtScanRAvg32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq		@blit			;no mask, so go fast
+		
+@mask	tst.l	(a1)+			;examine mask
+		bmi.s	@first			;blit only first word
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;dump out second pixel
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@first	bsr.s	@doOne			;dump out first pixel
+		addq	#4,a5			;bump dst ptr
+		addq	#4,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@doOne	moveq	#0,d7
+		move.w	0(a0,d6.w),d7	;get src pixel
+		moveq	#0,d5
+		move.w	(a5),d5			;get dest pixel
+		
+@short1	cmp.w	d3,d7			;same as last time?
+		bne.s	@hardway		;no, go do it
+		cmp.w	a2,d5			;same as last time?
+		beq.s	@again			;yes, go fast
+		
+@hardway		
+		add.w	d7,d7			;waste high bit
+		lsl.l	#5,d7			;but red in byte 3
+		lsr.w	#3,d7			;but green in byte 2, blue in lo byte
+		lsr.b	#3,d7			;right flush blue
+
+		add.w	d5,d5			;waste high bit
+		lsl.l	#5,d5			;but red in byte 3
+		lsr.w	#3,d5			;but green in byte 2, blue in lo byte
+		lsr.b	#3,d5			;right flush blue
+
+@blue	moveq	#0,d3			;clr out high end
+		move.b	d7,d3			;get src blue
+		swap	d1				;get blue weight
+		mulu.w	d1,d3			;% blue
+
+		moveq	#0,d4			;clr out high end
+		move.b	d5,d4			;get dst blue
+		neg.w	d1
+		mulu.w	d1,d4			;% blue
+		neg.w	d1
+		
+		add.l	d3,d4			;get 21 bits of blue
+		swap	d4				;right align 5 blue bits
+		move.l	d4,a2			;a2 has 000B
+		
+@grn	move.w	d7,d3			;get src grn
+		lsr.w	#8,d3
+		swap	d1				;get grn weight
+		mulu.w	d1,d3			;% grn
+
+		move.w	d5,d4			;get dst grn
+		lsr.w	#8,d4
+		neg.w	d1
+		mulu.w	d1,d4			;% grn
+		neg.w	d1
+		
+		add.l	d3,d4			;get 21 bits of grn
+		swap	d4				;right align 5 green bits
+		lsl.w	#5,d4			;shift into place
+		add.w	d4,a2			;a2 has 00GB
+		
+@red	moveq	#0,d3			;clr out high end
+		swap	d7
+		move.b	d7,d3			;get src red
+		mulu.w	d0,d3			;% red
+
+		moveq	#0,d4			;clr out high end
+		swap	d5
+		move.b	d5,d4			;get dst red
+		neg.w	d0
+		mulu.w	d0,d4			;% red
+		neg.w	d0
+		
+		add.l	d3,d4			;get 21 bits of red
+		clr.w	d4				;clear lsb's
+		lsr.l	#6,d4			;shift into place
+		add.w	a2,d4			;d4 has 0RGB
+
+@short2	swap	d5				;get back dst
+		lsl.b	#3,d5			;rejoin green/blue
+		lsl.w	#3,d5			;rejoin red/green/blue
+		lsr.l	#6,d5			;right flush red/green/blue
+		move.l	d5,a2			;save for short circuit
+		swap	d7				;get back src
+		lsl.b	#3,d7			;rejoin green/blue
+		lsl.w	#3,d7			;rejoin red/green/blue
+		lsr.l	#6,d7			;right flush red/green/blue
+		move.l	d7,d3			;save for short circuit
+		
+@again	move.w	d4,(a5)			;write pattern to dest
+		rts
+
+@blit	bsr.s	@doOne			;do first pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		bsr.s	@doOne			;do second pixel in long
+		addq	#2,a5			;bump dst ptr
+		addq	#2,d6			;bump src index
+		and.w	patHMask(a6),d6	;constrict to the source long if in a pattern mode
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+		
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 58: Hilite DST (similar to invert)
+;  pattern is black
+;  do a long at a time when possible
+;  run masked version
+;
+;-------------------------------------------------------
+;		a0 = scanCount		d0 = vert/scratch
+;		a1 = tmpmask		d1 = scanCount/scratch
+;		a2 = tmpdst			d2 = dstrow/scratch
+;		a3 = long of hilite	d3 = hilite pixel
+;		a4 = scratch		d4 = scratch
+;		a5 = dstPtr			d5 = long of backcolor
+;		a6 = locals			d6 = background pixel
+;		a7 = 				d7 = dst pixel size
+;-------------------------------------------------------
+rHilite	 
+runHiliteNot32
+		lea		@rHilit,a0 		;point to main loop
+		move.l	a0,modeCase(a6)	;go there from now on
+		move.l	hilitColor(A6),a3 ;should be setup only once
+		move.l	transColor(A6),d5 ;should be setup only once
+		bra.s 	@rHilit			;use run mask
+
+@nxtScan
+		add.l	DstRow(a6),a5	;BUMP DST TO NEXT ROW
+		move.w	vert(a6),d0		;reload vert
+		ADDQ 	#1,D0			;BUMP DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		bge 	DONE	 		;YES, BAIL
+		subq	#1,a0			;decrement scanCount
+		move.w	a0,d1			;tst scanCount
+		ble.s	nextMask
+		
+@rHilit	move.w	d1,a0			;keep scan count in a0
+@runs	move.w	d0,vert(a6)		;save vert for later
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	runBuf(a6),a1		;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d2,a2			;bump destptr by skip amount
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	move.l	(a2),d4			;get dst
+		cmp.l	d4,d5			;is the dst all background?
+		bne.s	@mask1AtATime	;handle pixel by pixel
+@mSwap	move.l	(a1)+,d0		;get mask
+		move.l	a3,d1			;get hilite long
+		and.l	d0,d1			;mask hilite long
+		not.l	d0				;make into punch
+		and.l	(a2),d0			;punch hole in dst
+		or.l	d0,d1			;merge src and dst
+		move.l	d1,(a2)+		;put back to dst
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@mask1AtATime
+		cmp.l	a3,d4
+		bne.s	@mSlow
+		exg		a3,d5
+		bra.s	@mSwap
+@mSlow
+		MOVEQ	#32,D1			;long position count
+		SUB		D7,D1			;start at last pixel position
+		move.l	d5,a4			;free up a register
+		move.l	(a1)+,d5		;get mask long
+@mNextPixel
+		BFEXTU	d5{D1:D7},D0	;get a pixel of the mask
+		beq.s	@mSkipBlank		;zero so skip this pixel
+		BFEXTU	d4{D1:D7},D0	;get a pixel of the destination
+		CMP.l	D6,D0			;same as the background color?
+		BNE.S	@mTryNew
+		BFINS	D3,d4{D1:D7}
+		BRA.S	@mSkipToNext
+@mTryNew
+		CMP.l	D3,D0			;same as new color?
+		BNE.S	@mSkipToNext
+		BFINS	D6,d4{D1:D7}
+@mSkipToNext
+@mSkipBlank
+		SUB		D7,D1			;advance to next pixel
+		BPL.S	@mNextPixel
+		move.l	d4,(a2)+		;advance the destination
+		move.l	a4,d5			;restore background long
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+@blit	move.l	(a2),d4			;get dst
+		cmp.l	d4,d5			;is the dst all background?
+		bne.s	@blit1AtATime	;handle pixel by pixel
+@bSwap	move.l	a3,(a2)+		;replace with hilite
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@blit1AtATime
+		cmp.l	a3,d4
+		bne.s	@bSlow
+		exg		a3,d5
+		bra.s	@bSwap
+@bSlow
+		MOVEQ	#32,D1			;long position count
+		SUB		D7,D1			;start at last pixel position
+@bNextPixel
+		BFEXTU	d4{D1:D7},D0	;get a pixel of the destination
+		CMP.l	D6,D0			;same as the background color?
+		BNE.S	@bTryNew
+		BFINS	D3,d4{D1:D7}
+		BRA.S	@bSkipToNext
+@bTryNew
+		CMP.l	D3,D0			;same as new color?
+		BNE.S	@bSkipToNext
+		BFINS	D6,d4{D1:D7}
+@bSkipToNext
+		SUB		D7,D1			;advance to next pixel
+		BPL.S	@bNextPixel
+		move.l	d4,(a2)+		;advance the destination
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODE 58: Hilite DST (similar to invert)
+;  Special 32 bit/pixel version of run-masked Hilite
+;
+;-------------------------------------------------------
+;		a0 = 				d0 = vert/scratch
+;		a1 = tmpmask		d1 = scanCount/scratch
+;		a2 = tmpdst			d2 = dstrow/scratch
+;		a3 = long of hilite	d3 = low3bytes
+;		a4 = scratch		d4 = scratch
+;		a5 = dstPtr			d5 = long of backcolor
+;		a6 = locals			d6 = background pixel
+;		a7 = 				d7 = dst pixel size
+;-------------------------------------------------------
+rHilite32	 
+		lea		@Hilite32,a0 	;point to main loop
+		move.l	a0,modeCase(a6)	;go there from now on
+		moveq	#-1,d3
+		lsr.l	#8,d3			;get low3byte mask in d0
+		move.l	hilitColor(A6),a3 ;should be setup only once
+		move.l	transColor(A6),d5 ;should be setup only once
+		bra.s 	@Hilite32		;use run mask
+
+@nxtScan
+		add.l	DstRow(a6),a5	;BUMP DST TO NEXT ROW
+		move.w	vert(a6),d0		;reload vert
+		ADDQ 	#1,D0			;BUMP DOWN A SCAN LINE
+		CMP 	lastV(a6),D0	;ARE WE AT THE LAST SCAN LINE ?
+		bge 	DONE	 		;YES, BAIL
+		subq	#1,d1			;decrement scanCount
+		ble.s	nextMask
+		
+@Hilite32
+@runs	move.w	d0,vert(a6)		;save vert for later
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	runBuf(a6),a1		;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d2,a2			;bump destptr by skip amount
+		swap	d2				;get mask/blit cnt and check done flag
+
+@blit	move.l	d3,d4			;copy mask
+		and.l	(a2),d4			;get dst minus alpha channel
+		cmp.l	d4,d5			;is the dst background?
+		bne.s	@chkHilite		;chk for hilite color 
+@bSwap	move.l	a3,(a2)+		;replace with hilite
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@chkHilite
+		cmp.l	a3,d4			;is the dst hilite?
+		bne.s	@skip			;no, ignore it
+		exg		a3,d5			;yes, exchange back and hilite
+		bra.s	@bSwap
+@skip
+		addq.l	#4,a2			;advance the destination
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+;-------------------------------------------------------
+		
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+; MODES 50 or 58: exchange hilite color with back color (using source, patterns as mask)
+; slow hilite does pixel by pixel if not small pattern = black
+;
+;	<SMC 01Aug90> - This entirely new routine replaces previous "BRA Done" routine.
+; this routine comes from QDciPatchROM.a									<sm 6/9/92>stb
+;
+;-------------------------------------------------------
+;		a0 = 				d0 = scratch
+;		a1 = bk pixel		d1 = patHMask
+;		a2 = 				d2 = run cnt
+;		a3 = srcPtr			d3 = bit bump
+;		a4 = mskPtr			d4 = dst offset
+;		a5 = dstPtr			d5 = hilite pixel
+;		a6 = locals			d6 = src offset
+;		a7 = 				d7 = dst pixel size
+;-------------------------------------------------------
+
+rslowHilite
+		CMP		#16,D7				;if 16 or 32 bit/pixel, undo some setup
+		BLT.S	@notDirect
+		LSL.L	#3,D6				;turn the patOffset back to pixels from bytes
+		MOVE.L	D6,patOffset(A6)
+		MOVE	patHMask(A6),D1		;convert patHMask back into pixels from bytes
+		LSL.W	#3,D1
+		MOVE	D1,patHMask(A6)
+@notDirect
+		LEA		@rsHilite,A0		;get address of real blit loop
+		MOVE.L	A0,modeCase(A6)		;go there from now on
+
+@rsHilite
+		MOVE	patHMask(A6),D1		;set up source constriction
+		BFEXTU	transColor(A6){0:D7},D0
+		MOVE.L	D0,A1				;set up pixel of background color
+@loopTop
+		AND		D1,D6				;constrict to the source long if in a pattern mode
+
+		BFEXTU	(A3){D6:D7},D0		;get pixel of source
+		CMP.L	A1,D0				;is it the same as the background color?
+		BEQ.S	@skip				;skip if so
+
+		BFEXTU	(A4){D4:D7},D0		;get pixel of the mask
+		BEQ.S	@skip				;skip if empty
+	
+		BFEXTU	(A5){D4:D7},D0		;get a pixel of the dest (zeros top word)
+		CMP.L	A1,D0				;same as a pixel of the background?
+		BEQ.S	@putHilite			;yes, go put hilite there
+		CMP.L	D5,D0				;same as a pixel of the hilite color?
+		BNE.S	@skip				;no, skip it
+		MOVE.L	A1,D0
+		BFINS	D0,(A5){D4:D7}		;yes, move pixel of back color to dest
+		BRA.S	@skip
+@putHilite
+		BFINS	D5,(A5){D4:D7}		;move hilite color to dest
+@skip	ADD.L	D3,D6				;bump srcptr left or right by 1 pixel
+		ADD.L	D3,D4				;bump destination and mask
+		DBRA	D2,@loopTop			;do it for all of the pixels on the line (or within the mask)
+		BRA		NxtNewSrc			;loop back for more
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;
+;  MODES 36, 44, 60: SRC less bg --> DST
+
+		IMPORT	rTransparent8	;<sm1>stb This comes from Arith8Blt.a, Andy’s QuickerDraw stuff
+
+rTransparent
+rTransparentIndexed
+		TST.L	D3						;right to left?									<sm 6/9/92>stb
+		BMI.S	@1						;if so, skip									<sm 6/9/92>stb
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)	;is it 8 bit mode?								<sm 6/9/92>stb
+		BEQ		rTransparent8			;yes, go use quickdraw							<sm 6/9/92>stb
+									; if it is, go use Andy’s QuickerDraw special 8-bit case
+									; which doesn’t have this problem					<sm 6/9/92>stb
+	@1:	LEA		@RealrTransparent,A0; this fixes a bug that the optimization introduced	<sm 6/9/92>stb
+		MOVE.L	A0,ModeCase(A6)		; which was causing the loss of pattern data		<sm 6/9/92>stb
+@RealrTransparent
+		MOVE	patHMask(A6),D1		;set up source constriction
+		MOVE 	pixInLong1(A6),A0	;set up absolute long bump
+		MOVE	longBump(A6),A2		;set up long bump
+		BFEXTU	D5{0:D7},D0
+		MOVE.L	D0,A1			;set up pixel of background
+@loopTop
+		AND		D1,D6			;constrict to the source long if in a pattern mode
+		BFEXTU	(A4){D4:D7},D0	;a pixel of the mask
+		BEQ.S	@skip
+	
+		BFEXTU	(A3){D6:D7},D0	;get a pixel of the source (zeros top word)
+		CMP.L	D0,A1			;same as a pixel of the background?
+		BEQ.S	@skip
+		BFINS	D0,(A5){D4:D7}	;move to the destination
+@skip
+		ADD.L	D3,D6			;BUMP SRCPTR LEFT OR RIGHT by 1 pixel
+		ADD.L	D3,D4			;bump destination and mask
+		DBRA	D2,@loopTop		;do it for all of the pixels on the line (or within the mask)
+		BRA		NxtNewSrc		;LOOP BACK FOR MORE
+		
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = result/scratch
+;		a1 = maskPtr		d1 = scanCount
+;		a2 = 				d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = 
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = backColor
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rTransparent32
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+
+@blit	move.l	0(a0,d6),d7		;get src pixel
+		add		a4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		cmp.l	d7,d5			;is src backColor?
+		beq.s	@skip1			;yes, don't write to dst
+
+		MOVE.L	d7,(a5)			;write pattern to dest
+@skip1	add		a4,a5			;bump dst ptr
+
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+	ALIGN Alignment	
+		
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = result/scratch
+;		a1 = maskPtr		d1 = scanCount
+;		a2 = 				d2 = run cnt
+;		a3 = srcPtr/patPtr	d3 = 
+;		a4 = hBump			d4 = patHMask
+;		a5 = dstPtr			d5 = backColor
+;		a6 = locals			d6 = pattern offset
+;		a7 = 				d7 = src pixel
+;-------------------------------------------------------
+
+rTransparent16
+		move.l	a3,a0			;set up srcAddr
+		move.l	runBuf(a6),A1	;point to run encoded mask buffer
+		
+@inst
+		move.l	(a1)+,d2		;pick up next instruction long
+		bmi.s	NxtNewSrc32
+		add.w	d2,a5			;bump destptr by skip amount
+		add.w	d2,d6			;BUMP src/pattern index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		swap	d2				;get mask/blit cnt and check done flag
+		bclr	#runMaskBit-16,d2 ;check and clear mask flag
+		beq.s	@blit			;no mask, so go fast
+		
+@mask	tst.l	(a1)+			;examine mask
+		bmi.s	@first			;blit only first word
+		move.w	2(a0,d6.w),d7	;get src pixel
+		cmp.w	d7,d5			;is it backcolor?
+		beq.s	@skip1			;yes, ignore it
+		move.w	d7,2(a5)		;write pattern to dest
+@skip1
+		add		a4,a5			;bump dst ptr
+		add		a4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+@first	move.w	0(a0,d6.w),d7	;get src pixel
+		cmp.w	d7,d5			;is it backcolor?
+		beq.s	@skip2			;yes, ignore it
+		move.w	d7,(a5)			;write pattern to dest
+@skip2
+		add		a4,a5			;bump dst ptr
+		add		a4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@mask		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+		
+@blit	move.l	0(a0,d6.w),d7	;get 2 src pixels
+		cmp.l	d7,d5			;is it backcolor?
+		beq.s	@skip3			;yes, ignore it
+		cmp.w	d7,d5			;check pixel 2
+		beq.s	@skip4			;yes, skip it
+		move.w	d7,2(a5)		;write pixel 2 to dest
+@skip4	swap	d7				;get first pixel
+		cmp.w	d7,d5			;check pixel 1
+		beq.s	@skip3			;yes, skip it
+		move.w	d7,(a5)			;write only first pixel to dest
+@skip3	add		a4,a5			;bump dst ptr
+		add		a4,d6			;bump src index
+		and.w	d4,d6			;constrict to the source long if in a pattern mode
+		DBRA	D2,@blit		;LOOP ALL LONGS THIS ROW
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+		
+
+		ENDPROC 
+
+
+

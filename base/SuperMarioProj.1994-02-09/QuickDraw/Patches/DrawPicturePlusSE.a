@@ -1,0 +1,1903 @@
+;
+;	File:		DrawPicturePlusSE.a
+;
+;	Contains:	xxx put contents here xxx
+;
+;	Written by:	xxx put writers here xxx
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds: BigBang Sys606
+;
+;	Change History (most recent first):
+;
+;		<20>	 4/10/91	KON		mrr, gbm,csd: Calculate numer and denom to 32-bits, and then
+;									shift to make it fit in 15-bits if necessary. This fixes the
+;									problem where text was not scaling uniformly in pictures.
+;		<19>	  4/9/91	KON		csd: When reducing a picture, text would not reduce properly
+;									since both numer and denom are small and the divide underflows.
+;									The fix is not to reduce numer/denom if the picture is being
+;									scaled down.
+;		<18>	 3/23/91	KON		csd, WRKSHT#SAH-QD-58: ReduceD3D4 would hang because MapRatio
+;									would return a zero result. I removed calls to MapRatio (since
+;									ReduceD3D4 does the same work) and changed ReduceD3D4 so it
+;									won't hang.
+;		<17>	 3/22/91	KON		CSD, WRKSHT#7P-WA-054: Large text does not draw correctly since
+;									fromRect scaled by numer/denom can overflow a word. A small
+;									problem with the last fix was discovered when updating the color
+;									versions.
+;		<16>	 3/22/91	KON		CSD, WRKSHT#7P-WA-054: Large text does not draw correctly since
+;									fromRect scaled by numer/denom can overflow a word.
+;		<15>	 3/20/91	KON		gbm, WRKSHT#SAH-QD-053: StdOpCodeProc sets the denom of a
+;									picture created with OpenCPicture. This is a problem since
+;									DrawPicture reduced numer/denom, and blasting denom to a large
+;									value makes the fraction invalid. Now numer/denom are reduced
+;									only after the header has been processed.
+;		<14>	 3/13/91	JT		Added the glyph state opcode support to picture drawing drawing
+;									under old QuickDraw. This opcode records the state of the Font
+;									Manager and TrueType so text will be drawn the same on picture
+;									playback as it was during picture recording. Code checked by KON
+;									and BAL. BRC numbers 82651 and 79185. Worksheet number KON-022.
+;		<13>	 2/15/91	KON		stb BRC #82511: PixMaps with nil color tables are not drawn
+;									properly.
+;		<12>	 1/16/91	KON		Move ReduceD3D4 to correct place. [CEL]
+;		<11>	 1/14/91	KON		Reduce Numer and Denom by GCD when drawing a picture. These
+;									overflow on higher DPI devices. [CEL]
+;		<10>	12/13/90	KON		Check for color table signature before throwing it away. [smc]
+;		 <9>	 12/3/90	KON		Handle cases where pixmaps saved to PICTs don't have a color
+;									table. [smc]
+;		 <8>	 9/12/90	KON		Get pictures in sync with previous MacII and ci picture changes.
+;		 <7>	 8/24/90	PKE		(per JT) Use new Script Mgr line layout values in GrafGlobals
+;									instead of soon-to-be-obsolete values in Script Mgr globals.
+;		 <6>	  8/2/90	gbm		continue the warning witch hunt
+;		 <5>	 5/27/90	JT		Strange operand in DrawPicture patch. Should be D0 (the digit)
+;									but is actually DO (the letter).
+;		 <4>	 5/27/90	JT		Moved the saved script manager fields to the bottom of the
+;									DrawPicture stack frame so we don't break up the picture state
+;									record. Also made this patch not fall into the ROM since the
+;									stack frame no longer matches. This costs us a few extra
+;									instructions, but we leave the two reserved fields available in
+;									the picture state record.
+;		 <3>	  5/2/90	JT		Copied the Script Manager specific changes from DrawPicture to
+;									this patch set.
+;		 <2>	 4/16/90	KON		Don't dereference stdbits address twice.
+;
+;	To Do:
+;
+
+
+;
+; Most of the code following this point is filched from pictures.a.
+;
+; General notes:
+;
+; The Color QD version of DrawPicture has an extended play state record.
+; We want to jump into ROM here and there in order to save system heap
+; space.  To do this, we must keep the stack frame layout below A6 the
+; same as in the existing ROM.  So, we do some slimy tricks to break the
+; play state record into two parts:  the existing part, and an extension
+; placed below other stuff in the stack frame.
+;
+
+
+PlusSEDrawPicture PROC  EXPORT
+		IMPORT PicItemPlusSE
+		IMPORT ReduceD3D4
+;------------------------------------------------------------------
+;
+;  PROCEDURE DrawPicture(myPicture: PicHandle; dstRect: Rect);
+;					Fix File	Date			Patch#		Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	DrawPicturePatch.a	01Jan1904		#???		(DrawPicture) 		(DrawPicture)		
+;
+
+;--------------------------------------------
+;
+;  OFFSETS WITHIN A PICTURE PLAY STATE RECORD:
+;
+; *** NOTE *** This information appears in two places: DrawPicture
+;				and PicItemPlusSE.
+;
+
+THERECT 		EQU 	0						;RECT
+PENLOC			EQU 	THERECT+8				;POINT
+TEXTLOC 		EQU 	PENLOC+4				;POINT
+OVALSIZE		EQU 	TEXTLOC+4				;POINT
+FROMRECT		EQU 	OVALSIZE+4				;RECT
+TORECT			EQU 	FROMRECT+8				;RECT
+NUMER			EQU 	TORECT+8				;POINT
+DENOM			EQU 	NUMER+4 				;POINT
+THECLIP 		EQU 	DENOM+4 				;RGNHANDLE
+USERCLIP		EQU 	THECLIP+4				;RGNHANDLE
+PLAYREC			EQU		USERCLIP+4				;End of OLD PLAYREC
+
+; Allocate the extension below the rest of DrawPicture's stack frame.
+
+				IF withFonts THEN
+
+PLAYVERSION		EQU		THERECT-PORTREC-2				;PICTURE VERSION
+SAVECURSTATE	EQU		PLAYVERSION-2			;Save state of pic handle		<FJL PMAB270>
+TXHFRAC			EQU		SAVECURSTATE-2			;FRACTIONAL TEXT POSITION
+NEWHFRAC		EQU		TXHFRAC-2				;UPDATED FRACTION RECIEVED
+TEMPPIXPAT		EQU		NEWHFRAC-2				;PIXPAT FOR PLAYING NEW PICS IN OLD PORTS
+FontMappingTbl 	EQU 	TEMPPIXPAT-4			;Handle to array of old,new font id pairs
+PSreserve1 		EQU 	FontMappingTbl-4		;reserved
+PSreserve2 		EQU 	PSreserve1-4			;reserved
+PLAYREC2 		EQU 	PLAYVERSION+2-PSreserve2	;TOTAL SIZE				
+
+				ELSE				
+
+NEWHFRAC		EQU		THERECT-PORTREC-2		;UPDATED FRACTION RECEIVED
+TXHFRAC			EQU		NEWHFRAC-2				;FRACTIONAL TEXT POSITION
+PLAYVERSION		EQU		TXHFRAC-2				;PICTURE VERSION
+SAVECURSTATE	EQU		PLAYVERSION-2			;Save state of pic handle		<FJL PMAB270>
+PLAYREC2		EQU		NEWHFRAC+2-SAVECURSTATE	;Length of PLAYREC extension	<FJL PMAB270>
+
+				ENDIF 	; withFonts
+
+
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	8
+MYPICTURE		EQU 	PARAMSIZE+8-4			;LONG, PICHANDLE
+DSTRECT 		EQU 	MYPICTURE-4 			;LONG, ADDR OF RECT
+
+PLAYSTATE		EQU 	-PLAYREC				;PICTURE PLAY STATE RECORD
+SAVEPORT		EQU 	PLAYSTATE-PORTREC		;GRAFPORT RECORD
+PLAYSTATE2		EQU		SAVEPORT-PLAYREC2
+saveQdRunSlop	equ		PLAYSTATE2-4			;Fixed							<7>
+saveQdChExtra	equ		saveQdRunSlop-4			;Fixed							<7>
+saveOutline		equ		saveQdChExtra-1			;Byte
+savePreserve	equ		saveOutline-1			;Byte
+saveFractional	equ		savePreserve-1			;Byte
+saveUnscaled	equ		saveFractional-1		;Byte
+VARSIZE 		EQU 	saveUnscaled			;TOTAL BYTES OF LOCALS
+
+
+		LINK	A6,#VARSIZE 					;ALLOCATE LOCALS
+		MOVEM.L D3-D7/A2-A4,-(SP)				;SAVE REGISTERS
+		MOVE.L	GRAFGLOBALS(A5),A4				;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A3					;POINT TO CURRENT GRAFPORT
+		TST.L	MYPICTURE(A6)					;IS PICHANDLE NIL ?
+		BEQ 	GOHOME							;YES, QUIT
+		
+;--------------------------------------------------
+;
+;  SET UP NUMER AND QUIT IF DSTRECT WIDTH OR HEIGHT IS <= 0
+;  COPY DSTRECT INTO TORECT
+;
+		MOVE.L	DSTRECT(A6),A0					;POINT TO DSTRECT
+		MOVE	RIGHT(A0),D0
+		SUB 	LEFT(A0),D0 					;CALC DST WIDTH
+		BLE 	GOHOME							;QUIT IF WIDTH <= 0
+		MOVE	D0,PLAYSTATE+NUMER+H(A6)		;NUMER.H := DST WIDTH
+		MOVE	BOTTOM(A0),D0
+		SUB 	TOP(A0),D0						;CALC DST HEIGHT
+		BLE 	GOHOME							;QUIT IF HEIGHT <= 0
+		MOVE	D0,PLAYSTATE+NUMER+V(A6)		;NUMER.V := DST HEIGHT
+
+		LEA 	PLAYSTATE+TORECT(A6),A1
+		MOVE.L	(A0)+,(A1)+
+		MOVE.L	(A0)+,(A1)+ 					;TORECT := DSTRECT
+
+
+;--------------------------------------------------
+;
+;  SET UP DENOM AND QUIT IF PICFRAME WIDTH OR HEIGHT IS <= 0
+;  COPY PICFRAME INTO FROMRECT.
+;
+		MOVE.L	MYPICTURE(A6),A0				;GET PICHANDLE
+		MOVE.L	(A0),A0 						;DE-REFERENCE IT
+		MOVE.L	A0, D0							;SET CONDITION CODE					<FJL PMAB270>
+		BEQ		GOHOME							;IF INVALID POINTER -> EXIT			<FJL PMAB270>
+		LEA 	PICFRAME(A0),A0 				;POINT TO PICTURE FRAME
+		MOVE	RIGHT(A0),D0
+		SUB 	LEFT(A0),D0 					;CALC SRC WIDTH
+		BLE 	GOHOME							;QUIT IF WIDTH <= 0
+		MOVE	D0,PLAYSTATE+DENOM+H(A6)		;DENOM.H := SRC WIDTH
+		MOVE	BOTTOM(A0),D0
+		SUB 	TOP(A0),D0						;CALC SRC HEIGHT
+		BLE 	GOHOME							;QUIT IF HEIGHT <= 0
+		MOVE	D0,PLAYSTATE+DENOM+V(A6)		;DENOM.V := SRC HEIGHT
+
+;
+; Divide Numer and Denom for width and height by GCD to prevent overflow.  
+; <KON 7/1/91>
+;
+; CAN'T DO THIS HERE SINCE STDOPCODEPROC CLOBBERS DENOM WITH THE RECTANGLE FROM
+; THE HEADER. <KON 20MAR91>
+;
+;		move.l	PLAYSTATE+NUMER(A6),d3			;reduce both high and low words of d3...
+;		move.l	PLAYSTATE+denom(A6),d4			;...and d4 by GCD
+;		jsr		ReduceD3D4
+;		move.l	d3,PLAYSTATE+NUMER(A6)			;save results
+;		move.l	d4,PLAYSTATE+denom(A6)	
+
+;		
+; End <KON 7/1/91>
+;
+		LEA 	PLAYSTATE+FROMRECT(A6),A1		;POINT TO FROMRECT
+		MOVE.L	(A0)+,(A1)+
+		MOVE.L	(A0)+,(A1)+ 					;FROMRECT := PICFRAME
+
+
+;---------------------------------------------------
+;
+;  PRESERVE THE CURRENT GRAFPORT IN SAVEPORT
+;
+		MOVE.L	A3,A0							;SRC = THEPORT
+		LEA 	SAVEPORT(A6),A1 				;DST = SAVEPORT
+		MOVEQ	#PORTREC/2-1,D0 				;INIT DBRA COUNT
+SAVELP	MOVE.W	(A0)+,(A1)+ 					;COPY A WORD
+		DBRA	D0,SAVELP						;LOOP ENTIRE PORT
+
+
+;---------------------------------------------------
+;
+;  PRESERVE AND INIT THE CURRENT LINE-LAYOUT STATE
+;
+	IF SCRIPT_CHAR_EXTRA THEN
+		move.l	grafGlobals(a5),a0							; load quickDraw globals.			<7>
+		move.l	qdChExtra(a0),saveQdChExtra(a6)				; save character extra amount.		<7>
+		move.l	qdRunSlop(a0),saveQdRunSlop(a6)				; save run slop amount.				<7>
+		clr.l	qdChExtra(a0)								; clear character extra amount.		<7>
+		clr.l	qdRunSlop(a0)								; clear run slop amount.			<7>
+	ENDIF
+
+
+;---------------------------------------------------
+;
+;  PRESERVE THE INITIAL GLYPH RENDERING STATE
+;
+	IF hasGlyphState THEN
+		btst.b	#splinePreferred,HiliteMode			; bit flag set in HiliteMode?
+		sne.b	saveOutline(a6)						; yes, set outline preferred flag
+		btst.b	#preserveGlyph,HiliteMode			; bit flag set in HiliteMode?
+		sne.b	savePreserve(a6)					; yes, set preserve glyph flag
+		move.b	FractEnable,saveFractional(a6)		; save fractional widths flag
+		move.b	FScaleDisable,saveUnscaled(a6)		; save scale disable flag
+	ENDIF
+
+
+;----------------------------------------
+;
+;  INIT GLOBAL VARS:
+;
+		MOVE.L	MYPICTURE(A6), A0				;SAVE STATE OF PICTURE HANDLE		<FJL PMAB270>
+		_HGetState
+		MOVE.B	D0, SAVECURSTATE(A6)			;SAVE IN STACK FRAME
+		MOVE.L	MYPICTURE(A6), A0				;MAKE IT NON-PURGEABLE FOR THE DURATION
+		_HNoPurge								;									<FJL PMAB270>
+		
+		CLR.L	PATALIGN(A4)					;PATALIGN := (0,0)
+		MOVE.L	MYPICTURE(A6),PLAYPIC(A4)		;SAVE PICTURE FOR STDGETPIC
+		MOVE.L	#PICDATA,PLAYINDEX(A4)			;INIT INDEX TO FIRST OPCODE
+
+
+;----------------------------------------
+;
+;  INIT PLAY STATE RECORD:
+;
+		LEA 	PLAYSTATE(A6),A0
+		CLR.L	(A0)+							;THERECT := (0,0,0,0)
+		CLR.L	(A0)+
+		CLR.L	(A0)+							;PENLOC := (0,0)
+		CLR.L	(A0)+							;TEXTLOC := (0,0)
+		CLR.L	(A0)+							;OVALSIZE := (0,0)
+												;FROMRECT SET UP
+												;TORECT SET UP
+												;NUMER SET UP
+												;DENOM SET UP
+
+		MOVE.L	CLIPRGN(A3),PLAYSTATE+USERCLIP(A6) ;SAVE USER CLIPRGN
+
+		CLR.L	-(SP)
+		_NEWRGN
+		MOVE.L	(SP)+,PLAYSTATE+THECLIP(A6)		;ALLOCATE THECLIP
+;		MOVE	#$8000,D0						;INITIALIZE FRACTIONAL PARTS
+;		MOVE	D0,PLAYSTATE+TXHFRAC(A6)		;TXHFRAC = 1/2
+;		MOVE	D0,PLAYSTATE+FRACFLAG(A6)		;NEW FRACTION = 1/2
+
+		IF withFonts THEN
+;
+; Allocate handle for mapping of fond id's we have seen so far
+;
+;		Format of FontMappingTbl handle is:
+;			handle size [long]
+;			# of entries - 1 used [word]
+;				oldID1,newID1 ... oldIDn,newIDn
+
+FontMapSize	equ		25*4
+
+doFontList
+		moveq	#FontMapSize+6,d0				;initial size for 50 entries
+		_NewHandle
+		move.l	a0,PLAYSTATE+FontMappingTbl(a6)	;save picFontList handle in picSave record
+		beq.s	@noHandle
+		
+		move.l	(a0),a0							;point into fontList
+		moveq	#FontMapSize+6,d0				;initial size for 25 entries
+		move.l	d0,(a0)+
+		move.w	#-1,(a0)						; 0 entries
+
+	;	clr.l	(a0)+							; 1 entry, first oldID = 0
+	;	clr.w	(a0)							; 		   first newID = 0
+
+@noHandle
+		ENDIF	;withFonts
+;--------------------------------------------------------
+;
+;  INIT MOST FIELDS OF THEPORT
+;
+		CLR.L	-(SP)
+		_NEWRGN
+		MOVE.L	(SP)+,CLIPRGN(A3)				;ALLOCATE TEMP CLIPRGN
+		LEA 	BKPAT(A3),A0					;POINT TO BKPAT
+		CLR.L	(A0)+							;BKPAT := WHITE
+		CLR.L	(A0)+
+		MOVEQ	#-1,D0							;GET SOME BLACK
+		MOVE.L	D0,(A0)+						;fillPat := BLACK
+		MOVE.L	D0,(A0)+
+		CLR.L	(A0)+							;PNLOC := (0,0)
+		MOVE.L	#$00010001,D1
+		MOVE.L	D1,(A0)+						;pnSize := (1,1)
+		MOVE	#8,(A0)+						;pnMode := patCopy
+		MOVE.L	D0,(A0)+						;pnPat := black
+		MOVE.L	D0,(A0)+
+		ADD 	#2,A0							;skip over pnVis
+		CLR.L	(A0)+							;txFont, txFace := 0
+		MOVE	#1,(A0)+						;txMode := srcOr
+		CLR 	(A0)+							;txSize := 0;
+		CLR.L	(A0)+							;spExtra := 0.0;
+		MOVE.L	#blackColor,(A0)+				;FGCOLOR := blackColor
+		MOVE.L	#whiteColor,(A0)+				;BKCOLOR := whiteColor
+												;LEAVE COLRBIT ALONE
+												;LEAVE PATSTRETCH ALONE
+												;LEAVE PICSAVE ALONE
+												;LEAVE RGNSAVE ALONE
+												;LEAVE POLYSAVE ALONE
+												;LEAVE GRAFPROCS ALONE
+
+;--------------------------------------------------
+;
+		PEA 	PNSIZE(A3)						;Scale initial pensize	<KON 27NOV90>
+		PEA 	FROMRECT+PLAYSTATE(A6)			;so that 1,1 lines scale
+		PEA 	TORECT+PLAYSTATE(A6)
+		_SCALEPT 								;SCALE PNSIZE
+
+;---------------------------------------------------
+;
+;  NOW DRAW THE PICTURE:
+;  REPEAT UNTIL NOT PicItemPlusSE(playState);
+;
+DRAWPIC	MOVE	#PICTVERSION,PLAYSTATE+PLAYVERSION(A6)	;DEFAULT TO OLD PICTURE
+
+MORE	CLR.B	-(SP)							;MAKE ROOM FOR FCN RESULT
+		PEA 	PLAYSTATE(A6)					;PUSH ADDR OF PLAYSTATE
+		JSR 	PicItemPlusSE 						;DRAW ONE PICTURE ITEM
+		MOVE.B	(SP)+,D0						;POP BOOLEAN RESULT
+		BNE 	MORE							;LOOP TILL FALSE
+
+;-----------------------------------------------------
+;
+;  DISCARD HANDLES AND RESTORE GRAFPORT STATE
+;
+DONE	MOVE.L	MYPICTURE(A6),A0				;GET PIC HANDLE						<FJL PMAB270>
+		MOVE.B	SAVECURSTATE(A6),D0				;RESTORE STATE OF PICTURE HANDLE
+		_HSetState								;									<FJL PMAB270>
+
+		MOVE.L	PLAYSTATE+THECLIP(A6),A0		;GET THECLIP RGNHANDLE
+		_DisposHandle							;DISCARD IT
+
+	IF withFonts THEN
+		MOVE.L	PLAYSTATE+FontMappingTbl(A6),A0	;get the fontID association table
+		_DisposHandle							;DISCARD IT
+	ENDIF
+		
+		MOVE.L	CLIPRGN(A3),A0					;GET TEMPCLIP
+		_DisposHandle							;DISCARD IT
+		LEA 	SAVEPORT(A6),A0 				;SRC = SAVEPORT
+		MOVEQ	#PORTREC/2-1,D0 				;INIT DBRA COUNT
+DONELP	MOVE.W	(A0)+,(A3)+ 					;COPY A WORD INTO THEPORT
+		DBRA	D0,DONELP						;LOOP ENTIRE PORT
+
+;---------------------------------------------------
+;
+;  RESTORE THE GLYPH RENDERING STATE
+;
+	IF hasGlyphState THEN
+		move.b	saveOutline(a6),-(sp)				; push saved outline preferred flag
+		_SetOutlinePreferred						; restore saved outline preferred
+		move.b	savePreserve(a6),-(sp)				; push saved preserve glyph flag
+		_SetPreserveGlyph							; restore saved preserve glyph
+		move.b	saveFractional(a6),-(sp)			; push saved fractional widths flag
+		_SetFractEnable								; restore saved fractional widths
+		move.b	saveUnscaled(a6),-(sp)				; push saved scale disable flag
+		_SetFScaleDisable							; restore saved scale disable
+	ENDIF
+
+;---------------------------------------------------
+;
+;  RESTORE THE LINE-LAYOUT STATE
+;
+	IF SCRIPT_CHAR_EXTRA THEN
+		move.l	grafGlobals(a5),a0						; load quickDraw globals.			<7>
+		move.l	saveQdChExtra(a6),qdChExtra(a0)			; restore character extra amount.	<7>
+		move.l	saveQdRunSlop(a6),qdRunSlop(a0)			; restore run slop amount.			<7>
+	ENDIF
+
+;---------------------------------------------------
+;
+;  RESTORE GLOBAL VARS AND QUIT
+;
+		CLR.L	PATALIGN(A4)					;RESTORE PATALIGN TO (0,0)
+		CLR.L	PLAYPIC(A4) 					;SET PLAYPIC TO NIL
+		CLR.L	PLAYINDEX(A4)					;AND PLAYINDEX TO 0
+
+GOHOME	MOVEM.L (SP)+,D3-D7/A2-A4				;RESTORE REGISTERS
+		UNLINK	PARAMSIZE,'DRAWPICT'			;destroys condition codes
+
+		ENDPROC
+
+
+PicItemPlusSE FUNC  EXPORT
+		IMPORT GetPicData,ScalePt,MapPt,MapRect,MapRgn,MapPoly,GetUByte,GetWord,GetLong
+		IMPORT NewRgn,CopyRgn,SectRgn,UnpackBits,MapRatio,GetPicPixPat,GETPICTABLE,GETPM1Deep
+		IMPORT MapPt1
+		IMPORT StdOpcodeProc,RGB2OLD,SkipPicData,RGB2Pixel,MapMode
+		IMPORT GETSBYTE, GETUBYTE
+		IMPORT GETWORD, ReduceD3D4
+;------------------------------------------------------------------
+;
+;  FUNCTION PicItem1(VAR playState: PicPlayRec): BOOLEAN;
+;
+;					Fix File	Date			Patch#		Fix Routine(s)	Routine(s) Fixed
+;AppleSystemPatch 	DrawPicturePatch.a	01Jan1904		#???		(PicItem1) 		(PicItem1)		
+;
+;  Draws one picture item, updating playState and thePort.
+;  Returns FALSE when an endPic opCode is encountered.
+;  The only state modified other than thePort and playState is patAlign.
+;
+;  When reading from an NPIC, skips to word boundary before fetching
+;  word-long opcode.
+
+
+;--------------------------------------------
+;
+;  OFFSETS WITHIN A PICTURE PLAY STATE RECORD:
+;
+; *** NOTE *** This information appears in two places: DrawPicture
+;				and PICITEM1.
+;
+
+THERECT 		EQU 	0						;RECT
+PENLOC			EQU 	THERECT+8				;POINT
+TEXTLOC 		EQU 	PENLOC+4				;POINT
+OVALSIZE		EQU 	TEXTLOC+4				;POINT
+FROMRECT		EQU 	OVALSIZE+4				;RECT
+TORECT			EQU 	FROMRECT+8				;RECT
+NUMER			EQU 	TORECT+8				;POINT
+DENOM			EQU 	NUMER+4 				;POINT
+THECLIP 		EQU 	DENOM+4 				;RGNHANDLE
+USERCLIP		EQU 	THECLIP+4				;RGNHANDLE
+PLAYREC			EQU		USERCLIP+4				;End of OLD PLAYREC
+
+; Allocate the extension below the rest of DrawPicture's stack frame.
+				
+				IF withFonts THEN
+
+PLAYVERSION		EQU		THERECT-PORTREC-2				;PICTURE VERSION
+SAVECURSTATE	EQU		PLAYVERSION-2			;Save state of pic handle		<FJL PMAB270>
+TXHFRAC			EQU		SAVECURSTATE-2			;FRACTIONAL TEXT POSITION
+NEWHFRAC		EQU		TXHFRAC-2				;UPDATED FRACTION RECIEVED
+TEMPPIXPAT		EQU		NEWHFRAC-2				;PIXPAT FOR PLAYING NEW PICS IN OLD PORTS
+FontMappingTbl 	EQU 	TEMPPIXPAT-4			;Handle to array of old,new font id pairs
+PSreserve1 		EQU 	FontMappingTbl-4		;reserved
+PSreserve2 		EQU 	PSreserve1-4			;reserved
+PLAYREC2 		EQU 	PLAYVERSION+2-PSreserve2	;TOTAL SIZE				
+
+				ELSE				
+NEWHFRAC		EQU		THERECT-PORTREC-2		;UPDATED FRACTION RECEIVED
+TXHFRAC			EQU		NEWHFRAC-2				;FRACTIONAL TEXT POSITION
+PLAYVERSION		EQU		TXHFRAC-2				;PICTURE VERSION
+SAVECURSTATE	EQU		PLAYVERSION-2			;Save state of pic handle		<FJL PMAB270>
+PLAYREC2		EQU		NEWHFRAC+2-SAVECURSTATE	;Length of PLAYREC extension	<FJL PMAB270>
+				ENDIF 	;withFonts
+				
+;
+;  params:
+;
+PARAMSIZE		EQU 	4
+RESULT			EQU 	PARAMSIZE+8 			;BOOLEAN
+PLAYSTATE		EQU 	RESULT-4				;LONG, PICHANDLE
+;
+;  locals:
+;
+HANDLE1 		EQU 	-4						;HANDLE
+HANDLE2 		EQU 	HANDLE1-4				;HANDLE
+DSTRECT 		EQU 	HANDLE2-8				;RECT (MUST BE BEFORE SRCRECT)
+SRCRECT 		EQU 	DSTRECT-8				;RECT (MUST FOLLOW DSTRECT)
+SRCBITS	 		EQU 	SRCRECT-14				;BITMAP (Not used)
+SAMEFLAG		EQU 	SRCBITS-2				;BOOLEAN
+NEWPT			EQU 	SAMEFLAG-4				;LONG
+TXDATA			EQU 	NEWPT-256				;UP TO 256 CHARACTERS,
+												;ALSO USED FOR PACKBUF !!!
+												;Also used by CTBitMap <19Feb87 DBG>
+SRCPTR			EQU 	TXDATA-4				;LONG
+DSTPTR			EQU 	SRCPTR-4				;LONG
+SAVEDSP			EQU 	DSTPTR-4				;LONG
+
+; Following is the extension to the stack frame in ROM
+
+SRCPIX			EQU		SAVEDSP-PMREC			;SRCPIX
+VARSIZE 		EQU 	SRCPIX					;TOTAL BYTES OF LOCALS
+
+
+		LINK	A6,#VARSIZE 					;ALLOCATE LOCALS
+		MOVEM.L D3-D7/A2-A4,-(SP)				;SAVE REGISTERS
+		MOVE.L	SP,SAVEDSP(A6)					;REMEMBER STACK FOR ABORT
+		MOVE.L	GRAFGLOBALS(A5),A4				;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A3					;POINT TO CURRENT GRAFPORT
+		
+;  GET PICTURE OPCODE AND CHECK FOR END OF PICTURE.
+
+		CLR.B	RESULT(A6)						;ASSUME END OF PICTURE
+		BSR		GetPicOp						;READ OPCODE INTO D0
+		MOVE	D0,D7							;PUT IT IN D7
+		CMP		#opEndPic,D7 					;IS THIS THE ENDPIC OPCODE ?
+		BEQ		DONE							;=>YES, ALL DONE
+		BLO.S	GoodOp							;=>GOOD OPCODE, CONTINUE
+		
+; IT'S AN OPCODE THAT WE DON'T KNOW HOW TO HANDLE.  CALL THE OPCODE PROC.
+
+		LEA		StdOpcodeProc,A0				;USE STANDARD OPCODE PROC
+USESTD	MOVE.L	PLAYSTATE(A6),A2				;GET THE PLAYSTATE RECORD
+		PEA		FROMRECT(A2)					;PUSH SRC RECT
+		PEA		TORECT(A2)						;PUSH DST RECT
+		MOVE	D7,-(SP)						;PUSH OPCODE
+		MOVE	PLAYVERSION(A2),-(SP)			;PUSH VERSION
+		JSR		(A0)							;CALL PROC
+		MOVE.B	#1,RESULT(A6)					;FLAG NOT END OF PICTURE
+		BRA		DONE							;=>DONE WITH THIS OPCODE
+		
+GoodOp	MOVE.B	#1,RESULT(A6)					;NOT END OF PICTURE
+
+;  CHECK FOR PARAM OPCODES $00..$1F
+
+		CMP 	#$20,D7 						;IS IT A PARAM OPCODE ?
+		BLO.S	PARAMOP 						;YES, GO TO IT
+
+;  GET LO AND HI NIBBLES OF OPCODE, AND CASE ON HI NIBBLE (NOUN).
+
+		MOVE.B	D7,D0							;COPY OPCODE
+		AND 	#$F0,D0 						;MASK FOR HI NIBBLE
+		BTST	#3,D7							;IS OPCODE BIT 3 SET ?
+		SNE 	SAMEFLAG(A6)					;REMEMBER IN SAMEFLAG
+		AND 	#$7,D7							;GET VERB FROM LO NIBBLE
+		LSR 	#3,D0							;DOUBLE HI NIBBLE FOR INDEX
+		MOVE	NOUNJMP(D0),D0					;GET JUMP OFFSET
+		JMP 	NOUNJMP(D0) 					;TAKE CASE JUMP
+
+NOUNJMP DC.W	DONE-NOUNJMP					;NEVER TAKEN
+		DC.W	DONE-NOUNJMP					;NEVER TAKEN
+		DC.W	TXLNOP-NOUNJMP
+		DC.W	RECTOP-NOUNJMP
+		DC.W	RRECTOP-NOUNJMP
+		DC.W	OVALOP-NOUNJMP
+		DC.W	ARCOP-NOUNJMP
+		DC.W	POLYOP-NOUNJMP
+		DC.W	RGNOP-NOUNJMP
+		DC.W	BITSOP-NOUNJMP
+		DC.W	COMMOP-NOUNJMP
+		DC.W	DONE-NOUNJMP					;OPCODE WITH NO DATA
+		DC.W	DONE-NOUNJMP					;OPCODE WITH NO DATA
+		DC.W	IGNORESHORT-NOUNJMP				;IGNORE WORD LENGTH, DATA
+		DC.W	IGNORELONG-NOUNJMP				;IGNORE LONG LENGTH, DATA
+		DC.W	IGNORELONG-NOUNJMP				;IGNORE LONG LENGTH, DATA
+
+
+;---------------------------------------------------
+;
+;  OPCODES $00..$1F DO NO DRAWING, THEY JUST SET PARAMETERS.
+;
+PARAMOP AND 	#$1F,D7 						;GET LO 5 BITS OF OPCODE
+		ADD 	D7,D7							;DOUBLE PARAM FOR CASE INDEX
+		MOVE	PARMJMP(D7),D0					;GET CASE JUMP OFFSET
+		JMP 	PARMJMP(D0) 					;TAKE CASE JUMP
+PARMJMP DC.W	DONE-PARMJMP					;OPCODE 0 IS PURPOSELY A NOP
+		DC.W	XCLIP-PARMJMP					;OPCODE $01
+		DC.W	XBKPAT-PARMJMP					;OPCODE $02
+		DC.W	XTXFONT-PARMJMP					;OPCODE $03
+		DC.W	XTXFACE-PARMJMP					;OPCODE $04
+		DC.W	XTXMODE-PARMJMP					;OPCODE $05
+		DC.W	XSPXTRA-PARMJMP					;OPCODE $06
+		DC.W	XPNSIZE-PARMJMP					;OPCODE $07
+		DC.W	XPNMODE-PARMJMP					;OPCODE $08
+		DC.W	XPNPAT-PARMJMP					;OPCODE $09
+		DC.W	XFILLPAT-PARMJMP				;OPCODE $0A
+		DC.W	XOVSIZE-PARMJMP					;OPCODE $0B
+		DC.W	XORIGIN-PARMJMP					;OPCODE $0C
+		DC.W	XTXSIZE-PARMJMP					;OPCODE $0D
+		DC.W	XFGCOL-PARMJMP					;OPCODE $0E
+		DC.W	XBKCOL-PARMJMP					;OPCODE $0F
+		DC.W	TXRATIO-PARMJMP 				;OPCODE $10
+		DC.W	VERSION-PARMJMP 				;OPCODE $11
+		DC.W	XBkPixPat-PARMJMP 				;OPCODE $12
+		DC.W	XPnPixPat-PARMJMP 				;OPCODE $13
+		DC.W	XFillPixPat-PARMJMP 			;OPCODE $14
+		DC.W	XPnLocHFrac-PARMJMP 			;OPCODE $15
+		DC.W	XChExtra-PARMJMP				;OPCODE	$16
+		DC.W	DONE-PARMJMP 					;OPCODE $17
+		DC.W	DONE-PARMJMP 					;OPCODE $18 (opIFore)
+		DC.W	DONE-PARMJMP 					;OPCODE $19 (opIBack)
+		DC.W	XRGBFGCOL-PARMJMP 				;OPCODE $1A
+		DC.W	XRGBBKCOL-PARMJMP 				;OPCODE $1B
+		DC.W	xHiliteMode-PARMJMP				;OPCODE $1C
+		DC.W	xHiliteColor-PARMJMP			;OPCODE $1D
+		DC.W	xDefHilite-PARMJMP				;OPCODE $1E
+		DC.W	xOpColor-PARMJMP 				;OPCODE $1F
+
+
+XCLIP	BSR 	GETHNDL 						;COPY RGN INTO HANDLE1
+		IF		noROM THEN
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	HANDLE1(A6),-(SP)				;PUSH HANDLE1
+		MOVE.L	THECLIP(A2),-(SP)				;PUSH PLAYSTATE THECLIP
+XCLIP2	_COPYRGN 								;COPY HANDLE1 INTO THECLIP
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	HANDLE1(A6),-(SP)				;PUSH HANDLE1 TEMP
+		PEA 	FROMRECT(A2)					;PUSH FROMRECT
+		PEA 	TORECT(A2)						;PUSH TORECT
+		_MAPRGN									;MAP RGN INTO DST COORDS
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	HANDLE1(A6),-(SP)				;PUSH MAPPED RGN
+		MOVE.L	USERCLIP(A2),-(SP)				;PUSH ORIGINAL CLIP
+		MOVE.L	CLIPRGN(A3),-(SP)				;PUSH DST = THEPORT^.CLIPRGN
+		_SECTRGN 								;PUT INTERSECT INTO CLIPRGN
+		BRA 	KILL1							;DISCARD HANDLE1 AND QUIT
+		ELSE
+		jmpROM		RomXClip						; Jump into ROM
+XCLIP2	jmpROM		RomXClip2						; Jump into ROM
+		ENDIF
+
+
+GET8	MOVEQ	#8,D6							;BYTECOUNT = 8
+		BRA 	GETDONE 						;COPY 8 BYTES AND QUIT
+
+GET4	MOVEQ	#4,D6							;BYTECOUNT = 4
+		BRA 	GETDONE 						;COPY 4 BYTES AND QUIT
+
+GET2	MOVEQ	#2,D6							;BYTECOUNT = 2
+		BRA 	GETDONE 						;COPY 2 BYTES AND QUIT
+
+GETMODE	JSR		GETWORD							;GET THE MODE WORD
+		JSR		MAPMODE							;GET EQUIVALENT MODES
+		MOVE.W	D0,(A3)							;SAVE IT
+		BRA		DONE							;QUIT
+
+XFGCOL	LEA 	FGCOLOR(A3),A3
+		BRA 	GET4							;GET FOREGROUND COLOR
+
+XBKCOL	LEA 	BKCOLOR(A3),A3
+		BRA 	GET4							;GET BACKGROUND COLOR
+
+XBKPAT	LEA 	BKPAT(A3),A3
+		BRA 	GET8							;GET BKPAT
+
+XTXFONT LEA 	TXFONT(A3),A3
+		IF	withFonts THEN
+		jsr		getword							;get the old font ID in d0
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	FontMappingTbl(A2),d1			;get the fontID association table
+		beq.s	@doit							;just use ID as is
+		move.l	d1,a0
+		move.l	(a0),a0
+		addq	#4,a0							;point to zero based entry count
+		move.w	(a0)+,d1						;pick up entry count (could be -1)
+		bmi.s	@doit							;no mapping entries
+												
+												;entries: oldID,newID word pairs
+@1		cmp.w	(a0),d0							;entry for this ID?
+		addq	#4,a0							;bump to next pair
+		dbeq	d1,@1							;look until the end or we find it
+		bne.s	@doit							;not found: so don't map
+		move.w	-2(a0),d0						;found: so use new ID
+		
+@doit	move.w	d0,(a3)							;install the font id in the port
+		BRA 	Done							;
+		ELSE
+		BRA		Get2
+		ENDIF
+
+XTXFACE LEA 	TXFACE(A3),A3
+		MOVEQ	#1,D6
+		BRA 	GETDONE 						;GET TXFACE
+
+XTXMODE LEA 	TXMODE(A3),A3
+		BRA 	GETMODE							;GET TXMODE
+
+XTXSIZE LEA 	TXSIZE(A3),A3
+		BRA 	GET2							;GET TXSIZE
+
+XSPXTRA LEA 	SPEXTRA(A3),A3
+		BRA 	GET4							;GET fixed point SPACE EXTRA
+
+XPNSIZE JSR 	GETLONG 						;GET PNSIZE
+		IF		noROM THEN
+		MOVE.L	D0,PNSIZE(A3)					;INSTALL INTO THEPORT
+		PEA 	PNSIZE(A3)
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		PEA 	FROMRECT(A2)
+		PEA 	TORECT(A2)
+		_SCALEPT 								;SCALE PNSIZE
+		BRA 	DONE
+		ELSE
+		jmpROM		RomXPnSize					;Jump into ROM
+		ENDIF
+
+TXRATIO MOVE.L	PLAYSTATE(A6),A3				;POINT TO PLAYSTATE RECORD
+		JSR 	GETLONG 						;GET TEXT NUMER
+		MOVE.L	D0,NUMER(A3)					;INSTALL INTO PLAYSTATE
+		JSR 	GETLONG 						;GET TEXT DENOM
+		MOVE.L	D0,DENOM(A3)					;INSTALL INTO PLAYSTATE
+;
+; Calculate new numer/denom to 32-bits using ConcatRatio.
+;
+		move.w	numer+v(a3),d3
+		move.w	toRect+bottom(a3),d4
+		sub.w	toRect+top(a3),d4				;get height of toRect
+		swap	d3
+		swap	d4
+		move.w	denom+v(a3),d3
+		move.w	fromRect+bottom(a3),d4
+		sub.w	fromRect+top(a3),d4				;get height of fromRect
+
+		bsr		ConcatRatio
+		move.w	d3,denom+v(a3)
+		swap	d3
+		move.w	d3,numer+v(a3)
+
+		move.w	numer+h(a3),d3
+		move.w	toRect+right(a3),d4
+		sub.w	toRect+left(a3),d4				;get width of toRect
+		swap	d3
+		swap	d4
+		move.w	denom+h(a3),d3
+		move.w	fromRect+right(a3),d4
+		sub.w	fromRect+left(a3),d4			;get width of fromRect
+
+		bsr		ConcatRatio
+		move.w	d3,denom+h(a3)
+		swap	d3
+		move.w	d3,numer+h(a3)
+		
+		bra 	done
+
+ConcatRatio
+;
+; takes two 16-bit numer/denom pairs and returns a 16-bit numer/denom
+; D3 = numer/denom
+; D4 = ToRect/FromRect
+;
+; Returns answer in D3
+;
+		move.w	d3,d0
+		mulu.w	d4,d0							;has 32-bit denom
+		swap	d3
+		swap	d4
+		
+		mulu.w	d4,d3							;has 32-bit numer
+;
+; Need to convert 32-bit ratio (in d3/d0) into 16-bit ratio in d3
+;
+		move.l	d0,d1
+		or.l	d3,d1							;number of bits to mask in high word
+		bra.s	@FifteenBitsYet
+;
+; shift until we're clear. 
+;
+@loop
+		lsr.l	#1,d3							;
+		lsr.l	#1,d0
+		lsr.l	#1,d1		
+@FifteenBitsYet
+		move.l	d1,d4							;ratio fit in 15 bits?
+		and.l	#$FFFF8000,d4
+		bne.s	@loop							;nope, loop again
+		swap	d3
+		move.w	d0,d3
+		rts
+
+VERSION JSR 	GETUBYTE						;GET VERSION NUMBER BYTE
+		MOVE.L	PLAYSTATE(A6),A3				;POINT TO PLAYSTATE RECORD
+		MOVE	D0,PLAYVERSION(A3)				;INSTALL VERSION INTO PLAYSTATE
+		BRA 	DONE							;AND RETURN
+
+XPNMODE LEA 	PNMODE(A3),A3
+		BRA 	GETMODE							;GET PNMODE
+
+XPNPAT	LEA 	PNPAT(A3),A3
+		BRA 	GET8							;GET PNPAT
+
+XFILLPAT LEA	 FILLPAT(A3),A3
+		BRA 	GET8							;GET FILLPAT
+
+XOVSIZE JSR 	GETLONG 						;GET OVAL SIZE
+		IF		noROM THEN
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	D0,OVALSIZE(A2)
+		PEA 	OVALSIZE(A2)
+		PEA 	FROMRECT(A2)
+		PEA 	TORECT(A2)
+		_SCALEPT 								;SCALE OVAL SIZE
+		BRA 	DONE
+		ELSE
+		jmpROM		OvalEnd							; Jump into ROM
+		ENDIF
+
+;-----------------------------------------------------
+;
+;  CHANGE ORIGIN:  ADD DH AND DV TO FROMRECT, ADJUST PATALIGN,
+;		   THEN RE-MAP THECLIP
+;
+XORIGIN JSR 	GETLONG 						;GET DH,DV
+		IF		noROM THEN
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		ADD 	D0,FROMRECT+TOP(A2) 			;ADD DV TO FROMRECT
+		ADD 	D0,FROMRECT+BOTTOM(A2)
+		ADD 	D0,PATALIGN+V(A4)				;AND TO PATALIGN
+		SWAP	D0								;GET DH IN LO WORD
+		ADD 	D0,FROMRECT+LEFT(A2)			;ADD DH TO FROMRECT
+		ADD 	D0,FROMRECT+RIGHT(A2)
+		ADD 	D0,PATALIGN+H(A4)				;AND TO PATALIGN
+;
+;  RE-COMPUTE MAPPED CLIPRGN FROM UNMAPPED THECLIP
+;
+		MOVE.L	THECLIP(A2),-(SP)				;PUSH THECLIP
+		CLR.L	-(SP)							;ROOM FOR FCN RESULT
+		_NEWRGN									;ALLOCATE A TEMP RGN
+		MOVE.L	(SP),HANDLE1(A6)				;PUT IN HANDLE1
+		BRA.S	XCLIP2							;COPY, MAP, SECT, AND DISCARD
+		ELSE
+		jmpROM		XOrigin							; Jump into ROM
+		ENDIF
+
+
+;---------------------------------------------------
+;
+;  NEW CQD OPCODES THAT JUST SET PARAMETERS
+		
+XRGBFGCOL
+			LEA		FGCOLOR(A3),A3				;POINT AT SLOT
+			BRA.S	XRGBCOMMON					;COMMON CODE
+
+XRGBBKCOL
+			LEA		BKCOLOR(A3),A3				;POINT AT SLOT
+XRGBCOMMON
+			JSR		GETLONG						;GET R,G
+			MOVE.L	D0,D6						;SAVE R,G
+			JSR		GETWORD						;GET B
+			MOVE	D0,-(SP)					;PUT B ON STACK
+			MOVE.L	D6,-(SP)					;PUT R,G ON STACK
+			MOVE.L	SP,A1						;POINT TO RGB
+			jsr		RGB2OLD						;CONVERT TO OLD
+			MOVE.L	D0,(A3)						;SET IT
+			ADDQ	#6,SP						;STRIP RGB
+			BRA		DONE						;AND RETURN
+
+XBkPixPat	PEA		BKPAT(A3)					;PUSH BKPAT PTR
+			BRA.S	XPIXPAT						;=>USE COMMON CODE
+
+XPnPixPat	PEA		PNPAT(A3)					;PUSH PNPAT PTR
+			BRA.S	XPIXPAT						;=>USE COMMON CODE
+
+XFillPixPat PEA		FILLPAT(A3)					;PUSH FILLPAT PTR
+XPixPat		JSR		GetPicPixPat				;GET THE PATTERN
+			BRA		DONE						;=>AND RETURN
+
+XPnLocHFrac	JSR		GetWord						;GET FRACTION INTO D0
+;			MOVE.L	PLAYSTATE(A6),A2			;POINT TO PLAYSTATE RECORD
+;			MOVE	D0,TXHFRAC(A2)				;SAVE HORIZONTAL FRACTION
+			BRA		DONE						;=>AND RETURN
+			
+XCHEXTRA
+			JSR		GetWord						;Get Junk word
+			BRA		DONE						;=>AND RETURN
+			
+XHiliteMode ;BCLR	#hiliteBit,HiliteMode		;ENABLE HILITING
+			BRA		DONE						;AND RETURN
+			
+; HILITE COLOR CHANGED, SAVE NEW VALUE INTO GRAFVARS
+
+XHiliteColor JSR	GETLONG						;GET R,G
+			MOVE.L	D0,D6						;SAVE R,G
+			JSR		GETWORD						;GET B
+; DO NOTHING, OLD GRAFPORT
+@DONE		BRA		DONE						;AND RETURN
+
+; HILITE COLOR CHANGED TO DEFAULT, COPY HILITE FROM LOW-MEM TO GRAFVARS
+			
+XDefHilite	BRA		DONE									;AND RETURN
+			
+; OP COLOR CHANGED, SAVE NEW VALUE INTO GRAFVARS
+
+XOpColor	JSR		GETLONG						;GET R,G
+			MOVE.L	D0,D6						;SAVE R,G
+			JSR		GETWORD						;GET B
+; OLD GRAFPORT, DO NOTHING
+@DONE		BRA		DONE						;AND RETURN
+
+
+;---------------------------------------------------
+;
+;  ROUTINES FOR IGNORING DATA
+;
+;  READ THE LENGTH FOLLOWED BY THAT NUMBER OF BYTES
+;
+CHKSAME		TST.B	SAMEFLAG(A6)					;USE SAME STRUCTURE?
+			BEQ.S	IGCOUNT							;=>NO, USE COUNT IN D0
+			MOVE.L	D1,D0							;ELSE GET SIZE FOR SAME
+			BRA.S	IGCOUNT							;=>IGNORE SPECIFIED NUMBER OF BYTES
+
+IGNORELONG	JSR		GETLONG							;GET A LONG OF LENGTH
+			BRA.S	IGCOUNT							;AND IGNORE THAT MUCH DATA
+			
+IGNORESHORT	JSR		GETWORD							;GET A WORD OF LENGTH
+			SWAP	D0								;GET HIGH WORD
+			CLR		D0								;CLEAR IT OUT
+			SWAP	D0								;SO WE HAVE A LONG LENGTH
+
+IGCOUNT		JSR		SkipPicData						;Skip D0 bytes
+			BRA		DONE
+
+;---------------------------------------------------
+;
+;  DRAWING OPCODES: 	$20 - $FE
+;
+;---------------------------------------------------
+;
+;  TEXT OR LINE OPCODES:
+;
+;  LINE:	  	  20,  PNLOC(pt), NEWPT(pt)
+;  LINEFROM:	  21,  			  NEWPT(pt)
+;  SHORT LINE:	  22,  PNLOC(pt), DH(byte), DV(byte)
+;  SHORTLNFROM:   23,             DH(byte), DV(byte)
+;
+;  TEXT:	  28,29,2A,2B
+;
+TXLNOP	TST.B	SAMEFLAG(A6)					;IS THIS A TEXT OPCODE ?	<07Nov89 KON>
+		BNE		TEXTOP							;YES, DO IT					<07Nov89 KON>
+		CMP		#3,D7							;IS OPCODE VALID?
+		BGT.S	IGNORESHORT						;=>NO, IGNORE SHORT DATA
+		
+		TST.B	SAMEFLAG(A6)					;IS THIS A TEXT OPCODE ?
+		BNE.S	TEXTOP							;YES, DO IT
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	PENLOC(A2),D0					;NO, GET PREVIOUS LINE ENDPOINT
+		ROR 	#1,D7							;IS LO NIBBLE ODD ? (BIT 0)
+		BCS.S	LNFROM							;YES, DRAW LINE FROM PREV
+		JSR 	GETLONG 						;NO, GET NEW STARTPT
+LNFROM	MOVE.L	D0,PNLOC(A3)					;COPY STARTPT INTO THEPORT
+		MOVE.L	D0,NEWPT(A6)					;SAVE FOR SHORT DH,DV BELOW
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		PEA 	PNLOC(A3)
+		PEA 	FROMRECT(A2)
+		PEA 	TORECT(A2)
+		_MAPPT									;MAP STARTPT
+
+		ROR 	#1,D7							;IS OPCODE BIT 1 SET ?
+		BCS.S	SHORTLN 						;YES, USE SHORT DH,DV FORM
+		JSR 	GETLONG 						;NO, GET NEWPT
+		MOVE.L	D0,NEWPT(A6)					;PUT IN TEMP
+		BRA.S	LNOK							;AND CONTINUE
+SHORTLN jsr 	GETSBYTE						;GET A SIGNED BYTE
+		ADD.W	D0,NEWPT+H(A6)					;ADD TO STARTPT.H
+		jsr 	GETSBYTE						;GET A SIGNED BYTE
+		ADD.W	D0,NEWPT+V(A6)					;ADD TO STARTPT.V
+
+		IF		noROM THEN
+LNOK	MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	NEWPT(A6),PENLOC(A2)			;REMEMBER NEWPT FOR NEXT TIME
+;		MOVE	#$8000,TXHFRAC(A2)				;INVALIDATE TEXT FRACTION
+		PEA 	NEWPT(A6)						;PUSH ADDRESS OF NEWPT
+		PEA 	FROMRECT(A2)
+		PEA 	TORECT(A2)
+		_MAPPT									;MAP NEWPT
+		MOVE.L	NEWPT(A6),-(SP) 				;PUSH NEWPT PARAM FOR LINEPROC
+		MOVE.L	PStdLine,A0 					;get piece of trap table
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	@1								;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	LINEPROC(A0),A0 				;NO, GET PROCPTR
+@1		BRA 	CALL0							;CALL PROC AND QUIT
+		ELSE
+LNOK	jmpROM		RomLNOK							;Jump into ROM
+		ENDIF
+
+
+;---------------------------------------------------
+;
+;  LONG TEXT:		28, txLoc(pt), count(0..255), text
+;  DH TEXT:			29, dh(0..255), count(0..255), text
+;  DV TEXT:   		2A, dv(0..255), count(0..255), text
+;  DHDV TEXT:		2B, dh(0..255), dv(0,..255), count(0..255), text
+;
+;  Font ID/Name:	2C, data size (word), fond ID, fond name (pstr)
+;  Line layout:		2D, data size (word), character extra (fixed), run slop (fixed)
+;  Glyph state:		2E, data size (word), ouline preferred (byte), preserve glyph (byte),
+;										  fractional widths (byte), scaling disabled (byte)
+;
+TEXTOP
+	IF hasGlyphState THEN
+		cmp		#6,d7							; glyph state opcode?
+		beq		GlyphState						; yes, glyph state information
+	ENDIF
+	IF SCRIPT_CHAR_EXTRA THEN
+		cmp		#5,d7							;line-layout opcode?
+		beq		LineLayout						;equal -> line-layout information.
+	ENDIF
+	IF withFonts THEN
+		CMP		#4,D7							;IS OPCODE VALID?
+		BGT		IGNORESHORT						;=>NO, IGNORE SHORT DATA
+		BEQ		AddFontToTbl					;bind name to new ID
+	ENDIF
+
+;		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+;		MOVE	NEWHFRAC(A2),TXHFRAC(A2)		;ELSE COPY NEW FRACTIONAL POSITION
+;		MOVE	#$8000,NEWHFRAC(A2)				;AND CLEAR TO 1/2
+
+		AND 	#3,D7							;IS THIS A LONGTEXT OPCODE ?
+		BEQ.S	LONGTXT 						;YES, USE LONG FORMAT
+		ROR 	#1,D7							;DO WE NEED DH ? (BIT 0)
+		BCC.S	DHOK							;NO, CONTINUE
+		JSR 	GETUBYTE						;GET DH 0..255
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		ADD 	D0,TEXTLOC+H(A2)				;BUMP TEXTLOC.H
+
+DHOK	ROR 	#1,D7							;DO WE NEED DV ? (BIT 1)
+		BCC.S	TEXTOP2 						;NO, CONTINUE
+		JSR 	GETUBYTE						;GET DV 0..255
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		ADD 	D0,TEXTLOC+V(A2)				;BUMP TEXTLOC.V
+		BRA.S	TEXTOP2 						;SHARE CODE
+
+LONGTXT JSR 	GETLONG 						;GET TXLOC, UNMAPPED
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	D0,TEXTLOC(A2)					;SAVE IN TEXTLOC
+
+TEXTOP2 JSR 	GETUBYTE						;GET TEXT LENGTH 0..255
+		MOVE	D0,D6							;SAVE LENGTH IN D6
+		PEA 	TXDATA(A6)						;PUSH ADDR OF TEXT BUF
+		MOVE	D6,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET THE TEXT
+
+		IF		noROM THEN
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+
+		MOVE.L	TEXTLOC(A2),PNLOC(A3)			;COPY TEXTLOC INTO PNLOC
+		PEA 	PNLOC(A3)
+		PEA 	FROMRECT(A2)
+		PEA 	TORECT(A2)
+		_MAPPT									;MAP PNLOC.V,PNLOC.H	
+		
+		MOVE	D6,-(SP)						;PUSH CHARACTER COUNT
+		PEA 	TXDATA(A6)						;PUSH ADDRESS OF TEXT
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	NUMER(A2),-(SP) 				;PUSH NUMER
+		MOVE.L	DENOM(A2),-(SP) 				;PUSH DENOM
+		MOVE.L	PStdText,A0 					;get piece of trap table
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	@1								;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	TEXTPROC(A0),A0 				;NO, GET PROCPTR
+@1		BRA 	CALL0							;CALL PROC AND QUIT
+		ELSE
+		jmpROM	RomTextOP						; Jump into ROM
+		ENDIF
+
+;
+; At this point we have found a non-zero fond ID which we have not seen previously
+; so we must add it to the FontMappingTbl handle.  If the handle needs to be resized we do that
+; here as well.
+
+	IF withFonts THEN
+fontMapChunk	equ		20*4
+
+AddFontToTbl
+		MOVE.L	PLAYSTATE(A6),A2			;POINT TO PLAYSTATE RECORD
+		MOVE.L	FontMappingTbl(A2),d1		;get the fontID association table
+		beq		ignoreShort					;skip opcode data if no handle
+		move.l	d1,a0
+		move.l	(a0),a1						;
+		moveq	#0,d0						;clear out high end
+		move.w	4(a1),d0					;get amnt of handle in use
+		addq.w	#1,d0						;make 1 based
+		add.w	d0,d0
+		add.w	d0,d0						;4 bytes per entry
+		addq.w	#6,d0						;hdr size
+		cmp.l	(a1),d0						;same as size of handle?
+		blt.s	addFontID					;no need to grow list	
+		
+		add.w	#fontMapChunk,d0			;bump handleSize enough for 25 more fonts
+		move.l	d0,(a1)						;save the new size
+		_SetHandleSize						;grow list
+		MOVE.L	FontMappingTbl(A2),a0		;get the fontID association table
+		move.l	(a0),a1						;get fontList handle
+		tst.w	d0							;did we get it?
+		beq.s	addFontID					;yes, continue
+		sub.w	#fontMapChunk,(a1)			;couldn't grow it.
+		bra		ignoreShort					;skip name stuff
+		
+addFontID		
+		move.l	a0,a3						;save fontMappingTbl handle in a3
+		JSR 	GetWord						;get word data length
+		subq	#2,d0						;get length of fond name (incl. length byte)
+		MOVE	D0,D6						;SAVE LENGTH IN D6
+		JSR 	GetWord						;get old fond ID
+		MOVE	D0,D7						;save fond ID in D7
+		PEA 	TXDATA(A6)					;PUSH ADDR OF TEXT BUF
+		MOVE	D6,-(SP)					;PUSH BYTECOUNT
+		JSR 	GetPicData					;get the name pstring
+		
+		PEA 	TXDATA(A6)					;PUSH ADDR OF font name
+		PEA 	NewPt(A6)					;PUSH ADDR OF var font id
+		_GetFNum							;find the appropriate id for this system
+		move.w	NewPt(a6),d6				;get new fond ID
+		beq.s	fontDone					;not found, so don't add to table
+		cmp.w	d6,d7						;does old ID = new ID?
+		beq.s	fontDone					;yes, don't add to table
+
+		move.l	(a3),a1						;fontID association table handle in A3
+		addq.w	#4,a1						;point to number of entries in use - 1
+		addq.w	#1,(a1)						;bump the entry count
+		move.w	(a1)+,d0					;get new entry count and point to entry array
+		lsl.w	#2,d0						;
+		lea		(a1,d0),a1					;point to this 0ld,New pair
+		move.w	d7,(a1)+					;store old ID
+		move.w	d6,(a1)						;store new ID
+		
+fontDone
+		bra		Done
+	ENDIF
+
+
+;
+; Load the line-layout information from the picture and save it into the Script Manager
+; globals. We also want to skip any extra data that follows so the opcode can hold more
+; in future versions.
+;
+
+	IF SCRIPT_CHAR_EXTRA THEN
+LineLayout
+		jsr		GetWord							; get the data length.
+		move.w	d0,-(sp)						; save this for later.
+		jsr		GetLong							; get the character extra.
+		move.l	grafGlobals(a5),a0				; load quickDraw globals.				<7>
+		move.l	d0,qdChExtra(a0)				; restore character extra amount.		<7>
+		jsr		GetLong							; get the run slop.
+		move.l	grafGlobals(a5),a0				; load quickDraw globals.				<7>
+		move.l	d0,qdRunSlop(a0)				; restore run slop amount.				<7>
+		
+		clr.l	d0								; clear a long.
+		move.w	(sp)+,d0						; load original data length.
+		sub.l	#8,d0							; extra data included?
+		bgt		IgCount							; yes -> ignore it for now.
+		bra		Done							; finished with this opcode.
+	ENDIF
+
+
+;
+; Load the glyph state information from the picture and save it into the low memory
+; globals. If the width tables are no longer valid then flag that condition by setting
+; LastSpExtra to an invalid value. We also want to skip any extra data that follows so
+; the opcode can hold more in future versions.
+;
+
+	IF hasGlyphState THEN
+GlyphState
+		jsr		GetWord							; get data length
+		move.w	d0,-(sp)						; save this for later
+		
+		jsr		GetUByte						; get outline preferred flag
+		move.b	d0,-(sp)						; push it on the stack
+		_SetOutlinePreferred					; set outline preferred state
+
+		jsr		GetUByte						; get preserve glyph flag
+		move.b	d0,-(sp)						; push it on the stack
+		_SetPreserveGlyph						; set preserve glyph state
+
+		jsr		GetUByte						; get fractional widths flag
+		move.b	d0,-(sp)						; push it on the stack
+		_SetFractEnable							; set fractional widths state
+
+		jsr		GetUByte						; get scaling disabled flag
+		move.b	d0,-(sp)						; push it on the stack
+		_SetFScaleDisable						; set scaling disabled state
+		
+		clr.l	d0								; clear a long
+		move.w	(sp)+,d0						; load original data length
+		sub.l	#4,d0							; extra data included?
+		bgt		IgCount							; yes, ignore it for now
+		bra		Done							; finished with this opcode
+	ENDIF
+
+
+;---------------------------------------------------
+;
+;  Rect:  OP, RECT
+;
+RECTOP	CMP		#4,D7							;IS OPCODE VALID?
+		BLE.S	ROK								;=>YES, CONTINUE
+		MOVEQ	#8,D0							;IF RECT, SKIP 8 BYTES
+		MOVEQ	#0,D1							;IF SAME, SKIP 0 BYTES
+		BRA		CHKSAME							;=>CHECK SAMEFLAG AND IGNORE
+
+ROK 	MOVE.B	D7,-(SP)						;PUSH VERB
+		BSR 	GETRECT 						;GET AND PUSH DSTRECT
+		IF		noROM THEN
+		MOVE.L	PStdRect,A0 					;get piece of trap table
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	@1								;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	RECTPROC(A0),A0 				;NO, GET PROCPTR
+@1		BRA 	CALL0							;CALL PROC AND QUIT
+		ELSE
+		jmpROM	RomRectOP						; Jump into ROM
+		ENDIF
+
+
+;---------------------------------------------------
+;
+;  RRect:  OP, RECT, OVALPT
+;
+RRECTOP CMP		#4,D7							;IS OPCODE VALID?
+		BLE.S	RROK							;=>YES, CONTINUE
+		MOVEQ	#8,D0							;IF RECT, SKIP 8 BYTES
+		MOVEQ	#0,D1							;IF SAME, SKIP 0 BYTES
+		BRA		CHKSAME							;=>CHECK SAMEFLAG AND IGNORE
+
+RROK	MOVE.B	D7,-(SP)						;PUSH VERB
+		BSR 	GETRECT 						;GET AND PUSH DSTRECT
+		IF		noROM THEN
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	OVALSIZE(A2),-(SP)				;PUSH OVHT,OVWD
+		MOVE.L	PStdRRect,A0					;get piece of trap table
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	@1								;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	RRECTPROC(A0),A0				;NO, GET PROCPTR
+@1		BRA 	CALL0							;CALL PROC AND QUIT
+		ELSE
+		jmpROM	RomRRectOP						; Jump into ROM
+		ENDIF
+
+
+;---------------------------------------------------
+;
+;  Oval:  OP, RECT
+;
+OVALOP	CMP		#4,D7							;IS OPCODE VALID?
+		BLE.S	OVOK							;=>YES, CONTINUE
+		MOVEQ	#8,D0							;IF RECT, SKIP 8 BYTES
+		MOVEQ	#0,D1							;IF SAME, SKIP 0 BYTES
+		BRA		CHKSAME							;=>CHECK SAMEFLAG AND IGNORE
+
+OVOK	MOVE.B	D7,-(SP)						;PUSH VERB
+		BSR 	GETRECT 						;GET AND PUSH DSTRECT
+		IF		noROM THEN
+		MOVE.L	PStdOval,A0 					;get piece of trap table
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	@1								;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	OVALPROC(A0),A0 				;NO, GET PROCPTR
+@1		BRA 	CALL0							;CALL PROC AND QUIT
+		ELSE
+		jmpROM	RomOvalOP						; Jump into ROM
+		ENDIF
+
+
+;---------------------------------------------------
+;
+;  Arc:  OP, RECT, STARTANGLE, ARCANGLE
+;
+ARCOP	CMP		#4,D7							;IS OPCODE VALID?
+		BLE.S	ARCOK							;=>YES, CONTINUE
+		MOVEQ	#12,D0							;IF NOT SAME, SKIP 12 BYTES
+		MOVEQ	#4,D1							;IF SAME, SKIP 5 BYTES
+		BRA		CHKSAME							;=>CHECK SAMEFLAG AND IGNORE
+
+ARCOK	MOVE.B	D7,-(SP)						;PUSH VERB
+		BSR 	GETRECT 						;GET AND PUSH DSTRECT
+		JSR 	GETWORD 						;GET STARTANGLE
+		MOVE	D0,-(SP)						;PUSH STARTANGLE
+		JSR 	GETWORD 						;GET ARCANGLE
+		IF		noROM THEN
+		MOVE	D0,-(SP)						;PUSH ARCANGLE
+		MOVE.L	PStdArc,A0						;get piece of trap table
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	@1								;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	ARCPROC(A0),A0					;NO, GET PROCPTR
+@1		BRA 	CALL0							;CALL PROC AND QUIT
+		ELSE
+		jmpROM	RomArcOP						; Jump into ROM
+		ENDIF
+
+
+;---------------------------------------------------
+;
+;  Poly:  OP, POLY
+;
+;  THE SAME POLY OPCODES WERE NEVER PARSED, SO FOR COMPATIBILITY I'LL DO OLD WAY
+
+POLYOP	CMP		#4,D7							;IS OPCODE VALID?
+		BLE.S	POLYOK							;=>YES, CONTINUE
+		TST.B	SAMEFLAG(A6)					;IS IT THE SAME POLY?
+		BNE.S	@DONE							;=>YES, NO DATA
+		BSR		GETHNDL							;ELSE READ IN THE POLYGON
+@DONE	BRA		DONE							;AND RETURN
+
+POLYOK	BSR 	GETHNDL 						;COPY POLY INTO HANDLE1
+		IF		noROM THEN
+		MOVE.L	HANDLE1(A6),-(SP)				;PUSH POLYHANDLE
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		PEA 	FROMRECT(A2)					;PUSH FROMRECT
+		PEA 	TORECT(A2)						;PUSH TORECT
+		_MAPPOLY 								;MAP POLY INTO DST COORDS
+		MOVE.B	D7,-(SP)						;PUSH VERB
+		MOVE.L	HANDLE1(A6),-(SP)				;PUSH POLYHANDLE
+		MOVE.L	PStdPoly,A0 					;get piece of trap table
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	@1								;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	POLYPROC(A0),A0 				;NO, GET PROCPTR
+@1		BRA 	CALL1							;CALL PROC AND QUIT
+		ELSE
+		jmpROM	RomPolyOP						; Jump into ROM
+		ENDIF
+
+
+;---------------------------------------------------
+;
+;  Rgn:  OP, RGN
+;
+RGNOP	CMP		#4,D7							;IS OPCODE VALID?
+		BLE.S	RGNOK							;=>YES, CONTINUE
+		TST.B	SAMEFLAG(A6)					;IS IT THE SAME RGN?
+		BNE.S	@DONE							;=>YES, NO DATA
+		BSR		GETHNDL							;ELSE READ IN THE RGN
+@DONE	BRA		DONE							;AND RETURN
+
+RGNOK	BSR 	GETHNDL 						;COPY RGN INTO HANDLE1
+		IF		noROM THEN
+		MOVE.L	HANDLE1(A6),-(SP)				;PUSH RGN
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		PEA 	FROMRECT(A2)					;PUSH FROMRECT
+		PEA 	TORECT(A2)						;PUSH TORECT
+		_MAPRGN									;MAP RGN INTO DSTRECT COORDS
+		MOVE.B	D7,-(SP)						;PUSH VERB
+		MOVE.L	HANDLE1(A6),-(SP)				;PUSH RGN
+		MOVE.L	PStdRgn,A0						;get piece of trap table
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	@1								;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	RGNPROC(A0),A0					;NO, GET PROCPTR
+@1		BRA 	CALL1							;CALL PROC, DISCARD AND QUIT
+		ELSE
+		jmpROM	RomRgnOP						; Jump into ROM
+		ENDIF
+
+
+;--------------------------------------------------------------------------
+;
+;  Quantities in brackets only read if high bit of rowbytes is set.
+;
+;  BitsRect:  	90, 	ROWBYTES, BOUNDS, [REST OF PIXMAP, COLORTABLE], 
+;						SRCRECT, DSTRECT, MODE, BYTECOUNT, BITDATA
+;
+;  BitsRgn:   	91, 	ROWBYTES, BOUNDS, [REST OF PIXMAP, COLORTABLE], 
+;						SRCRECT, DSTRECT, MODE,	MASKRGN, BYTECOUNT, BITDATA
+;
+;  PackBitsRect:98, 	ROWBYTES, BOUNDS, [REST OF PIXMAP, COLORTABLE], 
+;						SRCRECT, DSTRECT, MODE,	BYTECOUNT, BITDATA
+;
+;  PackBitsRgn: 99, 	ROWBYTES, BOUNDS, [REST OF PIXMAP, COLORTABLE], 
+;						SRCRECT, DSTRECT, MODE,	MASKRGN, BYTECOUNT, BITDATA
+;
+;  DirectBitsRect:9A, 	boguslong, ROWBYTES, BOUNDS, [REST OF PIXMAP], CLUT OPTIONAL,	<16Jun88 BAL>
+;						SRCRECT, DSTRECT, MODE, BITDATA
+;
+;  DirectBitsRgn: 9B, 	boguslong, ROWBYTES, BOUNDS, [REST OF PIXMAP], CLUT OPTIONAL,	<16Jun88 BAL>
+;						SRCRECT, DSTRECT, MODE,	MASKRGN, BITDATA
+;
+
+;  FIRST GET THE BITMAP/PIXMAP FROM THE PICTURE
+
+; Support for 32 bit picts added 8/25/89 by KON
+
+BITSOP	CMP		#3,D7							;CHECK OPCODE					<16Jun88 BAL>
+		BGT		IGNORESHORT						;=>READ WORD LENGTH + DATA
+		CMP		#1,D7							;IS IT INDEXED					<16Jun88 BAL>
+		BLE.S	@IND							;YES DON'T SKIP BOGUS LONG		<16Jun88 BAL>
+		JSR		GETLONG							;GET BOGUS LONG FROM PICTURE	<16Jun88 BAL>
+
+@IND	JSR		GETWORD							;GET ROWBYTES FROM PICTURE
+		MOVE	D0,SRCPIX+ROWBYTES(A6)			;SAVE ROWBYTES
+		MOVEQ	#BITMAPREC-6,D1					;GET SIZE OF BITMAP
+		MOVE	D0,D6							;IS IT A BITMAP OR A PIXMAP?
+		BPL.S	BITSOP1							;=>IT'S A BITMAP
+		MOVEQ	#PMREC-6,D1						;GET SIZE OF PIXMAP
+BITSOP1	PEA		SRCPIX+BOUNDS(A6)				;PUSH ADDR OF SRCPIX.BOUNDS
+		MOVE	D1,-(SP)						;PUSH BYTECOUNT
+		JSR		GETPICDATA						;GET BITMAP/PIXMAP
+		
+; IF IT'S A PIXMAP, THEN ALLOCATE A COLOR TABLE AND GET IT FROM THE PICTURE
+		
+		TST		D6								;IS IT A PIXMAP?
+		BPL.S	BITSOP2							;=>NO, DON'T GET TABLE
+		move.l	srcPix+PMTable(a6),d6			;does it have a color table?	<KON 2NOV90>
+		clr.l	srcPix+PMTable(a6)				;assume no clut					<12Jul88 BAL>
+		BTST	#1,D7							;IS IT DIRECT DATA?				<16Jun88 BAL>
+		bne.s	BITSOP2							;yes, no CLUT					<12Jul88 BAL>
+;
+; On indexed devices we convert the clut to a translation table
+;
+		MOVEQ	#CTREC,D0						;GET SIZE OF COLOR TABLE
+		_NEWHANDLE								;GET A HANDLE FOR IT
+		BNE		ABORT							;ABORT IF NO ROOM
+		MOVE.L	A0,SRCPIX+PMTABLE(A6)			;SAVE COLOR TABLE HANDLE
+		MOVE.L	A0,-(SP)						;PUSH COLOR TABLE HANDLE
+		MOVE.L	A0,-(SP)						;AND AGAIN
+		JSR		GETPICTABLE						;READ COLOR TABLE INTO HANDLE
+		tst.l	d6								;NIL color table?				<KON 2NOV90>
+		bne.s	Continue						;no, continue
+; ??? ERROR HANDLING ???
+
+;
+; Color table was NIL on record.  If it's a dummy CTable, throw it away.  Value field
+; of $4B4F in value field of 0th entry signals dummy table.
+;
+cTabSignature	EQU		$4B4F					;signature that PixMap has NIL color table (should be defined elsewhere)
+		move.l	(sp),a0
+		move.l	(a0),a2							;get ptr to color table
+		cmp.w	#cTabSignature,ctTable(a2)		;signature there?
+		bne.s	Continue						;no, then skip
+		_DisposHandle							;throw away color table and make...
+		clr.l	(sp)							;color table NIL
+Continue
+		MOVE.W	SRCPIX+PIXELSIZE(A6),-(SP)		;Push pixel size <27Feb87 DBG>
+		JSR		CTBitMap						;COMPUTE TRANSLATION TABLE
+
+BITSOP2	PEA 	SRCRECT(A6)						;PUSH ADDR OF SRCRECT
+		MOVE	#16,-(SP)						;PUSH BYTECOUNT = 16
+		JSR 	GetPicData						;GET SRCRECT,DSTRECT
+		
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		PEA 	DSTRECT(A6)
+		PEA 	FROMRECT(A2)
+		PEA 	TORECT(A2)
+		_MAPRECT 								;MAP DSTRECT
+		PEA 	SRCPIX(A6) 						;PUSH SRCPIX
+		PEA 	SRCRECT(A6) 					;PUSH ADDR OF SRCRECT
+		PEA 	DSTRECT(A6) 					;PUSH ADDR OF DSTRECT
+		JSR 	GETWORD 						;GET MODE
+		JSR		MAPMODE							;MAP TO EQUIVALENT MODE
+		MOVE	D0,-(SP)						;PUSH MODE
+
+		CLR.L	-(SP)							;ASSUME MASKRGN = NIL
+		BTST 	#0,D7							;IS MASKRGN USED ?			<6Sep89 KON>
+		BEQ.S	NOTRGN							;=> YES, USE NIL RGN
+
+USERGN	BSR 	GETHNDL 						;GET MASKRGN INTO HANDLE1
+		MOVE.L	HANDLE1(A6),-(SP)				;PUSH MASKRGN
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		PEA 	FROMRECT(A2)					;PUSH FROMRECT
+		PEA 	TORECT(A2)						;PUSH TORECT
+		_MAPRGN									;MAP RGN INTO DSTRECT COORDS
+		MOVE.L	HANDLE1(A6),(SP)				;PASS MASKRGN
+		MOVE.L	HANDLE1(A6),HANDLE2(A6) 		;AND REMEMBER MASKRGN IN HANDLE2
+
+NOTRGN	MOVE	SRCPIX+BOUNDS+BOTTOM(A6),D6		;GET SRCPIX.BOTTOM
+		SUB 	SRCPIX+BOUNDS+TOP(A6),D6		;CALC HEIGHT
+		MOVE	D6,D5							;COPY HEIGHT
+		MOVEQ	#0,D0							;CLEAR HIGH WORD
+		MOVE	SRCPIX+ROWBYTES(A6),D0 			;GET BITMAP/PIXMAP ROWBYTES
+		BPL.S	@NOTPIX							;SKIP IF NOT PIXMAP
+		AND		#rbMask,D0						;CLEAR FLAG BITS
+		MOVE	SRCPIX+PIXELSIZE(A6),D1			;GET PIXEL SIZE
+		ADD		D1,D0							;ROUND UP TO NEAREST BYTE
+		SUBQ	#1,D0							;(MINUS ONE FOR ROUNDING)
+		DIVU	D1,D0							;GET 1-BIT ROWBYTES
+		ADDQ	#1,D0							;MAKE SURE ROWBYTES...
+		BCLR	#0,D0							;...IS EVEN
+@NOTPIX
+		MOVE	D0,SRCBITS+ROWBYTES(A6)			;COPY INTO SRCBITS
+		MULU	D0,D5 							;CALC BITMAP SIZE
+		add		#2,d5							;make sure we have enough room...
+												;...for an extra long to slop over
+		MOVE.L	D5,D0							;GET BYTECOUNT
+		_NewHandle								;ALLOCATE BITS HANDLE
+		BEQ.S	MEMOK							;CONTINUE IF NOT MEMFULL
+		MOVE.L	(SP)+,A0						;POP MASKRGN (MAYBE NIL)
+MemFailure										;Clean up handles and return <Halloween89 KON>
+		_DisposHandle							;DISCARD IT
+		TST		SRCPIX+ROWBYTES(A6)				;PIXMAP OR BITMAP <30Mar87 DBG>
+		BPL.S	@NOTPIX2						;BITMAP-NO CTAB <30Mar87 DBG>
+		MOVE.L	SRCPIX+PMTABLE(A6),A0			;GET COLOR TABLE
+		_DisposHandle							;DISCARD IT
+@NOTPIX2										; <30Mar87 DBG>
+		BRA 	ABORT							;AND ABORT
+MEMOK	_HLock									;LOCK HANDLE1
+		MOVE.L	A0,HANDLE1(A6)					;REMEMBER IN HANDLE1		
+		move.w	4(sp),d5						;get copy mode <07Sept89 KON>
+		PEA		SRCPIX(A6)						;PUSH PIXMAP
+		PEA		TXDATA(A6)						;PUSH XLATE TABLE <19Feb87 DBG>
+		MOVE.L	A0,-(SP)						;PUSH HANDLE
+		MOVE	SRCBITS+ROWBYTES(A6),-(SP)		;PUSH TARGET ROWBYTES
+		move.w	d5,-(sp)						;push copy mode so we know whether... 
+												;... or not to dither <07Sept89 KON>
+		JSR		GETPM1Deep						;AND READ IN PIXMAP DATA
+		tst.w	d0								;d0 = 0 indicates noErr
+		beq.s	PixMapOK						;Error in getPM1Deep?	<Halloween89 KON>
+		MOVE.L	HANDLE1(A6),A0					;Yes, clean-up and exit	<Halloween89 KON>
+		bra.s	MemFailure				
+		
+PixMapOK
+		and		#$FFFF-64,d5	;clear dither bit since we took care...
+		move.w	d5,4(sp)		;of dithering in GetPM1Deep <07Sept89 KON>
+		
+		bclr	#1, d7			;clear bit 1 of low nibble of pict opcode
+								;This bit tells whether or not it's a 32-bit
+								;pixmap.  We don't need this info anymore,
+								;and the rom checks the low nibble for zero
+								;to determine if the pixmap is region clipped.
+								;Since that won't work when we are using bit 1
+								;to indicate 32-bit pixmap, we have to clear it!
+								; <07Sept89 KON>
+;	
+; OK, now it's time to build a bit map which looks like the pixmap.  Use
+; SRCBITS if it's really a PIXMAP (otherwise just use SRCPIX, since it's
+; already set up).
+;
+DOBITS
+		MOVE.L	HANDLE1(A6),A0					;GET HANDLE1
+		MOVE.L	(A0),SRCPIX+BASEADDR(A6)		;FILL IN BASEADDR
+		MOVE	SRCPIX+ROWBYTES(A6),D0			;GET ROWBYTES
+		BPL.S	REALDO							;OLD BITMAP=>GO FOR IT!
+		LEA		SRCBITS(A6),A1					;Point at SRCBITS
+		MOVE.L	A1,(4+2+4+4)(SP)				;Smash source bmap parameter
+		MOVE.L	(A0),(A1)+						;FILL IN BASEADDR
+		ADDQ	#2,A1							;Skip ROWBYTES (done above)
+		LEA		SRCPIX+BOUNDS(A6),A0			;GET BOUNDS
+		MOVE.L	(A0)+,(A1)+						;COPY FIRST LONG
+		MOVE.L	(A0),(A1)						;...AND SECOND
+REALDO
+		MOVE.L	PStdBits_SE_Portable,A0			;get piece of trap table (SE or Portable)
+		ENTRY	GetPStdBits
+GetPStdBits		equ		* - 2					;fix the word in the above instruction on Plus
+
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	BITSOK							;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	BITSPROC(A0),A0 				;NO, GET PROCPTR
+BITSOK	JSR 	(A0)							;CALL BITSPROC
+		MOVE.L	HANDLE1(A6),A0					;GET HANDLE1
+		_HUnlock								;UNLOCK THE DATABITS
+		TST		SRCPIX+ROWBYTES(A6)				;IS IT A PIXMAP?
+		BPL.S	DOKILL							;=>NO, DON'T DISPOSE COLOR TABLE
+		MOVE.L	SRCPIX+PMTABLE(A6),d0			;ELSE GET COLOR TABLE HANDLE
+		beq.s	DoKill							;direct data, no clut
+		move.l	d0,a0
+		_DISPOSHANDLE							;AND DISPOSE OF IT
+		IF		noROM THEN
+DOKILL	TST 	#0,D7							;IS MASKRGN USED ?
+		BEQ 	KILL1							;NO, DISCARD ONLY DATABITS
+		BRA 	KILL2							;DISCARD MASKRGN & DATABITS
+		ELSE
+DOKILL	jmpROM	RomBits							; Jump into ROM
+		ENDIF
+
+
+;--------------------------------------------------------------------------
+;
+;	CTBitMap - Build bit map of black/white color mappings from a CTAB
+;		PROCEDURE CTBitMap(theTable: CTabHandle; pixSize: INTEGER); <27Feb87 DBG>
+;
+CTBitMap
+;
+; Build a vector of bytes which indicates, for each of the colors in
+; the pixmap's color table, whether that color should map to black or white.
+;
+		MOVE.L	6(SP),D0						;Table handle				<KON 2NOV90>
+		move.l	d0,a0							;							<KON 2NOV90>
+		bne.s	@ConvertTable					;convert table if non-zero
+;
+; Here we have a relative PixMap:  First invalidate all entries in destination.
+;
+		LEA		TXDATA(A6),A1					;Place to stick table 		<KON 2NOV90>
+		MOVE.W	#256-1,D0						;Count of bytes 			<KON 2NOV90>
+		MOVE.B	#$80,D2							; Marker					<KON 2NOV90>
+@CLRLOOP										;
+		MOVE.B	D2,(A1)+						;Clear entry to $80 		<KON 2NOV90>
+		DBRA	D0,@CLRLOOP						;
+;
+; Make half of valid range (number of pixels) 0 and the other half one.
+;
+		MOVE	4(SP),D0						; Get pixel size 			<KON 2NOV90>
+		MOVEQ	#1,D1							; Handy 1 bit 				<KON 2NOV90>
+		ASL		D0,D1							; Compute #pixel values 	<KON 2NOV90>
+		ADDQ	#1,d1							; Assumes cnt+1 at @join	<KON 15NOV90>
+		LEA		TXDATA(A6),A1					; Start of table address	<KON 2NOV90>
+		bra.s	@join
+
+@ConvertTable
+		MOVE.L	(A0),A0							;Table pointer
+		ADDQ	#CTSize,A0						;POINT AT SIZE
+		MOVE	(A0)+,D4						;GET SIZE(-1); POINT AT TABLE
+;
+; First, clear the entire mapping table to $80 so we can recognize pixel
+; values which didn't get set by the color table.
+;
+		LEA		TXDATA(A6),A1					;Place to stick table <19Feb87 DBG>
+		MOVE.W	#256-1,D0						;Count of bytes <27Feb87 DBG>
+		MOVE.B	#$80,D2							;Marker <27Feb87 DBG>
+@myCLRLOOP										; <27Feb87 DBG>
+		MOVE.B	D2,(A1)+						;Clear entry to $80 <27Feb87 DBG>
+		DBRA	D0,@myCLRLOOP					; <27Feb87 DBG>
+;
+; Now, set the corresponding bit value for every entry in the color table.
+;
+		LEA		TXDATA(A6),A1					;Get address again <27Feb87 DBG>
+@CTLOOP
+		MOVE	(A0)+,D2						;Get pixel value <19Feb87 DBG>
+		jsr		RGB2Pixel						;GET BIT VALUE IN D0.B
+		MOVE.B	D0,0(A1,D2.W)					;WRITE OUT THIS BYTE <19Feb87 DBG>
+		DBRA	D4,@CTLOOP						;LOOP THROUGH COLOR TABLE
+;
+; Next, we must set a value for every pixel which isn't in the color table.
+; Of all the undefined entries, the first half map to zero and the second
+; to one (this approximates the ramp used by Color QuickDraw).
+;
+		MOVE	4(SP),D0						; Get pixel size <27Feb87 DBG>
+		MOVEQ	#1,D1							; Handy 1 bit <27Feb87 DBG>
+		ASL		D0,D1							; Compute #pixel values <27Feb87 DBG>
+		MOVE.L	6(SP),A0						;Table handle <27Feb87 DBG>
+		MOVE.L	(A0),A0							;Table pointer <27Feb87 DBG>
+		ADDQ	#CTSize,A0						;POINT AT SIZE <27Feb87 DBG>
+		MOVE	(A0),D4							;GET SIZE(-1) <27Feb87 DBG>
+		SUB		D4,D1							;Calculate number of...<27Feb87 DBG>
+@Join
+		SUBQ	#1,D1							;...undefined entries <27Feb87 DBG>
+		MOVE	D1,D4							;Make copy <27Feb87 DBG>
+		ASR		#1,D4							;Divide by 2 <27Feb87 DBG>
+		SUB		D4,D1							;Other half <27Feb87 DBG>
+;
+; Set all the pixels we want to set to zero, to zero.
+;
+@ZeroLoop										; <27Feb87 DBG>
+		TST		D4								;Any left? <27Feb87 DBG>
+		BEQ.S	@OneLoop						;Nope, do the ones <27Feb87 DBG>
+@ZeroLoop2										; <27Feb87 DBG>
+		TST.B	(A1)+							;Valid pixel?  <27Feb87 DBG>
+		BPL.S	@ZeroLoop2						;Yup, do next <27Feb87 DBG>
+		CLR.B	-1(A1)							;No, set to zero <27Feb87 DBG>
+		SUBQ	#1,D4							;One less to set <27Feb87 DBG>
+		BRA.S	@ZeroLoop						;Look for next guy <27Feb87 DBG>
+;
+; Now set all the one pixels to one.
+;
+@OneLoop										; <27Feb87 DBG>
+		MOVEQ	#1,D0							; Get a one <27Feb87 DBG>
+@OneLoop1										; <27Feb87 DBG>
+		TST		D1								;Any left? <27Feb87 DBG>
+		BEQ.S	@UndefDone						;Nope, do the ones <27Feb87 DBG>
+@OneLoop2										; <27Feb87 DBG>
+		TST.B	(A1)+							;Valid pixel?  <27Feb87 DBG>
+		BPL.S	@OneLoop2						;Yup, do next <27Feb87 DBG>
+		MOVE.B	D0,-1(A1)						;No, set to one <27Feb87 DBG>
+		SUBQ	#1,D1							;One less to set <27Feb87 DBG>
+		BRA.S	@OneLoop1						;Look for next guy <27Feb87 DBG>
+@UndefDone										; <27Feb87 DBG>
+;
+; Return to the caller.
+;
+		MOVE.L	(SP)+,A0						;GET RETURN ADDRESS <27Feb87 DBG>
+		ADD		#6,SP							;POP ARGUMENTS <27Feb87 DBG>
+		JMP		(A0)							;RETURN <27Feb87 DBG>
+
+
+;--------------------------------------------------------------------------
+;
+;  CommentOp:  OP, KIND, { SIZE, DATA }
+;
+COMMOP	TST.B	SAMEFLAG(A6)					;IS SAMEFLAG SET?
+		BNE		IGNORESHORT						;=>YES, READ WORD LENGTH + DATA
+		CMP		#1,D7							;$A0 OR $A1
+		BGT		IGNORESHORT						;=>READ WORD LENGTH + DATA
+	if 0 then
+		BEQ		CALLUSERBOTTLEPROC
+	endif
+		JSR 	GETWORD 						;GET COMMENT KIND IN D0
+		MOVE	D0,-(SP)						;PUSH FOR COMMENTPROC
+		TST.B	D7								;IS THIS SHORT FORM ?
+		BNE.S	LONGCOM 						;NO, GET MORE
+	IF		noROM THEN
+		CLR 	-(SP)							;YES, PUSH DATASIZE = 0
+		CLR.L	-(SP)							;PUSH DATAHANDLE = NIL
+		MOVE.L	PStdComment,A0					;get piece of trap table
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	@1								;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	COMMENTPROC(A0),A0				;NO, GET PROCPTR
+@1		BRA 	CALL0							;CALL PROC AND QUIT
+	ELSE
+		jmpROM	RomCommentOP					; Jump into ROM
+	ENDIF
+
+LONGCOM JSR 	GETWORD 						;GET DATASIZE
+		MOVE	D0,-(SP)						;PUSH DATASIZE
+		CLR 	D4								;INIT BYTE INDEX FOR GETHND2
+		BSR.S	GETHND2 						;GET DATA INTO HANDLE1
+	IF		noROM THEN
+		MOVE.L	HANDLE1(A6),-(SP)				;PUSH DATA HANDLE
+		MOVE.L	PStdComment,A0					;get piece of trap table
+		MOVE.L	GRAFPROCS(A3),D0				;IS GRAFPROCS NIL ?
+		BEQ.S	@1								;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	COMMENTPROC(A0),A0				;NO, GET PROCPTR
+@1		BRA 	CALL1							;CALL PROC, DISCARD AND QUIT
+	ELSE
+		jmpROM	RomLongCom						;Jump into ROM
+	ENDIF
+	if 0 then
+CALLUSERBOTTLEPROC
+		JSR		GETWORD							;GET DATA LENGTH
+		MOVE.L	D0,D2							;SAVE IT FOR A SEC
+		_NEWHANDLE
+		BNE.S	NOMEMORY						;READ BYTES AND ABORT
+		_HLOCK									;IT BETTER NOT MOVE!
+		MOVE.L	A0,HANDLE1(A6)					;SAVE HANDLE
+		MOVE.L	(A0),-(SP)						;POINTER TO MEMORY
+		MOVE	D2,-(SP)						;PUSH BYTECOUNT
+		JSR 	GETPICDATA						;GET SRCRECT,DSTRECT
+		MOVE.L	HANDLE1(A6),A0					;GET HANDLE
+		LEA		GETPICDATA,A1
+		MOVE.L	PLAYSTATE(A6),A2
+		MOVE.L	(A0),A0							;GET ADDRESS TO CALL
+		BRA		CALL1							;CALL IT
+NOMEMORY
+		MOVE.L	D2,D0							;GET COUNT TO IGNORE
+		BRA		IGCOUNT							;IGNORE BYTES IN D0
+	endif
+
+;-----------------------------------------------------
+;
+;  GET SOME BYTES AND QUIT
+;
+GETDONE MOVE.L	A3,-(SP) 			  	 		;PUSH DATAPTR
+		MOVE	D6,-(SP) 			  	 		;PUSH BYTECOUNT
+		JSR		GetPicData			   			;GET DATA FROM THEPIC
+		BRA		DONE
+
+
+GETRECT
+;----------------------------------------------------------
+;
+;  LOCAL PROCEDURE TO SET UP AND PUSH DSTRECT AS FOLLOWS:
+;  IF NOT SAMEFLAG, THEN GET NEXT 8 BYTES INTO THERECT.
+;  THEN MAP THERECT INTO DSTRECT, AND PUSH ADDR OF DSTRECT.
+;  CLOBBERS A0,D0
+;
+		TST.B	SAMEFLAG(A6)					;SAME RECT ?
+		BNE.S	SAME1							;YES, CONTINUE
+
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		PEA 	THERECT(A2) 					;PUSH ADDR OF THERECT
+		MOVE	#8,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET DATA FROM THEPIC
+
+		IF		noROM THEN
+SAME1	MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		MOVE.L	THERECT(A2),DSTRECT(A6) 		;COPY THERECT INTO DSTRECT
+		MOVE.L	THERECT+4(A2),DSTRECT+4(A6)
+		PEA 	DSTRECT(A6)
+		PEA 	FROMRECT(A2)
+		PEA 	TORECT(A2)
+		_MAPRECT 								;MAP DSTRECT
+		MOVE.L	(SP)+,A0						;POP RETURN ADDR
+		PEA 	DSTRECT(A6) 					;PUSH ADDR OF MAPPED DSTRECT
+		JMP 	(A0)							;RETURN
+		ELSE
+SAME1	jmpROM	RomGetRect
+		ENDIF
+		
+GETHNDL	
+;--------------------------------------------------------
+;
+;  LOCAL ROUTINE TO ALLOCATE, AND COPY HANDLE1
+;
+;  CLOBBERS D0-D2,A0-A1,D4,D5
+;
+;  TRICKY ENTRY AT GETHND2 WITH COUNT IN D0, D4 = 0
+;
+		MOVEQ	#2,D4							;INIT BYTE OFFSET FOR LATER
+		JSR 	GETWORD 						;GET BYTECOUNT
+GETHND2 
+		EXT.L	D0								;MAKE COUNT LONG
+		MOVE.L	D0,D5							;PUT BYTECOUNT INTO D5
+		_NewHandle								;ALLOCATE HANDLE
+		BNE.S	ABORT							;ABORT IF MEMFULL
+		MOVE.L	A0,HANDLE1(A6)					;SAVE IN HANDLE1
+		_HLock									;LOCK HANDLE1
+		MOVE.L	(A0),A0 						;DE-REFERENCE IT
+		MOVE	D5,(A0) 						;INSTALL SIZE WORD
+		SUB 	D4,D5							;ADJUST COUNT
+		PEA 	0(A0,D4)						;PUSH DATAPTR
+		MOVE	D5,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET DATA FROM THEPIC
+		MOVE.L	HANDLE1(A6),A0					;GET HANDLE 1
+		_HUnLock								;UNLOCK IT
+		RTS 									;AND RETURN
+		
+GetPicOp
+;------------------------------------------------------
+;
+;  LOCAL PROCEDURE TO GET NEXT OPCODE FROM PICTURE INTO D0
+;
+		MOVE.L	PLAYSTATE(A6),A2				;POINT TO PLAYSTATE RECORD
+		CMP		#PICTVERSION,PLAYVERSION(A2)	;IS IT AN OLD PICTURE?
+		BEQ.S	OLDPIC							;=>YES, GET ONE-BYTE OPCODE
+		MOVE.L	GRAFGLOBALS(A5),A0				;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	PLAYINDEX(A0),D0				;GET CURRENT POSITION
+		BTST	#0,D0							;IS IT ODD?
+		BEQ.S	NOTODD							;=>NO, JUST FETCH OPCODE
+		JSR		GETUBYTE						;ELSE SKIP PAD BYTE
+NOTODD	JSR		GETWORD							;GET OPCODE WORD IN D0
+		RTS										;AND RETURN
+		
+OLDPIC	JSR 	GETUBYTE						;GET OPCODE BYTE IN D0
+		RTS										;AND RETURN
+
+
+;-----------------------------------------------------------------
+;
+;  CALL BOTTLENECK PROC, DISPOSE OF ONE OR TWO HANDLES, AND QUIT
+;
+CALL0	JSR 	(A0)							;CALL PROC PTR
+		BRA.S	DONE							;AND QUIT
+
+CALL1	JSR 	(A0)							;CALL PROC PTR
+		BRA.S	KILL1							;KILL HANDLE1 AND QUIT
+
+;  KILL ONE OR TWO HANDLE TEMPS
+
+KILL2	MOVE.L	HANDLE2(A6),A0					;GET HANDLE2
+		_DisposHandle							;DISCARD IT
+
+		IF		noROM THEN
+KILL1	MOVE.L	HANDLE1(A6),A0					;GET HANDLE1
+		_DisposHandle							;DISCARD IT
+		BRA.S	DONE
+
+ABORT	MOVE.L	SAVEDSP(A6),SP					;RESTORE STACK
+		CLR.B	RESULT(A6)						;RETURN FALSE
+
+DONE	MOVEM.L (SP)+,D3-D7/A2-A4				;RESTORE REGISTERS
+		UNLINK	PARAMSIZE,'PICITEM1'			;destroys condition codes
+		ELSE
+KILL1	jmpROM	RomKill1						; Jump into ROM
+ABORT	jmpROM	RomAbort						; Jump into ROM
+DONE	jmpROM	RomDone							; Jump into ROM
+		ENDIF
+
+
+		ENDPROC
+
+FixPStdBits	INSTALLPROC		(Plus)
+		IMPORT	GetPStdBits
+
+		lea		GetPStdBits,a0				;point at above code
+		move.w	#PStdBits_Plus,(a0)			;jam in the correct vector for the Mac. Plus
+		rts
+
+		ENDPROC

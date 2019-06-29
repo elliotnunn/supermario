@@ -1,0 +1,905 @@
+;
+;	File:		ColorAsm.a
+;
+;	Copyright:	© 1981-1990, 1992-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM7>	 9/12/93	SAM		Changed all instances of _Translate24to32 to _rTranslate24to32
+;									so they can conditionalized out of the build.
+;	   <SM6>	  1/5/93	PN		Revert back to the previous version and back out the change
+;									because the fix should be in DisposeHandle in MemoryMgr.
+;	   <SM5>	  1/4/93	RB		In DisposCTable, do not dispose of Color tables in ROM.
+;	   <SM4>	 6/11/92	stb		<sm 6/9/92>stb Add comment to BitsToPix to reflect that
+;									QDciPatchROM.a and this file are synched-up.
+;	   <SM3>	 5/21/92	kc		Change the name of QuickDraws wrapper for NewHandle to
+;									NewHandleWrapper to avoid name conflict with the glue.
+;	   <SM2>	 4/15/92	RB		Rolled in PatchOpenCPort, set pnLocFixed to a good value when
+;									opening a new color port. from QuickDrawPatches.a
+;		<12>	 1/15/92	KC		Fix "If last BRA.S to import is to next instruction, BAD CODE
+;									will be generated" assembler warning.
+;		<11>	  6/3/91	DDG		Harmless addition of comment to test bbs scripts.
+;		<10>	11/26/90	SMC		Fixed another problem with the way grafvars flag bit was getting
+;									set.  With BAL.
+;		 <9>	 11/7/90	SMC		Fixed bug in InitCPort where grafvars flag bit wasn't getting
+;									set correctly.  With BAL.
+;		 <8>	10/31/90	SMC		Fixed alpha channel crimes with BAL.
+;		 <7>	10/29/90	KON		Insure hRes and vRes always 72 dpi for InitPixMap (NewPixMap).
+;		 <6>	 9/17/90	BG		Removed <5>. 040s are now behaving more reliably.
+;		 <5>	 6/25/90	BG		Added an EclipseNOP to fix a flakey 040 problem.
+;		 <4>	 4/11/90	KON		gdFlags was off by 1.
+;		 <3>	 4/10/90	KON		Make BitsToPix return whether pixmap needs 32-bit addressing in
+;									high word of D2.
+;		 <2>	  1/3/90	BAL		Remove references to A5 global ScreenBits.baseAddr.
+;	  <•2.4>	 7/14/89	BAL		For Aurora: Final CQD
+;	   <2.3>	 7/14/89	BAL		FOR Aurora: Made BitsToPix recognize 32 bit addressed pixmaps
+;	   <2.2>	  7/6/89	GGD		Un-Proc'd InitCPort so that alignment wouldn't screw up
+;									OpenCPort falling into it.
+;	   <2.1>	 6/10/89	CEL		Moved Private.a QuickDraw Equates into proper QuickDraw private
+;									file (colorequ.a), got rid of QuickDraw nFiles dependencies and
+;									fixed up necessary files…
+;	   <2.0>	 5/30/89	DAF		Undid <1.9> since it was nuking the window's palette across PICT
+;									drawing
+;	   <1.9>	 5/30/89	BAL		Changed InitCPort to zero the paletteHandle in grafVars.
+;	  <•1.8>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;				 9/19/88	BAL		Changed BitsToPix to return with D2=1 if XMap is screen
+;				  4/8/88	BAL		Change BitsToPix to mask high byte of baseAddr if not the screen
+;				 11/8/87	DAF		Fixed CloseCPort/ClosePort to eliminate disposes of NIL
+;									patHandles
+;				 5/27/87	EHB		Rolled in patch to make imagewriter work.
+;				12/12/86	CRC		Added grafVars, frac h pen, charExtra to color ports
+;				 8/18/86	EHB		Moved PixPat stuff to patterns.a
+;				 8/11/86	EHB		Added color pixMap support to OpenCPort, CloseCPort and
+;									InitCPort. Added new routine OneBitCTable.
+;				  8/5/86	EHB		Put new Color grafPorts into PortList!!
+;				  7/5/86	EHB		Deleted routine GetSizeShift (do it inline) New routines
+;									PortToMap and BitsToMap
+;				 6/15/86	EHB		Added routine GetSizeShift
+;				 6/14/86	EHB		Added routine BitsToPix
+;				 5/15/86	EHB		New today
+
+			BLANKS	ON
+			STRING	ASIS
+	
+			MACHINE MC68020
+	
+;------------------------------------------------------------
+;
+;  ROUTINES TO MANIPULATE THE NEW COLOR DATA STRUCTURES
+;
+;------------------------------------------------------------
+
+; extra comment (remove later)
+
+;-------------------------------------------------------------
+;
+;		LITTLE UTILITY ROUTINES
+;
+;-------------------------------------------------------------
+
+
+ONEBITCTABLE	PROC	EXPORT
+				EXPORT	FILLONEBIT
+				IMPORT	RSetHSize
+;-----------------------------------------------------------
+;
+;  OneBitCTable (CTabHandle);
+;  Fill in the specified handle with a one bit color table
+;  This table has two entries: White and black.
+;
+;  NOTE:  This should probably go through the color manager (should
+;  we keep around a dummy 1-bit gDevice for such purposes?)
+;
+			MOVE.L	(SP)+,A1					; get the return address
+			MOVE.L	(SP)+,A0					; get the handle
+			MOVE.L	#CTRec+16,D0				; get size of record + table
+			JSR		RSetHSize					; set the handle size
+			MOVE.L	(A0),A0						; get the table pointer
+FILLONEBIT	MOVEQ	#1,D1						; GET A USEFUL NUMBER
+			MOVE.L	D1,(A0)+					; CTSEED := 1 (matches resource id)
+			MOVE.L	D1,(A0)+					; TransIndex := 0, CTSize := 1
+			CLR		(A0)+						; entry 0: value := 0
+			MOVEQ	#-1,D0						; set entry 0 to white
+			MOVE.L	D0,(A0)+					; set R,G
+			MOVE	D0,(A0)+					; and B
+			SWAP	D1							; D1 = $00010000
+			MOVE.L	D1,(A0)+					; entry1: value := 1, R = 0
+			CLR.L	(A0)+						; set G, B
+			
+			JMP		(A1)						; and return
+
+			
+
+PORTTOMAP	PROC 	EXPORT
+			EXPORT	BITSTOMAP
+;-----------------------------------------------------------
+;
+;  LOCAL PROCEDURE PORTTOMAP
+;
+;  CALLED IF WE KNOW WE'RE POINTING AT A PORT TO GET ITS BIT/PIXMAP
+;
+;  Enter with:	A0:	 PORT
+;  Exit with:	A0:	 PORT's bitMap or pixMap
+;
+
+			ADDQ	#PORTBITS,A0				;POINT TO BITMAP/PIXMAP HANDLE
+			
+BITSTOMAP
+;-----------------------------------------------------------
+;
+;  LOCAL PROCEDURE BITSTOMAP
+;
+;  CALLED IF WE ARE POINTING AT A BIT/PIXMAP OF UNKNOWN ORIGIN
+;
+;  Enter with:	A0:	 BITMAP/PIXMAP WHICH MIGHT BELONG TO A PORT
+;  Exit with:	A0:	 bitMap or pixMap
+;
+			TST		ROWBYTES(A0)				;BITMAP OR PIXMAP?
+			BPL.S	GOTBITMAP					;=>JUST A BITMAP
+			BTST	#ISCPORT,ROWBYTES(A0)		;IS IT A COLOR PORT?
+			BEQ.S	GOTBITMAP					;=>NO, JUST A PIXMAP
+			MOVE.L	BASEADDR(A0),A0				;ELSE GET PORT'S PIXMAP HANDLE
+			MOVE.L	(A0),A0						;GET PIXMAP POINTER
+GOTBITMAP	RTS
+
+
+
+;------------------------------------------------------------
+;
+;  ROUTINES TO MANIPULATE COLOR PORTS
+;
+;------------------------------------------------------------
+
+
+OpenCPort 	PROC  	EXPORT
+			IMPORT	NewPort,NewPixPat,NewPixMap,NewHandleWrapper
+			IMPORT	InitCFields,InsPortList
+;------------------------------------------------------------
+;
+;  PROCEDURE OpenCPort (cp: CGrafPtr);
+;  
+;  OPEN A COLOR GRAFPORT, ALLOCATE ITS STORAGE, INITIALIZE IT
+;
+;-------------------------------------------
+;
+;  ALLOCATE A GRAFPORT
+;  
+			MOVE.L	GrafGlobals(A5),A0			; get quickdraw globals in a0		<SM2> rb
+			MOVE.W	#$8000,pnLocFixed(A0)		; set the default pen fraction		<SM2> rb
+			MOVE.L	4(SP),-(SP)					; push grafPort
+			MOVE.L	(SP),-(SP)					; and a copy for InsPortList
+			JSR		NEWPORT						; and init regions
+			JSR		InsPortList					; add port to portlist
+
+
+;-------------------------------------------
+;
+;  ALLOCATE A PIXELMAP 
+;  WITHOUT COLORTABLE SINCE WE'LL USE THEGDEVICE'S TABLE
+;  
+			CLR.L	-(SP)					; make room for function result
+			MOVE	#pmRec,-(SP)			; size of pixel map record
+			JSR		NewHandleWrapper		; get a handle, leave on stack
+		
+;-------------------------------------------
+;
+;  INSTALL THE FIELDS INTO THE CGRAFPORT
+;  
+			MOVE.L	8(SP),A0				; point to the port
+			MOVE.L	(SP)+,portPixMap(A0)		; install new handle for pixMap
+
+			CLR.L	bkPixPat(A0)			; clear for oldPatToNew
+			CLR.L	pnPixPat(A0)			; clear for oldPatToNew
+			CLR.L	fillPixPat(A0)			; clear for oldPatToNew
+			CLR.L	grafVars(A0)			; initialize for init
+
+;-------------------------------------------
+;
+;  INDICATE THAT THIS IS A COLOR GRAFPORT
+;  
+			MOVE	#cPortFlag,portVersion(A0)	; flag that it's a color port
+
+;-------------------------------------------
+;
+;  FALL INTO SHARED CODE WHICH INITIALIZES THE CGRAFPORT
+
+
+
+			EXPORT	InitCPort				; <2.2>	
+			IMPORT 	InitShared,InitPixMap,OldPatToNew,InitColorStuff
+InitCPort									; <2.2>
+;-------------------------------------------------------------
+;
+;  PROCEDURE InitCPort(cp: cGrafPtr);
+;
+;  INITIALIZE A CGRAFPORT TO ITS DEFAULT SETTINGS.
+;  DEFAULT SETTINGS INHERITED FROM THE CURRENT GRAFDEVICE.
+;  IF CP IS AN OLD GRAFPORT, THEN JUST RETURN
+;
+			MOVE.L	A2,-(SP)					; save work register
+			MOVE.L	8(SP),A2					; get cGrafPtr
+			TST		portVersion(A2)				; is it a new grafPort?
+			BPL		DONE						; => no, just return
+		
+;-------------------------------------------
+;
+;  INITIALIZE ALL FIELDS SHARED BY GRAFPORT AND CGRAFPORT
+;  
+			JSR		InitShared					; initialize shared fields
+		
+;-------------------------------------------
+;
+;  COPY THE DEFAULT PIXMAP FROM THE CURRENT GRAFDEVICE
+;  
+			MOVE.L	theGDevice,A0				; get grafDevice handle
+			MOVE.L	(A0),A0						; get grafDevice pointer
+			MOVE.L	GDPMap(A0),A0				; get handle to grafDevice's pixMap
+			MOVE.L	(A0),A0						; get pixMap pointer
+			MOVE.L	portPixMap(A2),A1			; get port's pixMap handle
+			MOVE.L	(A1),A1						; get pixMap pointer
+			MOVE	#pmRec/2-1,D0				; get size of pixMap in words
+NXTWORD		MOVE	(A0)+,(A1)+					; copy from grafDevice to cGrafPort
+			DBRA	D0,NXTWORD					; => do next word
+				
+		if ADDRMODEFLAG then					;							<BAL 11Dec88>
+			MOVE.L	portPixMap(A2),A1			; get port's pixMap handle
+			MOVE.L	(A1),A1						; get pixMap pointer
+			clr.w	pmVersion(A1)				; assume 24 bit addressing
+		endif
+;-------------------------------------------
+;
+;  INITIALIZE FIELDS THAT ARE ONLY IN COLOR GRAFPORT
+;
+			MOVE.L	A2,-(SP)					; push grafptr
+			JSR		INITCOLORSTUFF				; and initialize color fields
+
+DONE		MOVE.L	(SP)+,A2					; restore work register
+			MOVE.L	(SP)+,(SP)					; strip param
+			RTS 								; and return
+
+
+INITCOLORSTUFF	PROC EXPORT
+				IMPORT OldPatToNew,RNewHandle
+;-------------------------------------------
+;
+;  PROCEDURE INITCOLORSTUFF (port: GRAFPTR);
+;
+;  Initialize the color patterns, RGB foreground, and RGB background fields.
+;
+;  CALLED BY:  INITCPORT AND DRAWPICTURE
+;  
+			MOVE.L	A2,-(SP)					; save work register
+			MOVE.L	8(SP),A2					; get grafport
+			
+			CLR.L	-(SP)						; bkPat := white
+			CLR.L	-(SP)						; put white pattern on stack
+			MOVE.L	SP,-(SP)					; point to white pattern
+			PEA		bkPixPat(A2)				; push background pixPat handle
+			_OldPatToNew						; old pattern -> new pattern
+
+			NOT.L	(SP)						; pnPat := black
+			NOT.L	4(SP)
+			MOVE.L	SP,-(SP)					; point to black pattern
+			PEA		pnPixPat(A2)				; push pen pixPat handle
+			_OldPatToNew						; old pattern -> new pattern
+
+			MOVE.L	SP,-(SP)					; point to black pattern
+			PEA		fillPixPat(A2)				; push pen pixPat handle
+			_OldPatToNew						; old pattern -> new pattern
+			ADDQ	#8,SP						; strip black from stack
+
+;-------------------------------------------
+;
+;  INITIALIZE THE PORT'S FOREGROUND AND BACKGROUND COLORS
+;  
+			MOVE.L	#blackColor,-(SP)			; push black
+			_ForeColor							; set the foreground color
+			MOVE.L	#whiteColor,-(SP)			; push white
+			_BackColor							; set the background color
+			
+;-------------------------------------------
+;
+;  INITIALIZE FRACTIONAL PEN POSITION TO 1/2, Character Extra to 0
+
+			MOVE.L	#$00008000,chExtra(A2)		; CHEXTRA := 0, PnLocHFrac := 1/2
+			
+;———————————————————————————————————————————
+;
+;  Initialize grafVars opColor, hiliteColor
+;
+			TST.L	grafVars(A2)
+			BNE.S	@skipNew
+			MOVEQ	#newGrafVarRec,D0			; get size of record		<8>
+			JSR		RNewHandle					; op color is initialized to black
+			MOVE.L	A0,grafVars(A2)				; point grafVars field to handle
+			MOVE.L	(A0),A0						; deref grafvars handle		<8>
+			BSET	#pmNewGVBit-8,pmFlags(A0)	; set new grafvars flag		<8>
+@skipNew	MOVE.L	([grafVars,A2]),A0			; get a pointer to the data
+			CLR.L	(A0)+						; RGBOpColor = black
+			CLR		(A0)+						; init rest of RGBOpColor
+			MOVE.L	HiliteRGB,(A0)+				; RGBHiliteColor initialized
+			MOVE	HiliteRGB+4,(A0)+			; to low-memory default
+			
+	; Clear out paletteMgr info for the Brinker		<BAL 30May89>		
+			
+;+++			CLR.L	(A0)+						; paletteHandle = nil (fgColor)
+;+++			CLR.L	(A0)+						; fgindex/bkColor
+;+++			CLR.L	(A0)+						; bkColor/bkindex
+;+++			CLR.w	(A0)						; pmFlags
+				
+			MOVE.L	(SP)+,A2					; restore work register
+			MOVE.L	(SP)+,(SP)					; strip param
+			RTS 								; and return
+
+
+
+CloseCPort	PROC	EXPORT
+ClosePort 	PROC	EXPORT	
+			Import	DelPortList,DisposPixMap,DisposPixPat
+;-------------------------------------------------------------
+;
+;  PROCEDURE ClosePort(port: GrafPtr);
+;
+;  Disposes of clipRgn and visRgn.
+;
+;  If color grafPort, dispose of additional fields
+;
+			MOVE.L	4(SP),-(SP)					;PUSH GRAFPTR
+			JSR		DelPortList					;DELETE PORT FROM PORTLIST
+			MOVE.L	4(SP),A0					;GET PORT
+			MOVE.L	CLIPRGN(A0),A0				;GET CLIPRGN HANDLE
+			_DisposHandle						;DISCARD IT
+			MOVE.L	4(SP),A0					;GET PORT
+			MOVE.L	VISRGN(A0),A0				;GET VISRGN HANDLE
+			_DisposHandle						;DISCARD IT
+			MOVE.L	4(SP),A0					;GET PORT
+			TST		PortBits+RowBytes(A0)		;IS IT A NEW PORT?
+			BPL.S	DONE						;=>NO, STRIP PARAMS AND RETURN
+
+;-------------------------------------------
+;
+;  DISPOSE OF OLD COLOR PATTERNS, BUT NOT NEW
+;
+			MOVEQ	#-1,D0					; setup counter for disposes		<C953/08Nov87> DAF
+
+			TST.L	bkPixPat(A0)			; is it NIL?						<C953/08Nov87> DAF						
+			BEQ.S	@100					; if NIL, then skip					<C953/08Nov87> DAF
+			ADDQ	#1,D0					;									<C953/08Nov87> DAF
+			MOVE.L	bkPixPat(A0),-(SP)		; push bkPixPat handle				<C953/08Nov87> DAF
+@100		TST.L	pnPixPat(A0)			; is it NIL?						<C953/08Nov87> DAF						
+			BEQ.S	@101					; if NIL, then skip					<C953/08Nov87> DAF
+			ADDQ	#1,D0					;									<C953/08Nov87> DAF
+			MOVE.L	pnPixPat(A0),-(SP)		; push pnPixPat handle				<C953/08Nov87> DAF
+@101		TST.L	fillPixPat(A0)			; is it NIL?						<C953/08Nov87> DAF						
+			BEQ.S	@102					; if NIL, then skip					<C953/08Nov87> DAF
+			ADDQ	#1,D0					;									<C953/08Nov87> DAF
+			MOVE.L	fillPixPat(A0),-(SP)	; push fillPixPat handle			<C953/08Nov87> DAF
+@102		TST		D0						; do we need to do any?				<C953/08Nov87> DAF
+			BMI.S	@DispMap				; nope, so skip disposing			<C953/08Nov87> DAF
+			
+@NxtPat		MOVE.L	(SP)+,A0				; get next pattern handle
+			TST		([A0],patType)			; old pattern?
+			BNE.S	@NewPat					; =>no, don't dispose
+			MOVE	D0,-(SP)				; save counter
+			MOVE.L	A0,-(SP)				; push handle
+			_DisposPixPat					; dispose of handle
+			MOVE	(SP)+,D0				; get counter
+@NewPat		DBRA	D0,@NxtPat				; => repeat for each pattern
+
+@DispMap
+;-------------------------------------------
+;
+;  DISPOSE OF THE PIXMAP WITHOUT DISPOSING OF ITS COLOR TABLE
+;  (WHICH IS OWNED BY THE GRAFDEVICE).
+;  
+			MOVE.L	4(SP),A0				; GET CGRAFPORT
+			MOVE.L	portPixMap(A0),A0		; GET PIXMAP HANDLE
+			_DisposHandle					; AND DISPOSE OF IT
+			
+;———————————————————————————————————————————
+;
+;  Dispose of the grafVars handle (contains opColor, hiliteColor)
+;
+			MOVE.L	4(SP),A0				; get grafport
+			MOVE.L	grafVars(A0),A0			; get grafVars handle
+			_DisposHandle					; and toss it
+			
+DONE		RTD		#4						; strip params and return
+
+			
+
+SETCPORTPIX	PROC EXPORT	
+;----------------------------------------------------------
+;
+;  PROCEDURE SetPortPix(pm: PixMapHandle);
+;  { re-direct output to a different PixMap }
+;
+			MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+			MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+			TST		PORTVERSION(A0)				;IS IT A COLOR PORT?
+			BPL.S	DONE						;=>NO, JUST EXIT
+			MOVE.L	4(SP),portPixMap(A0)		;REPLACE PORTPIXMAP
+DONE		RTD		#4							;STRIP PARAMS AND RETURN
+
+
+;-------------------------------------------------------------
+;
+;		ROUTINES TO MANIPULATE COLOR TABLES
+;
+;-------------------------------------------------------------
+
+; 	<GetCTable moved to ColorMgr.a	12Apr89 BAL>
+
+NEWCTAB		PROC	EXPORT
+			IMPORT	NewHandleWrapper
+;-------------------------------------------------------------
+;
+;  FUNCTION NewCTab : CTabHandle;
+;
+;  Create a new, uninitialized color table and return a handle to it
+;
+			CLR.L	-(SP)							; make room for function result
+			MOVE.W	#CTRec+(2*CTEntrySize),-(SP)	; size of record					<C769>
+			JSR		NewHandleWrapper				; get a handle
+			MOVE.L	(SP)+,4(SP)						; return result
+			RTS										; and return
+
+
+DisposCTable	PROC	EXPORT
+;-------------------------------------------------------------
+;
+;  PROCEDURE DisposCTable (CTabHandle);
+;
+;  Dispose of the specified color table
+;
+			MOVE.L	(SP)+,A1			; get the return address
+			MOVE.L	(SP)+,d0			; get the color table			<BAL 28Apr89>
+			beq.s	@nil				; ignore if nil					<BAL 28Apr89>
+			move.l	d0,a0				; get handle in a0				<BAL 28Apr89>
+			_DisposHandle				; dispose of it
+@nil
+;	Commented out, but not totally deleted because this might still be an 040s problem	<6>
+;;;		EclipseNOP						; needed due to flakey 040s						<5><6>
+			JMP		(A1)				; and return
+
+
+GetCTSeed	PROC	EXPORT
+;-------------------------------------------------------------
+;
+;  FUNCTION GetCTSeed (Seed: LongInt);
+;
+;  Returns the next color table seed
+;  Seed values 0-MinSeed are reserved for resource id's
+;
+			MOVE.L	D0,-(SP)			; save work register
+			MOVE.L	TableSeed,D0		; get low-memory seed
+			ADDQ.L	#1,D0				; increment seed to next value
+			BMI.S	SeedOK				; => seed value ok
+			CMP.L	#MinSeed,D0			; is it <= to our min seed value?
+			BGT.S	SeedOK				; => no, seed is ok
+			MOVE.L	#MinSeed,D0			; else set seed to min value
+SeedOK		MOVE.L	D0,TableSeed		; update low-memory
+			MOVE.L	(SP)+,D0			; restore work register
+			MOVE.L	TableSeed,4(SP)		; return current value
+			RTS							; and return
+
+;-------------------------------------------------------------
+;
+;		ROUTINES TO MANIPULATE PIXEL MAPS
+;
+;-------------------------------------------------------------
+
+
+OPENPIXMAP	PROC	EXPORT
+			IMPORT	NewHandleWrapper,NEWCTAB
+;-------------------------------------------------------------
+;
+;  FUNCTION OpenPixMap : PixMapHandle;
+;
+;  Create a new, uninitialized pixel map and return a handle to it
+;
+			CLR.L	-(SP)				; make room for function result
+			MOVE.W	#pmRec,-(SP)		; size of pixel map record
+			JSR		NewHandleWrapper	; get a handle, leave on stack
+			CLR.L	-(SP)				; make room for function result
+			JSR		NEWCTAB				; go allocate a color table
+			MOVE.L	(SP)+,D0			; get color table handle
+			MOVE.L	(SP)+,A0			; get pixel map handle
+			MOVE.L	A0,4(SP)			; return result
+			MOVE.L	(A0),A0				; get pixel map pointer
+			MOVE.L	D0,pmTable(A0)		; install color table into pixMap
+			RTS							; and return
+
+
+NEWPIXMAP	PROC	EXPORT
+			IMPORT	OPENPIXMAP,INITPIXMAP
+;-------------------------------------------------------------
+;
+;  FUNCTION NewPixMap : PixMapHandle;
+;
+;  Create a new, initialized pixel map and return a handle to it
+;
+			CLR.L	-(SP)				;make room for a handle
+			JSR		OpenPixMap			;open the pixMap
+			MOVE.L	(SP),8(SP)			;return result
+			JSR		InitPixMap			;initialize it
+			RTS							;and return
+			
+
+DisposPixMap	PROC	EXPORT
+				IMPORT	DisposCTable
+;-------------------------------------------------------------
+;
+;  PROCEDURE DisposPixMap (PPH: PixMapHandle);
+;
+;  Dispose of a pixel pattern
+;
+			MOVE.L	4(SP),d0			; get pixMap handle
+			beq.s	@nil				; ignore if nil					<BAL 28Apr89>
+			move.l	d0,a1				; get the handle in A1			<BAL 28Apr89>
+			MOVE.L	(A1),A1				; get pixMap pointer
+			MOVE.L	pmTable(A1),d0		; get CLUT handle				<BAL 28Apr89>
+			beq.s	@noCLUT				; ignore if nil					<BAL 28Apr89>
+			move.l	d0,-(SP)			; push handle to color table	<BAL 28Apr89>
+			_DisposCTable				; and dispose of color table
+@noCLUT		MOVE.L	4(SP),A0			; get pixMap handle
+			_DisposHandle				; and dispose of it
+@nil		MOVE.L	(SP)+,(SP)			; strip parameter
+			RTS							; and return
+			
+
+InitPixMap	PROC	EXPORT
+;-------------------------------------------------------------
+;
+;  PROCEDURE InitPixMap (PPH: PixMapHandle);
+;
+;  Initialize a pixel map to the device's pixel map.
+;  Do not set the pixMap's color table.
+;
+			MOVE.L	theGDevice,A0				; get current device handle
+			MOVE.L	(A0),A0						; point to device record
+			MOVE.L	gdpMap(A0),A0				; get handle to device's pixMap
+			MOVE.L	(A0),A0						; point to device's pixMap
+			MOVE.L	4(SP),A1					; get pixMap handle
+			MOVE.L	(A1),A1						; point to the pixMap
+			MOVE.L	pmTable(A1),-(SP)			; save pixMap's cTab handle
+			MOVE.L	A1,-(SP)					; and pixMap pointer		
+			MOVEQ	#pmRec/2-1,D0				; get size of pixMap record
+NXTWORD		MOVE.W	(A0)+,(A1)+					; copy entire pixMap
+			DBRA	D0,NXTWORD					; one word at a time		
+			MOVE.L	(SP)+,A1					; get the pixMap pointer
+			MOVE.L	(SP)+,pmTable(A1)  			; restore pixMap's cTab handle
+			OR		#PMFlag,rowBytes(A1)		; flag that it's a pixMap
+		if ADDRMODEFLAG then					;							<BAL 11Dec88>
+			clr.w	pmVersion(A1)				; assume 24 bit addressing
+		endif
+			move.l	#$480000,hRes(a1)			;force hres and vres to 72 dpi	<KON 22OCT90>
+			move.l	hRes(a1),vRes(a1)			;								<KON 22OCT90>
+			MOVE.L	(SP)+,(SP)					; strip parameter
+			RTS									; and return
+		
+	
+CopyPixMap	PROC	EXPORT
+			IMPORT	COPYHANDLE
+;-------------------------------------------------------------
+;
+;  PROCEDURE CopyPixMap (SRCPM,DSTPM: PixMapHandle);
+;
+;  COPY THE SRC PIXMAP'S DATA TO THE DST PIXMAP'S HANDLES
+;
+PARAMSIZE	EQU		8
+SRCPM		EQU		PARAMSIZE
+DSTPM		EQU		SRCPM-4
+
+			MOVE.L	SRCPM(SP),A0				;GET HANDLE TO SRC PIXMAP
+			MOVE.L	(A0),A0						;GET POINTER TO SRC PIXMAP
+			MOVE.L	DSTPM(SP),A1				;GET HANDLE TO DST PIXMAP
+			MOVE.L	(A1),A1						;GET POINTER TO DST PIXMAP
+			
+			MOVEQ	#PMTABLE/2-1,D0				;GET NUMBER OF WORDS TO COPY
+NXTWORD		MOVE	(A0)+,(A1)+					;COPY A WORD
+			DBRA	D0,NXTWORD					;LOOP UNTIL DONE
+			
+			MOVE.L	4(A0),4(A1)					;COPY PMRESERVED
+			
+			MOVE.L	(A0),-(SP)					;PUSH SRC COLOR TABLE
+			MOVE.L	(A1),-(SP)					;PUSH DST COLOR TABLE
+			_COPYHANDLE							;COPY THE COLORTABLE
+			
+		if ADDRMODEFLAG then					;							<BAL 11Dec88>
+			MOVE.L	DSTPM(SP),A1				;GET HANDLE TO DST PIXMAP
+			MOVE.L	(A1),A1						;GET POINTER TO DST PIXMAP
+			clr.w	pmVersion(A1)				; assume 24 bit addressing
+		endif
+
+			MOVE.L	(SP)+,A0					;GET RETURN ADDRESS
+			ADDQ	#8,SP						;STRIP PARAMS
+			JMP		(A0)						;AND RETURN
+
+			
+BitsToPix	PROC	EXPORT
+			EXPORT	ONEBITDATA,COPYPMAP,SHFTTBL
+			IMPORT 	FILLONEBIT
+;-------------------------------------------------------------
+;
+;  PROCEDURE BitsToPix (XM: XMap; VAR PM: PixMap);
+;
+;  CONVERT THE SPECIFIED BITMAP OR PIXMAP TO A PIXMAP.
+;  A1 contains the src XMap, A2 points to the dst pixMap.
+;
+;  This routine is called by RGNBLT, STRETCH, DRAWLINE, DRAWARC, DRAWTEXT
+;
+;  The param XM can be a bitMap or a pixMap or a portBits pointer.  If it's a pixMap, 
+;  just copy it.  If it is a portBits pointer, dereference portPix and copy it.
+;  If XM is a BitMap and is to the screen, then make the PixMap the same
+;  as screenbits (because an old application is drawing to the screen).  Otherwise
+;  make the PixMap one bit deep because we are copying to or from the user's
+;  buffer and can't change its size.
+;
+;  RETURNS		D1 = XMAP.BOUNDS.TOPLEFT
+;				D2 = TRUE IF XMAP IS SCREEN
+;  CLOBBERS 	D0,A0-A2
+
+; as seen in QDciPatchROM.a <sm 6/9/92>stb 
+			MOVEQ	#0,D2						;ASSUME NOT SCREEN
+			MOVE	ROWBYTES(A1),D0				;IS SRC A PIXMAP?
+			BPL.S	DOBITMAP					;=>NO, IT'S A BITMAP
+			BTST	#isCPort,D0					;IS IT A COLOR GRAFPORT?
+			BEQ.S	NOTPORT						;=>NO, NOT A PORT
+			
+;  IT'S A PIXMAP, SEE IF IT'S THE SCREEN
+
+			MOVE.L	BASEADDR(A1),A1				;GET HANDLE TO PORT'S PIXMAP
+			MOVE.L	(A1),A1						;GET POINTER TO PORT'S PIXMAP
+NOTPORT		MOVE.L	BOUNDS+TOPLEFT(A1),D1		;RETURN BOUNDS.TOPLEFT IN D1
+	;		MOVE.L	GRAFGLOBALS(A5),A0			;GET GLOBAL POINTER
+	;		LEA 	SCREENBITS(A0),A0			;POINT TO SCREENBITS
+	;		MOVE.L	BASEADDR(A0),D0				;GET SCREENBITS.BASEADDR
+			MOVE.L	ScrnBase,D0					;GET MainScreen.BASEADDR
+			CMP.L	BASEADDR(A1),D0 			;IS IT TO THE SCREEN?
+			BNE		COPYPMAP					;=>NO, GO COPY IT
+			BRA.S	ISSCREEN					;=>ELSE IT IS THE SCREEN
+			
+;  IT'S A BITMAP.  SEE IF IT'S THE SCREEN
+			
+DOBITMAP	MOVE.L	BOUNDS+TOPLEFT(A1),D1		;RETURN BOUNDS.TOPLEFT IN D1
+	;		MOVE.L	GRAFGLOBALS(A5),A0			;GET GLOBAL POINTER
+	;		LEA 	SCREENBITS(A0),A0			;POINT TO SCREENBITS
+	;		MOVE.L	BASEADDR(A0),D0				;GET SCREENBITS.BASEADDR
+			MOVE.L	ScrnBase,D0					;GET MainScreen.BASEADDR
+			CMP.L	BASEADDR(A1),D0 			;IS BITMAP BASEADDR SAME ?
+			BNE.S	NOTSCREEN 					;=>NO, NOT TO THE SCREEN
+			
+; IT'S TO THE SCREEN.  COPY THE PIXMAP FROM THE GDEVICE, EXCEPT FOR THE BOUNDS
+; WHICH IS TAKEN FROM THE SPECIFIED DEVICE AND OFFSET TO PIXMAP COORDINATES.
+
+ISSCREEN	MOVEQ	#1,D2						;SET SCREEN FLAG FOR CALLER
+			MOVE.L	THEGDEVICE,A0				;GET HANDLE TO THE GDEVICE
+			MOVE.L	(A0),A0						;GET POINTER TO THE GDEVICE
+			btst	#ext32Device,gdFlags(a0)	;does it need 32-bit addressing?
+			beq.s	@not32Bit
+			moveq	#-1,d2						;is screen and needs 32-bit addressing
+@not32Bit												;
+			MOVE.L	GDPMAP(A0),A0				;GET HANDLE TO ITS PIXMAP
+			MOVE.L	(A0),A0						;GET POINTER TO GDEV'S PIXMAP
+			MOVE.L	(A0)+,(A2)+					;COPY BASEADDR FROM GDEV
+			MOVE	(A0)+,(A2)+					;COPY ROWBYTES FROM GDEV
+			
+; IF EMPTY RECTANGLE, THEN DON'T OFFSET TO MAKE PRINTING WORK					<27May87 EHB>
+
+			CMP.L	BOUNDS+BOTRIGHT(A1),D1		;TOPLEFT==BOTTOMRIGHT??			<27May87 EHB>
+			BNE.S	@NOHACK						;IF NOT, GO ON AS USUAL			<27May87 EHB>
+			
+			MOVE.L	D1,(A2)+					;JAM INPUT TOPLEFT				<27May87 EHB>
+			MOVE.L	D1,(A2)+					;JAM INPUT BOTTOMRIGHT			<27May87 EHB>
+			ADDQ.L	#8,A0						;SKIP OVER PIXMAP.BOUNDS		<27May87 EHB>
+			BRA.S	@DONEHACK					;SKIP THE MULTI-SCREEN WORLD	<27May87 EHB>
+
+@NOHACK		MOVE.L	(A0)+,D0					;GET PIXMAP.BOUNDS.TOPLEFT		<27May87 EHB>
+			ADD		D1,D0						;ADJUST FOR DEVICE.LEFT			<27May87 EHB>
+			SWAP	D0							;GET PIXMAP.TOP					<27May87 EHB>
+			SWAP	D1							;GET DEVICE.TOP					<27May87 EHB>
+			ADD		D1,D0						;ADJUST FOR DEVICE.TOP			<27May87 EHB>
+			SWAP	D0							;GET TOPLEFT					<27May87 EHB>
+			MOVE.L	D0,(A2)+					;SAVE TOPLEFT					<27May87 EHB>
+			
+			MOVE.L	(A0)+,D0					;GET PIXMAP.BOUNDS.BOTRIGHT		<27May87 EHB>
+			SWAP	D0							;GET PIXMAP.BOTTOM				<27May87 EHB>
+			ADD		D1,D0						;ADJUST FOR DEVICE.TOP			<27May87 EHB>
+			SWAP	D0							;GET PIXMAP.RIGHT				<27May87 EHB>
+			SWAP	D1							;GET DEVICE.LEFT				<27May87 EHB>
+			ADD		D1,D0						;ADJUST FOR DEVICE.LEFT			<27May87 EHB>
+			MOVE.L	D0,(A2)+					;SAVE TOPLEFT					<27May87 EHB>
+												;D1 = DEVICE.BOUNDS.TOPLEFT		<27May87 EHB>
+@DONEHACK										;FINISH UP THE TWO CASES		<27May87 EHB>
+
+			MOVE.L	A0,A1						;GET GDEV.PMVERSION IN A1
+			BRA.S	COPYREST					;=>COPY REST OF DATA AND EXIT
+
+; IT'S A ONE BIT PORT THAT'S NOT THE SCREEN.  COPY BASE,ROWBYTES,BOUNDS FROM SRC.
+; COPY THE REST OF THE PIXMAP FROM ONE BIT DATA
+
+NOTSCREEN	LEA		ONEBITDATA,A0				;GET DATA IF NOT THE SCREEN
+			PEA		PUTONETABLE					;RTS TO THIS ROUTINE
+			MOVE.L	BASEADDR(A1),d0				;COPY BASEADDR FROM SRC		@@@@ BAL 08Apr88
+			_rTranslate24To32					;mask off high bits			@@@@ BAL 08Apr88
+			move.l	d0,(a2)+					;put it to the pixmap		@@@@ BAL 08Apr88
+			
+			EXG		A0,A1						;GET SRC IN A0; DATA IN A1
+			ADD		#PMVERSION,A1				;START COPYING DATA AT PMVERSION
+			ADD		#ROWBYTES,A0				;START COPYING DATA AT ROWBYTES
+			MOVE	(A0)+,D0					;COPY ROWBYTES FROM SRC
+			AND		#nuRBMask,D0					;CLEAR FLAG BITS
+			MULU	PIXELSIZE-PMVERSION(A1),D0	;GET ROWBYTES * DEPTH
+			OR		#$8000,D0					;SET PIXMAP FLAG FROM SRC
+			MOVE	D0,(A2)+					;AND SET ROWBYTES
+			MOVE.L	(A0)+,(A2)+					;COPY BOUNDS FROM SRC
+			MOVE.L	(A0)+,(A2)+
+			BRA.S	COPYREST					;=>COPY REST OF DATA AND EXIT
+			
+; IF IT'S A ONE BIT PORT THAT'S NOT THE SCREEN, MAKE A ONE-BIT COLOR TABLE
+; FOR THE PIXMAP.  FAKE A MASTER POINTER RIGHT AFTER THE PIXMAP, FOLLOWED
+; BY THE COLOR TABLE.
+
+PUTONETABLE	MOVE.L	A2,-8(A2)					;INSTALL PMTABLE "HANDLE"
+			LEA		4(A2),A0					;POINT TO TABLE
+			MOVE.L	A0,(A2)						;INSTALL PMTABLE "MASTER POINTER"
+			MOVE.L	(SP)+,A1					;GET RETURN ADDRESS
+			JMP		FILLONEBIT					;INIT THE TABLE USING PARTIAL ROUTINE
+												;WHICH EXITS WITH JMP (A1)
+SpecialBase	
+			move.l	(a1)+,a0					;get baseAddr
+			btst	#1,d0						;is this a handle?
+			beq.s	@notHand					;no, don't deref
+			move.l	(a0),a0						;yes, dereference it
+@notHand	btst	#2,d0						;32-bit clean address?
+			exg		a0,d0						;get address in d0, don't change cc's
+			beq.s	base24						;no flag -> 24-bit addressing
+			moveq	#-1,d2						;
+			clr.w	d2							;set needs 32-bit addressing flag, not screen
+			bra.s	base32						;flag set-> 32-bit addressing
+
+; COPY THE SRC TO THE DST
+
+COPYPMAP	
+			move.w	pmVersion(a1),d0			;get baseAddr flags
+			bne.s	SpecialBase					;if flags set go decide
+			MOVE.L	(A1)+,d0					;COPY BASEADDR
+base24		_rTranslate24To32					;map address in D0
+base32		move.l	d0,(a2)+					;write it out
+
+			MOVE	(A1)+,(A2)+					;COPY ROWBYTES
+			MOVE.L	(A1)+,(A2)+					;COPY BOUNDS
+			MOVE.L	(A1)+,(A2)+
+COPYREST	MOVE.L	(A1)+,(A2)+					;COPY VERSION, PACKTYPE
+			MOVE.L	(A1)+,(A2)+					;COPY PACKSIZE
+			MOVE.L	(A1)+,(A2)+					;COPY HRES
+			MOVE.L	(A1)+,(A2)+					;COPY VRES
+			MOVE.L	(A1)+,(A2)+					;COPY PIXELTYPE, PIXELSIZE
+			MOVE.L	(A1)+,(A2)+					;COPY CMPCOUNT, CMPSIZE
+			MOVE.L	(A1)+,(A2)+					;COPY PLANEBYTES
+			MOVE.L	(A1)+,(A2)+					;COPY PMTABLE
+			MOVE.L	(A1)+,(A2)+					;COPY RESERVED
+			
+			RTS									;AND RETURN
+
+; HERE IS THE INFO THAT GOES INTO A ONE BIT DEEP PIXMAP
+
+ONEBITDATA
+			DC.L	0				;PBASEADDR
+			DC.W	0				;PROWBYTES
+			DC.L	0,0				;PBOUNDS
+			DC.W	PIXVERSION		;PMVERSION
+			DC.W	0				;PACKTYPE
+			DC.L	0				;PACKSIZE
+			DC.W	72				;HRES.Hi
+			DC.W	0				;HRES.Lo
+			DC.W	72				;VRES.Hi
+			DC.W	0				;VRES.Lo
+			DC.W	0				;PIXELTYPE
+			DC.W	1				;PIXELSIZE
+			DC.W	1				;CMPCOUNT
+			DC.W	1				;CMPSIZE
+			DC.L	0				;PLANEBYTES
+			DC.L	0				;PMTABLE
+			DC.L	0				;PMRESERVED
+			
+SHFTTBL		DC.B	0,0,1,0,2,0,0,0
+			DC.B	3,0,0,0,0,0,0,0
+			DC.B	4,0,0,0,0,0,0,0
+			DC.B	0,0,0,0,0,0,0,0,5
+			
+
+SetCPixel	PROC	EXPORT
+;---------------------------------------------------------------
+;
+;  PROCEDURE SetCPixel(h,v: INTEGER; pixColor: RGBColor);
+;
+;  PLOTS A SINGLE PIXEL AT THE SPECIFIED COORDINATE.  
+;  TAKES CARE OF CLIPPING, HIDING THE CURSOR, AND SAVING TO PICTURES.
+;  NOTE:  THIS ROUTINE IS EXTREMELY SLOW!!
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+PARAMSIZE		EQU 	8
+HPos			EQU		PARAMSIZE+8-2		;horizontal position
+VPos			EQU		HPos-2				;vertical position
+pixColor		EQU		VPos-4				;pointer to rgb color
+
+PState			EQU		-psRec				;saved pen state
+FColor			EQU		pState-6			;saved foreColor
+VARSIZE			EQU		FColor				;TOTAL SIZE OF LOCALS
+
+; SAVE CURRENT STATE
+
+			LINK	A6,#VARSIZE				;ALLOCATE STACK FRAME
+			PEA		PState(A6)				;push pen state record
+			_GetPenState					;save the pen state
+			PEA		FColor(A6)				;push foreground color
+			_GetForeColor					;save the foreground color
+			
+; PLOT THE PIXEL
+
+			MOVE.L	pixColor(A6),-(SP)		;push pointer to new color
+			_RGBForeColor					;set the color
+			_PenNormal						;set the pen to normal
+			MOVE.L	vPos(A6),-(SP)			;push the hpos, vpos
+			_MoveTo							;move the pen there
+			CLR.L	-(SP)					;dh:=0; dv:=0;
+			_Line							;draw a one dot line
+			
+; RESTORE PRIOR STATE AND RETURN
+			
+			PEA		FColor(A6)				;push foreground color
+			_RGBForeColor					;restore the foreground color
+			PEA		PState(A6)				;push pen state record
+			_SetPenState					;restore the pen state
+			UNLINK	PARAMSIZE,'SETCPIXE'
+
+			
+			ENDPROC
+			
+			
+HiliteColor	PROC	EXPORT
+			IMPORT	setGrafVarsCommon
+;-------------------------------------------------------------
+;
+;  PROCEDURE HiliteColor (color: rgbColor);
+;
+; HiliteColor sets the second six bytes of the grafVars handle to the color
+; supplied.  HiliteColor allows a grafCPort to have a hilite color different
+; from the system default contained in parameter RAM and in low memory.
+; If thePort is an old grafPort, it does nothing.
+
+			MOVEQ	#RGBHiliteColor,D0			;hilite color is 6 bytes into vars
+			BRA.S	setGrafVarsCommon
+			NOP									; silence the assembler <12>
+			
+			
+OpColor		PROC	EXPORT
+			EXPORT	setGrafVarsCommon
+;-------------------------------------------------------------
+;
+;  PROCEDURE OpColor (color: rgbColor);
+;
+; OpColor sets the first six bytes of the grafVars handle to the color
+; supplied.  OpColor is required to set up interesting rules for
+; Add with pin, subtract with pin, and blend (average) drawing modes.
+; If thePort is an old grafPort, it does nothing.
+
+			MOVEQ	#RGBOpColor,D0				;op color is 0 bytes into vars
+setGrafVarsCommon
+			MOVE.L	(SP)+,D2					;strip the return address
+			MOVE.L	(SP)+,A1					;pointer to the colors
+			MOVE.L	([grafGlobals,A5],thePort),A0 ; get current grafPort
+			TST		portVersion(A0)				;is it a color port?
+			BPL.S	@done						;no, just exit
+			MOVE.L	([grafVars,A0]),A0			;get op field pointer
+			ADD		D0,A0						;advance to proper field
+			MOVE.L	(A1)+,(A0)+
+			MOVE	(A1),(A0)
+@done		MOVE.L	D2,A0						;get the return address
+			JMP		(A0)						;and go home
+
+			
+

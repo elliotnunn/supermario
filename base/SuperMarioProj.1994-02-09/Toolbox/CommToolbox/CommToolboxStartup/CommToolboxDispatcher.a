@@ -1,0 +1,212 @@
+;
+;	File:		CommToolboxDispatcher.a
+;
+;	Written by:	Byron Han
+;
+;	Copyright:	© 1989-1992 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM4>	 11/3/92	SWC		Replaced INCLUDEs with a LOAD of StandardEqu.d.
+;	   <SM3>	  7/6/92	PN		Take out emCommToolBoxTable and replcace it with
+;									CommToolboxTable field in CTBBlock.  Also delete BigModel since
+;									it's not used
+;	   <SM2>	 6/30/92	PN		Change CommToolboxDispatcher to use ExpandMem to store the
+;									dispatch table instead of pc relative so that this will work in
+;									SM
+;		 <7>	 10/2/90	kaz		CM, FT, and TM are now loaded using the CRM to keep track of the
+;									resources and the apps that call them. <jng>
+;		 <6>	 9/18/90	kaz		Backing out last change to load the CM, TM, and FT using CRM.
+;									<BBH>
+;		 <5>	 9/11/90	kaz		Use _CRMGetResource to load TM, FT, and CM so that we can
+;									_CRMRelease when the app quits. Removed debugging stuff.
+;		 <4>	 4/17/90	dba		change module name from DISPATCHER to COMMTOOLBOXDISPATCHER
+;		 <3>	 4/11/90	BBH		unrolled dispatch table (was DCB.L, now a set of DC.L to allow
+;									use of linked patch install).
+;		 <2>	 3/16/90	BBH		stripped out jumk code
+;		 <1>	 3/14/90	BBH		first checked in
+;				 7/27/89	BBH		Clarified what bigModel means.  Also, changed cmtb resource ID's.
+;									Rediscovered the multifinder/finder trap management.
+;				 7/20/89	BBH		Changed a BRA to BRA.S to eliminate assembler warning
+;				  6/2/89	JNG		Save D0 and restore before calling managers (Found this since I'm
+;									using D0 to pass in paramater to core routines.
+;				 5/24/89	JNG		Save/Restore D3-D7 and A3-A4 (D1-D2 and A1-A2 saved by System dispatcher
+;				  5/4/89	BBH		Removed Detach of manager resources.  Caused unnecessary sysheap
+;									growth under multifinder
+;				 3/29/89	BBH		New today.
+;
+
+;	The new and improved trap dispatch mechanism for 1 Meg machines or smaller
+;	Written by Byron Han, Copyright © 1989 Apple Computer, Inc.
+;
+;	Parts of code are taken from original trap dispatcher from Dean Wong.
+;
+;	Essentially, this intercepts INIT msgs to the comm toolbox (msg=1)
+;	and loads them into the dispatch table inside the trap code.  This works
+;	well except when under MultiFinder when we need to have separate dispatch
+;	tables (and hence trap dispatch code) for each application running.
+;
+;	So, on the first call to InitXX, we open the communications toolbox file
+;	and load the manager into memory.
+
+
+;	OLD STUFF
+;	If we are under Finder, simply put the
+;	pointer to the start of the manager code into the trap dispatch table.
+;
+;	Under MultiFinder, copy the trap dispatch code, and do a SetTrapAddress
+;	to it.  Call the new trap code.  The new trap code will find the manager code
+;	without problem (becuase the CommToolbox file is open) and life will go on.
+;	Applications that patch traps have their patches unpatched when other applications
+;	get time, so any application in the foreground has its own copy of the CommToolbox
+;	trap and the associated dispatch code.  Applications that are not using the
+;	CommToolbox have the original trap code available.
+;
+;	NEW STUFF
+;	Since the CommToolbox resources are in the system file, they are automatically
+;	loaded into the system heap and shared under MultiFinderf.
+;
+;	Under monoFinder, the resources are loaded into the application heap and are
+;	removed at RsrcZoneInit time.
+;
+;	My own brilliance has eluded me and led me on a wild gooose chase.  7/27/89.
+;	Just goes to show, DOCUMENT, DOCUMENT, DOCUMENT
+;
+;	Static overhead is about 500 bytes and 1.4 factor penalty as of 2/10/89. BBH
+;
+;	This is the new universal dispatcher which will work for both large and small
+;	memory models.
+;
+
+				LOAD		'StandardEqu.d'
+
+				INCLUDE		'CommToolboxPriv.a'
+				INCLUDE		'CommResources.a'
+
+	IF (&TYPE('Debugging') = 'UNDEFINED') THEN		; start <BBH>
+			Debugging: EQU 0
+	ENDIF													; end <BBH>
+
+COMTRAP			EQU		$A08B			; ComToolBox trap
+UNUSED			EQU		$A09F			; unimplemented trap
+JUGGLERTRAP		EQU		$A88F			; juggler dispatch trap
+
+
+COMMTOOLBOXDISPATCHER		FUNC	EXPORT
+				
+				MOVEM.L	D3-D7/A3-A4,-(SP)	; save registers - across call
+;
+;	register conventions
+;		A0 enters with a pointer to the ctb parameter block
+;		D0 exits with the result code
+;
+;	internally
+;		D2, D3 hold the manager and call codes
+;		A2 holds the pointer to the dispatch table
+;		D6,D7 are used for performance analysis
+				MOVE.L	D0,-(SP)			; Save D0 (we trash it here, and core needs it)
+				MOVE.L	A0,-(SP)			; save A0
+
+				MOVE.W	(A0),D1				; get the mgr/msg values
+				MOVE.L	#$000000FF,D2		; message mask
+				AND.L	D1,D2				; get the message
+
+				MOVE.L	#$0000FF00,D3		; manager mask
+				AND.L	D1,D3				; mask out message…
+				LSR.L	#8,D3				; and shift out lower byte to get manager
+
+				MOVE.L	CommToolboxGlobals,A1		; get expanded memory area <SM3>
+				WITH	CTBBlock
+				MOVE.L	CommToolBoxTable(A1),A2	; get pointer to dispatch table <SM3>
+				ENDWITH
+				CMP.L	#1,D2				; is message = 1? (init msg)
+				BNE.S	@GoForIt			; nope, so just go and execute it
+
+
+@LoadIt			CLR.L	-(SP)				; clear space
+				MOVE.L	#CTB_ConnectionMgrType, -(SP)		; push resource type
+
+				MOVE.W	D3,D5				; calculate resource ID
+				SUB.W	#1,D5				; manager # = 1, 2, 3, 4, 5 ...
+				ADD.W	#CTB_ConnectionMgrID,D5			; resource ID = baseID, baseID+1, ...
+				MOVE.W	D5,-(SP)			; push the resource ID
+											; if TM, CM, or FT, use _CRMGetResource
+				CMP.W	#CTB_CTBUtilitiesID,D5
+				BGE.S	@useNormal
+				
+;		We use CRM so we have an indexed count for the managers.
+;		When the app quits, we use the CRM to only release it if no
+;		more apps are using it
+
+@useCRM	
+				IMPORT	TrackManagers		; res ID is already on the stack
+				CLR.W	-(SP)
+				MOVE.W	D5,-(SP)			; push the resource ID
+				JSR		TrackManagers		; track an attempt to load TM, CM, FT
+				MOVE.W 	(SP)+,D0
+				BNE.S	@useNormal			; != 0 => already tracked
+				_CRMGetResource				; handle returned in D0
+											; must clean up myself -- can i use JSR CRMGetResource instead
+				ADD.W	#10,SP				; res id + type + func result = 10 bytes
+				MOVE.L	D0,A0
+				BRA.S	@gotMgr
+@useNormal									; only for CRM & CTBU
+				_GetResource				; load the resource
+				MOVE.L	(SP)+,A0			; get the resource
+				MOVE.L	A0,D0				; test it				
+@gotMgr
+				BNE.S	@InstallIt			; install it
+@NoResource
+				MOVE.L	(SP)+,A0			; pop off saved A0
+				MOVE.L	(SP)+,D0			; pop off saved D0
+				BRA.S	@Exit				; and go home
+
+;		At this point in time, we expect A2 to point to the base of the
+;		internal communications toolbox dispatch table, A0 to be the
+;		handle to the appropriate manager code, and D3 to contain the
+;		manager number (1-based)
+
+@InstallIt
+			;	MOVE.L	A0,-(SP)			; save the resource handle
+
+			;	MOVE.L	A0,-(SP)			; push resource handle as parameter
+			;	_DetachResource				; detach the resource
+
+			;	MOVE.L	(SP)+,A0			; restore the resource handle
+			;	_MoveHHi					; move it high (but not in SysHeap)
+
+				_HLock						; lock it down
+				MOVE.L	(A0),A0				; dereference the handle
+				SUBQ.L	#1,D3				; make manager 0 based
+				LSL.L	#2,D3				; multiply by 4…
+				ADD.L	D3,A2				; find location in table apropos to manager
+				MOVE.L	A0,(A2)				; install the ptr to manager code
+				BRA.S	@Jump				; go for launch…
+
+;		At this point in time, we expect A2 to point to the base of the
+;		internal communications toolbox dispatch table, and D3 to contain the
+;		manager number (1-based)
+
+@GoForIt		SUB.L	#1,D3				; make manager 0 based
+				LSL.L	#2,D3				; multiply by 4…
+				ADD.L	D3,A2				; find location in table apropos to manager
+
+;		At this point in time, we expect A2 to point to the pointer of the entry point
+; 		of the appropriate manager
+
+@Jump
+				MOVE.L	(A2),A1				; get the manager entry point
+				MOVE.L	(SP)+,A0			; restore A0 for launch
+				MOVE.L	(SP)+,D0			; and D0
+				JSR		(A1)				; We have liftoff…
+
+@Exit			MOVEM.L	(SP)+,D3-D7/A3-A4	; restore registers
+				RTS
+				ENDFUNC
+
+
+;	To mark the end of the trap dispatch code
+
+Dummy			PROC		EXPORT
+				ENDPROC
+				END						; that's all folks!

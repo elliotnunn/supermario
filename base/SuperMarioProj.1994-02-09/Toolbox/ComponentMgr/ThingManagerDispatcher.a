@@ -1,0 +1,525 @@
+;
+;	File:		Thing Dispatch.a
+;
+;	Contains:	Dispatcher and Entry point table for Thing Manager
+;
+;	Written by:	andy warhol and friends
+;
+;	Copyright:	© 1990-1991, 1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM5>	  8/5/93	JDR		integrate Component Mgr from Reality
+;	   <SM4>	 7/21/93	RC		House Cleaning from Reality
+;		 <9>	 7/16/93	JDR		Added records and cleaned up some code. No real changes were
+;									made. Just tried making it more readable.
+;		 <3>	  7/2/93	IH		Reality Update: Change GestaltComponentMgr comments to correct gestalt
+;									prototype parameters (long *). Since this is assembly it doesn't
+;									really matter, but I need to change the prototype and I might as
+;									well fix the comment in the code too. How come the same code is
+;									in ThingManagerDisp.a and ThingManagerDispatcher.a?
+;		<SM2>	 6/24/93	CSS		Fix dispatcher to work with ROM.  And rollin from
+;									Reality.
+;		 <8>	 6/13/93	JDR		Rolled in the ComponentMgr sources from QuickTime 1.6.
+;		 <7>	12/12/91	DTY		Get rid of the spaces in the file names
+;		 <6>	10/31/91	YK		Moved patches to ComponentPatch.a.
+;		 <5>	10/30/91	YK		Added ComponentSearch call.  Check extensionsEnabledBit before
+;									calling ComponentSearch.
+;		 <4>	10/29/91	YK		Proc MainComponent, CallThingFunction, ChainThingFunction, and
+;									DelegateComponentCall are combined into one proc so that we can
+;									(almost) forget about LinkPatch.
+;		 <3>	10/25/91	JH		I had accidentally left a dcImport macro at the top of
+;									ChainThingFunction.  This added a dc.w which was being jumped
+;									to.  Fixed by changing to plain old IMPORT.
+;		 <2>	10/24/91	JH		Cleaning up after a hurried checkin.  Removed the double jump
+;									table (see whine below) and did it with the dcImportResident
+;									macro, which I guess is better.  Also removed a lot of stuff
+;									which had been commented out.
+;		<24> 	10/22/91	JH		Started rolling into the system file, made MainCompent a PatchProc
+;									Added includes.  Added completely stupid double jump table to keep Link Patch happy
+;										changed a bunch of elegant branches to clunky tst and branch to a label where you can jump,
+;										again for link patch.
+;		<23>	10/17/91	JB		If not debug build, pop stack and return for future calls
+;		<22>	10/15/91	MD		move thing manager gestalt function into here
+;		<21>	10/14/91	BAL		save registers around call to cleanup app components during
+;									patches to rsrczoneinit.
+;		<20>	10/11/91	BAL		added stub for RsrcZoneInit patch.
+;		<19>	 10/3/91	JB		Push storage when doing that chain thing
+;		<18>	 10/1/91	BAL		Make delegate work with new style dispatcers
+;		<17>	 10/1/91	BAL		Added support for new chain thing call.
+;		<16>	 9/29/91	KIP		Added wily dispatcher option of the future.
+;		<15>	 9/26/91	BAL		backed out that nasty stuff of mine that jim and peter checked
+;									in while I was sleeping.
+;		<14>	 9/26/91	BAL		jim & peter checking in bruce's changes - 2:00 AM...
+;		<13>	 9/18/91	BAL		fix up the dispatch table macro to deal with empty entries
+;		<12>	 7/24/91	BAL		Add support for optional fast thing function dispatchers.
+;		<11>	 5/18/91	dvb		Thing->Component
+;		<10>	  5/2/91	BAL		Conditionalized debug breaks
+;		 <9>	 4/25/91	PH		fix "optimized" calling of a5 things
+;		 <8>	 4/24/91	BAL		optimized thing dispatcher
+;		 <7>	 4/18/91	BAL		Removed support for when and self parameters.
+;		 <6>	 4/14/91	BAL		Replaced the debuggers with debugstr's.
+;		 <5>	 3/28/91	BAL		Added ChainThingCall.
+;		 <4>	 2/16/91	BAL		Added patch to intercept the PMgrExit trap and destroy any
+;									things or thingInstances found in the departing heap.  Also
+;									implemented CallThingNow for dispatching to things with an
+;									implicit when parameter.
+;		 <3>	  2/9/91	BAL		only switch A5 if switching to a non-zero value.
+;		 <2>	  2/6/91	PH		Removed debugger from bad thing instance path.
+;
+;	To Do:
+;
+
+		PRINT		PUSH,OFF
+			LOAD	'StandardEqu.d'
+			INCLUDE 'Components.a'
+			INCLUDE 'LinkedPatchMacros.a'
+		PRINT		POP
+
+
+WARHOL_DEBUG	equ		0
+
+ComponentManagerLowMem	equ	$28a
+
+RegisteredComponent	record 0
+rtRoutine			ds.l 1
+rtDesc				ds	 ComponentDescription
+;long rtRefcon								overlaps previous struct
+rtParent			ds.l 1
+rtNameHand			ds.l 1
+rtInfoHand			ds.l 1
+rtIconHand			ds.l 1
+rtFlags				ds.b 1
+rtEntryUseCount		ds.b 1
+rtReferenceCount	ds.w 1
+rtFileNumber		ds.w 1
+rtResourceID		ds.w 1
+rtResourceType		ds.l 1
+rtLocalA5			ds.l 1
+rtNext				ds.l 1
+rtRoutineHandle		ds.l 1				; don't trust RecoverHandle
+rtConnectionID		ds.l 1
+					endr
+
+RegisteredComponentInstance record 0
+rtiEntry			ds.l 1
+rtiFlags			ds.b 1
+rtiEntryUseCount	ds.b 1
+rtiError			ds.w 1
+rtiStorage			ds.l 1
+;rtiQueuedCalls		ds.l 1
+rtiSwitchedA5		ds.l 1
+					endr
+
+ComponentManagerGlobals record 0
+rtInstanceTable				ds.l 1
+rtModSeed					ds.l 1
+rtReservedForCodecManager	ds.l 1
+rtInstanceTableUsedCount	ds.w 1
+rtInstanceTableTotalCount	ds.w 1
+rtFileUsedCount				ds.w 1
+rtFileTotalCount			ds.w 1
+rtTableEntryCount			ds.w 1
+hasMoveHLo					ds.b 1
+rtReserved					ds.b 1
+rtTable						ds.l 1
+rtUsedChain					ds.l 1
+rtFreeChain					ds.l 1
+rtFileTable					ds.l 1
+					endr
+
+
+MainComponent	PROC	EXPORT
+			IMPORT	ComponentDispTableHead
+			EXPORT	ComponentBummer
+
+			with RegisteredComponent,RegisteredComponentInstance,ComponentManagerGlobals
+;-------------------------------------------------------
+;
+;  pascal long DoSomething( long theComponent,  long Params, long What );
+;
+;	Stack: 	ON ENTRY			BEFORE THING		AFTER THING		ON EXIT
+;
+;			result			[saveA5•]		[saveA5]			result•
+;			theComponent		return addr•		return addr		return addr
+;			params			params			params
+;			params			params			params
+;			what				what				what
+;	top  ->	return addr		new result•		result•
+;							&what•
+;							PrivateStorage•
+;							new return addr•
+;-------------------------------------------------------
+;  A7 OFFSETS OF PARAMETERS
+;
+caller		EQU	0					; return address of caller
+selector		EQU 	caller+4				; size of params,thing routine number
+cmptparams	EQU 	selector+4			; arbitrary number of parameters
+
+		tst.l		d0					; Is it a CallComponent() request?
+		bne		Dispatch				; no, go do the normal dispatch
+
+CallWithoutWhen
+
+		move.b	selector+1(sp),d0		; pick up size of parameters (low byte of top word of selector)
+		lea		cmptparams(sp,d0.w),a0		; point past parameters to theComponent
+		move.l	(a0),d1				; get the thingID
+ChainShare
+		move.w	d1,d0					; make into a long before indexing
+		lsl.l		#4,d0					; multiply index by sizeof(RegisteredComponentInstance)
+		move.l	ComponentManagerLowMem,a1	; point to our globals
+		move.l	rtInstanceTable(a1),a1	; rtInstanceTable
+		add.l		d0,a1				; point at the thingInstance record
+		swap	d1					; get signature in low word
+
+	if 1 then
+		cmp.w	rtiFlags(a1),d1			; rtiFlags,rtiEntryUseCount == (theComponent>>16) ?
+		bne.s	@oldway				; failed the fast check, try the old way
+
+		move.l	selector(sp),d0			; pick up selector for secondary dispatch
+		move.l	(sp)+,(sp)				; overwrite selector with caller's address
+		move.l	rtiStorage(a1),(a0)		; overwrite original thingID with rtiStorage
+		move.l	rtiEntry(a1),a1			; point back to thing record
+		move.l	rtRoutine(a1),a1		; pick up address of thing code
+		jmp		(a1)					; call the thing
+	endif
+
+@oldway
+		cmp.b	rtiEntryUseCount(a1),d1	; rtiEntryUseCount == 0xff & (theComponent>>16) ?
+		bne.s	@badComponentInstance	; no, clean up stack and return error!!
+
+		move.l	rtiSwitchedA5(a1),d1	; get rtiSwitchedA5 •••
+		bne.s	@validA5Component		; must swap A5 if set •••
+
+@validComponent
+		move.l	caller(sp),(a0)			; overwrite original thingID with caller's address
+		move.l	a0,caller(sp)			; save pointer to caller's address
+		subq		#4,sp				; room for new result
+		pea		8(sp)				; pointer to extended paramblock
+		move.l	rtiStorage(a1),-(sp)	; pass rtiStorage
+		move.l	rtiEntry(a1),a1			; point back to thing record
+		move.l	rtRoutine(a1),a1		; pick up address of thing code
+		jsr		(a1)					; call the thing
+
+		move.l	(sp)+,d0				; get result
+		move.l	(sp),sp				; strip params upto caller's address
+		move.l	d0,4(sp)				; store result for caller
+		rts
+
+@validA5Component
+		move.l	caller(sp),(a0)			; overwrite original thingID with caller's address
+		move.l	a5,4(a0)				; save register A5 for later restoration •••
+		move.l	d1,a5				; install rtiSwitchedA5 •••
+
+		move.l	a0,caller(sp)			; save pointer to caller's address
+		subq		#4,sp				; room for new result
+
+		pea		8(sp)				; pointer to extended paramblock
+		move.l	rtiStorage(a1),-(sp)	; pass rtiStorage
+		move.l	rtiEntry(a1),a1			; point back to thing record
+		move.l	rtRoutine(a1),a1		; pick up address of thing code
+		jsr		(a1)					; call the thing
+
+		move.l	(sp)+,d0				; get result
+		move.l	(sp),sp				; strip params upto caller's address
+		move.l	4(sp),a5				; restore saveA5 •••
+		move.l	d0,4(sp)				; store result for caller
+		rts
+
+
+;-------------------------------------------------------
+;	The thingInstance wasn't any good;
+;	Check to see if it is a valid thing.  If so,
+;	Open the thing, pass on the call, and then close it.
+
+@badComponentInstance
+		move.l	a0,-(sp)				; save pointer to thingID
+		clr.l		-(sp)				; space for returned thingInstance
+		move.l	(a0),-(sp)				; ComponentError Open( thingID);
+		_OpenComponent
+		move.l	(sp)+,d1				; get result
+		move.l	(sp)+,a0				; restore pointer to thingID
+		beq.s	@badComponent
+
+; Continue with the call:
+
+		move.l	caller(sp),(a0)			; overwrite original thingID with caller's address
+		move.l	d1,caller(sp)			; save thing instance for later close
+		clr.l		-(sp)				; room for new result
+
+		pea		8(sp)				; pointer to extended paramblock
+		move.l	d1,-(sp)				; pass thing instance
+		moveq	#0,d0				; Delegate needs high end clear
+		bsr		DelegateComponentCall	; let someone else do the work
+
+		move.l	(sp),d0				; get result
+		move.l	4(sp),a1				; get thingInstance
+		lea		9(sp),a0				; point to what
+		moveq	#0,d1				; clear out high byte ¶¶¶
+		move.b	(a0),d1				; get size of parameters
+		lea		3(a0,d1.w),sp			; point address of caller, strip params
+		move.l	d0,4(sp)				; store result for caller
+
+; Close the thingInstance:
+
+		clr.w	-(sp)				; room for result
+		move.l	a1,-(sp)				; ComponentError CloseComponent( ComponentInstance );
+		_CloseComponent
+		addq		#2,sp				; pop result
+		rts							; return result of original call
+
+@badComponent
+	IF WARHOL_DEBUG THEN
+		pea		#'Bad thing call, check paramsize!'
+		_DebugStr
+	EndIf
+		move.l	(sp),a1				; get caller's address
+		lea		4(a0),sp				; pop params
+		move.l	#badComponentInstance,(sp)		; return invalid thing error
+		jmp		(a1)
+
+Dispatch
+
+delegateSelector	EQU	36
+lastSelector		EQU	43
+
+		;cmp.w	#-1,d0
+		bmi.s	ChainThingFunction
+		cmp.w	#delegateSelector,d0
+		beq		DelegateComponentCall
+		cmp.w	#lastSelector,d0
+		bhi.s	ComponentBummer
+		lea		ComponentDispTableHead,a0
+		lsl.w		#2,d0				; don't assume 020
+	IF NOT ForROM THEN
+		move.l	(a0,d0.w),a0
+		ELSE
+		move.l	(a0,d0.w),a1
+		adda.l	a1,a0
+		ENDIF
+
+		jmp		(a0)
+
+ComponentBummer:
+	IF WARHOL_DEBUG THEN
+		pea		#'Bad Component Manager Selector !'
+		_DebugStr
+	EndIf
+		swap	d0						; put the number of parameters in low word
+		and.w	#$FF,d0				; mask off any cool bits
+		move.l	(sp)+,a0				; get the return address
+		add.w	d0,sp				; pop the stack
+		moveq	#-1,d0				; error into d0 for grins
+		jmp		(a0)					; get the hell out
+
+
+
+CallThingFunction
+;
+;  pascal long CallThisWithTheseParams( long optional, …, long optional, struct ComponentParameters originalParams, long (*thingFunction) (…) );
+;
+;
+;	Stack: 	ON ENTRY							BEFORE thingFunction
+;
+;			result							result
+;			optional							optional
+;			……								……
+;			optional							optional
+;			originalParams->					params…•
+;					flags,paramsize; what		return addr•
+;					params…
+;			thingFunction
+;	top  ->	return addr
+;
+;-------------------------------------------------------
+;  A7 OFFSETS OF PARAMETERS
+;
+;caller			EQU	0				; return address of caller
+;thingFunction		EQU 	caller+4			; routine to chain to
+;originalParams	EQU 	thingFunction+4	; descriptor of extra params to push
+
+		move.l	(sp)+,d2				; save address of caller
+		move.l	(sp)+,a0				; get address of routine to jmp to
+		move.l	(sp)+,a1				; point at ComponentParameters struct
+		moveq	#0,d1
+		move.b	1(a1),d1				; get size of params to copy
+		lea		4(a1,d1),a1			; point just past params to copy
+		lsr.w	#2,d1				; make into long count
+		bcc.s	@even
+		move.w	-(a1),-(sp)			; start with straggler
+		bra.s	@even
+@copy	move.l	-(a1),-(sp)			; copy params
+@even	dbra		d1,@copy
+
+		move.l	d2,-(sp)				; push return address
+		jmp		(a0)					; chain on through
+
+
+
+ChainThingFunction
+
+;
+;  pascal void ChainComponentCall( long paramsize/selector, ComponentInstance ti );
+;
+;-------------------------------------------------------
+;  A7 OFFSETS OF PARAMETERS
+;
+;caller			EQU	0					; return address of caller
+ComponentInstance	EQU 	caller+4				; routine to chain to
+originalParams		EQU 	ComponentInstance+4	; descriptor of extra params to push
+hisCaller			EQU 	originalParams+4		; descriptor of extra params to push
+
+		addq.l	#2,d0
+		bne.s	CallThingFunction
+
+		addq		#4,sp				; blow off caller
+		move.l	(sp)+,d1				; get component instance
+		move.l	4(sp),a0				; get hisCaller
+		move.l	(sp)+,(sp)				; move selector on top off hisCaller
+		move.l	a0,-(sp)				; put back return address
+		move.b	4+1(sp),d0			; pick up size of parameters (low byte of top word of selector)
+		lea		8(sp,d0.w),a0			; point past parameters to theComponent
+		bra		ChainShare
+
+
+
+DelegateComponentCall
+;
+;  pascal long DelegateComponentCall( ComponentParameters *originalParams, ComponentInstance ti );
+;
+;-------------------------------------------------------
+;  A7 OFFSETS OF PARAMETERS
+;
+;caller			EQU	0					; return address of caller
+;ComponentInstance	EQU 	caller+4				; routine to chain to
+;originalParams	EQU 	ComponentInstance+4	; descriptor of extra params to push
+
+
+		move.l	ComponentInstance(a7),d1	; get the thingID
+
+		move.w	d1,d0				; make into a long (d0.l = 36)
+		lsl.l		#4,d0				; multiply index by sizeof(RegisteredComponentInstance)
+		move.l	ComponentManagerLowMem,a0	; point to our globals
+		move.l	(a0),a0				; rtInstanceTable
+		add.l		d0,a0				; point at the thingInstance record
+		swap	d1					; get signature in low word
+
+		cmp.w	rtiFlags(a0),d1		; rtiFlags,rtiEntryUseCount == (theComponent>>16) ?
+		bne.s	oldway				; failed the fast check, try the old way
+
+		move.l	(a0),a1				; point back to thing record
+		move.l	(a1),ComponentInstance(a7) ; overwrite thingID with thing address
+		addq.l	#8,a0				; needed for secondary dispatch inside component
+
+;-------------------------------------------------------
+;  A7 OFFSETS OF PARAMETERS
+;
+;caller			EQU	0				; return address of caller
+;thingFunction		EQU 	caller+4			; routine to chain to
+;originalParams	EQU 	thingFunction+4	; descriptor of extra params to push
+
+		;%%%% A0 and D0 are used as implicit parameters to the component %%%%
+
+		move.l	(sp)+,d1				; save address of caller
+		move.l	(sp)+,d2				; get address of routine to jmp to
+		move.l	(sp)+,a1				; point at ComponentParameters struct
+
+		move.l	d1,-(sp)				; save our caller
+		clr.l		-(sp)				; room for function result
+		move.l	(a0),-(sp)				; push storage
+
+		move.l	(a1),d0				; need selector for secondary dispatch inside component
+		moveq	#0,d1
+		move.b	1(a1),d1				; get size of params to copy
+		lea		4(a1,d1),a1			; point just past params to copy
+		lsr.w	#2,d1				; make into long count
+		bcc.s	@even
+		move.w	-(a1),-(sp)			; start with straggler
+		bra.s	@even
+@copy	move.l	-(a1),-(sp)			; copy params
+@even	dbra		d1,@copy
+
+		move.l	d2,a1
+		jsr		(a1)					; call through and then come back
+		move.l	(sp)+,d0				; pickup result
+		move.l	(sp)+,a0				; our caller
+		move.l	d0,(sp)				; his result
+		jmp		(a0)					; go back
+
+oldway
+		cmp.b	rtiEntryUseCount(a0),d1	; rtiEntryUseCount == (theComponent>>16) ?
+		bne.s	@badComponent			; no, clean up stack and return error!!
+		move.l	rtiSwitchedA5(a0),d1	; get rtiSwitchedA5 •••
+		bne.s	@validA5Component		; must swap A5 if set •••
+
+@validComponent
+		move.l	rtiStorage(a0),ComponentInstance(a7) ; overwrite thingInstance with rtiStorage
+		move.l	rtiEntry(a0),a0			; point back to thing record
+		move.l	rtRoutine(a0),a0		; pick up address of thing code
+		jmp		(a0)					; call the thing, it returns to our caller
+
+
+@validA5Component						; must return here to restore A5 !!!
+		move.l	originalParams(a7),a1	; get params ptr
+		move.l	a5,-(sp)				; save a5 for later restore
+		move.l	d1,a5				; install rtiSwitchedA5 •••
+		clr.l		-(sp)				; room for result
+		move.l	a1,-(sp)				; push originalParams
+		move.l	rtiStorage(a0),-(sp)	; push rtiStorage
+		move.l	rtiEntry(a0),a0			; point back to thing record
+		move.l	rtRoutine(a0),a0		; pick up address of thing code
+		jsr		(a0)					; call the thing
+
+		move.l	(sp)+,d0				; get thing's result
+		move.l	d0,16(sp)				; copy to our result
+		move.l	(sp)+,a5				; restore caller's A5
+		move.l	(sp)+,a0				; get address of caller
+		addq		#8,sp				; strip params
+		jmp		(a0)					; return to caller
+
+
+@badComponent
+	IF WARHOL_DEBUG THEN
+		pea		#'Bad Component passed to delegate!'
+		_DebugStr
+	ENDIF
+
+		move.l	(sp)+,a0				; get caller's address
+		addq		#8,sp				; pop params
+		move.l	#badComponentInstance,(sp)	; return invalid thing error
+		jmp		(a0)
+
+		ENDPROC	;	MainComponent
+
+
+		MACRO
+		ComponentDispatch &a				; ComponentDispatch(name,returnType,selector)
+
+		IF	&a[3] < 0 THEN
+			ORG		ComponentDispTableHead-(&a[3]*4)
+			IF ForROM	THEN
+				IMPORT	ComponentBummer
+				DC.L	ComponentBummer-ComponentDispTableHead
+			ELSE
+				dcImportResident	ComponentBummer
+			ENDIF
+		ELSE
+			ORG		(&a[3]*4)+ComponentDispTableHead
+			IF ForROM	THEN
+				IMPORT	__&a[1]
+				DC.L	__&a[1]-ComponentDispTableHead
+			ELSE
+				dcImportResident  __&a[1]
+			ENDIF
+		ENDIF
+		ENDM
+
+
+ComponentDispTableHead	PROC	EXPORT
+
+		INCLUDE	'ComponentManagerSelectors.h'
+
+		ENDPROC	;	ComponentDispTableHead
+
+		END
+

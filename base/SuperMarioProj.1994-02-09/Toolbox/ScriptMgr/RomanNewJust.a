@@ -1,0 +1,2782 @@
+;
+;	File:		RomanNewJust.a
+;
+;	Contains:	New Roman routines for text drawing, measuring, and hit testing with
+;				justified text.
+;
+;	Written by:	PKE	Peter Edberg
+;
+;	Copyright:	© 1990-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM4>	 9/17/92	kc		Fix bug in PortChExtra. The rts was missing, and it was falling
+;									through to the next procedure. This was benign until we added a
+;									vector to the end of the procedure.
+;		<24>	  7/8/92	HA		#1035313 <PKE>: In NChar2Pixel, when we call StdTxMeas, we use
+;									the fixed value that is returned in field fontAdj field of QD
+;									globals . This would make NC2P more accurate and consistent with
+;									measurements returned by NMeasureJust.
+;		<23>	 4/29/92	FM		Get rid of conditionals: smgrSys7Extensions
+;		<22>	 4/14/92	PKE		#1026778,<yds>: Adapt for ScriptRecord pointer on stack instead
+;									of selector.
+;		<21>	 10/8/91	PKE		For Cube-E (and Bruges): Fix (N)Pixel2Char so that TRUE for
+;									leadingEdge is always $FF (not sometimes 1); bug #1012676.
+;		<20>	  4/1/91	PKE		JDT, #86037, #86038, #86039, #86068, #86074: Force all slop to
+;									be allocated to spaces, as in 6.x. This is necessary to fix a
+;									number of bugs having to do with use of the QuickDraw qdChExtra
+;									field. Some of these bugs are in printing, but we prevent them
+;									by doing this.
+;		<19>	  2/1/91	PKE		JSM,#PKE-Sys-017,#81409,#59217: Fix NPixel2Char to set
+;									widthRemaining correctly for large pixelWidth values (this
+;									change marked with <!>). Have (N)MeasureJust use a custom
+;									txMeasProc if installed, else measure using width table; stop
+;									using slimy way of passing scaling parameters to MeasureText via
+;									ExpandMem. Used heuristic to limit negative values of addSpExtra
+;									and addChExtra so net character widths don’t get negative; had
+;									to rearrange CalcSpChExtra somewhat to do this. Reduced code
+;									size by combining InitFontAndFlags and InitScaleFac into
+;									InitFontAndScale, and have it also compute output scaling.
+;		<18>	 1/19/91	PKE		(ngk) Fix remaining end-of-line and scaled text problems in
+;									(N)Pixel2Char and (N)Char2Pixel (rest of bug #70716). Also fixed
+;									a problem introduced in <17> that caused some linebreaking
+;									problems in TE: leadingEdge was not set correctly for widths
+;									beyond end of text (needed cmp.l, not cmp.w!).
+;		<17>	 1/14/91	PKE		(stb, jh) Fix measuring discrepancies in NChar2Pixel and
+;									NPixel2Char for scaled text. Speed up NPixel2Char by walking
+;									width tables, fix its handling of end adjustments and make it
+;									work with R-to-L line direction. Check FOND to see if it
+;									disallows interchar spacing, and act accordingly. Fixed handling
+;									of left and right style runs (each behaved like the other
+;									should). Use PicComment in NDrawJust to make LaserWriter
+;									printing work correctly if smgrCharPortion value does not match
+;									LaserWriter default value (1:10). Rearrange internal routines in
+;									order to do this: add InitFontAndFlags; rename InitJustData as
+;									InitWeight to better reflect function; split AdjustSpChExtra
+;									into CalcSpChExtra and DoSpChExtra; add flags to prevent
+;									redundant computation if CalcSpChExtra is called a second time
+;									(for LaserWriter layout calculations). Eliminate
+;									UseCharExtraTrap and ScaleSMgrCharExtra conditionals used with
+;									earlier versions of this code.
+;		<16>	 9/19/90	PKE		Fix bugs with zero-length strings and protect against divide by
+;									0.
+;		<15>	  9/1/90	PKE		Need to set up JustDataRec scaling parameters even if slop is 0
+;									(Pixel2Char was having problems cause hScaleTrue was bogus). To
+;									do this, break out the code that sets scaling parameters into a
+;									new routine InitScaleFac called by PortionText and
+;									AdjustSpChExtra. Also, add branches to avoid useless code if
+;									addChExtra is 0.
+;		<14>	 8/31/90	PKE		For NChar2Pixel and NPixel2Char, need to scale DOWN addChExtra
+;									by numer/denom to make pen moves at beginning and end of run
+;									accurate. For NDrawJust and NMeasureJust we don’t scale it.
+;		<13>	 8/30/90	PKE		Change interaction of scaling, slop, and charExtra to be
+;									correct: need to scale down qdChExtra and spExtra by numer/denom
+;									scaling factor.
+;		<12>	 8/24/90	PKE		Remove setting of obsolete smgrCharExtra and smgrSlop (in
+;									SMgrRecord). Use new names qdChExtra and qdRunSlop instead of
+;									QDSmgrCharExtra and QDSmgrSlop (in GrafGlobals).
+;		<11>	  8/9/90	PKE		If grafProcs are installed, DrawJust should call textProc
+;									instead of StdText! Otherwise printing doesn’t work. (Fixes BRC
+;									#68148).
+;		<10>	  8/8/90	PKE		New parameter to AdjustSpChExtra controls whether we scale
+;									addChExtra (need to for NDrawJust, NMeasureJust). Now we always
+;									pass real numer and denom to AdjustSpChExtra, and InitJustData
+;									computes numer.h/denom.h and saves it in JustDataRec. Use
+;									fractional pen position for pen moves in NDrawJust for increased
+;									accuracy. These changes fix BRC #70716 and other problems.
+;									Deleted code that was conditionalized out.
+;		 <9>	  8/2/90	PKE		Set smgrCharExtra and smgrSlop value in QD private globals. For
+;									now, continue to set them in SMgrRecord as well.
+;		 <8>	  6/8/90	PKE		Scale smgrCharExtra by font size instead of scaling it to
+;									compensate for StretchBits; this way it is scaled like the
+;									charExtra field in a color port instead of like the output of
+;									calcCharExtra. Now we no longer need GetScaledFontInfo call in
+;									AdjustSpChExtra, so move it to DrawJust instead.
+;		 <7>	  6/7/90	PKE		Moved GetScaledFontInfo to ScriptMgrExtTail.a, made it use as
+;									much ROM code as possible. Rearranged parameter order for
+;									GetScaledFontInfo. Implemented guts of num/denom scaling for
+;									NMeasureJust, which requires setting up new ExpandMem fields
+;									emNumer and emDenom that will be used by MeasureText.
+;		 <6>	  6/6/90	PKE		Implement guts of num/denom scaling for NPixel2Char. Add a
+;									little optimization for num/denom scaling in NChar2Pixel and
+;									NPixel2Char.
+;		 <5>	  6/1/90	PKE		Implement guts of num/denom scaling for NPortionText, NDrawJust,
+;									NChar2Pixel.
+;		 <4>	 5/24/90	PKE		Add numer/denom scaling parameters to NPortionText, NDrawJust,
+;									NMeasureJust, NChar2Pixel, and NPixel2Char. For now, these
+;									parameters are ignored.
+;		 <3>	 4/25/90	PKE		Use smgrCharExtra for both B&W and color ports, instead of using
+;									_CharExtra on new ports.
+;		 <2>	 4/25/90	PKE		Put slop value in smgrSlop global across calls to DrawText,
+;									MeasureText, TextWidth so it gets saved in pict. Clear it
+;									afterwards.
+;		 <1>	 4/10/90	PKE		New today - extracted from ScriptMgrExtTail.a and
+;									conditionalized so it can be used with ROM builds too.
+;
+;	Relevant recent comments from ScriptMgrExtTail.a below
+;		 <x5>	 2/22/90	PKE		For 7.0, moved Char2Pixel, DrawJust, MeasureJust here because we
+;									patch them out entirely for ROM; added these to NewRomanTable so
+;									their vectors get filled in. Added new InitJustData,
+;									AdjustSpChExtra, and RestoreSpChExtra utility routines for
+;									handling justification parameters with intercharacter spacing,
+;									using new JustDataRec structure. Added other utility routines
+;									GetFontSize, DrawGap, SignFixRound. Rewrote (N)PortionText,
+;									(N)DrawJust, (N)MeasureJust, (N)Char2Pixel and (N)Pixel2Char
+;									routines to fully implement the new justification model, using
+;									the above utility routines. Also made the ‘N’ versions standard
+;									for these routines, so that the old interfaces just redo the
+;									stack and fall through to the new routines.
+;		 <x2>	 1/11/90	PKE		Moved Roman PortionText and Pixel2Char here so we can fix them
+;									later for all systems (deal with color grafPorts, etc.) and also
+;									to reduce duplication of code in new interfaces. We may move
+;									other Roman routines here later. Added crude implementations of
+;									some new interfaces: NPortionText, NDrawJust, NMeasureJust,
+;									NChar2Pixel, and NPixel2Char. These ignore styleRunPosition, but
+;									otherwise behave as specified. Added code to expand the
+;									RomanUtil dispatch table if necessary (i.e. for ROM version of
+;									ScriptMgr) and fill in vectors for PortionText, Pixel2Char, and
+;									new interfaces listed above. Updated header to be in BBS format.
+;___________________________________________________________________________________________________
+;	To Do:
+;
+;___________________________________________________________________________________________________
+
+			LOAD	'StandardEqu.d'
+			include 'ScriptPriv.a'
+FixMathNonPortable	equ	1				; We require Mac Plus or newer	<x5>
+			include	'FixMath.a'			;								<x5>
+			include	'ColorEqu.a'		;								<x5>
+
+			blanks	on
+			string	asis
+
+FixedPoint5	equ		$00008000			; Fixed 0.5
+
+;UseCharExtraTrap	equ		0			; 0: Always use qdChExtra instead of _CharExtra		<3><17>
+;ScaleSMgrCharExtra	equ		1			; 1: Scale qdChExtra by font size (& not num/denom)	<8><17>
+
+useInterChar		equ		0			; Give up on interchar spacing for now				<20>
+										; (but make minimum changes to do this)
+
+; ----------------------------------------------------------------------- <x2>
+; Function PortionText (
+;				textPtr : Ptr;
+;				textLen : Longint
+;			): Fixed; {proportion}
+;
+; Find proportion for line of text. This sets up a call to NPortionText with
+; styleRunPosition = smOnlyStyleRun, then falls through into NPortionText.
+; ----------------------------------------------------------------------------
+; ----------------------------------------------------------------------- <x2><4>
+; Function NPortionText (
+;				textPtr:			Ptr;
+;				textLen:			Longint;
+;				styleRunPosition:	JustStyleCode;	{Integer}
+;				numer:				Point;			{Longint}
+;				denom:				Point			{Longint}
+;			): Fixed; 								{proportion}
+;
+; Find proportion for line of text. This now handles intercharacter spacing
+; too, using the smgrCharPortion value in the Script Manager globals.
+; ----------------------------------------------------------------------------
+
+			proc
+			export	PortionText,NPortionText
+			import	InitFontAndScale,InitWeight,StdUnlink			;			<17><19>
+
+;ptRecord		record	{a6link},decr
+;result			ds.l	1				; Fixed result
+;ptArgs			equ		*-8				; size of arguments.
+;textPtr		ds.l	1				; text pointer.
+;textLen		ds.l	1				; text length (LongInt).
+;scriptRecPtr	ds.l	1				; ScriptRecord ptr								<22>
+;return			ds.l	1				; return address.
+;a6link			ds.l	1				; old a6 register.
+;ptLocals		equ		*				; size of local variables.
+;				endr
+
+nptRecord		record	{a6link},decr
+result			ds.l	1				; Fixed result
+nptArgs			equ		*-8				; size of arguments.
+textPtr			ds.l	1				; text pointer.
+textLen			ds.l	1				; text length (LongInt).
+stylRunPos		ds.w	1				; style run position code.
+numer			ds.l	1				; Point											<4>
+denom			ds.l	1				; Point											<4>
+scriptRecPtr	ds.l	1				; ScriptRecord pointer							<22>
+return			ds.l	1				; return address.
+a6link			ds.l	1				; old a6 register.
+jdRec			ds		JustDataRec		;
+nptLocals		equ		*				; size of local variables.
+				endr
+
+PortionText
+			move.l	(sp)+,a0					; pop return address
+			move.l	(sp)+,a1					; pop ScriptRecord ptr					<22>
+			move.w	#smOnlyStyleRun,-(sp)		; no info, so assume only style run		<x5>
+			move.l	#$00010001,d0				; no info, assume 1/1 scaling			<4>
+			move.l	d0,-(sp)					; push numer							<4>
+			move.l	d0,-(sp)					; push denom							<4>
+			move.l	a1,-(sp)					; push ScriptRecord ptr					<22>
+			move.l	a0,-(sp)					; push return address
+; now we are set up for NPortionText
+
+NPortionText
+			with	nptRecord
+			link	a6,#nptLocals				; link the stack.
+	
+; Algorithm for Roman was simply to take (#spaces + #otherChars/8) * rawFontSize / 32.
+; Now we call InitFontAndScale which tells us if the font allows interchar spacing and	<19>
+; sets the scaling factors, InitWeight to set weight; then get weight (s*sp+nc*cp) from
+; JustDataRec into d2, multiply that by rawFontSize, and scale for compatibility with
+; old numbers.
+
+			move.l	numer(a6),-(sp)				; push numer							<17>
+			move.l	denom(a6),-(sp)				; push denom							<17>
+			pea		jdRec(a6)					; push ptr to JustDataRec				<17>
+			bsr		InitFontAndScale			; check font							<17><19>
+
+			move.l	textPtr(a6),-(sp)			; push textPtr
+			move.l	textLen(a6),-(sp)			; push textLen
+			move.w	stylRunPos(a6),-(sp)		; push styleRunPosition
+			pea		jdRec(a6)					; push ptr to JustDataRec
+			bsr		InitWeight					; Fill out weight						<17>
+
+			move.l	jdRec.weight(a6),d2			; Get nc*cp+ns*sp in d2
+
+; get raw font size
+
+			move.l	(a5),a0						; grafGlobals
+			move.l	thePort(a0),a0				; get thePort pointer
+			move.w	txSize(a0),d0				; get size
+			bne.s	@GotRealSize				; ok?
+			move.w	SysFontSize,d0				; get size
+			bne.s	@GotRealSize				; ok?
+			move.w	#12,d0						; ok, give up
+@GotRealSize
+	
+; Now we have font size (integer) in d0.w and ns*sp+nc*cp (Fixed) in d2.l.
+; Divide latter by 32 for compatibility with old numbers, then multiply by
+; raw font size.
+
+			lsr.l	#5,d2						; divide by 32						<x5>
+			swap	d0							; make font size fixed
+			clr.w	d0							; and clear frac part
+			subq	#4,sp						; make space for FixMul result		<5><10>
+			move.l	d2,-(sp)					; push scaled weight
+			move.l	d0,-(sp)					; push font size as Fixed			
+			_FixMul								; multiply, leave result on stack
+
+; Now multiply it by previous result by numer.h/denom.h if necessary 				<5><10>
+
+			tst.b	jdRec.inScalTrue(a6)		; do we have any scaling?				<19>
+			beq.s	@doneScaleAdjust			; skip if not
+			move.l	(sp),-(sp)					; first param & space for result
+			move.l	jdRec.inScaling(a6),-(sp)	; second param = numer/denom			<19>
+			_FixMul								; (numer/denom) * (result of above)
+@doneScaleAdjust
+
+; set result, unlink the stack and return to the caller.
+
+			move.l	(sp)+,result(a6)			; set return value
+
+			move.w	#nptArgs,d0					; for std exit
+			bra		StdUnlink					; StdUnlink
+			endWith
+
+			endproc
+
+; -----------------------------------------------------------------------	<x5>
+; procedure	DrawJust(textPtr: Ptr; textLength,slop: Integer);
+; input		(sp).l	Text pointer.
+;			(sp).w	Text length.
+;			(sp).w	Extra pixel width.
+; warning	This routine builds a stack frame.
+;			This routine follows Pascal register conventions.
+;
+; Draw the given text, fully justified.  The justification width is the
+; original text width plus the slop.  This is equivalent to the QuickDraw
+; DrawText trap in ROM.
+; -----------------------------------------------------------------------
+; ----------------------------------------------------------------------- <x2><4>
+; PROCEDURE	NDrawJust(
+;				textPtr:			Ptr;			{long}
+;				textLength:			Longint;		{long}
+;				slop:				Fixed;			{long}
+;				styleRunPosition:	JustStyleCode;	{Integer}
+;				numer: 				Point;			{Longint}
+;				denom: 				Point			{Longint}
+;			);
+;
+; notes		This routine builds a stack frame.
+;			This routine follows Pascal register conventions.
+;
+; Draw the given text, fully justified.  The justification width is the
+; original text width plus the slop.
+; -----------------------------------------------------------------------
+
+
+			proc
+			export	DrawJust,NDrawJust
+			import	InitFontAndScale,CalcSpChExtra,DoSpChExtra,RestoreSpChExtra	;		<17><19>
+			import	SignFixRound,StdUnlink
+			import	GetScaledFontInfo											;		<8>
+			import	GetFontSize													;		<17>
+
+;djRecord		record	{a6link},decr
+;djArgs			equ		*-8				; size of arguments.
+;textPtr		ds.l	1				; text pointer.
+;textLen		ds.w	1				; text length.
+;slop			ds.w	1				; extra pixel width.
+;scriptRecPtr	ds.l	1				; ScriptRecord ptr								<22>
+;return			ds.l	1				; return address.
+;a6link			ds.l	1				; old a6 register.
+;djLocals		equ		*				; size of local variables.
+;				endr
+
+ndjRecord		record	{a6link},decr
+ndjArgs			equ		*-8				; size of arguments.
+textPtr			ds.l	1				; text pointer.
+textLen			ds.l	1				; text length (LongInt).
+slop			ds.l	1				; extra pixel width (Fixed).
+stylRunPos		ds.w	1				; style run position code.
+numer			ds.l	1				; Point											<4>
+denom			ds.l	1				; Point											<4>
+scriptRecPtr	ds.l	1				; ScriptRecord pointer							<22>
+return			ds.l	1				; return address.
+a6link			ds.l	1				; old a6 register.
+jdRec			ds		JustDataRec		; local record
+fntInfo			ds.w	4				; FontInfo record									<17>
+numerVar		ds.l	1				; For StdTxMeas										<17>
+denomVar		ds.l	1				; For StdTxMeas										<17>
+portSpExScal	ds.l	1				; Fixed, port's sp extra, scaled by numer/denom		<17>
+portChExScal	ds.l	1				; Fixed, port's ch extra, scaled by numer/denom		<17>
+portSpEx1pt		ds.l	1				; Fixed, port's sp extra, scaled to 1 pt			<17>
+portChEx1pt		ds.l	1				; Fixed, port's ch extra, scaled to 1 pt			<17>
+jdRecLaser		ds		JustDataRec		; local record for LaserWriter stuff
+ndjLocals		equ		*				; size of local variables.
+				endr
+
+ndjRegs		reg		a2/d3			;													<17>
+
+DrawJust
+			move.l	(sp)+,a0				; pop 'n save return addr
+			move.l	(sp)+,a1				; pop ScriptRecord ptr						<22>
+			move.w	(sp)+,d0				; pop slop
+			clr.w	-(sp)					; zero-extend textLen on stack to long		<22>
+			swap	d0						; make slop a Fixed…
+			clr.w	d0						; clear frac part…
+			move.l	d0,-(sp)				; push slop as Fixed
+			move.w	#smOnlyStyleRun,-(sp)	; default styleRunPosition
+			move.l	#$00010001,d0			; no info, assume 1/1 scaling				<4>
+			move.l	d0,-(sp)				; push numer								<4>
+			move.l	d0,-(sp)				; push denom								<4>
+			move.l	a1,-(sp)				; push ScriptRecord ptr						<22>
+			move.l	a0,-(sp)				; restore return address
+
+; Now we are set up like NDrawJust, so just fall through
+
+NDrawJust
+
+; Link the stack and set the drawing params in thePort to correctly fill
+; justify the text.
+
+			with	ndjRecord
+			link	a6,#ndjLocals			; link the stack.
+			movem.l	ndjRegs,-(sp)			; save regs								<17>
+
+; set the drawing params
+
+			move.l	numer(a6),-(sp)			; push numer							<17>
+			move.l	denom(a6),-(sp)			; push denom							<17>
+			pea		jdRec(a6)				; push ptr to JustDataRec				<17>
+			bsr		InitFontAndScale		; check font							<17><19>
+
+			move.l	textPtr(a6),-(sp)		; push text pointer.
+			move.l	textLen(a6),-(sp)		; push text length.
+			move.l	slop(a6),-(sp)			; push slop.
+			move.w	stylRunPos(a6),-(sp)	; push styleRunPosition
+			move.l	numer(a6),-(sp)			; push numer								<5>
+			move.l	denom(a6),-(sp)			; push denom								<5>
+			pea		jdRec(a6)				; push local JustDatRec addr
+			bsr		CalcSpChExtra			; calculate drawing params					<17>
+
+; Handle initial forward pen motion
+
+		IF useInterChar THEN				;											<20>
+
+			tst.l	jdRec.addChExtra(a6)	; any add’l CharExtra?						<15>
+			beq.s	@doneStartMove			; if not, skip this							<15>
+			tst.b	jdRec.startNoFwd(a6)	; do we move at beginning
+			bne.s	@doneStartMove			; if TRUE, we don't get add’l CharExtra
+
+; Fill out FontInfo Record to get scaled ascent, descent for DrawGap.
+
+			pea		fntInfo(a6)				; push address of FontInfo rec (VAR param)	<7><8><17>
+			move.l	numer(a6),-(sp)			; push numer								<5><7>
+			move.l	denom(a6),-(sp)			; push denom								<5><7>
+			bsr		GetScaledFontInfo		; handles scaling params too				<5>
+
+			move.l	jdRec.addChExtra(a6),d0	; additional CharExtra
+			asr.l	#1,d0					; divide by 2 (signed!)
+			move.l	d0,-(sp)				; push size of move
+			pea		fntInfo(a6)				; push addr of FontInfo rec					<17>
+			bsr		DrawGap
+@doneStartMove
+
+		ENDIF								;											<20>
+
+		IF useInterChar THEN				;											<20>
+
+; Set LaserWriter line layout params (new section).										<17>
+; Do this either if a pic is open, or if we are drawing to a printer.
+; Skip if slop is 0 or font disallows interchar (because LaserWriter is ok for these).
+			tst.l	slop(a6)
+			beq		@donePrinterSetup
+			tst.b	jdRec.noInterCh(a6)
+			bne		@donePrinterSetup
+			move.l	grafGlobals(a5),a0		; Point to QuickDraw globals
+			move.l	thePort(a0),a0			; Get current grafport
+			tst.l	picSave(a0)				; Is a picture open?
+			bne.s	@doPrinterSetup			; If so, must do nasty LaserWriter stuff
+			tst.l	grafProcs(a0)			; Do we have grafProcs?
+			beq		@donePrinterSetup		; If not, we can't be printing, …
+											; … so skip nasty LaserWriter stuff
+			; Maybe we can add a better test to see if this is a printing port.
+			; Note that device field may be 0 even if we are printing.
+			; We could also check PrintVars to see if it is a LaserWriter…
+@doPrinterSetup
+
+			; Get port's spExtra and chExtra (16.16 Fixed, 1 pt and real sizes).
+			move.l	grafGlobals(a5),a0				; find the QuickDraw globals.
+			move.l	thePort(a0),a0					; get thePort pointer
+			bsr		GetFontSize						; assume thePort^ in a0, get font size in d0.w
+			swap	d0								; make Fixed
+			clr.w	d0								; clear frac part
+			move.l	d0,d3							; save in d3
+			move.l	a0,a2							; save thePort ptr
+
+			clr.l	portSpEx1pt(a6)					; initialize
+			move.l	spExtra(a2),d1					; get port's spExtra for txSize
+			move.l	d1,portSpExScal(a6)				; first assume no scaling
+			beq.s	@donePortSpExtra
+			subq	#4,sp							; space for result
+			move.l	d1,-(sp)
+			move.l	d3,-(sp)
+			_FixDiv
+			move.l	(sp)+,portSpEx1pt(a6)			; get spExtra for 1 pt
+			tst.b	jdRec.inScalTrue(a6)			; do we have any scaling?				<19>
+			beq.s	@donePortSpExtra				; skip if not
+			subq	#4,sp							; space for result
+			move.l	spExtra(a2),-(sp)				; unscaled spExtra
+			move.l	jdRec.inScaling(a6),-(sp) 		; second param = numer/denom			<19>
+			_FixDiv
+			move.l	(sp)+,portSpExScal(a6)			; now we have scaled version
+@donePortSpExtra
+
+			clr.l	portChEx1pt(a6)					; assume port has no chExtra
+			clr.l	portChExScal(a6)				;
+			tst.w	portVersion(a2)					; negative if cGrafPort
+			bpl.s	@donePortChExtra				; otherwise, get port's chExtra
+			move.w	chExtra(a2),d1					; get 4.12 fixed format
+			beq.s	@donePortChExtra				; if 0, we are done
+			ext.l	d1								; extend sign bits
+			asl.l	#4,d1							; convert to 16.16 format.
+			move.l	d1,portChEx1pt(a6)				; save port's chExtra for 1 pt
+			subq	#4,sp							; space for result
+			move.l	d1,-(sp)						; push chExtra for 1-point size
+			move.l	d3,-(sp)						; push size
+			_FixMul									; unscaled size on stack
+			tst.b	jdRec.inScalTrue(a6)			; do we have any scaling?				<19>
+			beq.s	@stuffChExtra					; skip if not
+			move.l	(sp),-(sp)						; result space and first param
+			move.l	jdRec.inScaling(a6),-(sp) 		; second param = numer/denom			<19>
+			_FixDiv
+@stuffChExtra			
+			move.l	(sp)+,portChExScal(a6)			; get real chExtra for our size
+@donePortChExtra
+
+		; Get LaserWriter width without slop (using FOND or TrueType metrics).
+		; Must be before DoSpChExtra.
+
+			subq	#4,sp					; space for result
+			move.l	textPtr(a6),-(sp)		; push text pointer.
+			move.l	textLen(a6),-(sp)		; push text length.
+			move.l	numer(a6),-(sp)			; push numer
+			move.l	denom(a6),-(sp)			; push denom
+			move.l	portSpEx1pt(a6),-(sp)	; push port spExtra for 1 pt
+			move.l	portChEx1pt(a6),-(sp)	; push port chExtra for 1 pt
+			pea		jdRec(a6)				; push local JustDatRec addr for scaling
+			bsr		LaserWidth				; Fixed width on stack
+
+		; Get the screen width without slop.
+		; Must be before DoSpChExtra.
+			move.l	numer(a6),numerVar(a6)
+			move.l	denom(a6),denomVar(a6)
+			subq	#2,sp					; make room for result
+			move.w	textLen+2(a6),-(sp)		; push byte count
+			move.l	textPtr(a6),-(sp)		; push the text pointer.
+			pea		numerVar(a6)			; VAR numer in
+			pea		denomVar(a6)			; VAR denom in
+			pea		fntInfo(a6)				; VAR info
+
+			move.l	grafGlobals(a5),a0		; Point to QuickDraw globals
+			move.l	thePort(a0),a0			; Get current grafport
+			move.l	grafProcs(a0),d0		; Is grafprocs NIL?
+			beq.s	@useMeasTrap			; Yes, use std proc	
+			move.l	d0,a0					;
+			move.l	txMeasProc(a0),a0 		; No, get proc ptr
+			jsr 	(a0)					; Go to it
+			bra.s	@doneTxMeas				; Measure text with txMeas grafProc
+@useMeasTrap								;
+			_StdTxMeas						; Measure text with std proc
+@doneTxMeas									;
+			move.w	(sp)+,d0				; get integer width
+			swap	d0						; make it fixed
+			clr.w	d0						; clear frac part to get screen width
+			move.w	numerVar+h(a6),d1		; get output numer
+			move.w	denomVar+h(a6),d2		; get output denom
+			cmp.w	d1,d2					; same?
+			beq.s	@doneScaleAdjust		; if so, skip adjust
+			subq	#4,sp					; space for FixMul result
+			move.l	d0,-(sp)				; first FixMul param
+			subq	#4,sp					; space for FixRatio result = second FixMul param
+			move.w	d1,-(sp)				; push output numer.h, first FixRatio paramm			move.w	d2,-(sp)				; push output denom.h, second FixRatio param
+			_FixRatio						; divide
+			_FixMul							; multiply
+			move.l	(sp)+,d0				; get scaled width
+@doneScaleAdjust
+
+		; Find total desired width of line
+			add.l	slop(a6),d0				; desired width of line
+			move.l	d0,d3					; save in d3 for underline length
+
+		; do we need to calculate new extra values?
+			lea		jdRec(a6),a2			; use screen spExtra, chExtra
+			tst.l	(sp)					; valid printer width?
+			bpl.s	@calcNewExtra			; if so, continue normally
+			addq	#4,sp					; otherwise, discard width
+			bra		@setupPicComment		; ready for PicComment
+
+		; Copy JustDataRec for printer layout
+@calcNewExtra
+			with	JustDataRec
+			lea		jdRecLaser(a6),a1		; ptr to dest record
+			move.w	#(jdRecSize/4),d1		; jdRecSize guaranteed to be multiple of 4
+			bra.s	@endCopyLoop
+@copyLoop
+			move.l	(a2)+,(a1)+
+@endCopyLoop
+			dbra	d1,@copyLoop
+
+		; compute new SpExtra and ChExtra for LaserWriter
+		; at this point, printer width is on stack, total desired width is in d0
+			sub.l	(sp)+,d0				; subtract LaserWriter width to get its slop
+			move.l	textPtr(a6),-(sp)		; push text pointer.
+			move.l	textLen(a6),-(sp)		; push text length.
+			move.l	d0,-(sp)				; push slop.
+			move.w	stylRunPos(a6),-(sp)	; push styleRunPosition
+			move.l	numer(a6),-(sp)			; push numer
+			move.l	denom(a6),-(sp)			; push denom
+			pea		jdRecLaser(a6)			; push local JustDatRec addr
+			bsr		CalcSpChExtra			; calculate drawing params
+			lea		jdRecLaser(a6),a2		; use printer spExtra, chExtra
+
+		; Compute major (spExtra) and minor (chExtra) for the PicComment.
+		; - Note that minor applies to all characters, incl space, so we
+		;   must subtract our minor value from the major value.
+		; - Also note that we must account for any spExtra or chExtra in
+		;   the port too.
+		; Assume that a2 points to JustDataRec to use
+		;
+		; Need to scale down underline len by input numer/denom.
+@setupPicComment
+			tst.b	inScalTrue(a2)			; do we have any scaling?					<19>
+			beq.s	@doneScaleUL			; skip if not
+			subq	#4,sp					; space for result
+			move.l	d3,-(sp)				; underline length
+			move.l	inScaling(a2),-(sp) 	; second param = numer/denom				<19>
+			_FixDiv
+			move.l	(sp)+,d3
+@doneScaleUL
+			move.l	portSpExScal(a6),d2				; get port's spExtra
+			add.l	addSpExScal(a2),d2				; get total spExtra
+			move.l	portChExScal(a6),d1				; get port's chExtra
+			add.l	addChExScal(a2),d1				; get total chExtra
+			sub.l	d1,d2							; subtract chExtra from spExtra
+			endwith	;JustDataRec
+
+			; Get ClientLLRecord handle from SMgr globals
+			with	ClientLLRecord,SMgrRecord
+			move.l	IntlSpec,a0
+			move.l	smgrClientLLRecHndl(a0),d0		; get reusable handle
+			beq.s	@donePrinterSetup				; bail if it's not there
+			move.l	d0,a0							; put handle in a0
+
+			; Fill out ClientLLRecord
+			move.l	(a0),a1
+			move.w	textLen+2(a6),chCount(a1)
+			move.l	d2,major(a1)
+			move.w	#$20,spChar(a1)
+			move.l	d1,minor(a1)
+			move.l	d3,ulLength(a1)
+
+			; ok, now make the comment
+			move.w	#clientLLComment,-(sp)
+			move.w	#cllRecSize,-(sp)
+			move.l	a0,-(sp)						; handle to ClientLLRecord
+			_PicComment
+			endwith	;ClientLLRecord,SMgrRecord
+
+@donePrinterSetup
+
+		ENDIF								;											<20>
+
+; Setup spacing params. Do this after printer setup, so it doesn't affect				<17>
+; StdTxMeas in that code.
+
+			pea		jdRec(a6)				; push local JustDatRec addr				<17>
+			bsr		DoSpChExtra				; set drawing params						<17>
+
+; Draw the text - change to use StdText (or text grafProc if present)					<5>
+
+			move.w	textLen+2(a6),-(sp)		; push text length as word.
+			move.l	textPtr(a6),-(sp)		; push text pointer.
+			move.l	numer(a6),-(sp)			; push numer								<5>
+			move.l	denom(a6),-(sp)			; push denom								<5>
+			move.l	grafGlobals(a5),a0		; Point to QuickDraw globals				<11>
+			move.l	thePort(a0),a0			; Get current grafport						<11>
+			move.l	grafProcs(a0),d0		; Is grafprocs NIL?							<11>
+			beq.s	@useTrap				; Yes, use std proc							<11>
+			move.l	d0,a0					;											<11>
+			move.l	textProc(a0),a0 		; No, get proc ptr							<11>
+			jsr 	(a0)					; Go to it									<11>
+			bra.s	@doneDrawText			; Draw text with text grafProc				<11>
+@useTrap									;											<11>
+			_StdText						; Draw text with std proc
+@doneDrawText								;											<11>
+
+; Restore drawing params (RestoreSpChExtra doesn't modify jdRec)
+
+			pea		jdRec(a6)				; push local JustDataRec addr
+			bsr		RestoreSpChExtra
+
+; Handle final pen motion <check rounding of negative number>
+
+		IF useInterChar THEN				;											<20>
+
+			move.l	jdRec.addChExtra(a6),d0	; get charExtra
+			beq.s	@doneEndMove			; if 0, no move necessary					<15>
+			tst.b	jdRec.endBackup(a6)		;
+			bne.s	@doneCalcEndMove		; if TRUE, we don't divide by 2
+			asr.l	#1,d0					; divide by 2 (signed!)
+@doneCalcEndMove
+			neg.l	d0						; negate									<10>
+			bsr		MovePen					; move pen, preserving fractional info		<10>
+@doneEndMove								;											<15>
+
+		ENDIF								;											<20>
+
+; Unlink the stack and return to the caller.
+
+			movem.l	(sp)+,ndjRegs			; restore regs								<17>
+			move.w	#ndjArgs,d0				; for std exit
+			bra		StdUnlink				; StdUnlink
+			endWith
+
+		IF useInterChar THEN				;											<20>
+
+; -----------------------------------------------------------------------------	<x5>
+; PROCEDURE DrawGap(gapSize: Fixed; info: FontInfo);
+;
+; This will draw a rect simulating a blank intercharacter text area, using
+; current text characteristics, beginning at the current position and continuing
+; for gapSize pixels, moving the pen gapSize pixels horizontally from its original
+; location. 
+;
+; This is a first pass without any optimization, which it needs.
+; We could also use horiz pen fraction for more accurate computation of the
+; gapRect.
+; -----------------------------------------------------------------------------
+
+;			export	DrawGap					; comment out						<17>
+;			import	SignFixRound,StdUnlink	; comment out						<17>
+
+dgRecord	record	{a6link},decr
+dgArgs		equ		*-8				; size of arguments.
+gapSize		ds.l	1				; gapSize value (Fixed)
+infoPtr		ds.l	1				; ptr to filled FontInfo record
+return		ds.l	1				; return address.
+a6link		ds.l	1				; old a6 register.
+gapRect		ds.w	4				; Rect - rect for gap
+saveMode	ds.w	1				; saved pnMode
+savePat		ds.b	8				; Pattern - saved pnPat or pnPixPat
+dgLocals	equ		*				; size of local variables.
+			endr
+
+DrawGap
+			with	dgRecord
+			link	a6,#dgLocals			; link the stack.
+			move.l	a2,-(sp)				; save reg
+
+			move.l	grafGlobals(a5),a0		; find the QuickDraw globals.
+			move.l	thePort(a0),a2			; save thePort pointer
+
+			move.l	infoPtr(a6),a1			; a1 points to FontInfo record
+
+			move.w	pnLoc+v(a2),d0			; current v
+			move.w	d0,d1					; copy
+			sub.w	ascent(a1),d0			; top of rect = v-ascent
+			move.w	d0,gapRect+top(a6)		; stuff it
+			add.w	descent(a1),d1			; bottom of rect = v+descent
+			move.w	d1,gapRect+bottom(a6)	; stuff it
+
+			move.w	pnLoc+h(a2),d1			; current h
+			move.l	gapSize(a6),d0			; get gap as Fixed (signed!)
+			bsr		SignFixRound			; round it
+			bpl.s	@posGap
+
+; gap is negative
+			move.w	d1,gapRect+right(a6)	; right side of rect = h
+			add.w	d0,d1					; left side of rect = h+gap
+			move.w	d1,gapRect+left(a6)		; stuff it
+			bra.s	@doneSetGap
+
+; gap is positive
+@posGap
+			move.w	d1,gapRect+left(a6)		; left side of rect = h
+			add.w	d0,d1					; right side of rect = h+gap
+			move.w	d1,gapRect+right(a6)	; stuff it
+			
+@doneSetGap
+
+; save pnMode, then set it from txMode
+
+			move.w	pnMode(a2),saveMode(a6)	; save pnMode
+			move.w	txMode(a2),pnMode(a2)	; set pnMode from txMode
+
+; next we have to save the pnPat/pnPixPat, set it from the background, call
+; PaintRect, then restore the pnPat/pmPixPat. How we do this depends on
+; what kind of port it is. We can't just use _EraseRect, because it ignores
+; the pnMode but we care about the pnMode.
+
+			tst.w	portVersion(a2)			; negative if cGrafPort
+			bmi.s	@colorPort				;
+
+; draw rect in old-style port - save pnPat, set it from bkPat,
+; draw rect, restore pnPat.
+
+			move.l	pnPat(a2),savePat(a6)		; save pnPat
+			move.l	pnPat+4(a2),savePat+4(a6)	; "
+			move.l	bkPat(a2),pnPat(a2)			; set pnPat from bkPat
+			move.l	bkPat+4(a2),pnPat+4(a2)		; "
+			pea		gapRect(a6)					; push rect
+			_PaintRect
+			move.l	savePat(a6),pnPat(a2)		; restore pnPat
+			move.l	savePat+4(a6),pnPat+4(a2)	; "
+			bra.s	@restorePnMode
+
+; draw rect in color port - save pnPixPat, set it from bkPixPat,
+; draw rect, restore pnPixPat.
+
+@colorPort
+			move.l	pnPixPat(a2),savePat(a6)	; save pnPixPat
+			move.l	bkPixPat(a2),pnPixPat(a2)	; set pnPixPat from bkPixPat
+			pea		gapRect(a6)					; push rect
+			_PaintRect
+			move.l	savePat(a6),pnPixPat(a2)	; restore pnPixPat
+
+; Now restore pnMode
+
+@restorePnMode
+			move.w	saveMode(a6),pnMode(a2)	; restore pnMode
+			
+; Now move pen to end of this gap
+
+			move.l	gapSize(a6),d0			; get h increment						<10>
+			bsr		MovePen					; move pen, preserving fractional info	<10>
+
+; all done, return
+
+			move.l	(sp)+,a2				; restore reg
+			move.w	#dgArgs,d0				; for std exit
+			bra		StdUnlink				; StdUnlink
+			endWith
+
+		ENDIF								;											<20>
+
+; -----------------------------------------------------------------------------	<10>
+; routine:	MovePen
+; input:	d0.l	Signed Fixed: horizontal increment for pen movement
+;
+; Moves pen by setting both integer and fractional parts of horizontal pen
+; position.
+;
+; Trashes a0, a1, d1
+; -----------------------------------------------------------------------------
+
+MovePen
+			move.l	grafGlobals(a5),a0		; find the QuickDraw globals.
+			move.l	thePort(a0),a1			; save thePort pointer
+			move.w	pnLoc+h(a1),d1			; get integer part of current pos
+			swap	d1						; put in Fixed format
+			tst.w	portVersion(a1)			; negative if cGrafPort
+			bpl.s	@notColorPort			;
+; for color port
+			move.w	pnLocHFrac(a1),d1		; get frac part of current pos
+			add.l	d0,d1					; add pen increment
+			move.w	d1,pnLocHFrac(a1)		; save frac part of new pos
+			bra.s	@common
+; for old ports
+@notColorPort
+			move.w	pnLocFixed(a0),d1		; get frac part of current pos
+			add.l	d0,d1					; add pen increment
+			move.w	d1,pnLocFixed(a0)		; save frac part of new pos
+; common finish
+@common
+			swap	d1						; get integer part of new pos
+			move.w	d1,pnLoc+h(a1)			; and save it
+			rts
+
+		IF useInterChar THEN				;											<20>
+
+; -----------------------------------------------------------------------------	<17>
+; FUNCTION LaserWidth(
+;						textPtr:			Ptr;
+;						textLen:			Long;
+;						numer: 				Point;
+;						denom: 				Point;
+;						portSpEx1pt:		Fixed;
+;						portChEx1pt:		Fixed;
+;						jdRecPtr:			^JustDataRec
+;			): Fixed;
+;
+; Returns Fixed width of text computed from metrics that the LaserWriter
+; driver will use, including scaling factors obtained from the JustDataRec.
+;
+; Returns neg value if bitmap font but no FOND or FOND width table.
+;
+; For more information on what this routine should really be trying to do, see
+; the following routines in the LaserWriter sources (thanks, Hugo):
+;	1. SetPrWidTab (in the file LpMisc68k.a), which fills out a table of
+;		printer widths.
+;	2. ChangeFont (in the file LpDraft.p), which calls SetPrWidTab.
+; The file LpMisc68k.a also has the LaserWriter line layout code.
+;
+; It would be nice to pre-allocate ThPrWidthTable with pointer in SMgrRecord
+; and cache widths for a particular font/style/etc, so we don't recalculate them
+; if current request matches last request. However, we have no way to know if
+; the width tables used for printing have been changed (we can't get driver's
+; value of modFlag in their ThPrWidthTable), so we just recalculate them each
+; time. Sigh.
+;
+; The potSpEx1pt and portChEx1pt values are the spExtra and chExtra values from
+; from the port, scaled to 1 pt.
+; -----------------------------------------------------------------------------
+
+
+lwRecord	record	{a6link},decr
+result		ds.l	1						; result: Fixed width
+lwArgs		equ		*-8						; size of arguments.
+textPtr		ds.l	1						; text pointer.
+textLen		ds.l	1						; text length.
+numer		ds.l	1						; Point
+denom		ds.l	1						; Point
+portSpEx1pt	ds.l	1						; Fixed
+portChEx1pt	ds.l	1						; Fixed
+jdRecPtr	ds.l	1						; pointer to JustDataRec
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6 register.
+myPrWidTab	ds		ThPrWidthTable			;
+lwLocals	equ		*						; size of local variables.
+			endr
+
+lwRegs		reg		a2/d3-d7
+
+SB_FILLPRINTER_WIDTHS	EQU		$0003
+_SplineCall				OPWORD	$A854
+
+LaserWidth
+			with	lwRecord,JustDataRec
+			link	a6,#lwLocals			; link the stack.
+			movem.l	lwRegs,-(sp)			; save regs
+			move.l	#-1,result(a6)			; initially assume can't get widths
+
+; Do we have a TrueType font for this?
+
+			clr.w	-(sp)					; room for current status
+			_GetOutlinePreferred			; leave result on stack
+			move.w	#-1,-(sp)				; pass TRUE…
+			_SetOutlinePreferred			; we want an outline if possible
+			clr.w	-(sp)					; room for Boolean result
+			move.l	numer(a6),-(sp)			; push numer
+			move.l	denom(a6),-(sp)			; push denom
+			_IsOutline						; Note: this calls FMWwapFont with needbits=T
+			tst.w	(sp)+					; use a TrueType font?
+			bne		@getOutlineWidths		; if so, get a different width table
+
+; Get widths from table in FOND
+
+			move.l	LastFOND,d0				; Do we have a FOND handle?
+			beq		@cleanup				; bail if not
+			move.l	d0,a0
+			move.l	(a0),a0					; Get FOND pointer
+			move.l	ffWTabOff(a0),d0		; Get offset to width table
+			beq		@cleanup				; bail if no table
+		; initialize local table
+			move.w	#255,d1
+			lea		myPrWidTab.theTable(a6),a1
+@clearLoop	clr.l	(a1)+
+			dbra	d1,@clearLoop
+		; set up params to search for width table that is best match for style
+			move.w	ffFirst(a0),d6			; get first char in table
+			move.w	ffLast(a0),d7			; get last char in table
+			lea		0(a0,d0.l),a0			; point to FOND width table
+			move.l	grafGlobals(a5),a1		; grafGlobals
+			move.l	thePort(a1),a1			; get thePort pointer
+			moveq	#0,d3					; for longizing
+			move.b	txFace(a1),d3			; get style
+		; search for width table. This code is almost exactly copied from SetPrWidTab.
+			move.w	(a0)+,d5				; counter
+			move.l	d3,d4					; initialize remainder
+			move.l	a0,a2					; initial table choice
+			move.w	d7,a1					; get to width tables
+			sub.w	d6,a1					; by LastChar-FirstChar
+			addq.w	#4,a1					; +3 for missing etc and +1 for style entry
+			add.l	a1,a1					; two bytes per entry
+			bra.s	@4
+@3
+			add.l	a1,a0					; next width table
+			move.w	(a0),d2					; get this width table style
+			jsr		MatchStyles				; return with match (a0,a1 preserved)
+			beq.s	@4						; if zero, its no better than current match
+			move.l	a0,a2					; found better match so take this table
+@4
+			dbra	d5,@3					; update count
+		; now a2 points to table in FOND (begins with style code). Copy it into printer
+		; width table, expanding from 4.12 to 16.16. This code is almost exactly copied
+		; from SetPrWidTab.
+			addq.w	#2,a2					; skip style entry
+			lsl.w	#2,d6					; 4 bytes per entry
+			lea		myPrWidTab.theTable(a6),a0
+			add.w	d6,a0					; skip to FirstChar in printer width table
+@5
+			move.w	(a2)+,d0				; get width entry
+			ext.l	d0						; make full longword
+			asl.l	#4,d0					; make into fixed point format from 4.12 format
+			move.l	d0,(a0)+				; put down this value
+			subq.w	#1,d7					; loop count LastChar
+			cmp.w	d7,d6					; compare with FirstChar
+			ble.s	@5						; continue till end of table
+		; now printer width table is set up, go measure text
+			bra		@addWidths
+
+; Get width table for outlines, using private Bass call.
+
+@getOutlineWidths
+			move.l	FOutFontHandle,a2		; handle to 'sfnt' resource
+			move.l	a2,a0
+			_HGetState
+			move.w	d0,-(sp)				; save state
+			move.l	a2,a0
+			_HLock
+
+			clr.l	-(sp)						; room for result code
+			pea		myPrWidTab.theTable(a6)		; width table ptr
+			move.l	a2,-(sp)					; sfnt handle
+			moveq	#SB_FILLPRINTER_WIDTHS,d0	; selector for our call, needs to be a long
+			_SplineCall							; get printer widths
+			move.l	(sp)+,d2					; get result of call
+
+			move.l	a2,a0
+			move.w	(sp)+,d0				; get saved state
+			_HSetState						; restore it
+
+			tst.l	d2						; success?
+			bne		@cleanup				; if not, bail
+
+; Now add up widths
+
+@addWidths
+			moveq	#0,d0					; initialize width
+			move.l	textPtr(a6),a0
+			move.l	textLen(a6),d1
+			move.l	portSpEx1pt(a6),d4
+			move.l	portChEx1pt(a6),d5
+			lea		myPrWidTab.theTable(a6),a1
+			moveq	#0,d2					; for longizing char
+			bra.s	@endWidthLoop
+@widthLoop
+			move.b	(a0)+,d2
+			move.l	d2,d3
+			lsl.w	#2,d3					; make a long offset
+			add.l	0(a1,d3.w),d0			; add in width
+			cmp.b	#$20,d2
+			bne.s	@addChExtra
+			add.l	d4,d0					; add in spExtra
+			bra.s	@endWidthLoop
+@addChExtra
+			add.l	d5,d0					; add in chExtra
+@endWidthLoop
+			dbra	d1,@widthLoop
+
+; Now we have Fixed width in d0, need to scale it by font size and numer.h/denom.h
+
+			subq	#4,sp
+			move.l	d0,-(sp)				; push 1-point width
+			move.l	grafGlobals(a5),a0		; find the QuickDraw globals.
+			move.l	thePort(a0),a0			; get thePort pointer
+			bsr		GetFontSize				; assume thePort^ in a0, get font size in d0.w
+			swap	d0						; make Fixed
+			clr.w	d0						; clear frac part
+			move.l	d0,-(sp)				; push font size
+			_FixMul							; leave result on stack
+
+			move.l	jdRecPtr(a6),a0			; get JustDataRec ptr
+			tst.b	inScalTrue(a0)			; do we have any scaling?					<19>
+			beq.s	@doneScale				; skip if not
+			move.l	(sp),-(sp)				; result space and first FixMul param
+			move.l	inScaling(a0),-(sp) 	; second param = numer/denom				<19>
+			_FixMul
+@doneScale
+			move.l	(sp)+,result(a6)		; get Fixed result
+
+; All done, return
+
+@cleanup
+			_SetOutlinePreferred			; restore outline pref status
+			movem.l	(sp)+,lwRegs			; restore regs
+			move.w	#lwArgs,d0				; for std exit
+			bra		StdUnlink				; StdUnlink
+			endWith	;lwRecord,JustDataRec
+
+;-------------------------------------------------------------------------------	<17>
+; MatchStyles (exactly copied from SetPrWidTab)
+;
+;	d2	Current
+;	d3	Desired
+;	d4	Remainder (may be updated)
+;
+;	Result in cc: eq if we did not find a better match, ne if we did
+;
+; The Current input is compared against Desired and Remainder parameters.
+; If Current is closer to Desired than Remainder, then Remainder is updated.
+; Remainder should be initialized to Desired.
+;
+; This Function can be called continuously over the entire range of styles
+; being checked.  Before each call only set the value for Current.
+; The values for Current should be set in order from default to least likely.
+; After the full range has been parsed, then the closest style
+; match is given by = Desired-Remainder (i.e. Desired•¬Remainder)
+;
+; Uses d0,d1
+;-------------------------------------------------------------------------------
+
+MatchStyles
+			move.w	d2,d0			; get Current
+			move.w	d3,d1			; get Desired
+			not.w	d1				; ¬Desired
+			and.w	d0,d1			; Current•¬Desired (Current-Desired)
+			bne.s	@1				; Perfect match if equal to zero
+			not.w	d0				; ¬Current
+			and.w	d3,d0			; Desired•¬Current (Desired-Current)
+			move.w	d0,d1			; Save potential new Remainder
+			not.w	d0				; ¬NewRemainder
+			and.w	d4,d0			; Remainder•¬NewRemainder (Remainder-NewRemainder)
+			beq.s	@1				; Check New against Old for better
+			move.w	d1,d4			; we found a better match
+			moveq	#-1,d0			; return result in d0
+@2
+			rts						; go home
+@1
+			moveq	#0,d0			; return results in d0
+			bra.s	@2
+
+			endproc
+
+		ENDIF								;											<20>
+
+; -----------------------------------------------------------------------	<x5>
+; procedure	MeasureJust(textPtr: Ptr; textLength,slop: Integer;
+;			charLocs: Ptr);
+; input		(sp).l	Text pointer.
+;			(sp).w	Text length.
+;			(sp).w	Extra pixel width.
+;			(sp).l	Character location array pointer.
+; warning	This routine builds a stack frame.
+;			This routine follows Pascal register conventions.
+;
+; Measure the given text, fully justified.  The cumulative width of each
+; character is left in the charLocs array.  This is equivalent to the
+; QuickDraw MeasureText trap in new ROMs.
+; -----------------------------------------------------------------------
+; ----------------------------------------------------------------------- <x2><4>
+; procedure	NMeasureJust(
+;				textPtr:			Ptr;
+;				textLen:			LongInt;
+;				slop:				Fixed;
+;				charLocs:			Ptr;
+;				styleRunPosition:	JustStyleCode;	{Integer}
+;				numer:				Point;			{Longint}
+;				denom:				Point			{Longint}
+;			);
+;
+; notes		This routine builds a stack frame.
+;			This routine follows Pascal register conventions.
+;
+; Measure the given text, fully justified.  The cumulative width of each
+; character is left in the charLocs array.
+;
+; At the moment, this just converts the parameters to MeasureJust format
+; and then calls MeasureJust.
+; -----------------------------------------------------------------------
+
+			proc
+			export	MeasureJust,NMeasureJust
+			import	InitFontAndScale,CalcSpChExtra,DoSpChExtra,RestoreSpChExtra	;		<17><19>
+			import	SignFixRound,StdUnlink
+			import	GetMeasProc,DoSwapFont,GetPortChExtra						;		<19>
+
+;mjRecord		record	{a6link},decr
+;mjArgs			equ		*-8				; size of arguments.
+;textPtr		ds.l	1				; text pointer.
+;textLen		ds.w	1				; text length.
+;slop			ds.w	1				; extra pixel width.
+;charLocs		ds.l	1				; character location array.
+;scriptRecPtr	ds.l	1				; ScriptRecord ptr								<22>
+;return			ds.l	1				; return address.
+;a6link			ds.l	1				; old a6 register.
+;mjLocals		equ		*				; size of local variables.
+;				endr
+
+nmjRecord		record	{a6link},decr
+nmjArgs			equ		*-8				; size of arguments.
+textPtr			ds.l	1				; text pointer.
+textLen			ds.l	1				; text length (LongInt).
+slop			ds.l	1				; extra pixel width (Fixed).
+charLocs		ds.l	1				; pointer
+stylRunPos		ds.w	1				; style run position code.
+numer			ds.l	1				; Point											<4>
+denom			ds.l	1				; Point											<4>
+scriptRecPtr	ds.l	1				; ScriptRecord pointer							<22>
+return			ds.l	1				; return address.
+a6link			ds.l	1				; old a6 register.
+jdRec			ds		JustDataRec		; local record
+measProc		ds.l	1				; address of current measure proc				<19>
+customProc		ds.w	1				; flag that custom proc is being used			<19>
+numerVar		ds.l	1				; Point											<19>
+denomVar		ds.l	1				; Point											<19>
+fntInfo			ds.w	4				; FontInfo record								<19>
+nmjLocals		equ		*				; size of local variables.
+				endr
+
+nmjRegs		reg		a2-a4/d3-d7		;													<19>
+
+MeasureJust
+			move.l	(sp)+,a0				; pop 'n save return addr
+			move.l	(sp)+,d1				; pop ScriptRecord ptr						<22>
+			move.l	(sp)+,a1				; pop 'n save charLocs pointer
+			move.w	(sp)+,d0				; pop slop (word)
+			clr.w	-(sp)					; zero-extend textLen on stack to long		<22>
+			swap	d0						; make slop a Fixed…
+			clr.w	d0						; clear frac part…
+			move.l	d0,-(sp)				; push slop as Fixed
+			move.l	a1,-(sp)				; push charLocs pointer
+			move.w	#smOnlyStyleRun,-(sp)	; default styleRunPosition
+			move.l	#$00010001,d0			; no info, assume 1/1 scaling				<4>
+			move.l	d0,-(sp)				; push numer								<4>
+			move.l	d0,-(sp)				; push denom								<4>
+			move.l	d1,-(sp)				; push ScriptRecord ptr						<22>
+			move.l	a0,-(sp)				; restore return address
+
+; Now we are set up like NMeasureJust, so just fall through
+
+NMeasureJust
+
+; Link the stack and fix drawing params in thePort to correctly fill
+; justify the text.
+
+			with	nmjRecord
+			link	a6,#nmjLocals			; link the stack.
+			movem.l	nmjRegs,-(sp)			; save regs								<19>
+
+; set up some regs, initialize charLocs[0]											new<19>
+
+			move.l	charLocs(a6),a2			; get charLocs ptr
+			clr.w	(a2)+					; width=0 for offset 0
+			move.l	textLen(a6),d7			; any length?
+			beq		@done					; if not, we are done
+			move.l	textPtr(a6),a3			; save text ptr
+
+; set the drawing params
+
+			move.l	numer(a6),-(sp)			; push numer							<17>
+			move.l	denom(a6),-(sp)			; push denom							<17>
+			pea		jdRec(a6)				; push ptr to JustDataRec				<17>
+			bsr		InitFontAndScale		; check font							<17><19>
+
+			move.l	a3,-(sp)				; push text pointer.					<19>
+			move.l	d7,-(sp)				; push text length.						<19>
+			move.l	slop(a6),-(sp)			; push slop.
+			move.w	stylRunPos(a6),-(sp)	; push styleRunPosition
+			move.l	numer(a6),-(sp)			; push numer							<5>
+			move.l	denom(a6),-(sp)			; push denom							<5>
+			pea		jdRec(a6)				; push local JustDatRec addr
+			bsr		CalcSpChExtra			; calculate drawing params				<17>
+
+			pea		jdRec(a6)				; push local JustDatRec addr			<17>
+			bsr		DoSpChExtra				; set drawing params					<17>
+
+;------------
+; Rewrote the next section to avoid the slimy way we were using MeasureText,		new<19>
+; since that wouldn't work for custom txMeasProcs anyway. Code down to next
+; dotted line replaces previous code.
+
+; register usage
+; 	a2.l	charLocs ptr (already set up)
+;	a3.l	text pointer (already set up)
+;	a4.l	measProc ptr
+;	d3.l	x
+;	d4.l	left end width adjust + rounding amount
+;	d5.l	right end width adjust (will be saved on stack)
+;	d6.w	current character offset
+;	d7.w	text length (already set up)
+
+; Set up for measure loops															new<19>
+
+			moveq	#0,d6					; initial char offset
+			moveq	#0,d5					; assume right adjust = 0
+			move.l	#FixedPoint5,d4			; rounding + left adjust (assumed 0)
+
+; get real start and end adjustments												new<19>
+
+		IF useInterChar THEN				;											<20>
+			move.l	jdRec.addChExtra(a6),d0	; get charExtra
+			beq.s	@doneEndAdjust			; if 0, no adjustments necessary
+			asr.l	#1,d0					; divide by 2 (signed!)
+
+			tst.b	jdRec.startNoFwd(a6)	; adjust widths for left flush?
+			beq.s	@doneStartAdjust		; if no, skip
+			sub.l	d0,d4					; update start adjust
+@doneStartAdjust
+
+			tst.b	jdRec.endBackup(a6)		; adjust widths for right flush?
+			beq.s	@doneEndAdjust			; if no, skip
+			move.l	d0,d5
+@doneEndAdjust
+		ENDIF								;											<20>
+			move.l	d5,-(sp)				; save for later
+
+; Now get address of measuring routine to use, and see if it is not standard		new<19>
+
+			bsr		GetMeasProc				; get flag in d0, addr in a0
+			tst.w	d0						; use custom proc?
+			beq.s	@useTable				; if not, go use width tables
+
+; Measuring width of text with custom proc.											new<19>
+
+			move.l	a0,a4					; save proc ptr
+@customLoop
+			add.w	#1,d6					; include next char
+			move.l	numer(a6),numerVar(a6)	; copy numer
+			move.l	denom(a6),denomVar(a6)	; copy denom
+			subq	#2,sp					; make room for result
+			move.w	d6,-(sp)				; push byte count
+			move.l	a3,-(sp)				; push the text pointer.
+			pea		numerVar(a6)			; VAR numer in
+			pea		denomVar(a6)			; VAR denom in
+			pea		fntInfo(a6)				; VAR info
+			jsr		(a4)					; go do measure
+			move.w	(sp)+,d0				; get width
+			swap	d0						; make a fixed
+			clr.w	d0
+		; scale it
+			tst.b	jdRec.outScalTrue(a6)	; any scaling?
+			beq.s	@doneScaleCustom
+			subq	#4,sp					; space for result
+			move.l	d0,-(sp)					; push width
+			move.l	jdRec.outScaling(a6),-(sp)	; push scaling
+			_FixMul
+			move.l	(sp)+,d0				; scaled width
+@doneScaleCustom
+		; do left side adjustment, round width, and stuff in charLocs
+			add.l	d4,d0					; adjust width for left side & add 0.5
+			cmp.w	d7,d6					; have we reached end of string?
+			bge		@lastChar				;
+			swap	d0						; get integer part
+			move.w	d0,(a2)+				; stuff in charLocs
+			bra.s	@customLoop
+
+;
+; We'll be using width tables.														new<19>
+;
+; register changes for this section
+;	a4.l	WidthTable ptr
+;	d3.l	current width total (initialized from d4)
+;	d4.l	total chExtra to add (screen scaling)
+;	d5.l	current char
+
+@useTable
+
+; Call SwapFont again to force SpExtra into width tables.							new<19>
+
+			move.l	numer(a6),-(sp)			; push numer
+			move.l	denom(a6),-(sp)			; push denom
+			pea		jdRec(a6)				; push ptr to JustDataRec
+			bsr		DoSwapFont				; reset width table
+
+; Get WidthTablePtr and  initialize width accumulator.								new<19>
+
+			move.l	WidthTabHandle,a4		; handle to global width table
+			move.l	(a4),a4					; now ptr
+			move.l	d4,d3					; initialize accum with left adj & rounding value
+
+; Need to get any chExtra from port, then add in our own.							new<19>
+
+			bsr		GetPortChExtra			; get port chExtra in d2
+			move.l	d2,d4					; save in d4
+			add.l	jdRec.addChExtra(a6),d4	; add our charExtra to port's
+
+; Loop: for each char, get width from table, scale it, add chExtra if not a space	new<19>
+
+			moveq	#0,d5
+@widthLoop
+			add.w	#1,d6					; include next char
+			move.b	(a3)+,d5
+			move.w	d5,d0
+			lsl.w	#2,d0
+			move.l	0(a4,d0.w),d0
+		; scale it
+			tst.b	jdRec.outScalTrue(a6)	; any scaling?
+			beq.s	@doneScaleTableWidth	; skip if none
+			subq	#4,sp					; space for result
+			move.l	d0,-(sp)					; push width
+			move.l	jdRec.outScaling(a6),-(sp)	; push scaling
+			_FixMul
+			move.l	(sp)+,d0				; scaled width
+@doneScaleTableWidth
+		; handle chExtra
+			cmp.b	#$20,d5					; space?
+			beq.s	@doneAddChExtra			; if so, skip chExtra
+			add.l	d4,d0					; add chExtra to width
+@doneAddChExtra
+			add.l	d0,d3					; add to char width to accum
+			move.l	d3,d0					; copy here for swap
+			cmp.w	d7,d6					; have we reached end of string?
+			bge.s	@lastChar
+			swap	d0						; make rounded integer
+			move.w	d0,(a2)+				; stuff in charLocs
+			bra.s	@widthLoop
+
+; Now we are back to common code to handle last char								new<19>
+
+@lastChar
+			sub.l	(sp)+,d0				; adjust for right side
+			swap	d0						; get integer part
+			move.w	d0,(a2)					; stuff in charLocs
+
+; end of new block
+;-------------
+
+; Restore drawing params (RestoreSpChExtra doesn't modify jdRec)
+
+			pea		jdRec(a6)				; push local JustDataRec addr
+			bsr		RestoreSpChExtra
+
+; Unlink the stack and return to the caller.
+
+@done
+			movem.l	(sp)+,nmjRegs			; restore regs							<19>
+			move.w	#nmjArgs,d0				; for std exit
+			bra		StdUnlink				; StdUnlink
+			endWith
+
+			endproc
+
+; ----------------------------------------------------------------------------	<x5>
+; function	Char2Pixel(textPtr: Ptr; textLen,slop,textOff: Integer;
+;						direction: Integer): Integer;
+; input		(sp).l	Text pointer.
+;			(sp).w	Text length.
+;			(sp).w	Extra slop pixels.
+;			(sp).w	Text offset.
+;			(sp).w	Direction flag.
+; output	(sp).w	Pixel width.
+; warning	This routine follows Pascal register conventions.
+;			This routine builds a stack frame.
+;
+; Translate a character offset in a string into a pixelWidth.  For Roman
+; scripts, this is similar to TextWidth.  The difference is that Char2Pixel
+; allows a slop for justification, which changes the width of the space
+; characters.
+; ----------------------------------------------------------------------------
+; -----------------------------------------------------------------------	<x2><4>
+; function	NChar2Pixel(
+;				textPtr:			Ptr;
+;				textLen:			Longint;
+;				slop:				Fixed;
+;				offset:				Longint;
+;				direction:			Integer;
+;				styleRunPosition:	JustStyleCode;		{Integer}
+;				numer:				Point;				{Longint}
+;				denom:				Point				{Longint}
+;			): 						Integer;			{pixel width}	
+:
+; notes		This routine follows Pascal register conventions.
+;			This routine builds a stack frame.
+;
+; Translate a character offset in a string into a pixelWidth.  For Roman
+; scripts, this is similar to TextWidth.  The difference is that Char2Pixel
+; allows a slop for justification, which changes the width of the space
+; characters.
+; -----------------------------------------------------------------------
+
+			proc
+			export	Char2Pixel,NChar2Pixel
+			import	InitFontAndScale,CalcSpChExtra,DoSpChExtra,RestoreSpChExtra	;		<17><19>
+			import	SignFixRound,StdUnlink
+
+;c2pRecord		record	{a6link},decr
+;result			ds.w	1				; pixel width.
+;c2pArgs		equ		*-8				; size of arguments.
+;textPtr		ds.l	1				; textBuf.
+;textLen		ds.w	1				; textLen.
+;slop			ds.w	1				; pixel slop.
+;textOff		ds.w	1				; textOffset.
+;direction		ds.w	1				; direction flag.
+;scriptRecPtr	ds.l	1				; ScriptRecord ptr								<22>
+;return			ds.l	1				; return address.
+;a6link			ds.l	1				; old a6 register.
+;c2pLocals		equ	*					; size of local variables.
+;				endr
+
+nc2pRecord		record	{a6link},decr
+result			ds.w	1				; pixel width.
+nc2pArgs		equ		*-8				; size of arguments.
+textPtr			ds.l	1				; text pointer.
+textLen			ds.l	1				; text length (LongInt).
+slop			ds.l	1				; extra pixel width (Fixed).
+textOff			ds.l	1				; offset (LongInt)
+direction		ds.w	1				; direction flag.
+stylRunPos		ds.w	1				; style run position code.
+numer			ds.l	1				; Point											<4>
+denom			ds.l	1				; Point											<4>
+scriptRecPtr	ds.l	1				; ScriptRecord pointer							<22>
+return			ds.l	1				; return address.
+a6link			ds.l	1				; old a6 register.
+jdRec			ds		JustDataRec		; local record
+fntInfo			ds.w	4				; FontInfo record								<17>
+nc2pLocals		equ		*				; size of local variables.
+				endr
+
+Char2Pixel
+			move.l	(sp)+,a0				; pop 'n save return addr
+			move.l	(sp)+,a1				; pop ScriptRecord ptr						<22>
+			move.w	(sp)+,d2				; pop direction
+			moveq	#0,d0					; for longizing
+			move.w	(sp)+,d0				; pop textOff, make it long
+			move.l	d0,d1					; save it in d1								<22>
+			move.w	(sp)+,d0				; pop slop
+			swap	d0						; make it a Fixed
+			clr.w	-(sp)					; zero-extend textLen on stack to long		<22>
+			move.l	d0,-(sp)				; push slop as Fixed
+			move.l	d1,-(sp)				; push offset as long						<22>
+			move.w	d2,-(sp)				; push direction, still a word
+			move.w	#smOnlyStyleRun,-(sp)	; default styleRunPosition
+			move.l	#$00010001,d0			; no info, assume 1/1 scaling				<4>
+			move.l	d0,-(sp)				; push numer								<4>
+			move.l	d0,-(sp)				; push denom								<4>
+			move.l	a1,-(sp)				; push ScriptRecord ptr						<22>
+			move.l	a0,-(sp)				; restore return address
+
+; Now we are set up like NChar2Pixel, so just fall through
+
+NChar2Pixel
+
+; Link the stack, set the new drawing params for thePort.
+
+			with	nc2pRecord
+			link	a6,#nc2pLocals			; link the stack.
+
+; get font mgr output rec to get output scaling										<17>
+; (this whole section is new)														<17>
+
+			move.l	numer(a6),-(sp)			; push numer
+			move.l	denom(a6),-(sp)			; push denom
+			pea		jdRec(a6)				; push ptr to JustDataRec
+			bsr		InitFontAndScale		; check font							<19>
+
+; set the drawing params
+
+			move.l	textPtr(a6),-(sp)		; push text pointer.
+			move.l	textLen(a6),-(sp)		; push text length.
+			move.l	slop(a6),-(sp)			; push slop.
+			move.w	stylRunPos(a6),-(sp)	; push styleRunPosition
+			move.l	numer(a6),-(sp)			; push numer								<10>
+			move.l	denom(a6),-(sp)			; push denom								<10>
+			pea		jdRec(a6)				; push local JustDatRec addr
+			bsr		CalcSpChExtra			; calculate drawing params					<17>
+
+			pea		jdRec(a6)				; push local JustDatRec addr				<17>
+			bsr		DoSpChExtra				; set drawing params						<17>
+
+; Check the text offset against zero on the left side and the text length
+; on the right side. Do these checks with word quantities.
+
+			move.w	textOff+2(a6),d0		; text offset >= 0?.
+			bpl.s	@0						; yes -> skip this.
+			moveq	#0,d0					; set text offset to zero.
+@0			cmp.w	textLen+2(a6),d0		; text offset <= text length?
+			ble.s	@1						; yes -> skip this.
+			move.w	textLen+2(a6),d0		; set text offset to length.
+@1
+
+; Call StdTxMeas/txMeasProc instead of TextWidth, for correct scaled metrics		<17>
+; (this section replace the section that called TextWidth)							<17>
+
+			subq	#2,sp					; make room for result
+			move.w	d0,-(sp)				; push byte count
+			move.l	textPtr(a6),-(sp)		; push the text pointer.
+			pea		numer(a6)				; VAR numer in - ok to change now
+			pea		denom(a6)				; VAR denom in - ok to change now
+			pea		fntInfo(a6)				; VAR info
+
+			move.l	grafGlobals(a5),a0		; Point to QuickDraw globals
+			move.l	thePort(a0),a0			; Get current grafport
+			move.l	grafProcs(a0),d0		; Is grafprocs NIL?
+			beq.s	@useTrap				; Yes, use std proc	
+			move.l	d0,a0					;
+			move.l	txMeasProc(a0),a0 		; No, get proc ptr
+			jsr 	(a0)					; Go to it
+			CLR.W	-(SP)					; save fraction of 0 on stack			<24>
+			bra.s	@doneTxMeas				; Measure text with txMeas grafProc
+@useTrap									;
+			_StdTxMeas						; Measure text with std proc
+			
+			MOVE.L	grafGlobals(A5),A0		; get pointer to graf globals			<24>
+			MOVE.L	fontAdj(A0),D2			; load fixed width						<24>
+			MOVE.W	D2,-(SP)				; save real frac part on stack			<24>
+
+@doneTxMeas									;
+											; leave pixel width on stack
+
+; Restore drawing params (RestoreSpChExtra doesn't modify jdRec)
+
+			pea		jdRec(a6)				; push local JustDataRec addr
+			bsr		RestoreSpChExtra
+
+; Make pixel width Fixed…
+
+			move.l	(sp)+,d2				; get frac part in hi word, integer in low word	<xx>
+			moveq	#0,d0					; assume zero width
+			move.w	textOff+2(a6),d1		; get textOff as word
+			ble.s	@done					; if ≤ 0, nothing to do
+
+			swap	d2						; put integer & frac in correct place	<10>
+;;;;;		clr.w	d2						; comment out							<10><24>
+			move.l	d2,d0					; get TextWidth in d0					<15>
+
+; Now adjust Fixed width in d0.l by scaling parameters.								<5><10>
+; Moved this section up here														<18>
+
+			tst.b	jdRec.outScalTrue(a6)	; do we have any scaling?				<10><17><19>
+			beq.s	@doneWidthAdjust		; skip if not							<10>
+			subq	#4,sp					; room for FixMul result
+			move.l	d0,-(sp)					; first FixMul param
+			move.l	jdRec.outScaling(a6),-(sp)	; second param = numer/denom		<10><17><19>
+			_FixMul
+			move.l	(sp)+,d0				; get Fixed result
+@doneWidthAdjust
+
+; Pen position adjustments for ends of style run
+
+		IF useInterChar THEN				;											<20>
+			move.l	jdRec.addChExtra(a6),d2	; get additional charExtra				<15><17><18>
+			beq.s	@doneEndAdjust			; if 0, no adjustment needed			<15>
+			asr.l	#1,d2					; divide by 2 (signed!)						<15>
+
+			tst.b	jdRec.startNoFwd(a6)	; adjust width for left flush?
+			beq.s	@doneStartAdjust		; if no, skip
+			sub.l	d2,d0					; subtract 0.5 ce from width				<10>
+@doneStartAdjust
+
+			tst.b	jdRec.endBackup(a6)		; adjust widths for right flush?
+			beq.s	@doneEndAdjust			; if no, skip
+			cmp.w	textLen+2(a6),d1		; width to last char?
+			bne.s	@doneEndAdjust			; if not, skip
+			sub.l	d2,d0					; subtract 0.5 ce from width				<10>
+@doneEndAdjust
+		ENDIF								;											<20>
+
+; Set result, unlink the stack and return to the caller.
+
+			bsr		SignFixRound			; round Fixed width to Integer			<10>
+@done
+			move.w	d0,result(a6)
+			move.w	#nc2pArgs,d0			; for std exit
+			bra		StdUnlink				; StdUnlink
+			endWith
+
+			endproc
+
+; -----------------------------------------------------------------------	<x2>
+; function	Pixel2Char(
+;				textPtr:			Ptr;
+;				textLen:			Integer;
+;				slop:				Integer;
+;				pixelWidth:			Integer;
+;				Var leadingEdge:	Boolean
+;			):						Integer;		{character offset}
+;
+; notes		This routine follows Pascal register conventions.
+;			This routine builds a stack frame.
+;
+; This routine converts a pixel width and string into a character offset into
+; the string and a leadingEdge flag that signals which side of the character
+; the pixel fell on.
+; ----------------------------------------------------------------------------
+; ----------------------------------------------------------------------- <x2><4>
+; function	NPixel2Char(
+;				textPtr:			Ptr;
+;				textLen:			Longint;
+;				slop:				Fixed;
+;				pixelWidth:			Fixed;
+;				Var leadingEdge:	Boolean;
+;				Var widthRemaining:	Fixed;
+;				styleRunPosition:	JustStyleCode;	{Integer}
+;				numer:				Point;			{Longint}
+;				denom:				Point			{Longint}
+;			):						Integer;		{character offset}
+;
+; notes		This routine follows Pascal register conventions.
+;			This routine builds a stack frame.
+;
+; This routine converts a pixel width and string into a character offset into
+; the string and a leadingEdge flag that signals which side of the character
+; the pixel fell on.
+;
+; Substantially rewritten to fix bugs, using ideas from Mark Davis's					<17>
+; SingleByteFastP2C.a code, but adapting it for scaling, slop, custom
+; txMeasProcs, etc.
+; ----------------------------------------------------------------------------
+
+			proc
+			export	Pixel2Char,NPixel2Char
+			import	InitFontAndScale,CalcSpChExtra,DoSpChExtra,RestoreSpChExtra	;		<17><19>
+			import	GetFontSize													;		<17>
+			import	SignFixRound,StdUnlink
+			import	DoSwapFont,GetMeasProc,GetPortChExtra						;		<19>
+
+;p2cRecord		record	{a6link},decr
+;result			ds.w	1				; result, char offset.
+;p2cArgs		equ		*-8				; size of arguments.
+;textPtr		ds.l	1				; text pointer.
+;textLen		ds.w	1				; text length.
+;slop			ds.w	1				; slop pixels.
+;pixelWidth		ds.w	1				; pixel offset.
+;leadEdgeAdr	ds.l	1				; leadingEdge address.
+;scriptRecPtr	ds.l	1				; ScriptRecord ptr								<22>
+;return			ds.l	1				; return address.
+;a6link			ds.l	1				; old a6 register.
+;widRemPtr		ds.l	1				; addr of widthRemaining parm (nil if none)		<x2>
+;p2cLocals		equ	*					; size of local variables.
+;				endr
+
+np2cRecord		record	{a6link},decr
+result			ds.w	1				; result, char offset.
+np2cArgs		equ		*-8				; size of arguments.
+textPtr			ds.l	1				; text pointer.
+textLen			ds.l	1				; text length (Longint).
+slop			ds.l	1				; slop pixels (Fixed).
+pixelWidth		ds.l	1				; pixel offset (Fixed).
+leadEdgeAdr		ds.l	1				; address of Boolean leadingEdge.
+widRemAdr		ds.l	1				; address of Fixed widthRemaining.
+stylRunPos		ds.w	1				; style run position code.
+numer			ds.l	1				; Point											<4>
+denom			ds.l	1				; Point											<4>
+scriptRecPtr	ds.l	1				; ScriptRecord pointer							<22>
+return			ds.l	1				; return address.
+a6link			ds.l	1				; old a6 register.
+jdRec			ds		JustDataRec		; local record
+fntInfo			ds.w	4				; FontInfo record								<17>
+measProc		ds.l	1				; address of current measure proc				<17>
+customProc		ds.w	1				; flag that custom proc is being used			<17>
+lastWidAdj		ds.l	1				; subtract this from width of last char			<17>
+numerVar		ds.l	1				; Point											<17>
+denomVar		ds.l	1				; Point											<17>
+np2cLocals		equ	*					; size of local variables.
+				endr
+
+minusOneFixed	equ		$FFFF0000	; -1.0 in Fixed format
+
+p2cRegs		reg		a2-a4/d3-d7				;											<19>
+
+Pixel2Char
+			move.l	(sp)+,a0				; pop and save return addr
+			move.l	(sp)+,d2				; pop ScriptRecord ptr						<22>
+			move.l	(sp)+,a1				; pop and save leadingEdge addr
+			move.w	(sp)+,d0				; pop pixelWidth as Integer
+			swap	d0						; make it a Fixed…
+			clr.w	d0						; and clear fraction part
+			move.w	(sp)+,d1				; pop slop as Integer
+			swap	d1						; make it a Fixed…
+			clr.w	d1						; and clear fraction part
+			clr.w	-(sp)					; zero-extend textLen on stack to long		<22>
+			move.l	d1,-(sp)				; push slop as a Fixed
+			move.l	d0,-(sp)				; push pixelWidth as a Fixed
+			move.l	a1,-(sp)				; push leadingEdge addr
+			clr.l	-(sp)					; push nil for widthRemaining addr
+			move.w	#smOnlyStyleRun,-(sp)	; default styleRunPosition
+			move.l	#$00010001,d0			; no info, assume 1/1 scaling				<4>
+			move.l	d0,-(sp)				; push numer								<4>
+			move.l	d0,-(sp)				; push denom								<4>
+			move.l	d2,-(sp)				; push ScriptRecord ptr						<22>
+			move.l	a0,-(sp)				; restore return addr
+			
+; Now we are set up like NPixel2Char, so just fall through
+
+; NPixel2Char register usage.
+;
+; 	a2.l	address of leadingEdge.
+;	a3.l	text pointer.
+;	a4.l	measProc ptr, also used at end
+;	d3.l	pixelWidth, will get scaled.
+;	d4.w	character offset.
+;	d5.l	text width measurement.
+;	d6.l	previous measurement.
+;	d7.w	text length
+
+NPixel2Char
+			with	np2cRecord
+			link	a6,#np2cLocals			; link the stack.
+			movem.l	p2cRegs,-(sp)			; save the registers.					<19>
+
+; Initialize widthRemaining to -1													<x5>
+
+			move.l	widRemAdr(a6),d0		; should we set widthRemaining?			<x5>
+			beq.s	@doneInitWidRem			; skip if not							<x5>
+			move.l	d0,a0					; copy widRemAdr						<x5>
+			move.l	#minusOneFixed,(a0)		; initialize widthzemaining to -1		<x5>
+@doneInitWidRem
+
+; load up some regs
+
+			move.l	leadEdgeAdr(a6),a2		; load leadingEdge pointer.
+			move.l	textPtr(a6),a3			; load text pointer.
+			move.l	pixelWidth(a6),d3		; get width. before or at start?
+			ble		p2cBeforeStart			; if we are, go handle					<17>
+			
+; get font mgr output rec to get output scaling										<17>
+; (this whole section is new)														<17>
+
+			move.l	numer(a6),-(sp)			; push numer							<17>
+			move.l	denom(a6),-(sp)			; push denom							<17>
+			pea		jdRec(a6)				; push ptr to JustDataRec				<17>
+			bsr		InitFontAndScale		; check font							<17><19>
+
+; set drawing/measuring params
+
+			move.l	a3,-(sp)				; push text pointer.
+			move.l	textLen(a6),-(sp)		; push text length.						<x5>
+			move.l	slop(a6),-(sp)			; push slop.							<x5>
+			move.w	stylRunPos(a6),-(sp)	; push styleRunPosition					<x5>
+			move.l	numer(a6),-(sp)			; push numer							<10>
+			move.l	denom(a6),-(sp)			; push denom							<10>
+			pea		jdRec(a6)				; push local JustDatRec addr
+			bsr		CalcSpChExtra			; calculate drawing params				<17>
+
+			pea		jdRec(a6)				; push local JustDatRec addr			<17>
+			bsr		DoSpChExtra				; set drawing params					<17>
+
+; Adjust pixelwidth for left side, save width adjustment for last char				<x5><17>
+
+			move.l	jdRec.addChExtra(a6),d0 ; get additional charExtra				<x5><17><18>
+		IF useInterChar THEN				;											<20>
+			beq.s	@doneCalcAdjust			; if 0, no adjustment necessary			<15><17>
+			asr.l	#1,d0					; divide by 2 (signed!)					<x5>
+			tst.b	jdRec.startNoFwd(a6)	; adjust width for left flush?			<x5>
+			beq.s	@doneStartAdjust		; if no, skip							<x5>
+			add.l	d0,d3					; bump width to hit next char sooner	<x5><17>
+@doneStartAdjust
+			; moved this up here													<17>
+			tst.b	jdRec.endBackup(a6)		; adjust widths for right flush?		<x5>
+			bne.s	@doneCalcAdjust			; if so, don't reset d0					<x5><17>
+			moveq	#0,d0					; no final width adjust					<x5><17>
+@doneCalcAdjust								;										<17>
+		ENDIF								;											<20>
+			move.l	d0,lastWidAdj(a6)		; subtract this from width of last char	<17>
+
+; Get pixelWidth param and scale it down by outnumer.h/outdenom.h					<6><10><17>
+; Moved down here, and now scale lastWidAdj too.									<18>
+
+			tst.b	jdRec.outScalTrue(a6)	; do we have any output scaling?		<10><17><19>
+			beq.s	@doneWidthAdjust		; if not, skip this part				<6>
+			subq	#4,sp					; room for FixDiv result				<6><10>
+			move.l	d3,-(sp)					; width is first FixDiv arg			<6><10>
+			move.l	jdRec.outScaling(a6),-(sp) 	; second param = numer/denom		<10><17><19>
+			_FixDiv							;										<10>
+			move.l	(sp)+,d3				; get scaled width						<6>
+			move.l	lastWidAdj(a6),d0		; do we need to scale this too?			<18>
+			beq.s	@doneWidthAdjust		; skip if not							<18>
+			subq	#4,sp					; room for FixDiv result				<18>
+			move.l	d0,-(sp)					; lastWidAdj is first FixDiv arg	<18>
+			move.l	jdRec.outScaling(a6),-(sp) 	; second param = numer/denom		<18><19>
+			_FixDiv							;										<18>
+			move.l	(sp)+,lastWidAdj(a6)	; get scaled width						<18>
+@doneWidthAdjust
+
+; Now get address of measuring routine to use, and see if it is not standard		new<17>
+
+			bsr		GetMeasProc				; get flag in d0, addr in a0			<19>
+			move.w	d0,customProc(a6)		; set flag								<19>
+			move.l	a0,measProc(a6)			; save addr of the proc we want
+
+; Set up to do measuring															new<17>
+
+			moveq	#0,d4					; initial char offset
+			moveq	#0,d5					; measurement for current offset
+			moveq	#0,d6					; measurement for previous offset
+			move.w	textLen+2(a6),d7		; textLen
+			ble		p2cAfterEnd
+			tst.w	customProc(a6)			; can we use width table?
+			beq.s	@useTable
+
+; Measuring width of text with custom proc.											new<17>
+
+			move.l	measProc(a6),a4			; get proc ptr							<19>
+@customLoop
+			add.w	#1,d4					; include next char
+			move.l	d5,d6					; save last meast
+			move.l	numer(a6),numerVar(a6)	; copy numer
+			move.l	denom(a6),denomVar(a6)	; copy denom
+			subq	#2,sp					; make room for result
+			move.w	d4,-(sp)				; push byte count
+			move.l	a3,-(sp)				; push the text pointer.
+			pea		numerVar(a6)			; VAR numer in
+			pea		denomVar(a6)			; VAR denom in
+			pea		fntInfo(a6)				; VAR info
+			jsr		(a4)					; go do measure							<19>
+			move.w	(sp)+,d5				; get width
+			swap	d5						; make a fixed
+			clr.w	d5
+			cmp.w	d7,d4					; have we reached end of string?
+			bge		@lastChar				;										<18>
+			cmp.l	d3,d5
+			blt.s	@customLoop
+			bra		@gotHit					;										<18>
+
+; We'll be using width tables.
+
+@useTable
+
+; additional registers for this section
+;	a1		ptr to width table
+;	d1.l	char from string
+;	d2.l	total chExtra (port's plus ours, scaled to match table)
+
+; Call SwapFont again to force SpExtra into width tables.							<17>
+; (this whole section is new)														<17>
+
+			move.l	numer(a6),-(sp)					; push numer
+			move.l	denom(a6),-(sp)					; push denom
+			pea		jdRec(a6)						; push ptr to JustDataRec
+			bsr		DoSwapFont						; reset width table				<19>
+
+; Need to get any chExtra from port, then add in our own and scale result.			new<17>
+; Moved part of this into subroutine for code sharing with MeasureJust.				<19>
+
+			bsr		GetPortChExtra				; get port chExtra in d2			<19>
+			add.l	jdRec.addChExtra(a6),d2		; add our charExtra to port's
+			tst.b	jdRec.outScalTrue(a6)		; do we have any output scaling?
+			beq.s	@doneTotalChExScal			; if not, skip this part
+			subq	#4,sp						; result space
+			move.l	d2,-(sp)					; total chExtra
+			move.l	jdRec.outScaling(a6),-(sp) 	; second param = numer/denom
+			_FixDiv								;
+			move.l	(sp)+,d2					; get scaled result
+@doneTotalChExScal
+
+; Here we have chExtra in d2. Get WidthTablePtr and start adding widths.			new<17>
+; SpExtra is in table, but have to add in chExtra.
+
+			move.l	WidthTabHandle,a1		; handle to global width table
+			move.l	(a1),a1					; now ptr
+			moveq	#0,d1
+@widthLoop
+			add.w	#1,d4					; include next char
+			move.l	d5,d6					; save last meast
+			move.b	(a3)+,d1
+			move.w	d1,d0
+			lsl.w	#2,d0
+			add.l	0(a1,d0.w),d5
+			cmp.b	#$20,d1					; space?
+			beq.s	@doneAddChExtra
+			add.l	d2,d5
+@doneAddChExtra
+			cmp.w	d7,d4					; have we reached end of string?
+			bge.s	@lastChar
+			cmp.l	d3,d5
+			blt.s	@widthLoop
+			bra.s	@gotHit
+
+; Now we are back to common code to handle last char							new<17>
+
+@lastChar
+			sub.l	lastWidAdj(a6),d5		; adjust for end pen move
+			cmp.l	d3,d5					; change to .l						<18>
+			blt		p2cAfterEnd
+
+; At this point we have a hit with the following:
+;	d4.w	current offset
+;	d5.l	width for current offset
+;	d6.l	width for previous offset
+
+@gotHit
+
+; Determine whether the pixelWidth occurs on the left or right side of
+; the character and return the right or left offset accordingly.
+
+			sf		(a2)					; assume leadingEdge false.			<21>
+			add.l	d3,d3					; double pixelWidth.
+			add.l	d5,d6					; average measurements.
+			cmp.l	d6,d3					; compare width to average.
+			bhi.s	DoneP2C					; if width < average,
+			st		(a2)					; set leadingEdge true.				<21>
+			sub.w	#1,d4					; decrement result.
+
+; Restore drawing params (RestoreSpChExtra doesn't modify jdRec).
+; Save the P2C result.
+
+DoneP2C
+
+			pea		jdRec(a6)				; push local JustDataRec addr		<x5>
+			bsr		RestoreSpChExtra		; restore orig drawing params		<x5>
+			move.w	d4,result(a6)			; return width.
+
+; Restore regs, unlink the stack and return to the caller.
+
+p2cExit
+			movem.l	(sp)+,p2cRegs			; restore the registers.			<19>
+			move.w	#np2cArgs,d0			; for std exit						<x5>
+			bra		StdUnlink				; StdUnlink
+
+p2cBeforeStart
+; if width <= 0, then before start of the line, so								<17>
+; return leadingEdge = teSysJust, offset = 0
+
+			move.w	#0,result(a6)			;									<18>
+			move.b	TESysJust,(a2)			; set leading edge
+			beq.s	p2cExit					; if 0, offset ok					<18>
+			move.w	textLen+2(a6),result(a6) ; else set it to length			<18>
+			bra.s	p2cExit
+
+p2cAfterEnd
+; if width exceeds length, then past the end of the line, so					<17>
+; return leadingEdge = ¬teSysJust, offset = length (should already
+; be in d4). Width for offset is in d5.
+			
+			tst.b	TESysJust				; 									<18>
+			seq		(a2)					; set leadingEdge = ¬teSysJust		<18>
+			beq.s	@doneSetLength			; if TESysJust ≠$0, …				<18>
+			moveq	#0,d4					; … then reset length				<18>
+@doneSetLength								;									<18>
+			move.l	widRemAdr(a6),d1		; should we set widthRemaining?			<x2>
+			beq.s	DoneP2C					; if not, just return length			<x2>
+			move.l	d1,a4					; copy widRemAdr						<x2>
+			sub.l	d5,d3					; remaining width						<x2><17>
+; we have to scale up remaining width.												<17>
+			tst.b	jdRec.outScalTrue(a6)	; do we have any scaling?				<19>
+			beq.s	@doneWidthScaleup		; if not, skip this part
+			subq	#4,sp					; room for FixDiv result
+			move.l	d3,-(sp)					; width is first FixMul arg
+			move.l	jdRec.outScaling(a6),-(sp) 	; second param = numer/denom		<19>
+			_FixMul							;
+			move.l	(sp)+,d3				; get scaled width
+@doneWidthScaleup
+; now set it, then go set offset and return.
+			move.l	d3,(a4)					; set widthRemaining				<x2><17><19><!>
+			bra.s	DoneP2C					; go return length.						<x2>
+
+			endWith
+
+			endproc
+
+; -----------------------------------------------------------------------	<17>
+; PROCEDURE InitFontAndScale(
+;					numer:				Point;
+;					denom:				Point;
+;					jdRecPtr:			^JustDataRec
+;			);
+;							
+; This calls FMSwapFont, checks the FontClass field of the style mapping
+; table in the FOND (if present), and sets the noInterCh flag field of the
+; JustDataRec, based on this info. It sets up the input and output scaling	<19>
+; factors and the relevant flags to 0. It also initializes all of the other
+; flags (except restoreSE) to 0 (false).
+;
+; Changed to not clear restoreSE, since it is initialized by DoSpChExtra	<18>
+; anyway, and since we need to preserve its state when we call this
+; routine to force FMSwapFont before getting widths from the width table.
+; (Now it doesn't matter, since we call DoSwapFont when we need to preserve	<19>
+; the state of restoreSE)
+;
+; PROCEDURE DoSwapFont(														<19>
+;					numer:				Point;
+;					denom:				Point;
+;					jdRecPtr:			^JustDataRec
+;			);
+;
+; This just calls SwapFont. The jdRecPtr parameter is not used, but is
+; passed for stack frame compatibility so we can share code more easily.
+; -----------------------------------------------------------------------
+
+			proc
+			export	InitFontAndScale,DoSwapFont
+			import	StdUnlink
+
+ifsRecord	record	{a6link},decr
+ifsArgs		equ		*-8						; size of arguments.
+numer		ds.l	1						; Point - numer
+denom		ds.l	1						; Point - denom
+jdRecPtr	ds.l	1						; pointer to JustDataRec
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6 register.
+fmInRec		ds.b	16						; FMInput record
+ifsLocals	equ		*						; size of local variables.
+			endr
+
+smtFontClass equ	0						; offset of Font Class in style map table
+fcNoInterCh	equ		10						; Font Class bit flag for no interchar sp
+fixed1		equ		$00010000				; 1.0 in 16.16 Fixed format					<19>
+
+InitFontAndScale
+			with	ifsRecord,JustDataRec	;										<19>
+			link	a6,#ifsLocals			; link the stack.
+
+; Compute input numer.h/denom.h and set inScaling and inScalTrue.
+; This was moved from InitScaleFac routine.											<19>
+
+			move.l	jdRecPtr(a6),a1			; pointer to JustDataRec
+			move.l	#fixed1,inScaling(a1)	; initially assume 1,1 scaling			<19>
+			sf		inScalTrue(a1)			; follows from above					<19>
+			move.w	numer+h(a6),d1			; get numer
+			move.w	denom+h(a6),d2			; get denom
+			beq.s	@doneInScaling			; if 0, then skip next part				<16>
+			cmp.w	d1,d2					; if they're the same…
+			beq.s	@doneInScaling			; …then skip next part
+			subq	#4,sp					; room for FixRatio result
+			move.w	d1,-(sp)				; push numer.h
+			move.w	d2,-(sp)				; push denom.h
+			_FixRatio						; divide
+			move.l	jdRecPtr(a6),a1			; restore pointer to JustDataRec
+			move.l	(sp)+,inScaling(a1)		; save computed scaling					<19>
+			st		inScalTrue(a1)			; follows from above					<19>
+@doneInScaling
+
+; Fill font mgr input record, call font mgr to set up FOND handle so we can see if
+;  FOND allows interchar spacing. Also sets up Width table.
+; Common routine returns FMOutRec ptr in a0.										<19>
+
+			bsr.s	CommonSwapFont			;										<19>
+
+; Compute output numer.h/denom.h and set outScaling and outScalTrue.
+; New section; code to do this used to be duplicated in Char2Pix, Pix2Char, etc.	<19>
+
+			move.l	jdRecPtr(a6),a1			; pointer to JustDataRec
+			move.l	#fixed1,outScaling(a1)	; initially assume 1,1 scaling
+			sf		outScalTrue(a1)			; follows from above
+			move.w	fmOutNumer+h(a0),d1		; get numer
+			move.w	fmOutDenom+h(a0),d2		; get denom
+			beq.s	@doneOutScaling			; if 0, then skip next part
+			cmp.w	d1,d2					; if they're the same…
+			beq.s	@doneOutScaling			; …then skip next part
+			subq	#4,sp					; room for FixRatio result
+			move.w	d1,-(sp)				; push numer.h
+			move.w	d2,-(sp)				; push denom.h
+			_FixRatio						; divide
+			move.l	jdRecPtr(a6),a1			; restore pointer to JustDataRec
+			move.l	(sp)+,outScaling(a1)	; save computed scaling
+			st		outScalTrue(a1)			; follows from above
+@doneOutScaling
+
+; Check if FOND allows intercharacter spacing
+
+;;			move.l	jdRecPtr(a6),a1			; get ptr to passed JustDataRec
+			sf		noInterCh(a1)			; initialize
+			move.l	LastFOND,d0				; Do we have a FOND handle?
+			beq.s	@doneFONDCheck			; skip this if not
+			move.l	d0,a0
+			move.l	(a0),a0					; Get FOND pointer
+			move.l	ffStylOff(a0),d0		; Get offset to style-map table
+			beq.s	@doneFONDCheck				; skip if no table
+			move.w	smtFontClass(a0,d0.l),d0	; get Font Class from table
+			btst	#fcNoInterCh,d0			; Does FOND forbid interchar spacing?
+			sne		noInterCh(a1)			; set according to result
+@doneFONDCheck
+
+; Initialize other flags to 0
+
+			sf		startNoFwd(a1)
+			sf		endBackup(a1)
+			sf		haveWeight(a1)
+;;			sf		restoreSE(a1)			; don't do this one						<18>
+
+; Restore regs, unlink stack, and return
+
+			move.w	#ifsArgs,d0				; for std exit
+			bra		StdUnlink				; StdUnlink
+			endwith	;ifsRecord,JustDataRec
+
+; Common routine for to set up SwapFont input record and call it.					<19>
+; Expects stack frame to be set up.
+; Returns FMOutRec ptr in a0.
+
+CommonSwapFont
+			with	ifsRecord
+			lea		fmInRec(a6),a1			; Point to local FMInput record			<19>
+			subq	#4,sp					; Room for result (FMOutput ptr)		<19>
+			move.l	a1,-(sp)				; push ptr to input record				<19>
+			move.l	grafGlobals(a5),a0		; Point to QuickDraw globals
+			move.l	thePort(a0),a0			; Get current grafport
+			move.w	txFont(a0),(a1)+		; Get family from thePort
+			move.w	txSize(a0),(a1)+		; Get size from thePort
+			move.b	txFace(a0),(a1)+		; Get face from thePort
+			sf		(a1)+					; Set needBits false
+			move.w	device(a0),(a1)+		; Get device from thePort
+			move.l	numer(a6),(a1)+			; Get numer from input params
+			move.l	denom(a6),(a1)			; Get denom from input params
+			_FMSwapFont
+			move.l	(sp)+,a0				; get FMOutPtr							<19>
+			rts
+			endwith	;ifsRecord
+
+; Little routine just to do the swap font stuff (same parameters)						<19>
+
+DoSwapFont
+			with	ifsRecord
+			link	a6,#ifsLocals			; link the stack.
+			bsr.s	CommonSwapFont			;
+			move.w	#ifsArgs,d0				; for std exit
+			bra		StdUnlink				; StdUnlink
+			endwith	;ifsRecord
+
+			endproc
+
+; -----------------------------------------------------------------------	<x5>
+; PROCEDURE InitWeight(
+;					textPtr:			Ptr;
+;					textLen:			Longint;
+;					styleRunPosition:	JustStyleCode;
+;					jdRecPtr:			^JustDataRec
+;			);
+;							
+; This initializes some of the fields in a JustDataRec, based on the
+; text, the styleRunPosition, and the smgrCharPortion field in the
+; SMgrRecord. It sets up the following:
+;	weight
+;	charPortion
+;	spPortion
+;	startNoFwd
+;	endBackup
+;
+; NOTE: trashes a0-a1,d0-d2
+; -----------------------------------------------------------------------
+
+			proc
+			export	InitWeight				;										<17>
+			import	StdUnlink
+
+iwRecord	record	{a6link},decr
+iwArgs		equ		*-8						; size of arguments.
+textPtr		ds.l	1						; text pointer.
+textLen		ds.l	1						; text length.
+stylRunPos	ds.w	1						; style run position code.
+jdRecPtr	ds.l	1						; pointer to JustDataRec
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6 register.
+iwLocals	equ		*						; size of local variables.
+			endr
+
+portion100	equ	$1000						; 100% in 4.12 format
+
+InitWeight									;											<17>
+			with	iwRecord
+			link	a6,#iwLocals			; link the stack.
+			movem.l	d3-d4,-(sp)				; save regs
+
+; Initialize char portion and space portion to 0% and 100% (moved here)					<17>
+
+			moveq	#0,d3					; also use for longizing CharPortion
+			move.l	#portion100,d4
+
+		IF useInterChar THEN				;											<20>
+
+; Check if FOND allows intercharacter spacing (new section)								<17>
+
+			with	JustDataRec				;
+			move.l	jdRecPtr(a6),a0			; pointer to JustDataRec
+			tst.b	noInterCh(a0)			; interchar forbidden?
+			bne.s	@doneGetPortion			; If so, don't get char portion
+			endwith	;JustDataRec			;
+
+; Get char portion (cp) in d3, ensure that it is in the range 0.0 to 1.0,
+; and then get space portion (sp = 1-cp) in d4.
+
+			with	SMgrRecord
+			GetSMgrCore	a1					; get SMgrRecord pointer
+			move.w	smgrCharPortion(a1),d3	; get CharPortion, 4.12 fixed
+			cmp.w	d4,d3					; within range 0.0 to 1.0?
+			bls.s	@doneFixPortion			; if so, skip fix
+			move.w	d4,d3					; fix char proportion
+@doneFixPortion
+			sub.w	d3,d4					; get space proportion in d4
+			endwith
+@doneGetPortion
+
+		ENDIF								;											<20>
+
+; Now compute #chars*cp + #spaces*sp by looping through the text buffer,
+; testing each character, and then adding cp or sp to d2. Here, d2 is a
+; 20.12 fixed-point number.
+			move.l	textPtr(a6),a0			; get text ptr
+			move.l	textLen(a6),d0			; get text len
+			move.l	a0,a1					; copy text pointer
+			moveq	#0,d2					; initialize accumulator
+			bra.s	@testLength				; jump to end of loop
+@loopStart
+			move.b	(a0)+,d1				; get next char
+			cmp.b	#' ',d1					; space?
+			bne.s	@notSpace				; if not, handle it separately
+			add.l	d4,d2					; add space proportion
+			bra.s	@testLength				;
+@notSpace
+			add.l	d3,d2					; add char proportion
+@testLength
+			subq.l	#1,d0					; decrement length
+			bge.s	@loopStart				; loop while still chars
+
+; Now, we use StyleRunPosition to adjust d2 and set d0/d1. First, we make
+; d2 a 19.13 format fixed, and we can treat d3 as 0.5*cp in 19.13 format.
+			with	JustDataRec
+			move.l	jdRecPtr(a6),a0			; pointer to JustDataRec
+			sf		startNoFwd(a0)			; initialize startNoFwd					<16>
+			sf		endBackup(a0)			; initialize endBackup					<16>
+			add.l	d2,d2					; now accum is 19.13 fixed				<16>
+			beq.s	@doneLeftAdjust			; if no chars, skip adjust				<16>
+			move.w	stylRunPos(a6),d0		; get styleRunPosition					<16>
+
+; Adjust for right end of style run
+			btst.l	#0,d0					; any adjustments for right end?		<17>
+			bne.s	@doneRightAdjust		; no,,skip
+			cmp.b	#' ',d1					; was last char a space?
+			beq.s	@doneRightAdjust		; if so, skip
+			sub.l	d3,d2					; subtract 0.5 cp from accum
+			st		endBackup(a0)			; now move for right end is -1 ce
+@doneRightAdjust
+
+; Adjust for left end of style run
+			btst.l	#1,d0					; any adjustment for left end?			<17>
+			bne.s	@doneLeftAdjust
+			move.b	(a1),d1
+			cmp.b	#' ',d1					; is first char a space?
+			beq.s	@doneLeftAdjust			; if so, skip
+			sub.l	d3,d2					; subtract 0.5 cp from accum
+			st		startNoFwd(a0)			; now move for left end is 0
+@doneLeftAdjust
+
+; Now make d2 and d3 16.16 Fixed and save them
+			lsl.l	#3,d2					; now accum is 16.16 Fixed.
+			move.l	d2,weight(a0)			; save it
+			lsl.l	#4,d3					; now cp is 16.16 Fixed
+			move.l	d3,charPortion(a0)		; save it too
+			lsl.l	#4,d4					; now sp is 16.16 Fixed
+			move.l	d4,spPortion(a0)		; guess what?
+			
+; Restore regs, unlink stack, and return
+			movem.l	(sp)+,d3-d4				; restore regs
+			move.w	#iwArgs,d0				; for std exit
+			bra		StdUnlink				; StdUnlink
+			endwith	; JustDataRec
+			endwith	; iwRecord
+
+			endproc
+
+; -----------------------------------------------------------------------------	<x5><17>
+; PROCEDURE	CalcSpChExtra(
+;						textPtr:			Ptr;
+;						textLen:			Long;
+;						slop:				Fixed;	{signed}
+;						styleRunPosition:	JustStyleCode;
+;						numer:				Point;
+;						denom:				Point;
+;						jdRecPtr:			^JustDataRec;
+;			);
+;
+; CalcSpChExtra finds the correct spExtra and charExtra values for the passed
+; string, based on its length, the slop value, the styleRunPosition, and the
+; scaling factors. It assumes InitFontAndScale has been called to set the			<19>
+; scaling factor, and calls InitWeight if the slop is nonzero to set the weight.
+;
+; InitFontAndScale must be called before calling this.
+;
+; Sets addSpExtra, addSpExScal, addChExtra, addChExScal, runSlop.
+; Uses and may modify haveWeight.
+;
+; NOTE: trashes a0-a1,d0-d2
+; -----------------------------------------------------------------------------
+
+			proc
+			export	CalcSpChExtra
+			import	StdUnlink
+			import	GetFontSize		;													<19>
+			
+csceRecord	record	{a6link},decr
+csceArgs	equ		*-8				; size of arguments.
+textPtr		ds.l	1				; text pointer.
+textLen		ds.l	1				; text length.
+slop		ds.l	1				; slop pixels.
+stylRunPos	ds.w	1				; style run position code.
+numer		ds.l	1				; Point - numer										<5>
+denom		ds.l	1				; Point - denom										<5>
+jdRecPtr	ds.l	1				; pointer to JustDataRec
+return		ds.l	1				; return address.
+a6link		ds.l	1				; old a6 register.
+csceLocals	equ		*				; size of local variables.
+			endr
+
+csceRegs	reg		a3/d3-d4				;											<19>
+
+CalcSpChExtra
+			with	csceRecord,JustDataRec,SMgrRecord
+			link	a6,#csceLocals			; link the stack.
+			movem.l	csceRegs,-(sp)			; save regs									<17><19>
+			move.l	jdRecPtr(a6),a3			; get ptr to JustDataRec					<17>
+
+			clr.l	addSpExtra(a3)			; Initialize fields we set directly			<17>
+			clr.l	addSpExScal(a3)			;
+			clr.l	addChExtra(a3)			;
+			clr.l	addChExScal(a3)			;
+			move.l	slop(a6),runSlop(a3)	;
+			beq		@csceRestoreRegs		; if slop zero, skip this whole mess
+
+			tst.b	haveWeight(a3)			; have we already done this?				<17>
+			bne.s	@gotWeight				; if so, skip								<17>
+			move.l	textPtr(a6),-(sp)		; push textPtr
+			move.l	textLen(a6),-(sp)		; push textLen
+			move.w	stylRunPos(a6),-(sp)	; push styleRunPosition
+			move.l	a3,-(sp)				; push ptr to JustDataRec
+			bsr		InitWeight				; Fill out weight							<17>
+			st		haveWeight(a3)			; don't do it again							<17>
+@gotWeight									;											<17>
+			tst.l	weight(a3)				; Check nc*cp+ns*sp
+			beq		@csceRestoreRegs		; if 0, nothing to do
+			
+; Determine limit on negative spExtra & chExtra.										new<19>
+; This uses a simple heuristic test. The basic idea is don't let the additional
+; Script Mgr spExtra or chExtra be < -3 for an unscaled 12 pt font (with appropriate
+; adjustments for font size and scaling). This ignores any existing spExtra or
+; chExtra in the port, and doesn't check the actual width of a space or narrow char.
+
+			move.l	grafGlobals(a5),a0		; grafGlobals
+			move.l	thePort(a0),a0			; get thePort pointer
+			bsr		GetFontSize				; expects thePort^ in a0, returns size in d0
+			swap	d0						; make a Fixed
+			clr.w	d0						; and clear frac part
+			tst.b	inScalTrue(a3)			; any num/denom scaling?
+			beq.s	@doneSizeAdjust			; if not, skip size adjust
+			subq	#4,sp					; space for FixMul return
+			move.l	d0,-(sp)				; push size
+			move.l	inScaling(a3),-(sp)		; push numer.h/denom.h
+			_FixMul
+			move.l	(sp)+,d0				; get scaled size
+@doneSizeAdjust
+			asr.l	#2,d0					; divide by 12/3
+			neg.l	d0						;
+			move.l	d0,d4					; save limit
+
+; Make slop/(nc*cp + ns*sp)
+
+			subq	#4,sp					; make stack space for result
+			move.l	runSlop(a3),-(sp)		; push slop (numerator)
+			move.l	weight(a3),-(sp)		; push weight (denom)
+			_FixDiv
+
+; Now slop/(nc*cp + ns*sp) is on the stack. If cp is 0, this is slop/ns,
+; which is the desired additional spExtra, so skip the unnecessary charExtra
+; stuff, skip multiplying slop/weight by sp (which is 1.0), and go straight
+; to where we set addSpExtra from result on stack. Otherwise, save slop/weight
+; in d3 and then proceed with charExtra stuff.
+
+		IF useInterChar THEN				;											<20>
+			move.l	charPortion(a3),d0		; get charPortion
+			beq.s	@setSpExtra				; if 0, skip a lot of stuff
+			move.l	(sp)+,d3				; get slop/weight
+
+; Determine additional chExtra.
+
+			subq	#4,sp					; make stack space for result
+			move.l	d0,-(sp)				; push charPortion
+			move.l	d3,-(sp)				; push slop/weight
+			_FixMul							; get unscaled additional charExtra
+			move.l	(sp)+,d0				;											<19>
+			move.l	d0,addChExtra(a3)		; save in JustDataRec						<17><19>
+			move.l	d0,addChExScal(a3)		; initialize this too						<19>
+			cmp.l	d4,d0					; do we exceed limit?						<19>
+			blt.s	@recalcExtra			; if so, go recalculate Extra values		<19>
+
+; Determine additional spExtra
+
+			subq	#4,sp					; make stack space for result
+			move.l	spPortion(a3),-(sp)		; push spPortion
+			move.l	d3,-(sp)				; push slop/weight
+			_FixMul							; get unscaled additional spExtra on stack
+@setSpExtra
+		ENDIF								;											<20>
+			move.l	(sp)+,d0				; get unscaled additional spExtra			<19>
+			move.l	d0,addSpExtra(a3)		; save in JustDataRec						<17><19>
+			move.l	d0,addSpExScal(a3)		; initialize this too						<19>
+			cmp.l	d4,d0					; do we exceed limit?						<19>
+			bge.s	@doScaling				; if not, skip pinning or recalculation		<19>
+
+; If charPortion is 0, all we can do is pin spExtra.									new<19>
+
+		IF useInterChar THEN				;											<20>
+			tst.l	charPortion(a3)			; is charPortion zero?
+			bne.s	@recalcExtra			; if no, go recalculate Extra values
+		ENDIF								;											<20>
+
+			move.l	d4,addSpExtra(a3)		; pin spExtra
+			move.l	d4,addSpExScal(a3)		; this too
+
+		IF useInterChar THEN				;											<20>
+			bra.s	@doScaling				; now go to scaling
+			
+; We have hit a neg limit, and charPortion is not 0. Set spExtra and chExtra to the		new<19>
+; greater of Extra limit (d4) or slop/(adjusted number of chars).
+
+@recalcExtra
+			move.l	textLen(a6),d0			; get length
+			swap	d0						; make Fixed
+			clr.w	d0						; clear frac part
+			move.l	#FixedPoint5,d1			; get value for adjusting number of chars
+
+			tst.b	startNoFwd(a3)			; only .5 chExtra for left char?
+			beq.s	@doneStartAdjust		; skip if not
+			sub.l	d1,d0					; adjust number of chars
+@doneStartAdjust							;
+			tst.b	endBackup(a3)			; only .5 chExtra for right char?
+			beq.s	@doneEndAdjust			; skip if not
+			sub.l	d1,d0					; adjust number of chars
+@doneEndAdjust								;
+
+			subq	#4,sp					; result space
+			move.l	runSlop(a3),-(sp)		; push slop (numerator)
+			move.l	d0,-(sp)				; push adjusted number of chars (denom)
+			_FixDiv							;
+			move.l	(sp)+,d0				; get new value for spExtra and chExtra
+			cmp.l	d4,d0					; does it exceed limit?
+			bge.s	@stuffNewExtra			; if not, use it
+			move.l	d4,d0					; else, just pin everything
+@stuffNewExtra								;
+			move.l	d0,addChExtra(a3)		; stuff it everywhere
+			move.l	d0,addChExScal(a3)		;
+			move.l	d0,addSpExtra(a3)		;
+			move.l	d0,addSpExScal(a3)		;
+		ENDIF								;											<20>
+
+; Scale spExtra and chExtra by numer/denom (collected here from above)					<19>
+
+@doScaling
+			tst.b	inScalTrue(a3)			; do we have any scaling?					<10><19>
+			beq.s	@doneScaleExtra			; skip if not								<10>
+
+		IF useInterChar THEN				;											<20>
+			move.l	addChExtra(a3),d0		; get unscaled value							<19>
+			beq.s	@doneScaleChExtra		; skip if 0										<19>
+			subq	#4,sp					; make stack space for result					<19>
+			move.l	d0,-(sp)				; push unscaled chExtra							<19>
+			move.l	inScaling(a3),-(sp)		; second param = numer/denom				<10><19>
+			_FixDiv							; get (unscaled chExtra)/(numer/denom)		<17>
+			move.l	(sp)+,addChExScal(a3)	; save in JustDataRec						<10><17><19>
+@doneScaleChExtra							;											<10>
+		ENDIF								;											<20>
+
+			move.l	addSpExtra(a3),d0		; get unscaled value							<19>
+			beq.s	@doneScaleExtra			; skip if 0										<19>
+			subq	#4,sp					; make stack space for result					<19>
+			move.l	d0,-(sp)				; push unscaled spExtra							<19>
+			move.l	inScaling(a3),-(sp)		; second param = numer/denom				<13><19>
+			_FixDiv							; (spExtra)/(num/den)						<13>
+			move.l	(sp)+,addSpExScal(a3)	; save in JustDataRec						<17><19>
+@doneScaleExtra								;											<13><19>
+			
+; Restore regs, unlink the stack and return to the caller.
+
+@csceRestoreRegs
+			movem.l	(sp)+,csceRegs			; restore regs								<17><19>
+@csceUnlink
+			move.w	#csceArgs,d0			; for std exit
+			bra		StdUnlink				; StdUnlink
+			endwith
+			
+			endproc
+
+; -----------------------------------------------------------------------------	<17>
+; PROCEDURE	DoSpChExtra(
+;						jdRecPtr:			^JustDataRec;
+;			);
+;
+; SetSpChExtra sets the spExtra value of the port and the GrafGlobal qdChExtra,
+; based on values in the JustDataRec. If addSpExScal is non-zero, the routine
+; saves the current value of spExtra, adds in the addSpExScal value, and sets
+; the restoreSE flag. The addChExScal value is scaled down by the font size and
+; put in qdChExtra. The runSlop is also saved in qdRunSlop.
+;
+; -----------------------------------------------------------------------------
+
+			proc
+			export	DoSpChExtra
+			import	StdUnlink
+			import	GetFontSize
+			
+dsceRecord	record	{a6link},decr
+dsceArgs	equ		*-8				; size of arguments.
+jdRecPtr	ds.l	1				; pointer to JustDataRec
+return		ds.l	1				; return address.
+a6link		ds.l	1				; old a6 register.
+dsceLocals	equ		*				; size of local variables.
+			endr
+
+DoSpChExtra
+			with	dsceRecord,JustDataRec
+			link	a6,#dsceLocals			; link the stack.
+			move.l	jdRecPtr(a6),a1			; get ptr to passed JustDataRec
+			sf		restoreSE(a1)			; initialize restoreSE
+
+			move.l	grafGlobals(a5),a0			; grafGlobals
+			clr.l	qdChExtra(a0)				; initialize
+			move.l	runSlop(a1),qdRunSlop(a0)	; put slop in globals so pics can save it
+			beq.s	@dsceUnlink					; if no slop, skip all of this
+
+			move.l	thePort(a0),a0			; get thePort pointer
+
+; If addSpExScal is non-zero, add it in to port's value, first saving old value
+
+			move.l	addSpExScal(a1),d0
+			beq.s	@doneSpExtra
+			
+; Now we have scaled spExtra in d0. Save the current spExtra value, then update it.
+
+			move.l	spExtra(a0),d1			; get original spExtra
+			move.l	d1,oldSpExtra(a1)		; save original spExtra…
+			st		restoreSE(a1)			; and remember to restore it
+			add.l	d0,d1					; add in scaled extra value
+			add.l	#$00000001,d1			; old <med> fix for QD bug - it rounds
+											; differently for measuring and drawing
+											; (is this fix still needed? does it
+											;  work right for neg spExtra? -pke)
+			move.l	d1,spExtra(a0)			; adjust spExtra
+@doneSpExtra
+
+		IF useInterChar THEN				;											<20>
+
+; If addChExScal is non-zero, scale it by font size (like CharExtra field in port)
+; and stuff it in qdChExtra.
+
+			move.l	addChExScal(a1),d1
+			beq.s	@doneChExtra
+
+; This does essentially the same thing as QuickDraw’s CharExtra routine.
+
+			bsr		GetFontSize				; assume thePort^ in a0, get font size in d0.w
+			swap	d0						; make it a Fixed
+			clr.w	d0						; clear the fraction part
+			subq	#4,sp					; space for result
+			move.l	d1,-(sp)				; addChExScal
+			move.l	d0,-(sp)				; font size as Fixed
+			_FixDiv							; addChExScal/(font size)
+			move.l	grafGlobals(a5),a0		; grafGlobals
+			move.l	(sp)+,qdChExtra(a0)		; get 16.16 Fixed result for use by QuickDraw
+@doneChExtra
+
+		ENDIF								;											<20>
+
+; Unlink the stack and return to the caller.
+
+@dsceUnlink
+			move.w	#dsceArgs,d0			; for std exit
+			bra		StdUnlink				; StdUnlink
+			endwith
+			
+			endproc
+
+; -----------------------------------------------------------------------------	<x5>
+; PROCEDURE	RestoreSpChExtra(
+;					jdRecPtr:			^JustDataRec
+;			);
+;
+; This restores the original spExtra value, and clears qdChExtra and qdRunSlop.		<17>
+; -----------------------------------------------------------------------------
+
+			proc
+			export	RestoreSpChExtra
+			import	StdUnlink
+
+rsceRecord	record	{a6link},decr
+rsceArgs	equ		*-8				; size of arguments.
+jdRecPtr	ds.l	1				; pointer to JustDataRec
+return		ds.l	1				; return address.
+a6link		ds.l	1				; old a6 register.
+rsceLocals	equ		*				; size of local variables.
+			endr
+
+RestoreSpChExtra
+			with	rsceRecord,JustDataRec
+			link	a6,#rsceLocals			; link the stack.
+
+			move.l	grafGlobals(a5),a0		; grafGlobals								<9><17>
+			clr.l	qdChExtra(a0)			; never hurts to clear it					<9><12>
+			clr.l	qdRunSlop(a0)			; we're done with this too					<9><12>
+
+			move.l	jdRecPtr(a6),a1			; get JustDataRec pointer					<17>
+			tst.b	restoreSE(a1)			; do we need to bother?						<17>
+			beq.s	@doneRestoreSE
+			move.l	thePort(a0),a0				; get thePort pointer					<10><17>
+			move.l	oldSpExtra(a1),spExtra(a0)	; restore old spExtra					<10><17>
+@doneRestoreSE
+
+			move.w	#rsceArgs,d0			; for std exit
+			bra		StdUnlink				; StdUnlink
+			endWith
+
+			endproc
+
+; -----------------------------------------------------------------------------		<19>
+; routine	GetPortChExtra
+;
+; input: none
+; output: d2.l	port's chExtra, converted to 16.16 and scaled back up by font size
+; -----------------------------------------------------------------------------
+
+			proc
+			export	GetPortChExtra
+			import	GetFontSize
+
+GetPortChExtra
+			move.l	grafGlobals(a5),a0		; find the QuickDraw globals.
+			move.l	thePort(a0),a0			; get thePort pointer
+			moveq	#0,d2					; assume port has no chExtra
+			tst.w	portVersion(a0)			; negative if cGrafPort
+			bpl.s	@donePortChExtra		; otherwise, get port's chExtra
+			move.w	chExtra(a0),d2			; get 4.12 fixed format
+			beq.s	@donePortChExtra		; if zero, we're done
+			ext.l	d2						; extend sign bits
+			asl.l	#4,d2					; convert to 16.16 format.
+			bsr		GetFontSize				; assume thePort^ in a0, get font size in d0.w
+			swap	d0						; make Fixed
+			clr.w	d0						; clear frac part
+			subq	#4,sp					; space for result
+			move.l	d0,-(sp)				; push size
+			move.l	d2,-(sp)				; push chExtra for 1-point size
+			_FixMul							; chExtra on stack
+			move.l	(sp)+,d2				; get real chExtra for our size
+@donePortChExtra							;
+
+			rts
+
+			endproc
+
+; -----------------------------------------------------------------------------	<x5>
+; routine:	GetFontSize
+; input:	a0		Pointer to thePort					<8><17>
+; output:	d0.w	Font size
+;
+; Copied from QD code in CharExtra.						<x5>
+; -----------------------------------------------------------------------------
+
+			proc
+			export	GetFontSize
+
+GetFontSize
+			MOVE.w	txSize(A0),D0			;get the text size					<17>
+			BNE.S	@notZero				;not FMDefault
+			TST.w	txFont(A0)				;system font?						<17>
+			BNE.S	@apFont					;if not, use default
+			MOVE.w	SysFontSize,D0			;if family is zero, use system font size
+			BNE.S	@notZero
+@apFont
+			MOVE.B	FMDefaultSize,D0		;if family nonzero or system font size zero, 
+			BNE.S	@notZero				; use the default size
+			MOVEQ	#12,D0					;if the default is zero, hardcode to 12
+@notZero
+			rts
+
+			endproc
+			
+; -----------------------------------------------------------------------------	<x5>
+; routine:	SignFixRound
+; input:	d0.l	signed fixed
+; output:	d0.w	integer produced by rounding
+; -----------------------------------------------------------------------------
+
+			proc
+			export	SignFixRound
+
+SignFixRound
+			tst.l	d0
+			bmi.s	@neg
+
+			add.l	#FixedPoint5,d0
+			swap	d0
+			rts
+@neg
+			sub.l	#FixedPoint5,d0
+			swap	d0
+			rts
+
+			endproc
+
+; -----------------------------------------------------------------------------	<19>
+; routine:	GetMeasProc
+; input:	none
+; output:	d0.l	0 if StdTxMeas used, -1 if custom txMeasProc used
+;			a0.l	ptr to meas proc to use
+;
+; Extracted this from Pixel2Char because it will be used by MeasureJust too
+; -----------------------------------------------------------------------------
+
+			proc
+			export	GetMeasProc
+
+stdTxMeasTrap	equ		$A8ED				;
+
+GetMeasProc
+			move.w	#stdTxMeasTrap,d0
+			_GetTrapAddress					; get address of StdTxMeas in a0
+			moveq	#0,d0					; set flag: no custom proc
+			move.l	grafGlobals(a5),a1		; Point to QuickDraw globals
+			move.l	thePort(a1),a1			; Get current grafport
+			move.l	grafProcs(a1),d1		; Is grafprocs NIL?
+			beq.s	@gotProc				; if so, we use StdTxMeas
+			move.l	d1,a1					; else, check grafprocs
+			move.l	txMeasProc(a1),d1 		; get txMeasProc
+			cmp.l	a0,d1					; is it same as StdTxMeas?
+			beq.s	@gotProc				; if so, skip reset
+			move.l	d1,a0					; else, we use custom proc
+			moveq	#-1,d0					; and say so
+@gotProc
+			rts
+
+			endproc
+
+;------------------------------------------										<5>
+;
+;  GetScaledFontInfo procedure
+;
+;  Copied from QuickDraw, but modified to accept scaling parameters and
+;  to use record for stack frame.
+;  Rearranged parameter order.													<7>
+;  Moved to ScriptMgrExtTail.a													<7>
+;
+
+			end

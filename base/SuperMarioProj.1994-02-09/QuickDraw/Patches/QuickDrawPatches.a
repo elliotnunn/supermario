@@ -1,0 +1,2604 @@
+;
+;	File:		QuickDrawPatches.a
+;
+;	Contains:	Linked patches for QuickDraw
+;
+;	Written by:	Jeff Miller and Darin Adler
+;
+;	Copyright:	© 1990-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM6>	 9/12/93	SAM		Changed all instances of _Translate24to32 to _rTranslate24to32
+;									so they can coditionalized out of the build.
+;	   <SM5>	 8/14/92	CSS		Integrate from Reality:
+;									<22> 8/13/92 SAH	#1039892: Fixed a bug in the ScaleBlt 1->16 non-colorizing loop
+;														(scIndexedTo16) where the bit offset into the source would be
+;														trashed in certain cases.
+;	   <SM4>	 7/17/92	CSS		Integrate from Reality:
+;									<21> 6/8/92	SAH		#1031825: Added new indexed to 16 and indexed to 32 blit loops
+;														for ScaleBlt.
+;	   <SM3>	 5/21/92	CSS		Integrate from Reality:
+;									<20> 4/10/92 SAH	Moved in the working fast bSetup0 patch for 68040 machines from
+;														QDIIciPatchROM.a.
+;	   <SM2>	 4/15/92	RB		All patches in this file up to this point have been rolled in
+;									except for the ones designated for 'TheFuture' which are not
+;									tested : DrawPictureForPurgedPictures in Pictures.a,
+;									newGetCTable in ColorMgr.a, ciNewFixRatio in DrawArc.a,
+;									DisposeOffscreenBufferFix in GWorld.a, FixPatExpand (TheFuture)
+;									not set yet, CheckForAbortPicPlayBackFix (TheFuture) not set
+;									yet, PatchSeedFill (TheFuture) not set yet, ciPatchGetCPixel
+;									(TheFuture) not set yet, PatchClosePictureCI (TheFuture) not set
+;									yet, AfterOpenCPortInNewGWorld in GWorld.a, PutPMDataPackBits 2
+;									patches in Pictures.a, CopyBitsGetScreenBase in BitMaps.a,
+;									CopyBitsDitherWhileFlattening, GWorldGetMaxDevice in GWorld.a,
+;									ciClosePortPatch in CoorAsm.A, NewPixMap in ColorAsm.a,
+;									BitMapRgn in Regions.a
+;		<19>	10/17/91	DTY		Avoid duplicate NewPatExpand label, and use trap number for
+;									PatExpand instead of macro because the linked patch macros don’t
+;									seem to know about it.
+;		<18>	10/16/91	KON		Move some routines from QDciPatchROM over and make them linked
+;									patches.
+;		<17>	10/15/91	KON		Clear pmVersion in NewPixMap so that pixmaps created while an
+;									offscreen gWorld is active don't have non-nil pmVersions.
+;		<16>	 10/2/91	DTY		Conditionalise last change for TheFuture.
+;		<15>	 10/1/91	KON		ComeFrom inside getPMData patch on UnpackBits to abort picture
+;									if an error is detected (QDError = AbortPicPlayBackErr).
+;		<14>	 7/23/91	KON		Fix 32-bit clean problems in BitMapRgn.
+;		<13>	 6/12/91	LN		changed #include 'HardwareEqu.a' to 'HardwarePrivateEqu.a'
+;		<12>	  4/3/91	KON		dba, BRC#86188: Make DrawPicture re-entrant by saving and
+;									restoring global variables playpic, playindex, and patAlign
+;									across calls.  This fixes bugs in balloon help while printing,
+;									and a bug in ResEdit while printing in the background.
+;		<11>	 3/31/91	dba		gbm: DrawPicture cannot handle purged handles, so lets make sure
+;									it never gets any
+;		<10>	 3/22/91	KON		CSD, BRC#B6-C4-HitTeam: DelPortList cannot assume that the port
+;									is in the list.  Also, clear the high word of D0 before calling
+;									SetHandleSize.
+;		 <9>	 3/19/91	KON		DTY:  When fixing PortList Munger bug, QDciROMPatch was getting
+;									too big, so we moved some patches (ClosePort, CloseCPort,
+;									NewPixMap, & BitMapRgn) into this file and made then linked
+;									patches.
+;		 <8>	 1/14/91	KON		Remove comefrom UpdateGWorld patch since it is now completely
+;									patched out in QDciPatch. [SMC]
+;		 <7>	12/14/90	bbm		(djw) roll in linked comefrompatch from patchIIrom.a.
+;		 <6>	11/26/90	JSM		<bbm> Move come-from patch on _StackSpace inside RgnOp here from
+;									PatchIIROM.a.  Note that this patch was also on the Plus and SE,
+;									but never worked on those machines since the ROM doesn't call
+;									_StackSpace!  We may want to revisit this in the future.
+;		 <5>	11/15/90	JSM		<bbm> Add _OpenCPort patch from AllB&WQDPatch.a and come-from
+;									patch on _OpenCPort inside NewGWorld from PatchIIciROM.a.
+;		 <4>	11/13/90	JSM		<dba> Move the following patches here from QDciPatchROM.a:
+;									come-from patch on _PackBits inside PutPMData, come-from patch
+;									on _CopyBits inside CopyBits, come-from patch on _GetMaxDevice
+;									inside NewGWorld and NewTempScreenBuffer, come-from patch on
+;									_DisposeGWorld inside UpdateGWorld.  Split the _CopyBits patch
+;									into a come-from and a regular patch to avoid future problems.
+;		 <3>	 8/22/90	DTY		OK, so I botched it.  Forget I ever did anything.
+;		 <2>	 8/22/90	DTY		Install the GetPMData trap here since it’s used by both
+;									QuickDrawPatchII and AllB&WQDPatch.
+;		 <1>	 6/11/90	JSM		First checked in.
+;
+
+				load 'StandardEqu.d'
+				include 'LinkedPatchMacros.a'
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; DrawPicture — purged and purgeable pictures													<11>
+;
+;	do nothing for purged handles and mark handles non-purgeable before doing DrawPicture
+;	this could be rolled into the main DrawPicture patches, but it would probably be trickier there
+;	we’re doing it here because we are working on the final candidate for 7.0
+
+;
+; Save and restore global info so DrawPicture is reentrant.  This should be rolled into DrawPicture 
+; someday soon, but we're ready to ship and this was the lowest risk way since the patch is the same
+; across machines. <12>
+
+;
+DrawPictureForPurgedPictures PatchProc _DrawPicture,(Plus,SE,II,Portable,IIci)
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+ParamSize		EQU 	8
+MyPicture		EQU 	ParamSize+8-4			;LONG, PICHANDLE
+DstRect 		EQU 	MyPicture-4 			;LONG, ADDR OF RECT
+; Locals
+SavePatAlign		EQU 	-4		
+SavePlayPic			EQU 	SavePatAlign-4
+SavePlayIndex		equ		SavePlayPic-4
+SaveHandleState		equ		SavePlayIndex-2
+VarSize 			EQU 	SaveHandleState				;TOTAL BYTES OF LOCALS
+
+				move.l	8(sp),d0					; get the picture handle
+				beq.s	Done						; if NIL, do nothing
+
+				move.l	d0,a0						; dereference the picture handle
+				move.l	(a0),d0
+				beq.s	Done						; if purged, do nothing
+
+				link	a6, #VarSize
+				_HGetState							; get the handle’s state
+				; DO NOT CHECK ERRORS HERE
+				; that would mess up people who do DrawPicture on fake handles
+
+				move.b	d0,SaveHandleState(a6)		; save the state
+				_HNoPurge							; mark the handle non-purgeable
+;
+; save global variables so DrawPicture is re-entrant
+;
+				move.l	a4,-(sp)								;need register a4
+				move.l	GrafGlobals(A5),a4						;point to QuickDraw globals
+				
+				move.l	PATALIGN(A4),SavePatAlign(a6)			;save patalign
+				move.l	PLAYPIC(A4),SavePlayPic(a6) 			;save playpic
+				move.l	PLAYINDEX(A4),SavePlayIndex(a6)			;save playindex
+
+				move.l	a0,-(sp)								; pass the picture through
+				move.l	DstRect(a6),-(sp)						; pass a pointer to the rectangle to draw in also
+				jsrOld
+;
+; Restore global variables
+;
+				move.l	SavePlayIndex(a6),PLAYINDEX(A4)			;restore 'em all
+				move.l	SavePlayPic(a6),PLAYPIC(A4) 	
+				move.l	SavePatAlign(a6),PATALIGN(A4)	
+				move.l	(sp)+,a4								;done with a4
+
+				move.b	SaveHandleState(a6),d0					; get back the handle state
+				move.l	MyPicture(a6),a0						; get back the picture handle
+				_HSetState										; set the picture back like before
+				unlk	a6
+Done
+				move.l	(sp)+,a0		; get the return address
+				addq	#8,sp			; get rid of the parameters
+				jmp		(a0)			; return
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Code below this point is for Color QuickDraw only!
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+				INCLUDE		'paletteEqu.a'
+				INCLUDE		'palettePriv.a'
+				include		'colorequ.a'
+				INCLUDE		'qdHooks.a'
+				INCLUDE		'VideoEqu.a'
+				include		'HardwarePrivateEqu.a'
+				INCLUDE 	'fontPrivate.a'
+
+		GBLC	&CurFile	;current file name used by DrawingVars
+
+				MACHINE	MC68020		; assumes this is for ColorQD only
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; CharExtraFixDiv
+;	Replace 0 sized font with system font if family is system, or fmDefault otherwise.
+
+AfterFixDivInCharExtra		ROMBIND				(II,$19B88)
+
+	IF (&TYPE('_FixDiv') = 'UNDEFINED') THEN
+_FixDiv   	OPWORD  $A84D
+	ENDIF
+
+CharExtraFixDiv	ComeFromPatchProc	_FixDiv,AfterFixDivInCharExtra,(II)
+
+			TST.L	4(SP)				; passed zero font size?
+			bneOld
+			TST		txFont(A0)			; system font?
+			BNE.S	@apFont				; if not, use default
+			MOVE	SysFontSize,D0		; if family is zero, use system font size
+			BNE.S	@notZero
+@apFont
+			MOVEQ	#0,D0				; clear high byte of low word
+			MOVE.B	FMDefaultSize,D0	; if family nonzero or system font size zero,
+			BNE.S	@notZero			; use the default size
+			MOVEQ	#12,D0				; if the default is zero, hardcode to 12
+@notZero
+			MOVE	D0,4(SP)			; stuff it in the high word
+			jmpOld
+
+				ENDPROC
+
+;=========================================================================================
+;=========================================================================================
+;
+;	Patch to GetCTable to make sure it always returns NIL when the call fails
+;
+;=========================================================================================
+;=========================================================================================
+
+newGetCTable	PatchProc	_GetCTable,(IIci)	
+		clr.l	6(sp)					; NIL return if call fails.					<KON 22OCT90>
+		jmpOld
+
+			ENDPROC
+
+;=========================================================================================
+;=========================================================================================
+;
+;	ComeFrom patch on FixRatio to see if from arc drawing
+;
+;=========================================================================================
+;=========================================================================================
+
+ciNewFixRatio			ComeFromPatchProc	_FixRatio,,(IIci)
+
+FromDrawArc		ROMBIND				(IIci,$34856)
+
+&CurFile	SETC	'DRAWARC'
+
+			INCLUDE	'DrawingVars.a'
+
+		cmpROM	FromDrawArc,(SP)	;coming from right place?
+		BNE.S	BackToROM
+
+;		MOVE.L	DSTRECT(A6),A0				;POINT TO DSTRECT
+		MOVE	TOP(A0),A1
+		ADD 	BOTTOM(A0),A1
+		MOVE.L	A1,D0
+		ASR.L 	#1,D0
+		MOVE	D0,MIDVERT(A6)				;MID VERT := (DSTBOT+DSTTOP)/2
+
+		MOVE	LEFT(A0),A1
+		ADD 	RIGHT(A0),A1
+		MOVE.L 	A1,D0
+		ASR.L 	#1,D0
+		MOVE	D0,MIDHORIZ(A6) 			;MID HORIZ := (DSTLEFT+DSTRIGHT)/2
+
+BackToROM
+		jmpold
+
+			ENDPROC
+
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _StackSpace inside RgnOp										<6>
+;
+; When calculating buffer sizes in the initialization section of RgnOp, the buffer size is
+; incorrectly calculated (signed add instead of unsigned).  By correcting this problem,
+; operations on 2 16K regions should be OK.  Many thanks to Darren Adler and Chris DeRossi
+; of Tech Support for locating this problem.
+;
+; Note that since QuickDraw calls _StackSpace directly, bypassing the OS trap dispatcher,
+; we can't use the ComeFromPatchProc macro to compare the come-from address, as it
+; assumes the return address is farther down the stack (since the OS trap dispatcher
+; saves registers before dispatching).
+;
+; ***This bug needs to be fixed on the Plus and SE as well, but the Plus and SE ROM RgnOp
+; procedures don't call _StackSpace to calculate the stack size, so we can't fix it here.
+
+; AfterStackSpaceInRgnOp		ROMBIND				(Plus,$0C424),(SE,$16B94),(II,$261CC)
+; AfterBufferSizeCalcInRgnOp	ROMBIND				(Plus,$0C47E),(SE,$16BEE),(II,$26220)
+
+AfterStackSpaceInRgnOp		ROMBIND				(II,$261CC)
+AfterBufferSizeCalcInRgnOp	ROMBIND				(II,$26220)
+
+RgnOpStackSpace				ComeFromPatchProc	_StackSpace,,(II)
+
+;
+;  Here is the stack frame for RgnOp copied from ROM source
+;
+
+PARAMSIZE		EQU 	20					;TOTAL # BYTES
+RESULT			EQU 	PARAMSIZE+8 		;INTEGER, FUNCTION RESULT
+RGNA			EQU 	RESULT-4			;LONG, RGNHANDLE
+RGNB			EQU 	RGNA-4				;LONG, RGNHANDLE
+BUFHANDLE		EQU 	RGNB-4				;LONG, HANDLE TO POINT BUFFER
+MAXBYTES		EQU 	BUFHANDLE-2 		;WORD
+OP				EQU 	MAXBYTES-2			;WORD
+DH				EQU 	OP-2				;WORD
+OKGROW			EQU 	DH-2				;BOOLEAN
+
+SCAN1			EQU 	-4					;long
+SCAN2			EQU 	SCAN1-4 			;long
+SCAN3			EQU 	SCAN2-4 			;long
+SCAN4			EQU 	SCAN3-4 			;long
+SCAN5			EQU 	SCAN4-4 			;long
+NEXTA			EQU 	SCAN5-2 			;WORD
+NEXTB			EQU 	NEXTA-2 			;WORD
+VERT			EQU 	NEXTB-2 			;WORD
+BUFPTRX			EQU 	VERT-4				;LONG, ^POINT
+BUFLIMIT		EQU 	BUFPTRX-4			;LONG
+FAKEB			EQU 	BUFLIMIT-18 		;18 BYTE FAKE RGN DATA
+MASTERB 		EQU 	FAKEB-4 			;LONG
+FAKEA			EQU 	MASTERB-18			;18 BYTE FAKE RGN DATA
+MASTERA 		EQU 	FAKEA-4 			;LONG
+CASEJMP 		EQU 	MASTERA-4			;LONG
+SAVESTK 		EQU 	CASEJMP-4			;LONG
+VARSIZE 		EQU 	SAVESTK 			;TOTAL BYTES OF LOCALS
+
+				cmpROM		AfterStackSpaceInRgnOp,(SP)	;coming from right place?
+				bneOld								;no, let StackSpace do its stuff
+
+				jsrOld								;call stackSpace
+				SUB.L		#qdStackXtra,D0			;subtract slop factor
+				CMP.L		#200,D0 				;is result < 200 bytes ?
+				BGE.S		STKOK1					;no, continue
+				MOVE		#40,D0					;yes, make bufSize = 40 bytes
+				BRA.S		ALLOC					;and continue
+STKOK1			DIVS		#5,D0					;no, divide for 5 buffers
+				BVC.S		STKOK2					;overflow ?
+				MOVE		#30000,D0				;yes, use 30K bytes
+STKOK2			BCLR		#0,D0					;make bufSize even
+ALLOC			SUB 		D0,SP					;allocate one buffer
+				MOVE.L		SP,SCAN1(A6)			;remember buffer pointer
+				SUB 		D0,SP					;allocate one buffer
+				MOVE.L		SP,SCAN2(A6)			;remember buffer pointer
+				SUB 		D0,SP					;allocate one buffer
+				MOVE.L		SP,SCAN3(A6)			;remember buffer pointer
+				SUB 		D0,SP					;allocate one buffer
+				MOVE.L		SP,SCAN4(A6)			;remember buffer pointer
+				SUB 		D0,SP					;allocate one buffer
+				MOVE.L		SP,SCAN5(A6)			;remember buffer pointer
+
+				MOVE.L		BUFHANDLE(A6),A0		;GET BUFHANDLE
+				MOVE.L		(A0),A0 				;DE-REFERENCE IT
+				MOVE.L		A0,BUFPTRX(A6)			;BUFPTR := BUFSTART
+				AND 		#$FFF8,MAXBYTES(A6) 	;TRUNCATE TO A MULT OF 8 BYTES
+				CLR.L		D4						;zero hi-word of register		<C970/22Nov87> DAF
+				MOVE.W		MAXBYTES(A6),D4			;get long version of MaxBytes   <C970/22Nov87> DAF
+				ADD.L		D4,A0					;add MaxBytes to BufStart		<C970/22Nov87> DAF
+
+				jmpROM		AfterBufferSizeCalcInRgnOp
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Fix to NewScreenBuffer and NewTempScreenBuffer in _QDExtensions
+
+; ROM code loads D0 with offscreen buffer and offscreen pixmap handles to dispose,
+; we put them in A0 where they belong
+
+AfterFirstDisposeD0			ROMBIND		(IIci,$40EA4)					; disposing offscreen buffer
+AfterSecondDisposeD0		ROMBIND		(IIci,$40EAA)					; disposing offscreen pixmap
+
+DisposeOffscreenBufferFix	ComeFromPatchProc	_DisposHandle,,(IIci)
+
+				CMPROM		AfterFirstDisposeD0,ReturnAddressDepth(SP)	; disposing offscreen buffer?
+				BEQ.S		@doIt										; yes
+				CMPROM		AfterSecondDisposeD0,ReturnAddressDepth(SP)	; disposing offscreen pixmap?
+				BNEOLD													; no
+
+@doIt
+				MOVE.L		D0,A0										; move handle into A0
+				BRAOLD													; and continue
+
+				ENDPROC													; DisposeOffscreenBufferFix
+
+;
+; <16> Build these patches when the future arrives.
+;
+	
+	if TheFuture then							; <16>
+;
+; Begin <18>
+;
+;Patches from Patterns.a
+
+FixPatExpand 	PatchProc	$AB15,(IIci)
+
+ciRSetHSize	ROMBIND		(IIci,$31450)
+ciGotCopy	ROMBIND		(IIci,$30972)
+ciNEWDONE	ROMBIND		(IIci,$30A96)
+ciNOTOLD	ROMBIND		(IIci,$30A9E)
+
+&CurFile	SETC	'PATEXPAND'
+
+			INCLUDE	'DrawingVars.a'
+
+
+;-------------------------------------------------------------
+
+PARAMSIZE		EQU 	0
+
+TWOPAT			EQU 	-16 				;ROOM FOR TWO COPIES OF PAT
+SAVESTK			EQU		TWOPAT-4			;ROOM TO SAVE STACK POINTER
+ROTSIZE			EQU		SAVESTK-2			;SCANLINE SIZE FOR ROTATION
+ROTSHIFT		EQU		ROTSIZE-2			;ROTATE AMOUNT
+GGLOBALS		EQU		ROTSHIFT-4			;POINTER TO GRAFGLOBALS
+SAVEA5			EQU		GGLOBALS-4			;PLACE TO SAVE A5
+VARSIZE 		EQU 	SAVEA5				;TOTAL BYTES OF LOCAL VARS
+
+;------------------------------------------------------------------
+;
+;  IF OLD PATTERN, ALLOCATE A BUFFER ON THE STACK AND POINT TO IT.
+;  IF NEW PATTERN, GO EXPAND IF NECESSARY.
+;
+		TST.B	NEWPATTERN(A6)				;IS IT A NEW PATTERN?
+		BNE		NEWPATEXPAND				;=>YES, EXPAND PIXELPAT
+
+; ALLOCATE AN EXPAND BUFFER ON THE STACK FOR USE BY CALLER
+
+DOOLD	MOVE.L	(SP)+,A0					;GET RETURN ADDRESS
+		MOVEQ	#64,D0						;MINIMUM BUFFER IS 64 BYTES
+		MOVE	DSTSHIFT(A6),D1				;GET DEPTH SHIFT
+		subq	#3,D1						;DEPTHS 1-8 OK						@@@@ BAL 10Apr88
+		ble.S	GETBUF						;=>SO GET THE PATTERN BUFFER		@@@@ BAL 10Apr88
+		LSL		D1,D0						;ELSE DOUBLE FOR 16, QUAD FOR 32
+GETBUF	SUB		D0,SP						;MAKE THE BUFFER (LONG ALIGNED)
+		MOVE.L	SP,EXPAT(A6)				;POINT TO PATTERN BUFFER
+		MOVE.L	A0,-(SP)					;REPLACE RETURN ADDRESS
+
+
+PSHARE	LINK	A4,#VARSIZE 				;ALLOCATE STACK FRAME
+		MOVEM.L	D3-D6/A2-A3/A5,-(SP)		;SAVE REGS
+
+		MOVE	LOCMODE(A6),D0				;GET MODE
+		MOVE	DSTPIX+BOUNDS+LEFT(A6),D2	;GET GLOBAL-LOCAL OFFSET (PIXELS)
+		MOVE.L	FCOLOR(A6),D3				;GET CURRENT FG COLOR
+		MOVE.L	BCOLOR(A6),D4				;GET CURRENT BK COLOR
+		MOVE	DSTSHIFT(A6),D5				;GET SHIFT FOR PIXEL DEPTH
+
+		MOVE.L	LOCPAT(A6),A0				;GET PATTERN
+		LEA		PATROW(A6),A1				;AND DATA DST
+
+		AND		#$F3,D0						;TURN OFF PAT, INVERT BITS
+		BEQ.S	GOTCOPY						;=>IT'S COPY MODE
+		BTST	#5,D0						;is it a new mode?
+		BNE.S	GotCopy
+;		MOVEQ	#-1,D3						;ELSE FGCOLOR = BLACK
+		MOVE.L	alphaMask(A6),D3
+		MOVEQ	#0,D4						;AND BKCOLOR = WHITE
+GotCopy	jmpROM	ciGotCopy
+
+
+NEWPATEXPAND
+;----------------------------------------------------------------
+;
+;  NEWPATEXPAND -- EXPAND A PIXELPAT, IF NECESSARY
+;
+;  NOTE:  STACK FRAME LINKED USING A4 SO NORMAL FRAME STILL IN A6
+;
+		LINK	A4,#VARSIZE 				;ALLOCATE STACK FRAME
+		MOVEM.L	D3-D6/A2-A3/A5,-(SP)		;SAVE REGS
+		MOVE.L	SP,SAVESTK(A4)				;SAVE STACK POINTER
+		MOVE.L	GRAFGLOBALS(A5),A3			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	A3,GGLOBALS(A4)				;SAVE IN STACK FRAME
+		MOVE.L	A5,SAVEA5(A4)				;AND SAVE GLOBAL POINTER
+
+		MOVE.L	LOCPAT(A6),A0				;GET THE PIXPAT HANDLE POINTER
+		MOVE.L	(A0),A0						;GET THE PIXPAT HANDLE
+		MOVE.L	(A0),A0						;GET THE PIXPAT POINTER
+
+		TST		PATTYPE(A0)					;IS IT AN OLD PATTERN?
+		BNE.S	NOTOLD						;=>NO, CHECK FOR EXPANSION OF NEW PAT
+
+;---------------------------------------------------------
+;
+;  IF OLD PATTERN, USE SHARED CODE TO EXPAND IT
+;
+		MOVE.L	PATXDATA(A0),A0				;GET THE EXPANDED DATA HANDLE
+		MOVEQ	#64,D0						;MINIMUM BUFFER IS 64 BYTES
+		MOVE	DSTSHIFT(A6),D1				;GET DEPTH SHIFT
+		subq	#3,D1						;DEPTHS 1-8 OK						@@@@ BAL 10Apr88
+		ble.S	BUFOK						;=>SO GET THE PATTERN BUFFER		@@@@ BAL 10Apr88
+		LSL.L	D1,D0						;ELSE DOUBLE FOR 16, QUAD FOR 32
+BUFOK	jsrROM	ciRSetHSize
+
+		MOVE.L	(A0),d0						;get master pointer					@@@@ BAL 10Apr88
+		_rTranslate24To32					;mask off high byte					@@@@ BAL 10Apr88
+		move.l	d0,EXPAT(A6)				;SAVE POINTER TO EXPAND DATA AREA
+											;*** LEAVE IT UNLOCKED
+		MOVE.L	LOCPAT(A6),A0				;GET PIXPAT HANDLE POINTER
+		MOVE.L	A0,-(SP)					;SAVE PIXPAT HANDLE POINTER
+		MOVE.L	(A0),A0						;GET HANDLE TO PIXPAT
+		MOVE.L	(A0),A0						;GET POINTER TO PIXPAT
+		MOVE.L	PATDATA(A0),A0				;GET HANDLE TO DATA
+		MOVE.L	(A0),A0						;GET POINTER TO DATA
+		MOVE.L	A0,LOCPAT(A6)				;SET UP POINTER TO SRC DATA
+
+		JSR		PSHARE						;AND CALL COMMON CODE
+
+		MOVE.L	(SP)+,LOCPAT(A6)			;RESTORE PATTERN HANDLE
+
+NEWDONE	jmpROM	ciNEWDONE
+NOTOLD	jmpROM	ciNOTOLD
+
+		ENDPROC
+;
+; end <18>
+;
+
+
+;
+; Begin <15>
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Abort GetDirectPMData if an error is encountered. This is done via a comefrom on Unpackbits.
+
+; if QDError = AbortPicPlayBackErr, return immediately.  Put 0 in d3, d6, and d7 which are loop
+; counters so the routine is also aborted immediately.
+
+;
+; In the unPack loop, D4 is used as the loop counter so we zero this also.  Zeroing all these reg.
+; should be ok for both places.
+
+AfterUnPackBitsInGetDirectPMData	ROMBIND		(IIci,$3332E)
+AfterUnPackBitsInGetPMData			ROMBIND		(IIci,$336A0)
+
+CheckForAbortPicPlayBackFix	ComeFromPatchProc	_UnpackBits,,(IIci)
+
+				CMPROM		AfterUnPackBitsInGetDirectPMData,ReturnAddressDepth(SP)	; disposing offscreen buffer?
+				BEQ.S		@doIt										; yes
+				CMPROM		AfterUnPackBitsInGetPMData,ReturnAddressDepth(SP)	; disposing offscreen pixmap?
+				BNEOLD													; no
+
+@doIt
+				cmp.w	#AbortPicPlayBackErr,qdErr						;abort if our special error
+				bneold
+				moveq	#0,d3
+				move.l	d3,d4
+				move.l	d4,d6
+				move.l	d6,d7
+				move.l	(sp)+,a0				;get return address
+				add		#$a,sp					;clear two ptrs and a count 4+4+2 = a
+				jmp		(a0)					; and abort
+
+				ENDPROC													; DisposeOffscreenBufferFix
+;
+; Stuff from QDciPatch because that file is too big
+;
+
+
+;=========================================================================================
+;=========================================================================================
+;
+;	Patch SeedFill and CalcMask to check both up and down on the first pass of filling
+;
+;=========================================================================================
+;=========================================================================================
+
+PatchSeedFill 			PatchProc	 _SeedFill,(IIci)
+		EXPORT	ciPatchCalcMask
+
+ciSeedFill	ROMBIND		(IIci,$35A4C)
+ciGoHome	ROMBIND		(IIci,$35B0A)
+
+;-------------------------------------------------------------------------
+;
+;  PROCEDURE SeedFill(srcPtr,dstPtr: Ptr;
+;			  srcRow,dstRow,height,words: INTEGER;
+;			  seedH,seedV: INTEGER)
+;
+		MOVE.L	(SP)+,A0				;pop return addr
+		MOVEQ	#-1,D0					;get a long of -1
+		MOVE.L	D0,-(SP)				;push edge = all ones
+		BRA.S	SHARE			;share common code
+
+
+;-------------------------------------------------------------------------
+;
+;  PROCEDURE CalcMask(srcPtr,dstPtr: Ptr;
+;			  srcRow,dstRow,height,words: INTEGER);
+;
+ciPatchCalcMask	
+
+		 MOVE.L   (SP)+,A0			  ;pop return addr
+		 MOVEQ	  #-1,D0			  ;get a long of -1
+		 MOVE.L   D0,-(SP)			  ;push seed = (-1,-1)
+		 CLR.L	  -(SP) 			  ;push edge = zeros
+SHARE	 MOVE.L   A0,-(SP)			  ;restore return addr
+
+
+
+;-------------------------------------------------------------------------
+;
+;  LOCAL PROCEDURE MakeMask(srcPtr,dstPtr: Ptr;
+;				srcRow,dstRow,height,words: INTEGER;
+;				seedH,seedV: INTEGER;
+;				edge: LongInt);
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	24
+srcPtr			EQU 	PARAMSIZE+8-4		;long
+dstPtr			EQU 	srcPtr-4			;long
+srcRow			EQU 	dstPtr-2			;word
+dstRow			EQU 	srcRow-2			;word
+height			EQU 	dstRow-2			;word
+words			EQU 	height-2			;word
+seedH			EQU 	words-2 			;word
+seedV			EQU 	seedH-2 			;word
+edge			EQU 	seedV-4 			;long
+
+
+dstBump 		EQU 	-2					;word
+saveStk 		EQU 	dstBump-4			;long
+varSize 		EQU 	saveStk 			;total locals
+
+
+		LINK	A6,#varSize 				;allocate stack frame
+		MOVEM.L D3-D7/A2-A4,-(SP)			;save regs
+		MOVE.L	SP,saveStk(A6)				;save stack pointer
+
+;
+;  prepare height and words for DBRA count.  Quit if either <= 0.
+;
+		MOVE	words(A6),D5				;get count of words
+		BLE 	GOHOME						;quit if words <= 0
+		SUB 	#1,D5						;subtract 1 for DBRA count
+		SUB 	#1,height(A6)				;convert height to DBRA
+		BLT 	GOHOME						;quit if height <= 0
+
+;
+;  init dst to all ones:
+;
+		MOVE	words(A6),D0				;get # of words
+		ADD 	D0,D0						;double for bytes
+		MOVE	dstRow(A6),D1				;get dstRow
+		SUB 	D0,D1						;subtract bytes for dstBump
+		MOVE	D1,dstBump(A6)				;save dstBump for later
+		MOVE.L	dstPtr(A6),A2				;point to dst
+		MOVEQ	#-1,D0						;get some black
+		MOVE	height(A6),D3				;init DBRA rowCount
+BLACK1	MOVE	D5,D2						;init DBRA wordCount
+BLACK2	MOVE	D0,(A2)+					;put a word of black
+		DBRA	D2,BLACK2					;loop all words in row
+		ADD 	D1,A2						;bump to next row
+		DBRA	D3,BLACK1					;loop height rows
+
+;
+;  clear one dst pixel at seedH,seedV
+;
+		MOVE	seedV(A6),D0				;get seed vert coord
+		BLT.S	NOSEED						;skip if neg (no seed)
+		MULU	dstRow(A6),D0				;mul times dst row
+		MOVE.L	dstPtr(A6),A0				;point to dst
+		ADD.L	D0,A0						;add vertical offset	<EHB 28-Oct-85>
+		MOVE	seedH(A6),D0				;get seed horiz coord
+		MOVE	D0,D1						;copy seedH
+		ASR 	#3,D0						;div by 8 for byte
+		NOT 	D1							;invert bit number
+		BCLR	D1,0(A0,D0) 				;clear seed pixel
+NOSEED
+;
+;  allocate a scanline buffer of ones or zeros on the stack:
+;
+		MOVE.L	edge(A6),D6 				;get zero or all ones
+		MOVE	D5,D1						;get longCount
+NEXTBUF MOVE	D6,-(SP)					;write a word of ones or zeros
+		DBRA	D1,NEXTBUF					;loop all words
+
+		MOVE.L	srcPtr(A6),A0				;point to top of src
+		MOVE.L	dstPtr(A6),A2				;point to top of dst
+		st		d7							;set dirty flag to force	<KON 24JAN91>
+;		bra.s	FirstPass					;search up and down			<KON 24JAN91>
+;NXTPASS SF		D7							;clear dirty flag
+FirstPass
+		jmpROM	ciSeedFill
+GoHome
+		jmpROM	ciGoHome
+		ENDPROC
+
+
+;=========================================================================================
+;=========================================================================================
+;
+;	Patch to getPixel and getCPixel so that SwapMMUMode is called if pixmap needs 32-bit
+;	addressing (pmVersion = 4).  These calls are in QDUtil.a.
+;
+;=========================================================================================
+;=========================================================================================
+
+ciPatchGetCPixel PatchProc  _GetCPixel, (IIci)
+				EXPORT	ciPatchGetPixel
+
+ciMMUModeOK		ROMBIND	(IIci,$2F018)
+ciGetPixelDone	ROMBIND (IIci,$2F070)
+
+PARAMSIZE		EQU 	4
+RETURN			EQU		PARAMSIZE+8			;ADDRESS OF BOOLEAN/RGBCOLOR
+HLOC			EQU 	PARAMSIZE+8-2		;HORIZONTAL POSITION
+VLOC			EQU 	HLOC-2				;VERTICAL POSITION
+
+VARSIZE			EQU		0					;TOTAL SIZE OF LOCALS
+;---------------------------------------------------------
+;
+;  FUNCTION GetPixel(h,v: INTEGER): BOOLEAN;
+;  PROCEDURE GetCPixel(h,v: INTEGER; myColor: RGBColor);
+;
+;  Returns TRUE if the pixel at (h,v) is set to black.
+;  h and v are in local coords of the current grafport.
+;
+;  WATCH OUT FOR STACK TRICKERY WHEN GETCPIXEL CALLS GETPIXEL!!
+;
+;  CLOBBERS A0,A1,D0,D1,D2
+;
+ciPatchGetPixel
+		MOVE.L	8(SP),-(SP)					;PUSH H,V
+		MOVEQ	#1,D2						;ROUTINE = GETCPIXEL
+		BSR.S	SHARE						;USE COMMON CODE
+		RTD		#8							;STRIP PARAMS AND RETURN
+
+		MOVEQ	#0,D2						;ROUTINE = GETPIXEL
+
+SHARE
+		LINK	A6,#VARSIZE					;ALLOCATE STACKFRAME
+		MOVEM.L	D4-D5/A2-A3,-(SP)			;SAVE WORK REGISTERS
+		MOVE.L	THEGDEVICE,-(SP)			;SAVE CURRENT GRAFDEVICE
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET THEPORT
+		_PORTTOMAP							;GET BIT/PIXMAP IN A0
+
+; GET GLOBAL COORDINATES OF VLOC INTO D4 AND HLOC INTO D5
+
+OLDRB	MOVE	VLOC(A6),D4					;GET VERTICAL
+		SUB 	BOUNDS+TOP(A0),D4			;CONVERT TO GLOBAL COORDS
+		MOVE	HLOC(A6),D5					;GET HORIZ COORD
+		SUB 	BOUNDS+LEFT(A0),D5			;CONVERT TO GLOBAL
+
+; IS IT FROM THE SCREEN?
+
+		MOVE.L	MAINDEVICE,A2				;GET MAIN DEVICE
+		MOVE.L	(A2),A2						;POINT TO IT
+		MOVE.L	GDPMAP(A2),A2				;GET PIXMAP HANDLE
+		MOVE.L	(A2),A2						;POINT TO PIXMAP
+		MOVE.L	BASEADDR(A0),D1				;GET PORT'S BASEADDR
+		CMP.L	BASEADDR(A2),D1				;SAME AS SCREEN'S?
+		seq.b	-(sp)						;push crsrFlag			@@@@ BAL 14Apr88
+		move.l	a0,a3						;save pixmap in a3
+		BNE.S	NOTSCRN						;=>NO, NOT SCREEN
+
+; IT IS FROM THE SCREEN!  Shield the Cursor.						@@@@ BAL 14Apr88
+
+		MOVE	D5,-(SP)					;PUSH GLOBAL LEFT
+		MOVE	D4,-(SP)					;PUSH GLOBAL TOP
+		MOVE	D5,-(SP)					;PUSH GLOBAL RIGHT
+		MOVE	D4,-(SP)					;PUSH GLOBAL BOTTOM
+		MOVE.L	JShieldCursor,A1			;get lo mem vector
+		JSR 	(A1)						;and call it
+
+		MOVE.L	DEVICELIST,A3				;GET FIRST IN DEVICE LIST
+
+DONXT	MOVE.L	(A3),A2						;POINT TO DEVICE
+		TST		GDFLAGS(A2)					;IS DEVICE ACTIVE?
+		BPL.S	NXTDEV						;=>NO, NOT ACTIVE
+		LEA		GDRECT(A2),A1				;POINT TO DEVICE'S RECT
+		CMP 	(A1)+,D4					;IS VERTICAL < GDRECT.TOP ?			<SMC 18SEP90>
+		BLT.S	NXTDEV						;=>YES, CHECK NEXT DEVICE			<SMC 18SEP90>
+		CMP 	(A1)+,D5					;IS HORIZONTAL < GDRECT.LEFT ?		<SMC 18SEP90>
+		BLT.S	NXTDEV						;=>YES, CHECK NEXT DEVICE			<SMC 18SEP90>
+		CMP 	(A1)+,D4					;IS VERTICAL >= GDRECT.BOTTOM ?
+		BGE.S	NXTDEV						;=>YES, CHECK NEXT DEVICE
+		CMP 	(A1)+,D5					;IS HORIZONTAL >= GDRECT.RIGHT ?
+		BLT.S	GOTDEV						;=>NO, FOUND DEVICE
+
+NXTDEV	MOVE.L	GDNEXTGD(A2),D0				;GET HANDLE TO NEXT DEVICE
+		MOVE.L	D0,A3						;KEEP IN A3
+		BNE.S	DONXT						;=>THERE IS A DEVICE
+		BRA		DONE						;=>DEVICE NOT FOUND, JUST RETURN
+
+;  FOUND THE DEVICE!  SET DEVICE AND OFFSET POINT TO DEVICE LOCAL COORDINATES
+
+GOTDEV	MOVE.L	A3,THEGDEVICE				;MAKE DEVICE CURRENT
+		LEA		GDRECT(A2),A1				;POINT TO DEVICE'S RECT
+		SUB		(A1)+,D4					;OFFSET VERTICAL
+		SUB		(A1)+,D5					;OFFSET HORIZONTAL
+		MOVE.L	GDPMAP(A2),A3				;GET PIXMAP HANDLE
+		MOVE.L	(A3),d0						;POINT TO PIXMAP
+		_rTranslate24To32					;strip off high byte		@@@@ BAL 14Apr88
+		move.l	d0,a3
+
+;-----------------------------------------------------------
+;
+;  Switch to 32 bit addressing mode
+;
+Needs32BitMode
+		move.b	#$ff,(sp)					;flag the fact that MMU mode must be swapped	<KON 20JUN90>
+		moveq	#true32b,d0					;switch to 32 bit addressing
+		move.w	d2,-(sp)					;save color/ bw flag across call
+		_rSwapMMUMode						;get previous mode in d0.b (can trash a0/a2, d0/d2)
+		move.w	(sp)+,d2					;restore flag in d2
+											;save previous state in d0 for later
+		bra.s	MMUModeOK
+
+NOTSCRN
+;
+; Check if pixmap needs 32-bit addressing									<KON 20JUN90>
+;
+baseAddr32Bit	EQU	2
+
+		tst.w	rowbytes(a3)				;								<KON 20JUN90>
+		bpl.s	MMUModeOK					;it's a bitmap					<KON 20JUN90>
+		btst	#baseAddr32Bit,pmVersion+1(a3)	;							<KON 20JUN90>
+		bne.s	Needs32BitMode				;pixmap needs 32-bit addressing	<KON 20JUN90>
+
+MMUModeOK
+		jmpROM	ciMMUModeOK
+DONE
+		jmpROM	ciGetPixelDone
+
+		ENDPROC
+
+PatchClosePictureCI patchProc  _ClosePicture,(IIci)
+
+ciClosePictureEntry		ROMBIND (IIci,$31D4C)
+ciClosePictureGoHome	ROMBIND (IIci,$31D82)
+cinopp					ROMBIND (IIci,$31D74)
+DPutPicOp					ROMBIND (IIci,$32C90)
+
+;------------------------------------------------------------------
+;
+;  PROCEDURE ClosePicture;
+;
+		MOVEM.L D6-D7/A3,-(SP)					;SAVE REGS
+		MOVE.L	GRAFGLOBALS(A5),A3				;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A3),A3					;GET CURRENT GRAFPORT
+		MOVE.L	PICSAVE(A3),D7					;ARE WE SAVING A PICTURE ?
+		BEQ.S	GOHOME							;NO, OOPS, EXIT
+		MOVE	#opEndPic,D0					;PUSH ENDPIC OPCODE
+		jsrROM	DPutPicOp						;PUT TO THEPIC
+		MOVE.L	D7,A0							;GET PICSAVE HANDLE
+		MOVE.L	(A0),A0							;POINT TO PICSAVE RECORD
+		move.l	picFontList(a0),a0				;get fontList handle
+		_DisposHandle
+		MOVE.L	D7,A0							;GET HANDLE TO PICSAVE RECORD
+		MOVE.L	(A0),A0 						;DE-REFERENCE IT
+		MOVE.L	PICCLIPRGN(A0),D6				;GET picClipRgn
+		MOVE.L	PICINDEX(A0),D0 				;DID PICTURE OVERFLOW ?
+		BEQ.S	OVERFLO 						;YES, CONTINUE
+		MOVE.L	THEPIC(A0),A0					;NO, GET THEPIC HANDLE
+		_SetHandleSize							;AND TRIM TO FINAL SIZE
+OVERFLO MOVE.L	D6,A0							;GET PICCLIPRGN
+		_DisposHandle							;DISCARD IT
+		tst		portBits+rowBytes(a3)			;is it in an old grafport? 				<20Sept90 KON>
+		bpl.s	nopp							;=>yes, skip new stuff					<20Sept90 KON>
+		jmpROM	ciClosePictureEntry
+nopp	jmpROM	cinopp
+GOHOME	jmpROM	ciClosePictureGoHome 			;AND RETURN
+
+		ENDPROC
+
+
+;
+; End <15>
+;
+	endif										; <16> of TheFuture
+	
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Patch to _OpenCPort to reset the horizontal pen fraction								<5>
+
+PatchOpenCPort 				PatchProc 			_OpenCPort,(II,IIci)
+
+				move.l	grafGlobals(a5),a0				; load QuickDraw globals.
+				move.w	#$8000,pnLocFixed(a0)			; reset pen fraction.
+				jmpOld									; join the original code.
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _OpenCPort inside NewGWorld										<5>
+;
+; NewGWorld trashes the current port when it calls OpenCPort to create
+; the offscreen port. This patch prevents the GWorld OpenCPort from changing the
+; current port.
+
+AfterOpenCPortInNewGWorld	ROMBIND		(IIci,$3FE3E)
+
+NewGWorldOpenCPort			ComeFromPatchProc	_OpenCPort,AfterOpenCPortInNewGWorld,(IIci)
+
+				move.l	4(sp),-(sp)					; get parameter to OpenCPort on stack
+				move.l	grafGlobals(a5),a0			; get QD globals
+				move.l	thePort(a0),4+4(sp)			; save thePort
+
+				jsrOld								; open the port
+
+				move.l	grafGlobals(a5),a0			; get QD globals
+				move.l	4(sp),thePort(a0)			; restore thePort
+
+				rtd		#4							; deallocate thePort while returning
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; The following come-from patches are from QDciPatchROM.a for the IIci ROM
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _PackBits inside PutPMData
+
+FromPutPMData				ROMBIND		(IIci,$3372C)
+FromPutPicPixPat			ROMBIND		(IIci,$33224)
+
+PutPMDataPackBits			ComeFromPatchProc	_PackBits,FromPutPMData,(IIci)
+
+;
+;	clean up PixMap address if we came from PutPicPixPat					<16Sept90 KON>
+;
+
+		cmpROM	FromPutPicPixPat, 4(a6)	;and making a PixPat		<2Oct90 KON>
+		bne.s	@1
+		move.l	-4(a6),d0
+		_rTranslate24To32		;fix up the high bytes						<16Sept90 KON>
+		move.l	d0,-4(a6)		;srcptr in putPMData stackframe				<16Sept90 KON>
+;		move.l	d0,$a(a6)		;myData in putPMData stackframe				<16Sept90 KON>
+
+@1
+		moveq	#true32b,d0		;switch to 32 bit addressing for source access	<BAL 02Feb90>
+		_rSwapMMUMode			;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+
+		addq	#4,sp			;strip extra return address
+		jsrOld					;PACK ROW INTO PACKBUF
+
+		moveq	#false32b,d0	;switch back before calling PutPicProc	<BAL 02Feb90>
+		_rSwapMMUMode			;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+
+		jmpROM	FromPutPmData	;return to PutPmData
+
+			ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Patch _CopyBits to get base address of screen from ScrnBase instead of screenBits.
+
+AfterGetScreenBaseInCopyBits	ROMBIND		(IIci,$356DC)
+
+CopyBitsGetScreenBase			PatchProc	_CopyBits,(IIci)
+
+;
+;  Here is the stack frame for CopyBits copied from ROM source
+;
+
+PARAMSIZE		EQU 	22					;TOTAL BYTES OF PARAMS
+SRCBITS 		EQU 	PARAMSIZE+8-4		;LONG, ADDR OF BITMAP
+DSTBITS 		EQU 	SRCBITS-4			;LONG, ADDR OF BITMAP
+SRCRECT 		EQU 	DSTBITS-4			;LONG, ADDR OF RECT
+DSTRECT 		EQU 	SRCRECT-4			;LONG, ADDR OF RECT
+MODE			EQU 	DSTRECT-2			;WORD
+MASKRGN 		EQU 	MODE-4				;LONG, RGNHANDLE
+
+SRCRECT1		EQU		-8					;LOCAL SRC RECT
+DSTRECT1		EQU		SRCRECT1-8			;LOCAL DST RECT  (MUST FOLLOW SRCRECT1)
+VARSIZE			EQU		DSTRECT1			;SIZE OF LOCAL VARS
+
+;
+; Get base address of main screen from ScrnBase instead of Baseaddr
+;
+		LINK	A6,#VARSIZE					;NO LOCAL VARS
+		MOVEM.L d2/D6-D7/A2-A4,-(SP)		;SAVE REGS (save d2 for MS Works) <01Apr89 BAL>
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A3				;POINT TO CURRENT GRAFPORT
+		MOVE.L	SRCBITS(A6),A0				;POINT TO SRCBITS
+		_BITSTOMAP							;GET POINTER TO BIT/PIXMAP IN A0
+		MOVE.L	A0,A2						;AND SAVE IN A2
+
+	;	MOVE.L	SCREENBITS+BASEADDR(A4),D6	;GET BASE ADDRESS OF SCREEN
+		MOVE.L	ScrnBase,D6					;GET BASE ADDRESS OF main SCREEN
+		jmpROM	AfterGetScreenBaseInCopyBits
+
+			ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _CopyBits inside _CopyBits
+;
+; When doing CopyBits to an old port and the image is being flattened (as when
+; printing a 32-bit bitmap to a laser-writer), set the dither mode if dither was
+; requested when copybits was called.
+
+AfterCopyBitsCallsItselfToFlatten	ROMBIND		(IIci,$3586A)
+
+CopyBitsDitherWhileFlattening		ComeFromPatchProc	_CopyBits,AfterCopyBitsCallsItselfToFlatten,(IIci)
+
+;
+;  Here is the stack frame for CopyBits copied from ROM source
+;
+
+PARAMSIZE		EQU 	22					;TOTAL BYTES OF PARAMS
+SRCBITS 		EQU 	PARAMSIZE+8-4		;LONG, ADDR OF BITMAP
+DSTBITS 		EQU 	SRCBITS-4			;LONG, ADDR OF BITMAP
+SRCRECT 		EQU 	DSTBITS-4			;LONG, ADDR OF RECT
+DSTRECT 		EQU 	SRCRECT-4			;LONG, ADDR OF RECT
+MODE			EQU 	DSTRECT-2			;WORD
+MASKRGN 		EQU 	MODE-4				;LONG, RGNHANDLE
+
+SRCRECT1		EQU		-8					;LOCAL SRC RECT
+DSTRECT1		EQU		SRCRECT1-8			;LOCAL DST RECT  (MUST FOLLOW SRCRECT1)
+VARSIZE			EQU		DSTRECT1			;SIZE OF LOCAL VARS
+
+		btst	#6,mode+1(a6)				;is the ditherCopy bit set
+		beqOld								;no, just pass through to ROM
+		move.w	#$40,8(sp)					;yes, use ditherCopy instead
+		jmpOld
+
+			ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _GetMaxDevice inside NewGWorld and NewTempScreenBuffer to check for NIL devices.
+
+FromNewGWorld					ROMBIND		(IIci,$3FB88)
+FromNewTempScreenBuffer			ROMBIND		(IIci,$40D0E)
+newGWorldParamError				ROMBIND		(IIci,$3FEE6)
+newTempScreenBufferParamError	ROMBIND		(IIci,$40E88)
+
+GWorldGetMaxDevice				ComeFromPatchProc	_GetMaxDevice,,(IIci)
+
+		cmpROM		FromNewGWorld,(sp)				; from NewGWorld?
+		beq.s		@itsForMe						; yes
+		cmpROM		FromNewTempScreenBuffer,(sp)	; from NewTempScreenBuffer?
+		bneOld										; no
+;
+; Call through, then check for NIL result
+;
+@itsForMe
+		move.l	(sp),d0					;get return address
+		move.l	4(sp),(sp)				;move rect down
+		move.l	d0,8(sp)				;put old return address on top of old result
+		jsrOld							;call original GetMaxDevice
+		move.l	(sp)+,d0				;get handle to max device
+		bnz.s	@returnToCaller			;if it isn't NIL, we're ok
+		cmpROM	FromNewGWorld, (sp)+	;was this from NewGWorld?  (nuke return address also)
+		bneROM	newTempScreenBufferParamError		;if not, goto parameter error
+		jmpROM	newGWorldParamError
+
+@returnToCaller
+		move.l	d0,a0
+		addq.l	#2,(sp)					;skip over the move.l (sp)+,a0 instruction
+		rts
+
+			ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+;=========================================================================================
+;=========================================================================================
+;
+;	Patch ClosePort and CloseCPort so that they jsr to the RAM version of DelPortList
+;	(which doesn't call Munger).
+;
+;=========================================================================================
+;=========================================================================================
+
+ciClosePortEntry	RomBind	(IIci,$301E8)
+ciOpenPixMap		ROMBind	(IIci,$302D0)
+ciInitPixMap		ROMBind	(IIci,$30330)
+
+			ROMs		IIci
+PatchIIciCloseCPort	MakePatch	ciClosePortPatch,$AA02
+PatchIIciClosePort	MakePatch	ciClosePortPatch,$A87D
+	if TheFuture then							; <16> Patch only for future builds
+PatchIIciGetPixel	MakePatch	ciPatchGetPixel,$A865
+PatchIIciCalcMask	MakePatch	ciPatchCalcMask,$A838
+	endif										; <16>
+
+
+ciClosePortPatch 	Proc	Export
+			Import	DelPortList
+;-------------------------------------------------------------
+;
+;  PROCEDURE ClosePort(port: GrafPtr);
+;
+;  Disposes of clipRgn and visRgn.
+;
+;  If color grafPort, dispose of additional fields
+;
+			MOVE.L	4(SP),-(SP)					;PUSH GRAFPTR
+			JSR		DelPortList					;DELETE PORT FROM PORTLIST
+			jmpROM	ciClosePortEntry
+			ENDPROC
+
+
+DelPortList PROC  EXPORT
+;----------------------------------------------------------
+;
+;  PROCEDURE DelPortList(grafPtr);
+;
+;  Delete the specified grafPtr from the portList
+;
+			MOVE.L	portList,A0					;get the portList
+			MOVE.L	(A0),A0						;point to it
+			TST		(A0)						;any elements?
+			BEQ.S	DONE						;=> no
+;			SUBQ	#1,(A0)						;else decrement count
+;
+; Find the port and delete it from the list.  NOTE:  The item is assumed to be in the list.
+;
+; a0 points to the beginning of the list
+;
+			move.w	(a0)+,d0					;get length >= 1
+			subq	#1,d0						;get length >= 0
+			move.l	4(sp),d1					;grafPtr to match
+@loop		cmp.l	(a0)+,d1
+			dbeq.w	d0,@loop					;fall through if found
+;
+; found it:  delete the item and shrink the handle by 4 bytes
+;
+;  a0 points 4 bytes past the item to delete
+;
+			bne.s	Done						;port was not found
+			bra.s	@MoveLoopEntry				;yes, move the others up
+@moveLoop
+			move.l	(a0),-4(a0)					;move the next item over this one
+			addq.l	#4,a0
+@MoveLoopEntry
+			dbra.w	d0,@moveLoop
+@DoSetHandleSize
+			move.l	portList,a0					;handle to portList
+			move.l	(a0),a1						;point to it
+			subq	#1,(a1)						;decrement count to remove 1 item
+			moveq	#0,d0
+			move.w	(a1),d0						;get size
+			lsl.w	#2,d0						;*4
+			addq.w	#2,d0
+			_SetHandleSize						;set the new size
+;
+;size word in portlist was decremented above
+;
+DONE		MOVE.L	(SP)+,(SP)					;strip param
+			RTS									;and return
+
+			ENDPROC
+
+;=========================================================================================
+;=========================================================================================
+;
+;	Patch NewPixMap to always return 72 dpi pixmaps
+;
+;=========================================================================================
+;=========================================================================================
+
+NewPixMap	PatchProc	_NewPixMap,(IIci)
+;-------------------------------------------------------------
+;
+;  FUNCTION NewPixMap : PixMapHandle;
+;
+;  Create a new, initialized pixel map and return a handle to it
+;
+			CLR.L	-(SP)				;make room for a handle
+			jsrROM	ciOpenPixMap		;open the pixMap
+			MOVE.L	(SP),8(SP)			;return result
+			jsrROM	ciInitPixMap		;initialize it
+			move.l	#$480000,hRes(a1)	;don't try this at home: a1 still points	<KON 22OCT90>
+			move.l	hRes(a1),vRes(a1)	;to pixmap.  Make resolution 72dpi			<KON 22OCT90>
+	if TheFuture then
+		if ADDRMODEFLAG then			;											<17>
+			clr.w	pmVersion(A1)		; assume 24 bit addressing					<17>
+		endif							;
+	endif
+			RTS							;and return
+			ENDPROC
+
+;=========================================================================================
+;=========================================================================================
+;=
+;=		Patch to BitMapRgn to allow 32-bit addressed pixmaps and to create
+;=	64K regions.
+;=========================================================================================
+;=========================================================================================
+
+
+
+;________________________________________________________________________________
+;
+; 		FUNCTION BitMapRgn(region:RgnHandle; bMap:BitMap): OSErr; INLINE $A8D7;
+;
+; 		Given a region and bitmap, BitMapRgn makes the region a bounding
+;		region for the 'map. If it can't get memory it will return a
+;		Memory Manager-type error and an empty region gibbley. Note that
+;		the region might also be empty with no error (if the bounds is an
+;		empty rectangle or there are no 1 bits in the bitmap). Lastly,
+;		if the region would have to exceed 32K it returns a result of
+;		-500 (rgnTooBigErr).
+;
+;		The bMap parameter may be a pointer to a bitmap, a pointer to a
+;		pixmap, or a pointer to a portBits field in a color grafport.
+;		In the latter two cases, if the pixmap is not 1-bit deep, an error
+;		result of -148 (pixmapTooDeepErr) is returned.
+;
+; 		(the nibble state machine idea is from the Finder MaskToRgn routine)
+;
+;	History
+;		2/19/88	 RBB	changed to take in washing and handle rect. & empties properly
+;						also now finds minimum rectangle to enclose region
+;		*** version of 2/22/88 ***
+;		2/23/88	 RBB	putting in numerous optimizations recommended by Darin
+;		4/4/88   RBB	trying to re-do lost work from March
+;		         DBA
+;		3/28/89	 CSD	adjusted setup to know about pixmaps and portBits
+;
+;________________________________________________________________________________
+;
+;Theory
+;		We scan each line of the bitmap and pump inversion points (ip's) into the region
+;		to put the areas with ones in the bitmap into the region and the areas
+;		with zeroes outside the region.
+;
+;		In order to keep track of where we are in "inversion land" we use two
+;		techniques:
+
+;		The first is a scanline buffer which records the changes
+;		(zeroes to ones and vice versa) as we go. Wherever a change occurs (a
+;		1 next to a 0 in the buffer) we need to put out an inversion point.
+
+;		The second is a togglin' flag which tells us whether we are "inverted" or not.
+;		Since we use a state machine in the innermost (nibble) loop to churn out
+;		ip's, the input to the state machine must be complemented if the flag is set.
+
+;		The loop stuff looks like this:
+;			outer line loop (grows handle in anticipation of worst case for next line)
+;			longword loop for current line (puts out inter-long ip's as needed)
+;			loop for 4 nibbles in current long (calls state maching for each nibble)
+;
+;________________________________________________________________________________
+
+
+BitMapRgn	PatchProc	_BitMapRgn,(II,IIci)
+
+BMFrame		RECORD	{A6Link},DECR
+result		DS.W	1
+
+paramTop	EQU		*
+
+regionH		DS.L	1
+bMapPtr		DS.L	1
+
+paramSize	EQU		paramTop-*
+
+return		DS.L	1
+A6Link		DS.L	1
+
+rowLongs	DS.L	1							;number of longwords per line
+rightMask	DS.L	1							;mask for rightmost long of each line
+slHandle	DS.L	1							;handle to scanline buffer
+numLines	DS.W	1							;number of lines in bitmap
+rowNumBytes	DS.W	1							;rowbytes from the bitmap
+startSize	DS.L	1							;size of region at start of line
+lastLineH	DS.L	1							;last line (zeroes) handle
+
+handSize	DS.L	1							;size of handle (avoid calls to GetHandleSize)
+max2Add		DS.L	1							;worst case for bytes we could add for next line
+MMUSave		ds.b	2							;keep it even!
+SrcPixMap	ds.b	PMREC+CTREC+20 				;room for pixmap and color table
+
+localSize	EQU		*
+			ENDR
+
+		WITH	BMFrame
+		LINK	A6,#localSize
+		MOVEM.L	A2-A5/D3-D7,-(SP)				;save work registers
+
+		CLR.L	slHandle(A6)					;no scanline handle, yet
+		CLR.W	result(A6)						;function result presumed zero at start
+
+		MOVE.L	regionH(A6),A0
+		MOVE.L	(A0),A2
+		MOVEQ	#0,D0
+		MOVE.W	(A2),D0							;get size of region
+		MOVE.L	D0,handSize(A6)					;save it long
+;
+; Convert bitmap/pixmap to a pixmap
+;
+		move.l	bMapPtr(a6),a1
+		lea		SrcPixMap(a6),a2
+		_BitsToPix
+
+;get boundary rectangle so we can tell how to process the bitmap
+
+		lea		SrcPixMap(A6),A1				;get bitmap pointer
+		CMP.W	#1, pmPixelSize(A1)				;is it 1 bit per pixel deep?
+		BEQ.S	@1								;if yes, we're fine
+		MOVE.W	#pixmapTooDeepErr, D0			;return an error otherwise
+		BRA		BMRBadEmpty						;clean up and bail out
+@1
+		MOVE.W	rowBytes(A1), rowNumBytes(A6)	;get the rowbytes from the bit/pixmap
+		ANDI.W	#$7FFF, rowNumBytes(A6)			;mask off pixmap flag
+		MOVE.L	bounds+topLeft(A1),D2			;get topLeft
+		MOVE.W	bounds+right(A1),D0				;get right
+
+;figure the number of longs per row (according to width, not rowbytes)
+;so we can get a scanline buffer
+
+		SUB.W	D2,D0							;right - left
+		BLE		BMREmptyOut						;if empty rect. then empty region
+		EXT.L	D0
+		MOVE.L	D0,D4
+		ADD.L	D4,D4							;double width for 2 bytes/ip
+		ADDQ.L	#4+2,D4							;add 4 bytes for y value and $7FFF word
+												;add 2 more for the $7FFF if the last line
+		ADD.L	D4,D4							;double, just 'cause I feel like it!
+		MOVE.L	D4,max2Add(A6)					;save max. bytes for a given line
+
+		MOVEQ	#32,D7							;(side effect: clear high word of D7)
+		DIVU	D7,D0							;number of longs = width/32
+
+;get a mask for the rightmost long into rightMask
+
+		MOVE.L	D0,D3							;save remainder(hi word)
+		SWAP	D3								;get remainder from width/32
+		MOVEQ	#-1,D1							;default rightmost long mask
+		TST.W	D3								;zero remainder?
+		BEQ.S	@0								;yes, $FFFF is a good mask
+		ADDQ.W	#1,D0							;we need one more long
+		SUB.W	D3,D7							;32 - remainder = zero bits to shift in
+		ASL.L	D7,D1							;get proper mask
+@0		MOVE.L	D1,rightMask(A6)
+		EXT.L	D0
+		MOVE.L	D0,rowLongs(A6)					;save # of longs
+		ASL.L	#2,D0							;longs => bytes
+
+;get the scanline buffer (D0 = number of bytes per line)
+		_NewHandle clear 						;get a scanline buffer (of zeroes)
+		BNE		BMRBadEmpty						;if we failed then return a NIL handle
+
+		MOVE.L	A0,slHandle(A6)					;save buffer handle
+
+;figure the number of lines
+
+		MOVE.L	D2,D3
+		SWAP	D3								;get top
+		MOVE.W	bounds+bottom(A1),D0			;get bottom
+		SUB.W	D3,D0							;bottom - top
+		BLE		BMREmptyOut						;if empty rect. then empty region
+
+		MOVE.W	D0,numLines(A6)					;number of lines
+
+		MOVE.L	baseAddr(A1),a4					;point to start of map
+		MOVE.W	#rgnData,D7						;initial region size
+
+;OK, now we start the loops.
+;	A1 will point to the bitmap long,
+;	A2 to the region.
+;	A3 points to the current scanline buffer long.
+;	A4 will point to the row in the map.
+;	A5 points to the current word (= size + A2)
+;	D1 holds the current long (modified).
+;	D2 holds the leftmost coordinate of bitmap.bounds.
+;	D3 has the y coordinate, and
+;	D4 the x coordinate (high word stays clear!).
+;	D5 has number of longs remaining for current line.
+;	D6 holds the (on or off) value of the "beam" (for the line).
+;	D7 holds the size outside the longword loop (used as scratch while nibbling).
+;	   (we assume at the very end that D7's high word has remained clear)
+
+;
+; goto 32-bit mode
+;
+		moveq	#true32b,d0						;switch to 32 bit addressing
+		_rSwapMMUMode							;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+		move.b	d0,MMUsave(a6)					;save previous state for later
+
+BMRHScramLine
+		MOVE.L	regionH(A6),A2
+		MOVE.L	(A2),d0
+		_StripAddress							;clean it up	<14>
+		move.l	d0,a2							;point to start of region
+
+BMRLineLoop
+  		LEA		(A2,D7.L),A5					;point to new region start + size
+
+		MOVE.L	handSize(A6),D1					;get handle size
+		SUB.l	D7,D1							;handle size - region size
+		CMP.L	max2Add(A6),D1					;is there enough for worst case on next line?
+		BGE.S	@1								;skippy if so
+
+		MOVE.L	handSize(A6),D0					;get handle size
+		ADD.L	max2Add(A6),D0					;add more than enough for worst case on next line
+		MOVE.L	D0,handSize(A6)					;save new size
+;
+; go back to previous mode
+;
+		move.b	MMUsave(a6),d0					;get previous MMU state in d0
+		_rSwapMMUMode							;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+
+		MOVE.L	handSize(A6),d0					;save new size
+		MOVE.L	regionH(A6),A0					;region handle
+		_SetHandleSize
+		BNE		BMRBadEmpty						;if we failed then return a NIL handle
+;
+; goto 32-bit mode
+;
+		moveq	#true32b,d0						;switch to 32 bit addressing
+		_rSwapMMUMode
+		BRA.S	BMRHScramLine					;rederef. handle and recompute current pointer
+@1
+
+		MOVE.W	D2,D4							;get current x coordinate from left
+		MOVEQ	#0,D6							;beam initially off
+		MOVE.L	A4,A1							;start of current line into map pointer
+		MOVE.L	rowLongs(A6),D5					;longs remaining for current line
+		MOVE.L	slHandle(A6),A3					;A3 points to the current "differences" long
+		MOVE.L	(A3),A3
+
+; Note: within this loop we assume that nothing will be done to move the heap
+
+		MOVE.W	D3,D0							;get y position
+		BSR		OutputRgnWord					;output y pos to region
+
+		MOVE.l	D7,startSize(A6)				;save size at line start (a la Derwood)
+		BRA		NextBMRLong						;enter the long loop
+
+BMRLongLoop
+		MOVE.L	(A1)+,D0						;fetch the next long for this line
+BMRLastLEntry
+		MOVE.L	(A3),D1							;get differences long
+
+		EOR.L	D0,D1							;compute the differences
+		BNE		BMRDiff							;if not the same, skip ahead
+
+BMRSame
+;since we want to skip this long (it matches the previous line) we need to
+;put out an ip if the beam is on
+ 		TST.B	D6								;beam on?
+ 		BEQ.S	@1								;skip if not
+ 		MOVE.W	D4,(A5)+						;pump it out
+ 		MOVEQ	#0,D6							;beam off
+
+@1
+		ADD.W	#32,D4							;slip to next long's x coordinate
+@2 		ADDQ.W	#4,A3							;to next changes buffer long
+		BRA		NextBMRLong
+
+;----------------------------------------------------------------------------------------
+
+; Start of State Machine
+
+; Handle state 0001
+
+BMRState1
+		ADDQ.W	#3,D4							;bump x by 3
+State1Common
+		MOVE.W	D4,(A5)+						;generate one
+;Tog1StateDone
+		ADDQ.W	#1,D4							;bump x by one more
+TogStateDone
+		NOT.B	D6								;toggle state
+		RTS
+
+; Handle state 0010
+
+BMRState2
+		ADDQ.W	#2,D4							;bump x by 2
+		MOVE.W	D4,(A5)+						;generate one
+Gen1BumpBy1
+		BSR.S	Gen1InvPoint					;and another one
+BumpBy1
+		ADDQ.W	#1,D4							;bump once more
+		RTS										;state doesn't change
+
+; Handle state 0011
+
+BMRState3
+		ADDQ.W	#2,D4							;bump x by 2
+		MOVE.W	D4,(A5)+						;generate one
+		ADDQ.W	#2,D4							;bump
+		BRA.S	TogStateDone					;toggle the state
+
+; Handle state 0100
+
+BMRState4
+		BSR.S	Gen1InvPoint
+		BSR.S	Gen1InvPoint
+BumpBy2
+		ADDQ.W	#2,D4
+		RTS
+
+; Handle state 0101
+
+BMRState5
+		BSR.S	BMRState4						;start out as state 4
+		SUBQ	#1,D4
+		BRA.S	State1Common					;use common code
+
+; Handle state 0110
+
+BMRState6
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#1,D4
+		BRA.S	Gen1BumpBy1
+
+; Handle state 0111
+
+BMRState7
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#3,D4
+		BRA.S	TogStateDone
+
+; Gen1InvPoint bumps x by one and then generates a horizontal inversion point
+
+Gen1InvPoint
+		ADDQ.W	#1,D4							;bump by 1, first
+		MOVE.W	D4,(A5)+						;add x value (ip) to region
+		RTS
+
+; Handle State 1000
+
+BMRState8
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#3,D4
+		RTS
+
+; Handle State 1001
+
+BMRState9
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#2,D4
+		BRA.S	State1Common
+
+; Handle State 1010 (most complicated case)
+
+BMRState10
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		BSR.S	Gen1InvPoint
+		BRA.S	Gen1BumpBy1
+
+; Handle State 1011
+
+BMRState11
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#2,D4
+		BRA.S	TogStateDone
+
+; Handle State 1100
+
+BMRState12
+		MOVE.W	D4,(A5)+
+		ADDQ.W	#2,D4
+		MOVE.W	D4,(A5)+
+		BRA.S	BumpBy2
+
+; Handle State 1101
+
+BMRState13
+		BSR.S	BMRState12
+		SUBQ	#1,D4
+		BRA.S	State1Common
+
+; Handle State 1110
+
+BMRState14
+		MOVE.W	D4,(A5)+
+		ADDQ.W	#3,D4
+		MOVE.W	D4,(A5)+
+		BRA.S	BumpBy1
+
+; State table
+
+BMRHandler
+		BRA.S	BMRState0
+		BRA.S	BMRState1
+		BRA.S	BMRState2
+		BRA.S	BMRState3
+
+		BRA.S	BMRState4
+		BRA.S	BMRState5
+		BRA.S	BMRState6
+		BRA.S	BMRState7
+
+		BRA.S	BMRState8
+		BRA.S	BMRState9
+		BRA.S	BMRState10
+		BRA.S	BMRState11
+
+		BRA.S	BMRState12
+		BRA.S	BMRState13
+		BRA.S	BMRState14
+
+; Handle State 15 or 1111
+
+BMRState15
+		MOVE.W	D4,(A5)+						;generate one now
+		NOT.B	D6								;toggle the state
+
+; Handle State 0 or 0000
+
+BMRState0
+		ADDQ.W	#4,D4
+		RTS
+
+; End of the State Guys
+
+;----------------------------------------------------------------------------------------
+
+BMRDiff
+		MOVE.L	D0,(A3)+						;fix up scanline buffer for next time
+
+; this long is different from the last one, so output a bunch
+; of inversion points by pumping it through the state machine, a nibble
+; at a time.
+
+		MOVEQ	#3,D7							;4 bytes to process (D7 high word clear)
+		MOVEQ	#0,D0							;prevent need to mask for first nibble
+
+; here is the loop where we feed it through a nibble at a time.
+; it's worth it to special case a whole byte of 0
+
+BMRByteLoop
+		ROL.L	#8,D1							;get next (topmost) byte
+		TST.B	D1								;is it zero?
+		BNE.S	BMRNibble						;if not, 4 bits at a time
+
+		TST.B	D6
+		BNE.S	BMRNibble						;if beam on, must pass through
+
+;the top 8 are zero, so we can save some time
+
+		ADDQ.W	#8,D4							;bump x
+		BRA.S	BMRNextByte
+
+;take care of the rightmost long for a line
+
+BMRLastLong
+		MOVE.L	(A1),D0							;fetch the long from the bitmap
+		AND.L	rightMask(A6),D0				;mask off right bits that aren't in map
+		BRA		BMRLastLEntry					;go process this long
+
+; handle the first nibble
+
+BMRNibble
+		MOVE.B	D1,D0							;get byte
+		EOR.B	D6,D0							;invert nibble when beam is on
+		LSR.B	#4,D0							;get 1st nibble
+		ADD.W	D0,D0							;double for word index
+
+		JSR		BMRHandler(D0.W)				;invoke the handler
+
+; handle the second nibble
+
+		MOVE.B	D1,D0							;get byte again
+		EOR.B	D6,D0							;invert nibble when beam is on
+		AND.W	#%1111,D0						;mask to it
+		ADD.W	D0,D0							;double for word index
+
+		JSR		BMRHandler(D0.W)				;invoke the handler
+
+BMRNextByte
+		DBRA	D7,BMRByteLoop					;loop for all 8 nibbles
+
+; bump to the next long
+
+NextBMRLong
+		SUBQ.W	#1,D5							;decrement longword index
+		BGT		BMRLongLoop						;not at end, loop for whole line
+		BEQ.S	BMRLastLong						;process last long for this line
+
+; we've reached the end of the (this) line
+BMREOL
+		MOVE.l	A5,D7							;current region pointer
+		SUB.l	A2,D7							;figga region size
+		CMP.l	startSize(A6),D7				;did we add inv. pts to this line?
+		BEQ.S	BMRNoLine						;br = no, so back up
+		BLT		BMR64KErr						;if the size decreased, we overflowed
+
+; if the state is on, generate one last inversion point
+
+		TST.B	D6
+		BEQ.S	@1
+
+		MOVE.W	D4,(A5)+						;generate a last one
+		ADDQ.l	#2,D7							;keep sizable advantage
+@1
+
+; end the scan line with the traditional $7FFF
+
+		BSR.S	OutputLastRgnWord
+
+BMREOL2
+		ADDQ.W	#1,D3							;bump y position
+		MOVE.W	D2,D4							;start x at left again
+		ADD.W	rowNumBytes(A6),A4				;bump to next row in map
+		SUBQ.W	#1,numLines(A6)
+		BGT		BMRLineLoop						;if we're not done then do next line
+		BLT.S	BMRFinis						;br if really done
+
+; as the last line process an imaginary line of zeroes to end the region…
+		move.b	MMUsave(a6),d0					;get previous MMU state in d0		<14>
+		_rSwapMMUMode							;(can trash a0/a1/a2, d0/d1/d2)		<14>
+
+		MOVE.L	rowLongs(A6),D0
+		ASL.L	#2,D0							;longs => bytes
+		_NewHandle clear						;get a full line of zero bits
+		BNE		BMRBadEmpty						;if we failed then return a NIL handle
+
+		MOVE.L	A0,lastLineH(A6)				;save handle
+		MOVE.L	(A0),A4							;start of current line
+;
+; Since we just allocated this handle, there is no need to strip it since the flags are guaranteed
+; to be zero.
+;
+		moveq	#true32b,d0						;switch to 32 bit addressing		<14>
+		_rSwapMMUMode							;									<14>
+		BRA		BMRHScramLine					;do this last one (and rederef handle)
+
+BMRNoLine
+		SUBQ.L	#2,A5							;back up pointer
+		SUBQ.l	#2,D7							;back down size
+		BRA.S	BMREOL2							;go for next line
+
+; Append the "end of line" token to the region
+
+OutputLastRgnWord
+		MOVE.W	#$7FFF,D0
+
+; OutputRgnWord takes the word in D0, appends it to the region,
+; and leaves the condition codes set for ADDQ.l D7 (which contains the length)
+
+OutputRgnWord
+		MOVE.W	D0,(A5)+						;put a word to the region
+		ADDQ.l	#2,D7							;ink the size
+		RTS
+
+
+; all done:  Restore MMU Mode, clean up, and output the final $7FFF
+;
+BMRFinis
+		move.b	MMUsave(a6),d0				;get previous MMU state in d0
+		_rSwapMMUMode						;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+
+		MOVE.L	lastLineH(A6),A0
+		_DisposHandle						;get rid of that last line of zeroes
+
+		CMP.l	#10,D7							;is region empty of inversion points?
+		BEQ.S	BMREmptyOut						;skip if so (it's an empty region)
+
+		BSR.S	OutputLastRgnWord				;put End-O-Region ($7FFF) word
+;
+; check if rgn > 64K
+;
+		cmp.l	#$0000FFFF,d7
+		BGT.S	BMR64KErr						;if larger than $FFFF, we overflowed!
+
+; find the smallest rectangle that encompasses all the inversion points
+; A0 will point to the current region word, A1 to the start of the line
+; D1 will have the smallest x, D2 the largest x, D4 will contain $7FFF
+; D3 gets the smallest y value (which we know at the start)
+
+		LEA		rgnData(A2),A0					;point A0 past the rgnBBox
+		MOVE.W	#$7FFF,D4
+		MOVE.W	D4,D1							;smallest x so far = $7FFF
+		MOVE.W	#$8000,D2						;largest x so far = -32768
+		MOVE.W	(A0),D3							;smallest y there is
+		BRA.S	BMRPackStart					;enter loop
+
+BMRPackY
+		MOVE.L	A0,A1							;remember where the y value is (sort of)
+
+		CMP.W	(A0)+,D1						;less than smallest x so far?
+		BLE.S	@1								;skip if not
+		MOVE.W	-2(A0),D1						;new smallest x
+
+@1		CMP.W	(A0)+,D4						;end of line?
+		BNE.S	@1								;if not then keep looking
+
+		CMP.W	-4(A0),D2						;last x greater than largest x so far?
+		BGE.S	BMRPackStart					;skip if not
+		MOVE.W	-4(A0),D2						;new largest x
+
+BMRPackStart
+		MOVE.W	(A0)+,D0						;get next word (y value or $7FFF)
+		CMP.W	D4,D0							;if $7FFF then we're done
+		BNE.S	BMRPackY						;otherwise loop
+
+		SWAP	D3								;top into top word
+		MOVE.W	D1,D3							;left into bottom word
+		MOVE.W	-2(A1),D4						;bottom (from last y at start of line)
+		SWAP	D4								;move bottom to high word
+		MOVE.W	D2,D4							;get right
+
+		CMP.l	#28,D7							;size = 28? (do we have a rect. region?)
+		BEQ.S	BMRRect							;skip if so
+
+		BRA.S	BMROut							;return complex region
+
+;the region would exceed 64K, so we have to error out, man
+BMR64KErr
+		move.b	MMUsave(a6),d0				;get previous MMU state in d0
+		_rSwapMMUMode						;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+		MOVE.W	#rgnTooBigErr,D0				;if >32K needed return error
+
+;we come here after failing a SetHandleSize (or NewHandle)
+BMRBadEmpty
+		MOVE.W	D0,result(A6)					;OSErr function result
+
+; emptify the region on errors (or when it should be empty with no error)
+BMREmptyOut
+		MOVE.L	regionH(A6),A0					;handle to region
+		MOVE.L	(A0),A2							;point to it
+		CLR.L	D3								;(0, 0) to topLeft
+		CLR.L	D4								;(0, 0) to botRight
+
+BMRRect
+		MOVEQ	#10,D7							;the size of the region = 10
+
+;output the region with size (longword, high word clear) in D7
+;D3 comes in with topLeft, D4 with botRight
+BMROut
+		MOVE.W	D7,(A2)+						;the size of the region
+		MOVE.L	D3,(A2)+						;topLeft to rgnBBox
+		MOVE.L	D4,(A2)							;botRight to rgnBBox
+		MOVE.L	D7,D0							;size
+		MOVE.L	regionH(A6),A0					;handle to region
+		_SetHandleSize
+
+BMRDspSL
+		MOVE.L	slHandle(A6),A0
+		_DisposHandle						;get rid of the scanline buffer (even if NIL)
+
+BMRDone
+		MOVEM.L	(SP)+,A2-A5/D3-D7				;restore work registers
+		UNLK	A6
+		MOVE.L	(SP)+,A0						;pop return address
+		ADD 	#paramSize,SP					;pop params
+		JMP 	(A0)
+		ENDWITH
+
+		ENDPROC
+
+;=========================================================================================
+;=========================================================================================
+;
+;	Patch to bSetup0 on 040 machines with VM off to use Move16's to speed up scrolling
+;	radically. Moved from QDIIciPatchROM.a
+;
+;=========================================================================================
+;=========================================================================================
+installPatchBSetup0 InstallProc	(IIci,hasTERROR)
+		IMPORT	bSETUP0
+		INCLUDE	'GestaltEqu.a'
+		
+	;call gestalt to see if we have an 040 or greater. If not, bail
+		move.l	#gestaltProcessorType,d0
+		_Gestalt
+		tst.w	d0						;did gestalt return an error?
+		bne.s	@skipme					;if so, bail
+		moveq.l	#gestalt68040,d0		;get the 040 flag
+		cmp.l	a0,d0					;compare result to 040 flag
+		bgt.s	@skipme					;if less than 040, bail
+	
+	;call gestalt to see if VM is on. If so, bail
+		move.l	#gestaltVMAttr,d0
+		_Gestalt
+		tst.w	d0						;did gestalt return an error?
+		bne.s	@skipme					;if so, bail
+		move.l	a0,d0					;get the result
+		btst	#gestaltVMPresent,d0	;check the VM on bit
+		bne.s	@skipme					;if on, quit
+	
+	;we're ok, so install the patch
+		leaResident	bSETUP0,a0
+		move.w	#$AB58,d0
+		_SetTrapAddress	,NewTool
+@skipme
+		rts
+
+		ENDPROC
+
+
+;------------------------------------------------------------
+;
+; <SMC> All new fast scrolling routine that takes advantage of the
+;		MOVE16 instruction on the 68040 when possible.
+; <SAH>	Added NOP's to appropriate places to make Move16's work.
+;
+;-------------------------------------------------------
+;		a0 = JUMPA			d0 = SCRATCH
+;		a1 = JUMPB			d1 = <LONGS>,SCRATCH
+;		a2 = JUMPC			d2 = LEFTLONGS,SCRATCH
+;		a3 = JUMPD			d3 = RIGHTLONGS,QUADBLOCKS
+;		a4 = <SRCPTR>		d4 = <LEFTMASK>
+;		a5 = <DSTPTR>		d5 = <RIGHTMASK>
+;		a6 = locals			d6 = SRCWID
+;		a7 = sp				d7 = DSTWID
+;-------------------------------------------------------
+
+bSETUP0	PROC	EXPORT
+
+SRCBUMP		EQU		-606
+HEIGHT		EQU		-608
+OFFSET		EQU		38
+
+		MOVE	SRCBUMP(A6),D6		;get srcwid into a register
+		MOVE	A3,D7				;put dstwid into a more useful register
+		MOVEQ	#$F,D1				;get useful mask
+
+		ADDQ	#1,D2				;make longs width one based
+
+		CMP		#8,D2				;are at least 8 longs being moved?
+		BLT.S	@normal				;no, use normal case
+
+		MOVE	D2,D3				;are srcwid and dstwid both quadlong multiples?
+		LSL		#2,D3				;	((srcwid + (longs*4)) | (dstwid + (longs*4))) & 0x000F == 0)
+		MOVE	D6,D0
+		ADD		D3,D0
+		ADD		D7,D3
+		OR		D0,D3
+		AND		D1,D3
+		BNE.S	@normal				;no, use normal case
+
+		MOVE.L	A4,D3				;do srcptr and dstptr have same quadlong phase?
+		SUB.L	A5,D3				;	(srcptr - dstptr) & 0x000F == 0)
+		AND		D1,D3
+		BEQ.S	@fast				;yes, use fast case
+
+@normal	MOVE	D2,D3				;count = longs
+		MOVEQ	#0,D0
+		ADDQ.L	#1,D4				;count += (leftmask++ == -1)
+		ADDX	D0,D3
+		ADDQ.L	#1,D5				;count += (rightmask++ == -1)
+		ADDX	D0,D3
+		MOVE.L	D5,D0				;JUMPD = &@right + (rightmask ? (@right - @rmask) : 0)
+		BEQ.S	@0
+		MOVEQ	#-OFFSET,D0
+	@0:	LEA		(@right,D0.W),A3
+		MOVE.L	A3,A1				;JUMPB = JUMPD
+		SUBQ	#3,D3				;if ((count -= 3) < 0)
+		BMI.S	@5					;	goto @5
+		AND		D3,D1				;JUMPB = &@mv4 - (count % 16) * 2
+		NEG		D1
+		LEA		(@mv4,D1.W*2),A1
+		LSR		#4,D3				;count /= 16;
+		BRA.S	@5
+
+@fast	MOVEQ	#-1,D0
+		MOVE.W	A4,D3				;leftlongs = (-srcptr % 16) / 4
+		NEG		D3
+		AND.W	D3,D1
+		LSR.W	#2,D1
+		SUB		D1,D2				;longs -= leftlongs
+		ADDQ.L	#1,D4				;leftlongs -= (leftmask++ != -1)
+		ADDX	D0,D1
+		BGE.S	@1					;if (leftlongs < 0)
+		MOVEQ	#3,D1				;	leftlongs = 3
+		SUBQ	#4,D2				;	longs -= 4
+	@1:
+		MOVEQ	#3,D3				;rightlongs = longs & 0x03
+		AND		D2,D3
+		SUB		D3,D2				;longs -= rightlongs
+		ADDQ.L	#1,D5				;rightlongs -= (rightmask++ != -1)
+		ADDX	D0,D3
+		BGE.S	@2					;if (rightlongs < 0)
+		MOVEQ	#3,D3				;	rightlongs = 3
+		SUBQ	#4,D2				;	longs -= 4
+	@2:
+		NEG		D3					;JUMPD = &@right + (-rightlongs * 2)
+		LEA		(@right,D3.W*2),A3
+		TST.L	D5					;if (rightmask - 1 != -1)
+		BEQ.S	@3
+		SUB		#OFFSET,A3			;	JUMPD -= @right - @rmask;
+	@3:
+		MOVE.L	A3,A2				;JUMPC = JUMPD
+		LSR		#2,D2				;longs /= 4
+		BEQ.S	@4					;if (longs)
+		SUBQ	#1,D2				;	longs--
+		MOVE	D2,D3				;	quadblocks = longs / 8
+		LSR		#3,D3
+		AND		#$07,D2				;	JUMPC = &@mv16 + (-(longs & 0x7) * 4)
+		NEG		D2
+		LEA		(@mv16,D2.W*4),A2
+	@4:
+		MOVE.L	A2,A1				;JUMPB = JUMPC
+		MOVE	D1,D2				;if (leftlongs != 0)
+		BEQ.S	@5
+		NEG		D2					;	JUMPB = &@left - (leftlongs * 2)
+		LEA		(@left,D2.W*2),A1
+	@5:	MOVE.L	A1,A0				;JUMPA = JUMPB
+		TST.L	D4					;if (leftmask - 1 != -1)
+		BEQ.S	@6
+		LEA		@lmask,A0			;	JUMPA = &@lmask
+	@6:	SUBQ.L	#1,D4				;++leftmask
+		SUBQ.L	#1,D5				;++rightmask
+		MOVE.L	HEIGHT(A6),D1		;(put height into high word)
+		MOVE	D3,D1				;(set up initial quadblocks count)
+		nop							;finish any write in pipeline (may not need this one)
+		JMP		(A0)
+
+		MACRO						;*** REMOVE WHEN ASSEMBLER KNOWS ABOUT MOVE16
+		myMOVE16					;*** REMOVE WHEN ASSEMBLER KNOWS ABOUT MOVE16
+		DC.L $F624D000				;*** REMOVE WHEN ASSEMBLER KNOWS ABOUT MOVE16
+		ENDM						;*** REMOVE WHEN ASSEMBLER KNOWS ABOUT MOVE16
+
+	ALIGN	Alignment
+
+@lmask	MOVE.L	(A4)+,D0			;get long of src
+		MOVE.L	(A5),D2				;get long of dst
+		EOR.L	D2,D0				;
+		AND.L	D4,D0				;splice src and dst together through leftmask
+		EOR.L	D2,D0				;
+		MOVE.L	D0,(A5)+			;save result to dst
+		nop							;finish any write in pipeline
+		JMP		(A1)				;go copy partial or full quadlong blocks
+
+		MOVE.L	(A4)+,(A5)+			;copy partial left quadlong block
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+@left	nop							;finish any write in pipeline
+		JMP		(A2)				;go copy quadlong blocks
+
+@mv256	myMOVE16			;MOVE16	(A4)+,(A5)+			;copy 32 longs
+		myMOVE16			;MOVE16	(A4)+,(A5)+
+		myMOVE16			;MOVE16	(A4)+,(A5)+
+		myMOVE16			;MOVE16	(A4)+,(A5)+
+		myMOVE16			;MOVE16	(A4)+,(A5)+			;copy 16 longs
+		myMOVE16			;MOVE16	(A4)+,(A5)+
+		myMOVE16			;MOVE16	(A4)+,(A5)+
+@mv16	myMOVE16			;MOVE16	(A4)+,(A5)+			;copy 4 longs
+		DBRA	D1,@mv256			;dec counter and go do another 32 longs
+		JMP		(A3)				;go finish right edge of scanline
+
+@mv64	MOVE.L	(A4)+,(A5)+			;copy 16 longs
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+			;copy 8 longs
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+@mv4	MOVE.L	(A4)+,(A5)+			;copy 1 long
+		DBRA	D1,@mv64			;dec count and go do another 16 longs
+		JMP		(A3)				;go finish right edge of scanline
+
+		MOVE.L	(A4)+,(A5)+			;copy partial right quadlong block
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+@rmask	MOVE.L	(A4)+,D0			;get long of src
+		MOVE.L	(A5),D2				;get long of dst
+		EOR.L	D2,D0
+		AND.L	D5,D0				;splice src and dst together through rightmask
+		EOR.L	D2,D0
+		MOVE.L	D0,(A5)+			;save result to dst
+		ADD		D6,A4				;bump srcptr by (srcbump - (longcnt * 4))
+		ADD		D7,A5				;bump dstptr by (dstbump - (longcnt * 4))
+		MOVE	D3,D1				;restore quadblock count
+		SWAP	D1					;swap linecount into low word
+		SUBQ	#1,D1				;decrement linecount
+		BEQ		GoHome				;leave if zero
+		SWAP	D1					;swap linecount out of low word
+		nop							;finish any write in pipeline
+		JMP		(A0)				;go do another line
+
+		MOVE.L	(A4)+,(A5)+			;copy partial right quadlong block
+		MOVE.L	(A4)+,(A5)+
+		MOVE.L	(A4)+,(A5)+
+@right	ADD		D6,A4				;bump srcptr by (srcbump - (longcnt * 4))
+		ADD		D7,A5				;bump dstptr by (dstbump - (longcnt * 4))
+		MOVE	D3,D1				;restore quadblock count
+		SWAP	D1					;swap linecount into low word
+		SUBQ	#1,D1				;decrement linecount
+		BEQ.S	GoHome				;leave if zero
+		SWAP	D1					;swap linecount out of low word
+		nop							;finish any write in pipeline
+		JMP		(A0)				;go do another line
+
+		IF @right - @rmask - OFFSET THEN
+		AERROR	'••• Offset assumption is bad •••'
+		ENDIF
+GOHOME	RTS							;THEN QUIT
+
+		ENDPROC
+		
+
+
+;=========================================================================================
+;=========================================================================================
+;
+;	Patch to bring in new indexed to 16 bit scaleblt routine.		<5JUNE92 SAH>
+;
+;=========================================================================================
+;=========================================================================================
+
+scIndTab16	PatchProc	$ABB0,(IIci)
+
+&CurFile	SETC	'STRETCH'
+			INCLUDE	'DrawingVars.a'
+
+		DC.L	scIndexedto16-scIndTab16	;0		1	to	16
+		DC.L	scIndexedto16-scIndTab16	;1		2	to	16
+		DC.L	scIndexedto16-scIndTab16	;2		4	to	16
+		DC.L	scIndexedto16-scIndTab16	;3		8	to	16
+
+runMaskBit		equ		30				;bit number for run MASK instruction
+
+;-------------------------------------------------------
+;
+;	<SAH 060292>
+;		scale and clip indexed source to 16-bit dst
+;	<SAH 060492>
+;		put in special case for 1->16 using Sean Callahan's
+;		code from 1->32
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert/scratch
+;		a1 = tmpmask		d1 = scanCount
+;		a2 = tmpdst			d2 = scratch
+;		a3 = scaleTbl		d3 = run cnt
+;		a4 = srcPtr/patPtr	d4 = src pixel size
+;		a5 = dstPtr			d5 = scratch
+;		a6 = locals			d6 = bit offset in src
+;		a7 = 				d7 = src shift
+;-------------------------------------------------------
+scNonBWto16
+		move	srcShift(a6),d7		;set this up once
+		move.l	scaleTbl(a6),a3		;set this up once
+
+		lea		first16,a0			;go here from now on
+		move.l	A3,scaleBltA3(a6)	;save for reload after seekMask
+		move.l	a0,ScaleCase(a6)	;remember for later
+		bra.s	first16				;go to it
+
+nxtScan16
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a4	;BUMP src TO NEXT ROW
+		addq.w	#1,vert(a6)		;BUMP DOWN A SCAN LINE
+		subq	#1,d1
+		ble		NXTMASK16
+
+first16
+		move.l	dstAlign(a6),d2	;get initial dst offset
+		asr.l	#4,d2			;convert it to pixels
+		asl.l	d7,d2			;and convert it to src bits
+		move.l	srcAlign(a6),d6	;start with initial src offset
+		move.l	a4,a0			;init tmp src ptr
+	;now make sure the source is long aligned
+		move.w	a0,d5
+		and.w	#3,d5			;get the non-long address
+		beq.s	@srcAligned		;branch if aligned
+		sub.w	d5,a0			;align the source
+		lsl.w	#3,d5			;turn it into a bit offset
+		add.w	d5,d6			;add it to the src index
+@srcAligned
+		add.w	d2,d6			;back up the number of dst pixels
+		bge.s	@srcOK			;make sure we didn't go negative
+		add.w	#$20,d6			;figure out where to start in the new src long
+		subq.l	#4,a0			;back up the src
+@srcOK
+		cmp.w	#$1f,d6			;make sure we didn't overshoot this long
+		ble.s	@srcAligned2
+		addq.l	#4,a0			;bump src ptr to next long
+		and.w	#$1f,d6			;and find where we are inside it
+@srcAligned2
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	runBuf(a6),a1	;point to run encoded mask buffer
+		
+inst16	move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	nxtScan16		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		lsr.w	#1,d3			;make byte skip into pixel skip
+		lsl.w	d7,d3			;make into bit skip
+		add.w	d3,d6			;bump src offset
+		move	d6,d3			;make a copy
+		lsr.w	#5,d3			;make into long cnt
+		lea		(a0,d3.w*4),a0	;bump src ptr
+		swap	d3				;get mask/blit cnt and check done flag
+
+		BCLR	#runMaskBit-16,D3	;check and clear mask flag
+		BNE		MASKRUN16
+
+@blit	MOVE.L	(A0)+,D5		;GET FIRST LONG OF SRC
+@NXPXL	BFEXTU	D5{D6:D4},D0	;GET A PIXEL OF SRC
+		ADD		D4,D6			;ADVANCE TO NEXT SRC PIXEL
+		MOVE.L	0(A3,D0*4),D2	;TRANSLATE IT
+		and.w	#$1f,D6			;TIME FOR NEXT SRC LONG?
+		bne.s	@srcOK
+		MOVE.L	(A0)+,D5		;GET NEXT LONG OF SRC
+@srcOK
+		SWAP	D2				;MOVE LAST PIXEL INTO HIGH WORD
+		BFEXTU	D5{D6:D4},D0	;GET A PIXEL OF SRC
+		MOVE.W	2(A3,D0*4),D2 	;TRANSLATE IT
+		ADD		D4,D6			;ADVANCE TO NEXT SRC PIXEL
+		ext.l	d6				;bfext uses all of it
+		MOVE.L	D2,(A2)+		;WRITE OUT LONG TO DST
+		AND		#$1f,D6			;TIME FOR NEXT SRC LONG?
+		DBEQ	D3,@NXPXL		;LOOP ALL PIXELS THIS LONG
+		DBNE	D3,@blit		;LOOP ALL PIXELS THIS RUN
+		beq.s 	inst16 			;LOOP BACK FOR more runs
+		subq.w	#4,a0			;point back to remaining pixels
+		BRA.s 	inst16 			;LOOP BACK FOR more runs
+
+
+NXTMASK16	move.w	MinRect+bottom(a6),d2		;get bottom vertical position
+		sub.w	vert(a6),d2					;compute scans remaining, prime d2
+		ble		Done
+		move	d2,d3						;save scans remaining
+		JSR 	([SEEKMASK,A6])				;MAKE MASK BUFFER CURRENT
+		move.w	d2,d1						;get scan count in d1
+		cmp.w	d3,d1						;scan count > scans remaining?
+		ble.s	@go							;no, call the blit loop
+		move.w	d3,d1						;yes, pin to scans remaining
+@go		JSR 	([RUNRTN,A6])				;MAKE RUN BUFFER CURRENT
+		move.l	scaleBltA3(a6),A3			;reload A3 for scan loops
+		MOVE.L	ScaleCase(A6),A2 			;GET MODE CASE JUMP
+		JMP 	(A2)						;TAKE MODE JUMP
+
+MASKRUN16
+@BLIT	MOVE.L	(A0)+,D5		;GET FIRST LONG OF SRC
+@NXPXL2	BFEXTU	D5{D6:D4},D0	;GET A PIXEL OF SRC
+		ADD		D4,D6			;ADVANCE TO NEXT SRC PIXEL
+		MOVE.l	0(A3,D0*4),D2 	;TRANSLATE IT
+		AND		#$1f,D6			;TIME FOR NEXT SRC LONG?
+		BNE.S	@srcOK
+		MOVE.L	(A0)+,D5		;GET NEXT LONG OF SRC
+@srcOK
+		SWAP	D2				;MOVE LAST PIXEL INTO HIGH WORD
+		BFEXTU	D5{D6:D4},D0	;GET A PIXEL OF SRC
+		ADD		D4,D6			;ADVANCE TO NEXT SRC PIXEL
+		MOVE.W	2(A3,D0*4),D2 	;TRANSLATE IT
+		MOVE.L	(A2),D0			;GET LONG OF DST
+		EOR.L	D0,D2
+		AND.L	(A1)+,D2
+		EOR.L	D0,D2
+		MOVE.L	D2,(A2)+
+		AND		#$1f,D6			;TIME FOR NEXT SRC LONG?
+		DBEQ	D3,@NXPXL2		;LOOP ALL PIXELS THIS LONG
+		DBNE	D3,@blit		;LOOP ALL PIXELS THIS RUN
+		beq.s 	inst16 			;LOOP BACK FOR more runs
+		subq.w	#4,a0			;point back to remaining pixels
+		BRA.s 	inst16 			;LOOP BACK FOR more runs
+
+scIndexedto16
+		MOVE.L	scaleTbl(A6),A3		;set this up once
+		CMP.W	#1,D4				;is src one bit?
+		BNE.S	scNonBWto16
+		TST.L	4(A3)				;is second color black?
+		BNE.S	scNonBWto16
+		MOVE.L	#$7FFF,D0
+		CMP.L	(A3),D0				;is first color white?
+		BNE.S	scNonBWto16
+		
+		MOVE.W	D0,D4				;move white mask to better register
+		SWAP	D4
+		MOVE.W	D0,D4
+		LEA		@first,A0			;go here from now on
+		MOVE.L	A0,ScaleCase(A6)	;remember for later
+		BRA.S	@first				;go to it
+		
+
+@next	ADD.L	dstRow(A6),A5	;BUMP DST TO NEXT ROW
+		ADD.L	srcRow(A6),A4	;BUMP src TO NEXT ROW
+		ADDQ.W	#1,vert(A6)		;BUMP DOWN A SCAN LINE
+		SUBQ	#1,D1
+		BLE.S	NXTMASK16
+
+@first
+		MOVE.L  dstAlign(a6),D6	;get dest alignment
+		ASR.L	#4,D6			;and convert to dst pixels
+		ADD.L	srcAlign(A6),D6	;add src alignment
+		MOVE.L	A4,A0			;init tmp src ptr
+		MOVE.L	A5,A2			;init tmp dst ptr
+		MOVE.L	runBuf(A6),A1	;point to run encoded mask buffer
+
+@inst	MOVE.L	(A1)+,D3		;pick up next instruction long
+		BMI.S	@next			;if high bit set then done with scan
+		ADD.W	D3,A2			;bump destptr by skip amount
+		LSR.W	#1,D3			;byte skip to pixel skip
+		MOVEQ	#0,D2			;clear out d2
+		MOVE.W	D3,D2			;get a LONG bit skip
+		ADD.L	D2,D6			;add to current skip
+		SWAP	D3				;get mask/blit cnt and check done flag
+		
+		BCLR	#runMaskBit-16,D3	;check and clear mask flag
+		BNE		@doMaskedRun
+
+@blit	MOVEQ	#$07,D2
+		ADDQ.W	#1,D3
+		AND.W	D3,D2
+		LSR.W	#3,D3
+		SUBQ.W	#1,D3
+		BMI.S	@no16
+		
+@reblit	BFEXTS	(A0){D6:16},D0
+		ADDQ.W	#2,A0
+		BEQ.S	@white
+		NOT.L	D0
+		BEQ.S	@black
+
+		MOVEQ	#1,D5
+@pixel	ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		DBRA	D5,@pixel
+		DBRA	D3,@reblit
+		BRA.S	@no16
+
+@white	MOVE.L	D4,D0
+@black	MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		DBRA	D3,@reblit
+
+@no16	SUBQ.W	#1,D2
+		BMI.S	@inst
+@last15	BFEXTS	(A0){D6:16},D0
+		NOT.L	D0
+		EXT.L	D2
+		ADD.L	D2,D6
+		ADD.L	D2,D6			;2 pixels per long
+		ADDQ.L	#2,D6			;the 1 we subtracted above
+@sloop	ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		DBRA	D2,@sloop
+		BRA.S	@inst
+
+@doMaskedRun
+		MOVE.W	D3,D2
+		AND.W	#$7,D2
+		SUB.W	D2,D3
+		BFEXTS	(A0){D6:16},D0
+		NOT.L	D0
+		EXT.L	D2
+		ADD.L	D2,D6
+		ADD.L	D2,D6			;2 pixels per long
+		ADDQ.L	#2,D6			;we're about to do 2 pixels
+@maskPixels
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		ADD.W	D0,D0
+		SUBX.W	D7,D7
+		AND.L	D4,D7
+		MOVE.L	(A2),D5			;get a long of dest
+		EOR.L	D5,D7
+		AND.L	(A1)+,D7		;splice them together using mask
+		EOR.L	D5,D7
+		MOVE.L	D7,(A2)+
+		DBRA	D2,@maskPixels
+		DBRA	D3,@doMaskedRun
+		BRA.S	@inst
+
+;-----------------------------------------------------------------
+;
+;  ENTIRE STRETCHBITS COMPLETE. RESTORE REGS AND STACK AND GO HOME.
+;
+Done	MoveQ	#1,d0						;return success
+GoBack	MOVE.L	SAVESTK2(A6),SP				;RESTORE STACK POINTER
+		RTS									;AND RETURN TO STRETCHBITS
+
+		ENDPROC
+
+
+;=========================================================================================
+;=========================================================================================
+;
+;	Patch to bring in new indexed to 32 bit scaleblt routine.		<5JUNE92 SAH>
+;
+;=========================================================================================
+;=========================================================================================
+
+
+scIndTab32	PatchProc	$ABB1,(IIci)
+
+&CurFile	SETC	'STRETCH'
+			INCLUDE	'DrawingVars.a'
+
+runMaskBit		equ		30				;bit number for run MASK instruction
+
+		DC.L	scIndexedto32-scIndTab32	;0		1	to	32
+		DC.L	scIndexedto32-scIndTab32	;1		2	to	32
+		DC.L	scIndexedto32-scIndTab32	;2		4	to	32
+		DC.L	scIndexedto32-scIndTab32	;3		8	to	32
+
+
+;-------------------------------------------------------
+;
+;		scale and clip indexed source to 32-bit dst
+;	<SAH 060292>
+;		brought in Sean Callahan's new fast loop for 1
+;		to 32
+;
+;-------------------------------------------------------
+;		a0 = tmpsrc			d0 = vert/scratch
+;		a1 = tmpmask		d1 = scanCount
+;		a2 = tmpdst			d2 = scratch
+;		a3 = scaleTbl		d3 = run cnt
+;		a4 = srcPtr/patPtr	d4 = src pixel size
+;		a5 = dstPtr			d5 = scratch
+;		a6 = locals			d6 = bit offset in src
+;		a7 = 				d7 = src shift
+;-------------------------------------------------------
+scNonBWto32
+		move	srcShift(a6),d7		;set this up once
+		move.l	scaleTbl(a6),a3		;set this up once
+
+		lea		@first,a0			;go here from now on
+		move.l	A3,scaleBltA3(a6)	;save for reload after seekMask
+		move.l	a0,ScaleCase(a6)	;remember for later
+		bra.s	@first				;go to it
+
+@nxtScan
+		add.l	dstRow(a6),a5	;BUMP DST TO NEXT ROW
+		add.l	srcRow(a6),a4	;BUMP src TO NEXT ROW
+		addq.w	#1,vert(a6)		;BUMP DOWN A SCAN LINE
+		subq	#1,d1
+		ble.s	NXTMASK2
+
+@first	move.l	srcAlign(a6),d6	;start with initial src offset
+		move.l	a4,a0			;init tmp src ptr
+		move.l	a5,a2			;init tmp dst ptr
+		move.l	runBuf(a6),a1	;point to run encoded mask buffer
+		
+@inst	move.l	(a1)+,d3		;pick up next instruction long
+		bmi.s	@nxtScan		;if high bit set then done with scan
+		add.w	d3,a2			;bump destptr by skip amount
+		lsr.w	#2,d3			;make byte skip into pixel skip
+		lsl.w	d7,d3			;make into bit skip
+		add.w	d3,d6			;bump src offset
+		move	d6,d3			;make a copy
+		lsr.w	#5,d3			;make into long cnt
+		lea		(a0,d3.w*4),a0	;bump src ptr
+		swap	d3				;get mask/blit cnt and check done flag
+
+@blit	MOVE.L	(A0)+,D5		;GET FIRST LONG OF SRC
+@NXPXL	BFEXTU	D5{D6:D4},D0	;GET A PIXEL OF SRC
+		move.l	0(A3,D0*4),(a2)+ ;TRANSLATE IT
+		ADD		D4,D6			;ADVANCE TO NEXT SRC PIXEL
+		AND		#$1f,D6			;TIME FOR NEXT SRC LONG?
+		DBEQ	D3,@NXPXL		;LOOP ALL PIXELS THIS LONG
+		DBNE	D3,@blit		;LOOP ALL PIXELS THIS RUN
+		beq.s 	@inst 			;LOOP BACK FOR more runs
+		subq.w	#4,a0			;point back to remaining pixels
+		BRA.s 	@inst 			;LOOP BACK FOR more runs
+
+
+NXTMASK2	move.w	MinRect+bottom(a6),d2		;get bottom vertical position
+		sub.w	vert(a6),d2					;compute scans remaining, prime d2
+		ble		Done
+		move	d2,d3						;save scans remaining
+		JSR 	([SEEKMASK,A6])				;MAKE MASK BUFFER CURRENT
+		move.w	d2,d1						;get scan count in d1
+		cmp.w	d3,d1						;scan count > scans remaining?
+		ble.s	@go							;no, call the blit loop
+		move.w	d3,d1						;yes, pin to scans remaining
+@go		JSR 	([RUNRTN,A6])				;MAKE RUN BUFFER CURRENT
+		move.l	scaleBltA3(a6),A3			;reload A3 for scan loops
+		MOVE.L	ScaleCase(A6),A2 			;GET MODE CASE JUMP
+		JMP 	(A2)						;TAKE MODE JUMP
+
+
+scIndexedto32
+		MOVE.L	scaleTbl(A6),A3		;set this up once
+;	btst	#1,$17b
+;	bne.s	scNonBWto32
+		CMP.W	#1,D4				;is src one bit?
+		BNE.S	scNonBWto32
+		TST.L	4(A3)				;is second color black?
+		BNE.S	scNonBWto32
+		MOVE.L	#$00FFFFFF,D0
+		CMP.L	(A3),D0				;is first color white?
+		BNE.S	scNonBWto32
+		
+		MOVE.L	D0,D4				;move white mask to better register
+		LEA		@first,A0			;go here from now on
+		MOVE.L	A0,ScaleCase(A6)	;remember for later
+		BRA.S	@first				;go to it
+		
+
+@next	ADD.L	dstRow(A6),A5	;BUMP DST TO NEXT ROW
+		ADD.L	srcRow(A6),A4	;BUMP src TO NEXT ROW
+		ADDQ.W	#1,vert(A6)		;BUMP DOWN A SCAN LINE
+		SUBQ	#1,D1
+		BLE.S	NXTMASK2
+
+@first	MOVE.L	srcAlign(A6),D6	;start with initial src offset
+		MOVE.L	A4,A0			;init tmp src ptr
+		MOVE.L	A5,A2			;init tmp dst ptr
+		MOVE.L	runBuf(A6),A1	;point to run encoded mask buffer
+
+@inst	MOVE.L	(A1)+,D3		;pick up next instruction long
+		BMI.S	@next			;if high bit set then done with scan
+		ADD.W	D3,A2			;bump destptr by skip amount
+		LSR.W	#2,D3			;byte skip to pixel skip
+		ADD.W	D6,D3			;add current skip to bit skip
+		MOVEQ	#$0F,D6			;get mod 16 mask
+		AND.W	D3,D6			;get shift mod 16
+		LSR.W	#4,D3			;get short skip
+		ADD.W	D3,A0			;bump src
+		ADD.W	D3,A0
+		SWAP	D3				;get mask/blit cnt and check done flag
+
+@blit	MOVEQ	#$0F,D2
+		ADDQ.W	#1,D3
+		AND.W	D3,D2
+		LSR.W	#4,D3
+		SUBQ.W	#1,D3
+		BMI.S	@no16
+		
+@reblit	BFEXTS	(A0){D6:16},D0
+		ADDQ.W	#2,A0
+		BEQ.S	@white
+		NOT.L	D0
+		BEQ.S	@black
+
+		MOVEQ	#3,D5
+@pixel	ADD.W	D0,D0
+		SUBX.L	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		ADD.W	D0,D0
+		SUBX.L	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		DBRA	D5,@pixel
+		DBRA	D3,@reblit
+		SUBQ.W	#1,D2
+		BMI.S	@inst
+		BRA.S	@last15
+
+@white	MOVE.L	D4,D0
+@black	MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		MOVE.L	D0,(A2)+
+		DBRA	D3,@reblit
+
+@no16	SUBQ.W	#1,D2
+		BMI.S	@inst
+@last15	BFEXTS	(A0){D6:16},D0
+		NOT.W	D0
+		ADD.W	D2,D6
+		ADDQ.W	#1,D6
+@sloop	ADD.W	D0,D0
+		SUBX.L	D7,D7
+		AND.L	D4,D7
+		MOVE.L	D7,(A2)+
+		DBRA	D2,@sloop
+		BRA.S	@inst
+
+;-----------------------------------------------------------------
+;
+;  ENTIRE STRETCHBITS COMPLETE. RESTORE REGS AND STACK AND GO HOME.
+;
+Done	MoveQ	#1,d0						;return success
+GoBack	MOVE.L	SAVESTK2(A6),SP				;RESTORE STACK POINTER
+		RTS									;AND RETURN TO STRETCHBITS
+
+		ENDPROC
+		
+			END

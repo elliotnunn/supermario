@@ -1,0 +1,337 @@
+;EASE$$$ READ ONLY COPY of file “FP881ctrl.a”
+; 1.1	CCH 11/11/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.0	BBM 2/12/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: FP881ctrl.a
+;; Implementation of FP68K for machines using the Motorola MC68881
+;; Copyright Apple Computer, Inc. 1985,1986,1987
+;; All Rights Reserved
+;; Confidential and Proprietary to Apple Computer,Inc.
+;;
+;; Written by Clayton Lewis, begun 7 Feb 85.
+;; Debugged by Stuart McDonald.
+;;
+;; Modification history:
+;;    Rev5: 27 May 85
+;;    Rev6: 19 Dec 85	fix CVTz2x bug
+;;    Rev7: 16 Jun 86 CRL moved to MPW
+;;    Rev8: 11 Oct 86 -S.McD. changed version number from 3 to 4 .
+;;          21 Nov 86 -S.McD. set chips IEEE status defaults, too.
+;;    Rev9: 06 Jan 87 -S.McD. changed version number from 4 to 5 .
+;;          15 Jan 87 -S.McD. changed status and copyright notice.
+;;          16 Jan 87 -S.McD. Arith and IntOp tables combinded; _SYSERROR call added.
+;;          23 Jan 87 -S.McD. MC68881 directive moved to file fp881.a .
+;;    RevA: 24 Jan 87 -S.McD. changed version number from 5 to 6 .
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; The stack looks like:
+;;	 _______________________________________________
+;;	|			            |
+;;	|	address of argument 3 (if any)	|  - Long
+;;	|_______________________________________________|
+;;	|			            |
+;;	|	 address of argument 2 (if any)	|  - Long
+;;	|_______________________________________________|
+;;	|			            |
+;;	|       	 address of argument 1 (if any)	|  - Long
+;;	|_______________________________________________|
+;;	|			            |
+;;	|	            opword	            |  - Word
+;;	|_______________________________________________|
+;;	|			            |
+;;	|	        return address	            |  - Long
+;;	|_______________________________________________|
+;;
+;; Where the number of addresses depends on the operation, most use 2, some use 0 or 1.
+;; Only binary -> decimal conversion uses 3.
+;;
+;; Grow the stack in case a trap is taken and save registers D0, D1, A0, A1.
+;;
+;;	|			            |
+;;	|	       stack as passed	            |
+;;	|_______________________________________________|
+;;	|			            |
+;;	|	             link	            | - Long
+;;	|_______________________________________________|
+;;	|			            |
+;;	|	          byte count	            | - Word
+;;	|_______________________________________________|
+;;	|			            |
+;;	|	        saved registers	            | - Several
+;;	|_______________________________________________|
+;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;This is the sole entry point of the package.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	BRA.S	 FPbegin
+
+	DC.W	$00
+        STRING  ASIS
+	DC.B	'PACK'
+	DC.W	$4
+	DC.W	$0006	; version 6
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Beginning of code.
+;;    Reserve space, save registers,
+;;    opword -> D0, destination -> FP0, source address -> A0
+;;    save control/status information in D5
+;;    disable halts and clear exceptions (until haltcheck at end of package).
+;;    D5.hi = loword of status;  D5.lo = loword of control
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+FPbegin
+	LINK	 A6,#-2	; byte count word for halt handler
+	MOVEM.L	 D0/D1/D5/A0/A1,-(SP)
+
+	FMOVE	FPSR,D5	; collect user status register. Save permanently in D5.hi
+
+	MOVEQ	#0,D1
+
+	SWAP	D5	; move exception stuff to hi byte
+
+	FMOVE	FPCR,D0	; collect user control register. Save permanently in D5.lo
+
+	MOVE.W	D0,D5	; [exceptions|Aexceptions|halts|rounding] now in D5
+	BEQ.S	@1	; skip 881 call if halts already disabled
+
+	MOVE.B	D5,D1	; copy of control with cleared halt settings
+
+	FMOVE	D1,FPCR	; restore control with no halts set
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Handle odd instructions elsewhere. (those not done by the 68881)
+;; Even instructions are handled by the 68881.(except classify)
+;; Place an altered opword in D1:
+;;
+;; 	v_______________v_______________v_______________v_______________v
+;;	|   |   |   |   |   |   |   |   |not| S | D |   |   |   |   |   |
+;;	|   |   |   |   |   |   |   |   |SDX| C | L | o | o | o | o |zro|
+;;	|___|___|___|___|___|___|___|___|___|___|___|___|___|___|___|___|
+;;
+;;		                |src format |  operation mask   |
+;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEQ	#0,D1	; for line below and table addressing
+@1
+	MOVE.W	 LKOP(A6),D0	; opword
+	BTST	D1,D0	; arithmetic or nonarithmetic?
+	BNE	NonArith
+
+	FMOVE	D1,FPSR	; IEEE default status -S.McD.
+
+	ANDI.W	#OPMASK,D0	; leave only format & even opcode
+	CMP.B	#$0E,D0
+	BLT.S	@3	; basic 2 argument operations
+	CMP.B	#$12,D0
+	BLT.S	@2	; CVT routines, handled specially
+	CMP.B	#$1C,D0
+	BEQ.S	@6	; classify, handled as if no arguments
+	BRA.S	@4	; others are one argument (and scalb)
+@2
+	MOVEA.L	LKADR2(A6),A0	; set up only addresses for convert
+	MOVEA.L	LKADR1(A6),A1
+	BRA.S	@6
+@3
+     ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+     ;; Move the address of the source to A0.
+     ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEA.L	LKADR2(A6),A0
+@4
+     ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+     ;; Move the (extended) destination value to the chip.
+     ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEA.L	LKADR1(A6),A1
+	ADDQ.L	#6,A1
+	MOVE.L	(A1),-(SP)
+	MOVE.L	-(A1),-(SP)
+	SUBQ.L	#2,A1
+	MOVE.L	(A1),-(SP)
+
+	FMOVE.X	(SP)+,FP0
+@6
+	MOVE.B	D0,D1	; opcode bits into D1
+	LSR.W	#6,D0	; format to bits 5-7
+	OR.B	D0,D1
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Jump to required operation with floating point source format.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ArithOp
+	MOVE.W	ArithTab(D1),D1
+	JMP	ArithOp(D1)
+ArithTab
+	DC.W	ADDext-ArithOp
+	DC.W	SUBext-ArithOp
+	DC.W	MULext-ArithOp
+	DC.W	DIVext-ArithOp
+	DC.W	CMPext-ArithOp
+	DC.W	CPXext-ArithOp
+	DC.W	REMext-ArithOp
+	DC.W	CVText2E-ArithOp
+	DC.W	CVTE2ext-ArithOp
+	DC.W	SQRText-ArithOp
+	DC.W	RINText-ArithOp
+	DC.W	TINText-ArithOp
+	DC.W	SCALBext-ArithOp
+	DC.W	LOGBext-ArithOp
+	DC.W	CLASSext-ArithOp
+	DC.W	UnknownOp-ArithOp
+
+	DC.W	ADDdbl-ArithOp
+	DC.W	SUBdbl-ArithOp
+	DC.W	MULdbl-ArithOp
+	DC.W	DIVdbl-ArithOp
+	DC.W	CMPdbl-ArithOp
+	DC.W	CPXdbl-ArithOp
+	DC.W	REMdbl-ArithOp
+	DC.W	CVTdbl2E-ArithOp
+	DC.W	CVTE2dbl-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	CLASSdbl-ArithOp
+	DC.W	UnknownOp-ArithOp
+
+	DC.W	ADDsgl-ArithOp
+	DC.W	SUBsgl-ArithOp
+	DC.W	MULsgl-ArithOp
+	DC.W	DIVsgl-ArithOp
+	DC.W	CMPsgl-ArithOp
+	DC.W	CPXsgl-ArithOp
+	DC.W	REMsgl-ArithOp
+	DC.W	CVTsgl2E-ArithOp
+	DC.W	CVTE2sgl-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	CLASSsgl-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Jump to required operation with integer source format.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	DC.W	ADDint-ArithOp
+	DC.W	SUBint-ArithOp
+	DC.W	MULint-ArithOp
+	DC.W	DIVint-ArithOp
+	DC.W	CMPint-ArithOp
+	DC.W	CPXint-ArithOp
+	DC.W	REMint-ArithOp
+	DC.W	CVTint2E-ArithOp
+	DC.W	CVTE2int-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	Scalbext-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+
+	DC.W	ADDlong-ArithOp
+	DC.W	SUBlong-ArithOp
+	DC.W	MULlong-ArithOp
+	DC.W	DIVlong-ArithOp
+	DC.W	CMPlong-ArithOp
+	DC.W	CPXlong-ArithOp
+	DC.W	REMlong-ArithOp
+	DC.W	CVTlong2E-ArithOp
+	DC.W	CVTE2long-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+
+	DC.W	ADDcomp-ArithOp
+	DC.W	SUBcomp-ArithOp
+	DC.W	MULcomp-ArithOp
+	DC.W	DIVcomp-ArithOp
+	DC.W	CMPcomp-ArithOp
+	DC.W	CPXcomp-ArithOp
+	DC.W	REMcomp-ArithOp
+	DC.W	CVTcomp2E-ArithOp
+	DC.W	CVTE2comp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	CLASScomp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+	DC.W	UnknownOp-ArithOp
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Non-arithmetic routines.  Not handled directly by 68881.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+NonArith
+	MOVE.W	D0,D1	; save opcode for nextafter
+	ANDI.W	#OPMASK2,D0	; leave only even opcode
+NAop
+	MOVE.W	NATab(D0),D0
+	JMP	NAop(D0)
+NATab
+	DC.W	SetEnv-NAop
+	DC.W	GetEnv-NAop
+	DC.W	SetHv-NAop
+	DC.W	GetHv-NAop
+	DC.W	D2B-NAop
+	DC.W	B2D-NAop
+	DC.W	Negate-NAop
+	DC.W	Abs-NAop
+	DC.W	CopySign-NAop
+	DC.W	NextAfter-NAop
+	DC.W	SetExp-NAop
+	DC.W	ProcEnt-NAop
+	DC.W	ProcEx-NAop
+	DC.W	TestExp-NAop
+	DC.W	UnknownOp-NAop
+	DC.W	UnknownOp-NAop
+
+UnknownOp
+	MOVEQ	#81,D0	; Error exit for unknown Op code. -S.McD.
+	_SysError
+

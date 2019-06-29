@@ -1,0 +1,80 @@
+;
+;	File:		ScrapMgrPatches.a
+;
+;	Contains:	Fixes to the ROM Scrap Manager
+;
+;	Written by:	Nick Kledzik
+;
+;	Copyright:	© 1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <2>	 2/10/92	JSM		Moved this file to ScrapMgr folder, keeping all the old
+;									revisions.
+;		 <1>	 8/22/90	ngk		first checked in
+;
+
+
+			LOAD	'StandardEqu.d'
+			INCLUDE 'LinkedPatchMacros.a'
+
+
+			ROMs		Plus,SE,II,Portable,IIci
+
+
+
+PutScrapExit	ROMBind (Plus,$16F70), (SE,$127BA), (II,$1776E), (Portable,$1E064), (IIci,$25F16)
+DoPutAppendMem	ROMBind (Plus,$16F80), (SE,$127CA), (II,$1777E), (Portable,$1E074), (IIci,$25F26)
+DoPutAppendFile	ROMBind (Plus,$16F8E), (SE,$127D8), (II,$1778C), (Portable,$1E082), (IIci,$25F34)
+
+
+; PutScrap has a bug.  If you put a chunk of data that is to large, it
+; will return an error, but the scrap handle block and low-mem length will 
+; be updated as if the chunk was successfully written.  The next app to do
+; a GetScrap will then get garbage for that chunk. 
+;
+; To fix this, we do a come from patch on _PtrAndHand, which PutScrap uses
+; to append each chunk to the scrap handle.  If _PtrAndHand returns an error
+; (in D0), then we skip over the updating of low-mem scrapSize and cut back the
+; scrap handle to the last scrapSize.  Similarly we patch _Write.
+;
+; PutScrap calls "DoPut" from two places: one to write the type and size, the 
+; other to write the data itself.  Either of these can fail.  So we change the
+; return address of who called DoPut to be the end of PutScrap, then return to DoPut.
+; DoPut then "returns" to the end of PutScrap.
+;
+FixPutScrap	ComeFromPatchProc	_PtrAndHand, DoPutAppendMem
+			
+			jsrOld							; _PtrAndHand is register based, so just jsr to it	
+			tst.w		d0					; did _PtrAndHand return an error?
+			beq.s		@done				; if so, do our fix
+			move.w		d0,-(sp)			; save orginal error code
+			move.l		scrapSize,d0		; resize handle to last good size, to delete last 'next entry'
+			_SetHandleSize		
+			move.w		(sp)+,d0			; return with original error code
+			leaROM		PutScrapExit,a0
+			move.l		a0,ReturnAddressDepth+4(sp) ; make DoPut "return" to end of PutScrap
+@done		rts							
+								
+			EndProc		; FixPutScrap
+
+			
+F2PutScrap	ComeFromPatchProc	_Write, DoPutAppendFile
+			
+			jsrOld							; _Write is register based, so just jsr to it	
+			tst.w		d0					; did _Write return an error?
+			beq.s		@done				; if not, then continue as if patch not here
+			move.w		d0,-(sp)			; save orginal error code
+			move.l		scrapSize,ioMix(a0)	; resize file to last good size, to delete last 'next entry'
+			_SetEOF
+			move.w		(sp)+,d0			; return with original error code
+			leaROM		PutScrapExit,a0
+			move.l		a0,ReturnAddressDepth+4(sp) ; make DoPut "return" to end of PutScrap
+@done		rts							
+			EndProc		; FixPutScrap
+			
+			
+			
+			END
+			
+			

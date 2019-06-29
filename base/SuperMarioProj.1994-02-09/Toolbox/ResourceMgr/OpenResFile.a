@@ -1,0 +1,73 @@
+;
+;	File:		OpenResFile.a
+;
+;	Contains:	patch to OpenResFile to fix old print glues
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds: BigBang
+;
+;	Change History (most recent first):
+;
+;		 <4>	 1/16/91	stb		& gbm; preserve d1-d2/a1 like all good Resource Mgr calls should
+;		 <3>	 4/23/90	dba		don’t change CurMap to SysMap before doing the GetString; this
+;									fixes some problems with PrintMonitor, and doesn’t hurt
+;									anything, since no one except PrintMonitor and the System is
+;									supposed to have an STR -8192
+;		 <1>	  4/6/90	NB		Added a call to PrLoadDriver. This replaces all the driver
+;									load hacks from before.
+;
+
+	load 'StandardEqu.d'
+	include 'LinkedPatchMacros.a'
+
+	macro
+	_PrLoadDriver					; Only available on System 7.0 or better.
+	move.l	#$D8000000,-(SP)
+	dc.w	$A8FD
+	endm
+
+; ——————————————————————————————————————————————————————————————————————————————————————————————————
+; OpenResFile — open the printer driver whenever anyone opens 'STR ' ($E000)
+
+OpenResFile PatchProc _OpenResFile, (Plus,SE,II,Portable,IIci)
+
+	move.b	ResLoad,-(sp)			; save the old value for whether to load resources
+	sf		ResLoad					; don’t load the resource
+
+	subq	#4,sp					; make room for resource handle
+	move.w	#$E000,-(sp)			; get that resource handle
+	_GetString						; got the string now!
+	move.l	(sp)+,d0				; get the string into a register
+
+	move.b	(sp)+,ResLoad			; restore ResLoad
+
+	tst.l	d0						; check if the handle is nil
+	bz.s	NotForPrinting			; nope, it is not the printer driver name
+	exg		d0,a0					; move to address register for dereference
+	move.l	(a0),a0					; dereference to get the pointer
+	exg		d0,a0					; move file name pointer back to A1
+	cmp.l	4(sp), d0				; check and see if it is the printer name
+	bne.s	NotForPrinting			; nope, it is not the printer driver
+
+	movem.l	d1-d2/a1,-(sp)			; Resource Mgr calls shouldn’t touch these					<4>
+	_PrLoadDriver					; function result is in D0
+	movem.l	(sp)+,d1-d2/a1			; restore registers											<4>
+	move.w	D0, ResErr				; copy the error result into ResErr
+	move.w	$952, D0				; copy the printing refnum into the function result
+									; This will be the error from HOpenResFile if it didn't work.
+
+	move.l	(sp)+, a0				; save return address
+	add.l	#4, sp					; strip the parameter
+	move.w	d0, (sp)				; set the function result
+	jmp		(a0)					; out of here
+
+NotForPrinting
+
+	jmpold							; go to the old OpenResFile
+
+	EndProc
+
+; ——————————————————————————————————————————————————————————————————————————————————————————————————
+
+	End

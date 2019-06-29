@@ -1,0 +1,141 @@
+;
+;	File:		DeskMgrPatches.a
+;
+;	Contains:	Fixes to the Desk Manager
+;
+;	Copyright:	© 1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <5>	  7/8/92	JSM		Add comments about patches that have been rolled in.
+;		 <4>	 2/10/92	JSM		Moved this file to DeskMgr folder, keeping all the old
+;									revisions.
+;		 <3>	 8/30/90	dba		add code for SystemClick heap scramble bug fixes
+;		 <2>	  8/2/90	csd		Patch SystemClick to be 32-Bit clean.
+;		 <1>	  7/2/90	stb		first checked in
+;
+;
+
+		load	'StandardEqu.d'
+		include	'LinkedPatchMacros.a'
+
+
+SysEvtAfterFrontWindow	ROMBind	(Plus, $15C2A), (SE, $10268), (II, $14FE0), (Portable, $15536), (IIci, $1C79C)
+SysEvtDoneSEvt			ROMBind	(Plus, $15C20), (SE, $1025C), (II, $14FD4), (Portable, $1552C), (IIci, $1C790)
+SystemClickContinue		ROMBind (IIci, $1C856)
+CheckDeskHook			ROMBind (IIci, $1C8A0)
+SearchWindow			ROMBind	(Plus, $15C40), (SE, $1027C), (II, $14FF4), (Portable, $15550), (IIci, $1C7B4)
+DoneSClick				ROMBind	(IIci, $1C894)
+AfterLoadResourceInSystemClick ROMBind (Plus, $15CDC), (SE, $10330), (II, $150A8), (Portable, $15606), (IIci, $1C86A)
+AfterFrontWindowInSystemClick ROMBind (Plus, $15CF8), (SE, $1034C), (II, $150C4), (Portable, $15622), (IIci, $1C886)
+AfterTrackGoAwayInSystemClick ROMBind (Plus, $15D58), (SE, $103AC), (II, $15124), (Portable, $15682), (IIci, $1C8E6)
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; SystemEvent — bail out if there is no window up
+
+; SystemEvent has a call to FrontWindow before dereferencing the front window's data structure.
+; This is bad if FrontWindow returns nil.  This come-from patch to FrontWindow causes SystemEvent
+; to exit immediately with a return value of FALSE if FrontWindow returns nil.
+;
+; This patch has been rolled into DeskMgr.a.
+;
+
+SysEvtIgnoreNILFrontWindow ComeFromPatchProc \
+	_FrontWindow,SysEvtAfterFrontWindow,(Plus,SE,II,Portable,IIci)
+
+		addq	#4,sp					; pop return address because we know it's always SysEvtAfterFrontWindow
+		jsrOld							; go ahead and finish the FrontWindow
+		tst.l	(sp)					; is there no window up?
+		bneROM	SysEvtAfterFrontWindow	; there's a window, so we can continue as normal
+
+		; we don't have a window, so bail out
+		addq	#4,sp					; pop the windowptr from the FrontWindow call
+		jmpROM	SysEvtDoneSEvt			; exit through the ROM
+
+		EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; SystemClick - Make this routine 32-bit clean when it calls the WDEF and fix heap scramble bugs.
+;
+; This patch has been rolled into DeskMgr.a.
+;
+
+FixSystemClick	PatchProc	_SystemClick,(IIci)
+
+		MOVEM.L D0/D3-D4/A3-A4,-(SP)	;preserve some work registers
+										;D0 to reserve space on stack
+		MOVE.L	SP,-(SP)				;push "savePort"
+		_GetPort						;remember the current grafPort on stack
+
+		MOVE.L	24(SP),A4				; get theWindow into A4
+		MOVE.L	WindowDef(A4),A3		; get the window def proc handle into A3
+		MOVE.L	28(SP),D4				; get theEvent into D4
+
+		MOVE.L	A4,D0					; test the window ptr
+		beqROM 	CheckDeskHook			; if nil, check the desk hook
+
+		MOVE.L	A4,A0					;pass in A0
+		jsrROM 	SearchWindow			;find it in the driver list
+		bneROM	DoneSClick				;if not found, ignore the call
+		MOVE.L	A0,D3					;remember DCE handle (formerly remembered the pointer)	<3>
+;
+; we found the window in the device table; A1 points to the DCE entry of the driver
+; that owns the window.  First see what part of the window its in by calling
+; the window definition proc to classify.
+;
+		subq	#2, SP					; room for window variant
+		move.l	A4, -(SP)				; push window pointer
+		_GetWVariant					; legally get the window variant
+		move.w	(SP)+, D0				; put the var code into D0 for the ROM
+
+		jmpROM	SystemClickContinue		; let the rom do the rest
+
+		EndProc
+
+; The next patch is so that we keep the DCE handle instead of the pointer.
+; Not needed on the IIci because the above patch fixes it for that ROM.
+
+RememberDCEHandleInsteadOfPointer ComeFromPatchProc \
+	_LoadResource,AfterLoadResourceInSystemClick,(Plus,SE,Portable,II)
+
+		MOVE.L	A4,A0					;pass in A0
+		jsrROM 	SearchWindow			;find it in the driver list (we know it will be found, we found it before)
+		MOVE.L	A0,D3					;remember DCE handle (formerly remembered the pointer)	<3>
+		jmpOld
+
+		EndProc
+
+; The next patch is so that we get the dCtlRefNum properly when we send a message to the driver.
+;
+; This patch has been rolled into DeskMgr.a.
+;
+
+GetDCtlRefNumFromHandleForSendDrvrMsg ComeFromPatchProc \
+	_FrontWindow,AfterFrontWindowInSystemClick,(Plus,SE,Portable,II,IIci)
+
+		move.l	d3,a0					;put DCE handle in an address register to dereference it
+		move.l	(a0),d3					;get the DCE pointer now, like the ROM expects
+		jmpOld
+
+		EndProc
+
+; The next patch is so that we get the dCtlRefNum properly when close the driver.
+; This can be two different things — either CloseDeskAcc or calling the CloseOrnHook.
+;
+; This patch has been rolled into DeskMgr.a.
+;
+
+GetDCtlRefNumFromHandleForClosingDeskAccessory ComeFromPatchProc \
+	_TrackGoAway,AfterTrackGoAwayInSystemClick,(Plus,SE,Portable,II,IIci)
+
+		addq	#4,sp					;get rid of the return address in SystemClick
+		jsrOld							;call TrackGoAway, and the stack is right
+		move.l	d3,a0					;put DCE handle in an address register to dereference it
+		move.l	(a0),d3					;get the DCE pointer now, like the ROM expects
+		jmpROM	AfterTrackGoAwayInSystemClick	; rejoin the ROM, just after the TrackGoAway call
+
+		EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		End

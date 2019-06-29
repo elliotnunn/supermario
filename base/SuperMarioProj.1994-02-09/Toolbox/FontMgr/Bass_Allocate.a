@@ -1,0 +1,262 @@
+;
+;	File:		Bass_Allocate.a
+;
+;	Copyright:	© 1989-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM5>	 9/13/93	SAM		Removed an include of QDHooks.a.
+;	   <SM4>	 2/20/93	SAM		Added and INCLUDE of TrapsPrivate.a.
+;	   <SM3>	  2/4/93	PN		I did a global search and NewTempHandle is only called from
+;									CTempBuffHand. So I change the name to FontNewTempHandle to
+;									eliminate confusion with QD call.
+;	   <SM2>	 4/16/92	PN		Change GETSTYLEBUFHAND to upper case
+;		 <3>	 7/10/91	JSM		Remove obsolete SysVers conditionals.
+;		 <2>	 3/20/91	CL		B3B, #84919: Fixed NewTempHandle, EndSystem mode reset the state
+;									from MFTempHandle.  This resulted in a memory leak since we
+;									thought we did not get a block from MFTemp memory and continued
+;									to get a application block instead.
+;		 <13>	 9/23/90	CL		Can not call BeginSystemMode or EndSystem mode in 6.0.x systems.
+;		 <12>	 9/13/90	CL		Fixing test for MultiFinder to use the unimplemented trap
+;									instead of these old weird vectors.
+;		 <11>	 9/10/90	CL		Added PurgeSpaceSysTotal and NewHandleSysNoInt for testing purposes.
+;		 <10>	  9/4/90	CL		Added MultiFinderExist routine to call from c code.
+;		 <9>	 8/31/90	KSM		Add Charlton's changes for MF existence checking.
+;		 <8>	 7/20/90	DTY		Added EndProcs and End for Greggy.
+;		 <7>	 7/20/90	CL		The assembler wishes to create a branch of zero. This gets
+;									intrepreted into a long branch and takes the next instruction as
+;									the offset and really messes up the code.
+;		 <6>	  7/5/90	RB		Richard is checking this out for my Chazz bug. Need to BSR to
+;									NewTempHandle instead of calling the Macro.
+;		 <5>	  7/3/90	CL		Putting back in the NewTempHandle call for the init since the
+;									trap does not exist on the 6.0.x world.
+;		 <4>	 6/22/90	CL		Taking out newTempHandle, newTempBuffer, disposeTempBuffer.
+;		 <3>	 4/11/90	dba		Chaz says we need this new version
+;		 <2>	 2/27/90	CL		Supports new fast blit loops…
+;	   <1.2>	 8/28/89	CEL		Linker has a mean bug that leaves out some code. Moved code
+;	   <1.1>	 8/14/89	CEL		Fixed up tstMFExist macro to use different base addr for MacPlus
+;	   <1.0>	  8/1/89	CEL		Adding into Bass build for the first time…
+;	   <1.0>	  8/1/89	CEL		Adding into Bass build for the first time…
+;
+
+;——————————————————————————————————————————————————————————————————————————————————————————
+;								 	Bass_Allocate.a
+;
+;	File:				Bass_Allocate.a
+;	Language:			68000 assembly
+;
+;	Author:				Charlton E. Lui
+;	Date:				August 1, 1989
+;	Modifications:		1.0
+;
+;	Copyright Apple Computer, Inc.  1989
+;	All Rights Reserved
+;
+;	Gets memory from Multifinder heap.
+;
+;——————————————————————————————————————————————————————————————————————————————————————————
+	CASE OBJ
+
+		INCLUDE		'Traps.a'
+		INCLUDE		'SysEqu.a'
+		INCLUDE		'SplineDefines.a'
+		INCLUDE		'fontPrivate.a'
+		INCLUDE		'MFPrivate.a'
+		INCLUDE		'TrapsPrivate.a'				; <SM4>
+
+	if &type('INITVERSION') = 'UNDEFINED' then
+BASS_INIT		equ 0
+	else
+BASS_INIT		equ	1
+asGaudi			equ	1
+	endif
+
+		MACRO										; $$$$ Use the unimplemented Trap instead
+		_tstMFExists
+	IF 1 THEN
+		MOVE.L	#$A89F, D0							;Unimplemented trap
+		_GetTrapAddress
+		MOVE.L	A0, D1
+		MOVE.L	#$A88F, D0							;MultiFinder trap
+		_GetTrapAddress
+		SUB.L	A0, D1		
+	ELSE
+		MOVE.L	expandMem, A0						; get low mem expand
+		MOVE.L	ExpandMemRec.emSplineKey(A0), A0	; Handle to splineKey
+		MOVE.L	(A0), A0							; Pointer to rec
+		MOVE.W	splineKeyRec.machineType(A0), D0	; Save away machine type
+		CMP.W	#envMacPlus, D0						; Is it a MacPlus
+		BNE.S	@useCheck
+		move.l 	($C00+$9f*4),d0						; get address of unimplemented trap
+		cmp.l	($C00+$8f*4),d0						; same as OSDispatch?
+		BRA.S	@doneMacro
+@useCheck
+		move.l 	($E00+$9f*4),d0						;get address of unimplemented trap
+		cmp.l	($E00+$8f*4),d0						;same as OSDispatch?
+@doneMacro
+	ENDIF
+		ENDM
+
+
+PurgeSpaceSysTotal		Proc Export					;Checks for purge space in sys heap
+		_PurgeSpace		,SYS
+		RTS
+
+
+
+MultiFinderExist	Proc Export
+		_tstMFExists						;is twitcher happening?  (trashes d0)
+		MOVE.L	D1, D0						;Finder mode!
+		rts	
+
+
+FontNewTempHandle	PROC 	
+;--------------------------------------------------
+;
+;  Function FontNewTempHandle(VAR requestSize: long) : TBuffer;
+;
+;	This routine attempts to get a block of the requested size from
+;	the multiFinder temporary memory pool.
+;	If multiFinder is not running or memory is full, then a nil pointer
+;	and a size of zero are returned.
+;
+;		entry:	d0 = requested size
+;		 exit:	d0 = actual size
+;				a0 = handle
+
+		movem.l	d1-d3,-(sp)					;save work registers
+		MOVEM.L	A0-A1/D0-D2,-(SP)			;Save off all registers before call <13>
+		_BeginSystemMode					;<9>
+		MOVEM.L (SP)+, A0-A1/D0-D2			;Restore all registers on return
+		clr.l	-(sp)						;room for result
+		move.l	d3,-(sp)					;ask for it
+		pea		memErr						;var result code
+		_MFTempNewHandle
+		move.l	(sp)+,d0
+		move.l	d0,a0						;return handle
+		beq.s	@done						;leave it empty	 	$$$ take out later
+		move.l	d3,d0						;return size in d0	$$$ take out later
+@done										;					$$$ take out later
+		MOVEM.L	A0-A1/D0-D2,-(SP)			;Save off all registers before call
+		_EndSystemMode						;<9>
+		MOVEM.L (SP)+, A0-A1/D0-D2			;Restore all registers on return
+		move.l	a0, d0						;set status
+@noTry	movem.l	(sp)+,d1-d3					;restore work registers
+		rts
+
+
+NewTempBuffer	PROC 	EXPORT					;<18Jun89>	BAL
+;--------------------------------------------------
+;
+;  Function NewTempBuffer(VAR requestSize: long) : TBuffer;
+;
+;	This routine attempts to get a block of the requested size from
+;	the multiFinder temporary memory pool.  If the requested amount is
+;	not available it returns the largest contiguous block and its size.
+;	If multiFinder is not running or memory is full, then a nil pointer
+;	and a size of zero is returned.
+;
+;		entry:	d0 = requested size
+;		 exit:	d0 = actual size
+;				a0 = handle
+
+		movem.l	d1-d3,-(sp)					;save work registers
+		move.l	d0,d3						;copy requested size
+		_tstMFExists						;is twitcher happening?  (trashes d0)
+		bne.s	@tryMultMem					;no, we're out of luck	<9>
+		moveq	#0,d0						;zero resulting size
+		move.l	d0,a0						;return nil handle
+		bra.s	@noTry
+@tryMultMem
+	IF NOT BASS_INIT THEN
+		MOVEM.L	A0-A1/D0-D2,-(SP)			;Save off all registers before call
+		_BeginSystemMode					;<9>
+		MOVEM.L (SP)+, A0-A1/D0-D2			;Restore all registers on return
+	ENDIF
+		clr.l	-(sp)						;room for result
+		move.l	d3,-(sp)					;ask for it
+		pea		memErr						;var result code
+		_MFTempNewHandle
+		move.l	(sp)+,d0
+		beq.s	@hardWay
+@gotit	move.l	d0,-(sp)					;save a copy of the handle
+		move.l	d0,-(sp)					;handle to lock
+		pea		memErr						;var result code
+		_MFTempHLock						;lock it down
+
+		move.l	(sp)+,a0					;return handle in a0
+		move.l	d3,d0						;return size in d0
+@done	
+	IF NOT BASS_INIT THEN
+		MOVEM.L	A0-A1/D0-D2,-(SP)			;Save off all registers before call
+		_EndSystemMode
+		MOVEM.L (SP)+, A0-A1/D0-D2			;Restore all registers on return
+	ENDIF
+@noTry	movem.l	(sp)+,d1-d3					;restore work registers
+		rts
+
+@hardWay
+		clr.l	-(sp)						;room for grow amt
+		clr.l	-(sp)						;room for result
+		pea		4(sp)						;push var grow
+		_MFMaxMem
+		move.l	(sp)+,d3					;get size in d3
+		addq	#4,sp						;pop grow amt
+;		tst.l	d3							;<9>
+		ble.s	@noMem						;bail if none or less
+@tryAgain
+		clr.l	-(sp)						;room for result
+		move.l	d3,-(sp)					;ask for this much
+		pea		memErr						;var result code
+		_MFTempNewHandle					;a prayer
+		move.l	(sp)+,d0					;did we get it?
+		bne.s	@gotit
+		sub.l	#$1000,d3					;no, back off by 4K
+		bgt.s	@tryAgain					;try again
+
+@noMem	moveq	#0,d0						;zero resulting size <9>
+		move.l	d0,a0						;return nil handle
+		bra.s	@done
+
+
+DisposeTempBuffer	PROC 	EXPORT			;<18Jun89>	BAL
+;--------------------------------------------------
+;
+;  Procedure DisposeTempBuffer(aBufferHandle:  : TBuffer);
+;
+;	This routine frees a block of multiFinder temporary memory.
+;
+;		entry:	a0 = handle to dispose
+
+		move.l	a0,d0						;is it nil?
+		beq.s	@nil
+		move.l	a0,-(sp)					;push the handle
+		pea		memErr						;var result code
+		_MFTempDisposHandle					;dispose it.
+@nil	rts
+		ENDPROC
+		
+;--------------------------------------------------
+;	This procedure has to be underneath NewTempHandle
+;	and GetStyleBufHand.  Otherwise the mean old linker
+;	bug will eliminate code that is below this routine.
+;
+;
+;
+CtempBufHand		PROC 	EXPORT
+		EXPORT		GETSTYLEBUFHAND
+		MOVE.L	4(SP), d0				; Get size
+GETSTYLEBUFHAND
+		MOVE.L	D0, D3					; Save request in reg
+		BSR		FontNewTempHandle			; Try to get it from Multi Temp
+		BNE.S	@returnVal				; Worked so go home
+		MOVE.L	D3, d0					; Get size
+		MOVE.L	theZone, D2				; Save the current zone
+		MOVE.L	applZone, theZone		; Switch to app zone
+		_NewHandle						; Try App heap
+		MOVE.L	D2, theZone				; Restore zone
+@returnVal
+		MOVE.L	A0, D0
+		RTS
+		ENDPROC
+		END

@@ -1,0 +1,351 @@
+;
+;	File:		MenuMgrPatch.a
+;
+;	Contains:	Patches to the Menu Manager.
+;
+;	Written by:	Ed Tecot
+;
+;	Copyright:	© 1987-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<16>	 7/24/92	DTY		#1034303 <gbm>: The Menu Manager calls the 'MDEF' with the
+;									CallMDEF utility routine. This routine locks the 'MDEF', calls
+;									it, unlocks it upon return, and returns to the caller.
+;									CalcMenuSize is an example of such a routine. The problem is
+;									that the 'MDEF' calls CalcMenuSize itself, which causes the
+;									'MDEF' to get unlocked while it’s still executing. If the 'MDEF'
+;									handle get relocated by the Memory Manager, you’ll crash.
+;									Bracket calls to CalcMenuSize with code that saves and restores
+;									the 'MDEF' handle state.
+;		<15>	 5/14/92	KSM		#1028474,<DCC>: Update patch that calls SCUpperText to skip the
+;									call when character is a one-byte null character for speed.  Add
+;									patch to DrawMenuBar to synchronize the Keyboard menu (new
+;									KeyScript verb).
+;		<14>	 1/22/92	JSM		Add comment to PatchInsMenuItem to never roll this patch into
+;									ROM.
+;		<13>	10/10/91	PKE		#1012672, For Cube-E (and Bruges): Use new SCUpperText routine
+;									in MenuKey instead of UpperText, so we are independent of any
+;									grafPort font. Include ScriptPriv.a.
+;		<12>	 8/30/91	DTY		Define hasCQD here since it’s no longer defined in BBSStartup.
+;									Defining it to be 0 for the System build seems like the wrong
+;									thing since some of these patches apply to the colour machines,
+;									but that’s the way it used to be, so that’s the way it’ll stay.
+;		<11>	 8/22/91	KSM		csd,#Bruges: New InsrtResMenu call to fix sorting problem with
+;									FONTs & FONDs. Call _UpperText instead of _UprString, MARKS in
+;									MenuKey.
+;		<10>	 7/10/91	dba		end of the forPost70 conditional; we are post-7.0 for good
+;		 <9>	 3/31/91	dba		gbm: load the new version of DisposeMenu on the II, IIci, and
+;									Portable as well, since they all need the bug fix to handle
+;									purged menus; also implement MenuChoice on the Plus, SE, and
+;									Portable (but only post-7.0)
+;		 <8>	12/14/90	bbm		(djw) roll in linked comefrompatch from patchIIrom.a.
+;		 <7>	12/14/90	KSM		<rlc>Fix bug in MenuKey (II,IIci,&Portable) where it is BTSTing
+;									a register for each item, but when the item is greater than 31,
+;									the BTST instruction wraps and we get flags for previous items.
+;		 <6>	 9/28/90	KSM		<dba> Guarantee A5 world for calls into MDEFs.
+;		 <5>	 9/15/90	KSM		Patch InsMenuItem to fix a PixelPaint bug!!*!
+;		 <4>	 7/26/90	KSM		use GetMenuBar on the Macintosh II as well
+;		 <3>	 7/23/90	dba		convert this into a linked patch
+;		 <2>	12/19/89	EMT		Removed references to routines that haven't been altered. Use
+;									PatchMacros.a.
+;	   <1.3>	 8/28/89	SES		Removed references to nFiles.
+;	   <1.2>	  6/2/89	KSM		Remove tear off menu support in this file. See MenuMgr_Patch.a
+;	   <1.1>	  6/1/89	KSM		Added MenuDispatch for BigBang.
+;	   <1.0>	11/16/88	CCH		Added to EASE.
+;
+
+;
+; <12>	When hasCQD was defined in {AvailableFeatures} in BBSStartup, it was defined
+;	to be 0 for System builds, so keep it that way for future System builds.  This
+;	file probably won’t be used in ROM builds, but in case it ever is, define
+;	hasCQD to be true for those builds.
+;
+
+	if (&type('hasCQD') = 'UNDEFINED') then				; <12>
+		if forROM then									; <12>
+			hasCQD:	equ	1								; <12>
+		else											; <12>
+			hasCQD:	equ	0								; <12>
+		endif											; <12>
+	endif												; <12>
+	
+			load		'StandardEqu.d'
+			include		'LinkedPatchMacros.a'
+			include		'ScriptPriv.a'					; <13>
+
+			ROMs		Plus,SE
+
+			MakePatch	InitProcMenu,$A808
+			MakePatch	PopUpMenuSelect,$A80B
+			MakePatch	InsMenuItem,$A826
+			MakePatch	GetItemCmd,$A84E
+			MakePatch	SetItemCmd,$A84F
+			MakePatch	InitMenus,$A930
+			MakePatch	DisposeMenu,$A932,(Plus,SE,II,IIci,Portable)
+			MakePatch	AppendMenu,$A933
+			MakePatch	ClearMenuBar,$A934
+			MakePatch	InsertMenu,$A935
+			MakePatch	DeleteMenu,$A936
+			MakePatch	DrawMenuBar,$A937
+			MakePatch	HiliteMenu,$A938
+			MakePatch	EnableItem,$A939
+			MakePatch	DisableItem,$A93A
+			MakePatch	GetMenuBar,$A93B,(Plus,SE,II)
+			MakePatch	SetMenuBar,$A93C
+			MakePatch	MenuSelect,$A93D
+			MakePatch	MenuKey,$A93E
+			MakePatch	CalcMenuSize,$A948
+			MakePatch	GetMHandle,$A949
+			MakePatch	FlashMenuBar,$A94C
+			MakePatch	AddResMenu,$A94D,(Plus,SE,II,IIci,Portable)
+			MakePatch	InsrtResMenu,$A951,(Plus,SE,II,IIci,Portable)
+			MakePatch	DelMenuItem,$A952
+			MakePatch	MenuChoice,_MenuChoice,(Plus,SE,Portable)
+
+			include		'MenuMgr.a'
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	SetClipForCallDrawMDEF
+;
+;	This fixes two bugs in CallDrawMDEF.  First, Don't use intersection of menuRect and
+;	portRect for clipping, just use menuRect instead. Second, Set low-memory global
+;	TopMenuItem before calling MDEF.
+
+AfterSectRectInCallDrawMDEF		ROMBind	(II,$11244)
+RTSInDrawTheMenu				ROMBind	(II,$11232)
+
+SetClipForCallDrawMDEF	ComeFromPatchProc	_SectRect,AfterSectRectInCallDrawMDEF,(II)
+
+				cmpROM	RTSInDrawTheMenu,18(sp)		; CallDrawMDEF is called by PopUpMenuSelect
+													; which should NOT be patched, so check where
+													; CallDrawMDEF was called from.
+				bne.s	@inPopUp					;
+
+				move	menuRect+Top(a6),TopMenuItem ; tell MDEF to draw from top of menu
+@inPopUp
+				MOVE.L	4(SP),A0					; Get dstRect (tRect)
+				MOVE.L	12(SP),A1					; Get src1 (menuRect)
+				MOVE.L	(A1)+,(A0)+					; Copy src1 to dstRect
+				MOVE.L	(A1)+,(A0)+
+				MOVE.L	(SP)+,A0					; Get return address
+				LEA		12(SP),SP					; Remove parameters
+				JMP		(A0)						; And return
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; PatchInsMenuItem — Check for bogus data passed to this routine and ignore it to aid PixelPaint.
+; This code should never be rolled into ROM.
+;	PROCEDURE InsMenuItem(menu, str, item);
+
+PatchInsMenuItem PatchProc _InsMenuItem,(Portable,IIci)
+
+; Stack frame offsets in memory
+retAddr		EQU		0
+itemID		EQU		retAddr+4
+strPtr		EQU		itemID+2
+menuHdl		EQU		strPtr+4
+stackDepth	EQU		menuHdl+4
+
+				; Perform a sanity check on the Parameters
+				move.l	strPtr(sp),d0				; Get a potentially offending param (stringPtr)
+				beq.s	@PixelPaintSuks				; EQ means the stringPtr is NIL!!
+
+				move.l	menuHdl(sp),d0				; Get a potentially offending param (menuHandle)
+				beq.s	@PixelPaintSuks				; Yep, they blew it
+				btst	#0,d0						; Is it an odd address?
+				beqOLD								; EQ means not ODD and param are all ok
+
+@PixelPaintSuks
+				move.l	(sp),a0
+				lea		stackDepth(sp),sp
+				jmp		(a0)
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; <16> SaveMDEFHandleStateAroundCalcMenuSize
+;
+; A side effect of calling CalcMenuSize is that the 'MDEF' will be unlocked on return.
+; If the 'MDEF' itself calls CalcMenuSize, the world tends to blow up.  Bracket calls to
+; CalcMenuSize with HGetState/HSetState of the 'MDEF'.
+;
+
+SaveMDEFHandleStateAroundCalcMenuSize	PatchProc _CalcMenuSize,(Plus,SE,II,IIci,Portable)
+				move.l	4(sp),a0				; Get menu handle
+				subq	#2,sp					; Save space for the handle state
+				move.l	a0,-(sp)				; Push menu handle again for call through to CalcMenuSize
+				move.l	(a0),a0
+				move.l	MenuDefHandle(a0),a0	; Get menu’s definition procedure
+				_HGetState						; Get the handle’s current state
+				move.b	d0,4(sp)				; Save the state in the space we allocated just now
+				jsrOld							; Call CalcMenuSize
+				move.b	(sp)+,d0				; Get the saved handle state
+				move.l	4(sp),a0				; Get the menu handle again
+				move.l	(a0),a0
+				move.l	MenuDefHandle(a0),a0	; Get the menu’s definition procedure
+				_HSetState						; Restore the previous handle state
+				move.l	(sp)+,(sp)				; Bubble up the return address over the parameter
+				rts
+				EndProc
+				
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; SaveA5AroundCallMDEFProc — Some MDEFs rely on current A5 (so hold their hand across the call)
+
+AfterLoadResourceInCallMDEFProc		ROMBind	(Portable,$11D96),(IIci,$177AA)
+AfterCallToMDEFInCallMDEFProc		ROMBind	(Portable,$11D9C),(IIci,$177B0)
+
+SaveA5AroundCallMDEFProc ComeFromPatchProc _LoadResource,AfterLoadResourceInCallMDEFProc,(Portable,IIci)
+
+				addq	#4,sp					; get rid of the return address
+				jsrOld							; call LoadResource
+
+				_HLock							; lock it the gentleman’s way
+				MOVE.L	(A0),A0					; handle -> pointer
+
+				move.l	a5,8(a6)				; store A5 over one of the (already copied) parameters
+				move.l	CurrentA5,a5			; get the A5 he’s expecting
+
+				JSR		(A0)					; call him
+
+				move.l	8(a6),a5				; get our A5 back
+				jmpROM	AfterCallToMDEFInCallMDEFProc
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; FixBTSTBugInMenuKey — MenuKey is BTSTing a register containing menu flags.  When we get to
+;						items > 31, the BTST wraps and we get bogus flag results.
+;						An item > 31 is always enabled unless the entire menu is disabled.
+;	FUNCTION MenuKey(CHAR): LongInt;
+
+ROMUpChar			ROMBind	(II,$114A0),(IIci,$179D8),(Portable,$11F86)
+ROMGetA0List		ROMBind	(II,$10DB2),(IIci,$17162),(Portable,$11776)
+ROMGETMENUPTR		ROMBind	(II,$10DA4),(IIci,$17154),(Portable,$11768)
+ROMGETITEMRECORD	ROMBind	(II,$113F8),(IIci,$17928),(Portable,$11ED6)
+ROMGetHA0List		ROMBind	(II,$10DCE),(IIci,$1717E),(Portable,$11792)
+ROMGetHIndex		ROMBind	(II,$10BD2),(IIci,$16F68),(Portable,$11600)
+ROMKeyNotFound		ROMBind	(II,$116CE),(IIci,$17C06),(Portable,$12008)
+ROMGOTMKEY			ROMBind	(II,$116DC),(IIci,$17C14),(Portable,$12016)
+
+FixBTSTBugInMenuKey PatchProc _MenuKey,(II,Portable,IIci)
+CmdChar		EQU		9							; command char is in lo-byte of param [byte/word]
+MenuResult	EQU		10							; menu ID part of result
+mItemResult EQU		12							; Item part of result
+
+searchMenu	EQU		-8							; looking for the parent of...
+HorRMenus	EQU		searchMenu - 2				; looking thru HMenus (=0), or Regular Menus (=1)
+KeyFrame	EQU		HorRMenus - 2
+
+				link	a6, #KeyFrame			; set up stackframe
+				MOVEM.L D3-D6/A3,-(SP)			;save work registers
+
+				move.b	CmdChar(a6), d0			; get character to search for
+				jsrROM	ROMUpChar				; upshift in D0
+				MOVE.B	D0,D4					; and save in D4
+
+				jsrROM	ROMGetA0List			; get menuList pointer into A0
+				move	lastMenu(a0), d5		; go to last menu
+				clr		d6						; zero flag == checking regular menus
+
+; here is the outer loop where each menu in the menuList is considered
+
+KEYBARLOOP		jsrROM	ROMGETMENUPTR			;get menu pointer in A0 from index in D5
+				MOVE.L	A0,A3					;stash in A3 for safe keeping
+				BTST	#0,MENUENABLE+3(A3)		;is this menu enabled?
+				BEQ.S	NEXTBAR					;if not, skip it
+				MOVEQ	#1,D3					;start with item number 1
+
+; here is the inner loop where each item is considered
+
+KEYITEMLOOP		MOVE.L	MENUENABLE(A3),D0		;get enable flags
+				BTST	D3,D0					;make sure this item is enabled
+				BEQ.S	KEYNEXTITEM				;if not, skip it
+
+EnabledKeyItemLoop								; <10> Loops to here when item in D3 > 31
+				MOVE.L	A3,A0					;get menuPtr in A0
+				MOVE	D3,D0					;get item number in D0
+				jsrROM	ROMGETITEMRECORD		;search for item
+				BEQ.S	NEXTBAR					;if not, this menu is exhausted
+
+				MOVE.B	ItemCmd(A1),D0			;get the command char
+				jsrROM	ROMUpChar				; upshift it in D0
+
+				cmpi.b	#FirstAltMenuCmd, d0	; item between $1B and $1F?
+				blt.s	@DoCompare				; no, so continue
+				cmpi.b	#LastAltMenuCmd, d0
+				bhi.s	@DoCompare				; no, so continue
+				bra.s	KeyNextItem				; if here then cmdItem is between
+												; $1B and $1F so skip comparison
+
+@DoCompare		CMP.B	D0,D4					;do they match?
+				beqROM	ROMGOTMKEY				;if they do, we’ve found it!
+
+KEYNEXTITEM		ADDQ	#1,D3					;bump to next item
+				CMPI.W	#31,D3					;<10> items > 31 are always enabled
+				BHI.S	EnabledKeyItemLoop		;<10> so skip moving the flags and the btst
+				BRA.S	KEYITEMLOOP				;loop till we find it or no more
+
+NEXTBAR			subq	#6, d5					; bump to next item
+				cmp		d6, d5					; have we reached the value in d6?
+				bgt.s	KeyBarLoop				; loop till we reach it
+
+				tst		d6						; does d6 have a value?						<FJL C222>
+				bneROM	ROMKeyNotFound			; yes, so have checked regular AND HMenus	<FJL C222>
+
+; d6 was equal to zero, so now check thru the hierarchical menus
+
+				jsrROM	ROMGetHA0List			; get HMenuList ptr in A0
+				move	lastHMenu(a0), d5		; get #HMenus
+				beqROM	ROMKeyNotFound			; none, so don’t check ’em
+
+												; yes there are menus so check them backwards
+				move.l	MinusOne, d1			; set up for GetHIndex call
+				jsrROM	ROMGetHIndex			; d0 now has ptr to HMenuList header info
+				add		d0, d5					; d5 points at last HMenu
+				move	d0, d6					; d6 points at HMenuList header
+				bra.s	KeyBarLoop				; and start checking
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; UseUpperTextInMenuKey — MenuKey now uses the internationally friendly _UpperText.
+; <14>:
+; Since SCUpperText can be slow, skip calls when we're upper-casing the single byte NULL
+; which really means that there is no command-key equivalent for this item.
+; Note: This patch should never be rolled in, the main code has been fixed in a better way.
+
+AfterUprStringInUpChar	ROMBind	(II,$114A8),(IIci,$179E0),(Portable,$11f8E)
+UseUpperTextInMenuKey ComeFromPatchProc _UprString,AfterUprStringInUpChar,(II,IIci,Portable)
+
+				tst.b	(a0)					; Is the byte a zero?				<14>
+				bne.s	mustUpper				; No? go upper case it				<14>
+				cmp.w	#1,d0					; Is the length 1? (to be sure)		<14>
+				beq.s	canSkipUpper			; Upper casing zero is skipped		<14>
+mustUpper										; <14>
+				move.l	a0,-(sp)				; push textPtr						<13>
+				move.w	d0,-(sp)				; push length						<13>
+				move.w	#smSystemScript,-(sp)	; use system script, ignore port	<13>
+				_SCUpperText					; (stack based!)					<13>
+canSkipUpper									; <14>
+				rts
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; <14>
+; SynchKeyboardMenuState —	Make sure the keyboard menu state corresponds to the
+;							application’s desired setting (enable/disable) in the
+;							application-specific global flag, scriptDisableKybds
+; Note: This patch should never be rolled in, this code should be in Process Manager.
+
+SynchKeyboardMenuState PatchProc _DrawMenuBar,(Plus,SE,II,IIci,Portable)
+
+				moveq	#smKeySynchKbdMenuState,d0	; Set up the KeyScript verb
+				move.w	d0,-(sp)					; to just synchronize the keyboard menu
+				_KeyScript							; Do it.
+				jmpOld								; Continue with DrawMenuBar code
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+			End

@@ -1,0 +1,199 @@
+;
+;	File:		DataAccessResultsHandlers.a
+;
+;	Contains:	Entry point for 'proc' resource containing default system result handlers.
+;				Dispatches to appropriate routine based on dataType.  Stored in a 'proc'
+;				resource so it is never unlocked or purged.
+;
+;	Written by:	Jeff Miller
+;
+;	Copyright:	© 1990-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<12>	 3/13/92	JSM		Renamed this file DataAccessResultsHandlers.a from
+;									SnarfResultsHandlers.a, keeping all the old revisions.
+;		<11>	  3/4/91	dba		dty: get rid of extraneous forROM and SysVers stuff and turn off
+;									debugging symbols
+;		<10>	12/12/90	VL		(jsm) Put in a check for NULL data item and nil data pointer.
+;		 <9>	 8/27/90	VL		Check typeDecimal and typeMoney before zero length test (since a
+;									zero length in Packed Decimal String is identically equal to 0).
+;		 <8>	 7/22/90	JSM		Call zeroLengthHandler for null data (except row breaks, column
+;									breaks, and unknown data types).
+;		 <7>	 6/10/90	JSM		Just touch this file so SnarfMan.a.rsrc is rebuilt correctly.
+;		 <6>	 4/12/90	JSM		Combined some routines, thus eliminating more JMP instructions.
+;		 <5>	 4/12/90	JSM		Reduce code size:  eliminated two JMP instructions.
+;		 <4>	  4/9/90	VL		Added 5 new ResultHandlers.
+;		 <3>	 3/13/90	JSM		Update for new result handler interface to include places and
+;									flags.
+;		 <2>	 3/12/90	JSM		Update header comment to reflect reality.
+;		 <1>	 2/23/90	JSM		First checked in.
+;
+
+				TITLE		'DataAccessResultsHandlers.a'
+				STRING		ASIS
+				CASE		OBJ
+
+;
+; Define DataAccessDebug to get MacsBug labels
+;
+
+;	IF &TYPE('DataAccessDebug')='UNDEFINED' THEN
+DataAccessDebug		EQU			0
+;	ENDIF
+
+; Includes
+
+				PRINT		OFF
+
+				LOAD		'StandardEqu.d'
+				INCLUDE 	'DatabaseAccess.a'
+
+				PRINT		ON
+
+;
+; Macro to put in debug symbols for MacsBug
+;
+				IF DataAccessDebug THEN
+				MACRO
+				DoDebugSymbols &name
+				DC.B	$80 + &LEN(&name), '&name'
+				DC.W	$0000
+				ENDM
+				ENDIF
+
+;===============================================================================
+;
+;	FUNCTION	DataAccessHandler(dataType : DBType; theLen : INTEGER; thePlaces :
+;								INTEGER; theFlags : INTEGER; theData : Ptr;
+;								theText : Handle) : OSErr;
+;
+;	Common entry point for all default system result handlers.  Branches to
+;	appropriate routine.
+;
+;===============================================================================
+
+DataAccessHandler	PROC	EXPORT
+
+;
+; record corresponding to the stack on entry
+;
+myStack			RECORD		0
+ReturnAddr		DS.L		1
+theText			DS.L		1
+theData			DS.L		1
+theFlags		DS.W		1
+thePlaces		DS.W		1
+theLen			DS.W		1
+dataType		DS.L		1
+theOSErr		DS.W		1
+				ENDR
+
+				CASE		OFF						; following are Pascal routines
+
+				IMPORT		typeBooleanHandler
+				IMPORT		typeIntegerHandler
+				IMPORT		typeFloatHandler
+				IMPORT		typeCharHandler
+				IMPORT		typeUnknownHandler
+				IMPORT		typeColBreakHandler
+				IMPORT		typeRowBreakHandler
+				IMPORT		typeTimeHandler
+				IMPORT		typeDateHandler
+				IMPORT		typeTimeStampHandler
+				IMPORT		typeMoneyDecimalHandler
+				IMPORT		zeroLengthHandler
+				IMPORT		nilPtrHandler			;											<10>
+
+				WITH		myStack
+				MOVE.L		dataType(A7),D0			; D0 = dataType
+				ENDWITH
+
+				; check for the most common data types first
+
+				CMP.L		#typeColBreak,D0		; column break?
+				BNE.S		@1						; no
+				JMP			typeColBreakHandler		; yes
+@1
+				CMP.L		#typeRowBreak,D0		; row break?
+				BNE.S		@2						; no
+				JMP			typeRowBreakHandler		; yes
+@2
+				CMP.L		#typeUnknown,D0			; unknown type?
+				BNE.S		@3						; no
+				JMP			typeUnknownHandler		; yes
+@3
+				WITH		myStack					;											<10>
+				MOVE.W		theFlags(A7),D1			; get flags									<10>
+				AND.W		#kDBNullFlag,D1			; is it a null item?						<10>
+				BEQ.S		@notNull				;											<10>
+				JMP			zeroLengthHandler		; yes => return noErr						<10>
+@notNull											; no => get the data type and continue on	<10>
+				TST.L		theData(A7)				; is it a nil pointer?						<10>
+				ENDWITH								;											<10>
+				BNE.S		@notNilPtr				;											<10>
+				JMP			nilPtrHandler			; yes => return an error					<10>
+@notNilPtr											; no => continue on							<10>
+				CMP.L		#typeDecimal,D0			; decimal?
+				BEQ.S		@4						; yes
+				CMP.L		#typeMoney,D0			; money?
+				BNE.S		@checkZero				; no
+@4
+				JMP			typeMoneyDecimalHandler	; used for both typeDecimal and typeMoney
+
+				; check for zero length
+@checkZero
+				WITH		myStack
+				TST.W		theLen(A7)				; is length 0?
+				BNE.S		@5						; no, try rest of data types
+				JMP			zeroLengthHandler		; yes, just return noErr
+				ENDWITH
+
+				; now try other data types
+@5
+				CMP.L		#typeVChar,D0			; variable length character string?
+				BEQ.S		@6						; yes
+				CMP.L		#typeChar,D0			; character?
+				BNE.S		@7						; no
+@6
+				JMP			typeCharHandler			; used for both typeVChar and typeChar
+@7
+				CMP.L		#typeBoolean,D0			; Boolean?
+				BNE.S		@8						; no
+				JMP			typeBooleanHandler		; yes
+@8
+				CMP.L		#typeSMInt,D0			; small integer?
+				BEQ.S		@9						; yes
+				CMP.L		#typeInteger,D0			; integer?
+				BNE.S		@10						; no
+@9
+				JMP			typeIntegerHandler		; used for both typeSMInt and typeInteger
+@10
+				CMP.L		#typeSMFloat,D0			; small float?
+				BEQ.S		@11						; yes
+				CMP.L		#typeFloat,D0			; float?
+				BNE.S		@12						; no
+@11
+				JMP			typeFloatHandler		; used for both typeSMFloat and typeFloat
+@12
+				CMP.L		#typeTime,D0			; time?
+				BNE.S		@13						; no
+				JMP			typeTimeHandler			; yes
+@13
+				CMP.L		#typeDate,D0			; date?
+				BNE.S		@14						; no
+				JMP			typeDateHandler			; yes
+@14
+				CMP.L		#typeTimeStamp,D0		; TimeStamp?
+				BNE.S		@15						; no
+				JMP			typeTimeStampHandler	; yes
+@15
+				JMP			typeUnknownHandler		; default is unknown
+
+				IF DataAccessDebug THEN
+				DoDebugSymbols	DataAccessHandler	; label for MacsBug
+				ENDIF
+
+				ENDPROC								; end of DataAccessHandler
+
+				END

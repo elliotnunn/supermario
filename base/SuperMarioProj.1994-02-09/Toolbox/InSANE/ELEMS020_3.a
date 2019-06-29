@@ -1,0 +1,781 @@
+;
+;	File:		ELEMS020_3.a
+;
+;	Contains:	xxx put contents here xxx
+;
+;	Written by:	The Apple Numerics Group
+;
+;	Copyright:	© 1990-1993 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:   Mac32
+;
+;	Change History (most recent first):
+;
+;		<SM2>	 2/3/93		CSS		Update from Horror:
+;		<H2>	 9/29/92	BG		Rolling in Jon Okada's latest fixes.
+;		 <1>	11/14/90	BG		Added to BBS for the first time.
+;
+
+;-----------------------------------------------------------
+; CHANGE HISTORY, kept for historical purposes:
+;
+; 30 APR 92  Filter out small magnitude inputs for all
+;	     functions, as well as large magnitude inputs
+;	     for ATAN function, thus avoiding spurious exceptions  (JPO)
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; Sine function.
+; Input:  A4 = operand T
+;	   D1 = class (1..6) reduced by #FCINF
+; Output: A4 = result
+; Uses:   A0-A2
+;
+;
+; About the argument reduction:  T is reduced MOD approximate pi/2,
+; leaving its magnitude no bigger than approximate pi/4.
+; Recall the identities:
+;	sin(T)		=  sin(T)
+;	sin(pi/2 + T)	=  cos(T)
+;	sin(pi + T) = -sin(T)
+;	sin(3pi/2 + T)	= -cos(T)
+;	sin(2pi + T)	=  sin(T)
+; Then if input T = q*(pi/2) + r,
+;	q mod 2 determines whether to use sin (0) or cos (1), and
+;	q mod 4 determines whether to negate result (2 or 3).
+; Note that KLH takes (q + 128) mod 4; this is because of the
+; braindamaged Pascal MOD function, which cannot handle a negative
+; numerator.
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+SINTOP:
+	MOVEQ	#NANTRIG,D0 	; ASSUME THE WORST
+	MOVEQ	#0,D2		; QUOTIENT ADJUSTMENT
+	SUBQ.B	#1,D1		; -1 FOR INF, 0 OR 0, ...
+	BGT.B	@sinfin		; finite, nonzero input
+	BEQ 	RESULTDELIVERED ; SIN(+-0) IS +-0
+;SINCOSCOM:			;				label MOVED below <4/30/92, JPO>
+	BMI 	ERRORNAN	; INF IS ILLEGAL
+
+;-----------------------------------------------------------
+; Have finite, nonzero argument.
+;-----------------------------------------------------------
+@sinfin:			;				label ADDED <4/30/92, JPO>
+	BFEXTU	(A0){1:15},D0	; |arg| < 2.0^(-32)?		<4/30/92, JPO>
+	CMPI.W	#$3FDF,D0	;				<4/30/92, JPO>
+	BLT	TINYX		; yes, return arg		<4/30/92, JPO>
+
+SINCOSCOM:			;				label MOVED from above <4/30/92, JPO>
+	BSR.S	TRIGREDUCTION	; T <-- T REM PI/2
+	BTST	#0,D2		; QUO MOD 2
+	BNE.S	@1
+	BSR.S	SINGUTS 	; EVEN, USE SIN
+	BRA.S	@3
+@1:
+	BSR 	COSGUTS 	; ODD, USE COS
+@3:
+	ANDI.W	#3,D2		; QUO MOD 4
+	SUBQ.W	#2,D2		; >= 0 ONLY IF MOD 2 OR 3
+	BMI.S	@5
+	BCHG	#7,(A4) 	; NEGATE RESULT
+@5:
+
+;-----------------------------------------------------------
+; Common trig finish:
+;	Clear uflow, except when denormalized.
+;	Set inexact.
+;	If result is denormal, set underflow.
+;	Exit.
+;-----------------------------------------------------------
+TRIGFINI:
+;	BSR 	CLEARUFLOW	; WILL CHECK FOR ERROR LATER	DELETED <4/30/92, JPO>
+	BSR 	FORCEINEXACT
+
+;	PEA 	(A4)		;				DELETED <4/30/92, JPO>
+;	PEA 	STI(A6) 	; CELL I FOR RETURN CODE	DELETED <4/30/92, JPO>
+;	ELFCLASSX		;				DELETED <4/30/92, JPO>
+;	MOVE.W	STI(A6),D0	; -6, -5, ..., -1, 1, ..., 6	DELETED <4/30/92, JPO>
+;	BPL.S	@11		;				DELETED <4/30/92, JPO>
+;	NEG.W	D0		; 1, 2, ..., 6			DELETED <4/30/92, JPO>
+;@11:				;				label DELETED <4/30/92, JPO>
+;	SUBQ.W	#FCDENORM,D0	; LEAVES ZERO IF DENORMAL	DELETED <4/30/92, JPO>
+;	BNE.S	@13		;				DELETED <4/30/92, JPO>
+;	BSR 	FORCEUFLOW	;				DELETED <4/30/92, JPO>
+;@13:				;				label DELETED <4/30/92, JPO>
+	BRA 	RESULTDELIVERED
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; Cosine function.
+; Input:  A4 = operand T
+;	   D1 = class (1..6) reduced by #FCINF
+; Output: A4 = result
+; Uses:   A0-A2
+;
+;
+; About the argument reduction:  T is reduced MOD approximate pi/2,
+; leaving its magnitude no bigger than approximate pi/4.
+; Recall the identities:
+;	cos(T)		=  cos(T)
+;	cos(pi/2 + T)	= -sin(T)
+;	cos(pi + T) = -cos(T)
+;	cos(3pi/2 + T)	=  sin(T)
+;	cos(2pi + T)	=  cos(T)
+; Then if input T = q*(pi/2) + r,
+;	q mod 2 determines whether to use cos (0) or sin (1), and
+;	(q+1) mod 4 determines whether to negate result (2 or 3).
+; Note that KLH takes (q + 129) mod 4; this is because of the
+; braindamaged Pascal MOD function, which cannot handle a negative
+; numerator.
+;-----------------------------------------------------------
+COSTOP:
+	MOVEQ	#NANTRIG,D0 	; ASSUME THE WORST
+	MOVEQ	#1,D2		; QUO ADJUSTMENT
+	SUBQ.B	#1,D1		; -1 FOR INF, 0 OR 0, ...
+;	BNE.S	SINCOSCOM	;				DELETED <4/30/92, JPO>
+;	BRA 	P1STUFF 	; COS(+-0) IS 1			DELETED <4/30/92, JPO>
+	BGT.B	@cosfin		; finite, nonzero input		<4/30/92, JPO>
+	BEQ	P1STUFF		; COS(+-0) = +1.0		<4/30/92, JPO>
+	BRA	ERRORNAN	; +-INF is INVALID input	<4/30/92, JPO>
+@cosfin:			;				label ADDED <4/30/92, JPO>
+	BFEXTU	(A4){1:15},D0	; |arg| < 2.0^(-32)?		<4/30/92, JPO>
+	CMPI.W	#$3FDF,D0	;				<4/30/92, JPO>
+	BGE.B	SINCOSCOM	; no, reduce argument		<4/30/92, JPO>
+	BRA	P1XSTUFF	; yes, return 1.0 and INEXACT	<4/30/92, JPO>
+
+;-----------------------------------------------------------
+; Reduce A4 mod approximate pi/2, adding quotient to D2.
+; Input:  A4 = operand T
+;	   D2 = quotient adjustment
+; Output: A4 = reduced argument
+;	   D2 = adjusted quotient
+; Uses:   D0
+;-----------------------------------------------------------
+TRIGREDUCTION:
+	PEA 	FPKPI2		; APPROXIMATE PI/2
+	PEA 	(A4)		; T
+	ELFREMX			; T REM (PI/2), QUO IN D0
+	ADD.W	D0,D2
+	RTS
+
+;-----------------------------------------------------------
+; Evaluate sin(T) for reduced |T| <= pi/4.
+; Use approximation (S = T*T)	  T - (T*S*(P(S) / Q(S)))
+; Input:  A4 = T
+; Output: A4 = sin(T)
+; Uses:   A0-A2, cells W, X, Y
+; Note use of sin/cos common routine depends on placement of Q coef table
+; immediately before P coef table.
+;-----------------------------------------------------------
+SINGUTS:
+	LEA 	SINQ,A2 	; ADDRESS OF SIN Q TABLE
+	BSR.S	POVERQ		; X <-- P/Q
+
+	PEA 	(A4)		; T
+	PEA 	(A2)		; T*T
+	ELFMULX			; W <-- T * (T*T)
+
+	PEA 	(A2)		; W = T^3
+	PEA 	(A0)		; X = P/Q
+	ELFMULX			; X <-- (T * (T*T)) * (P/Q)
+
+	PEA 	(A0)		; X
+	PEA 	(A4)		; T
+	ELFSUBX			; RES <-- T - (...)
+	RTS
+
+
+;-----------------------------------------------------------
+; Common routine for trig functions guts.
+; Input:  A4 = operand T
+;	   A2 = ptr to Q coef table, with P immediately after in memory
+; Output: cell W = T*T
+;	   cell X = (T*T) * (P(T*T) / Q(T*T))
+;	   A0 = X
+;	   A2 = W
+; Uses:   A0, A2, cell Y
+;-----------------------------------------------------------
+T2POVERQ:
+	BSR.S	POVERQ
+
+	PEA 	(A2)		; W = T*T
+	PEA 	(A0)		; X = P/Q
+	ELFMULX			; X <-- (T*T) * P(T*T) / Q(T*T)
+	RTS
+
+;-----------------------------------------------------------
+; Common routine for trig functions guts.
+; Called by T2POVERQ and ATANGUTS.
+; Input:  A4 = operand T
+;	   A2 = ptr to Q coef table, with P immediately after in memory
+; Output: cell W = T*T
+;	   cell X = P(T*T) / Q(T*T)
+;	   A0 = X
+;	   A2 = W
+; Uses:   A0, A2, cell Y
+;-----------------------------------------------------------
+POVERQ:
+	MOVEA.L A4,A0		; T
+	LEA 	STW(A6),A1	; W
+	BSR 	A0TOA1		; COPY W <-- T
+
+	PEA 	(A1)		; W
+	PEA 	(A1)		; W
+	ELFMULX			; W <-- W*W = T*T
+
+	EXG 	A1,A2		; A1 = Q COEF TABLE, A2 = W
+	LEA 	STY(A6),A0	; CELL Y
+	BSR 	POLYEVAL	; EVAL Y <-- Q(T*T)
+;-----------------------------------------------------------
+; LEAVES A1 = P	COEF TABLE
+;-----------------------------------------------------------
+	PEA 	(A0)		; NEED Y FOR P/Q DIVIDE LATER
+
+	LEA 	STX(A6),A0	; CELL X
+	BSR 	POLYEVAL	; EVAL X <-- P(T*T)
+
+	PEA 	(A0)		; X
+	ELFDIVX			; X <-- P(T*T) / Q(T*T)
+	RTS
+
+
+;-----------------------------------------------------------
+;	Evaluate cos(T) for reduced |T| <= pi/4.
+; Use approximation (S = T*T):
+;	(S < 1/4):	1  -  S/2  +  S*S*(P(S) / Q(S))
+;	else:		with Z = |X| - 0.5
+;			0.875 - (Z/2 + (Z*Z/2 - S*S*(P(S) / Q(S))))
+; Input:  A4 = T
+; Output: A4 = cos(T)
+; Uses:   A0-A2, cells W, X, Y
+; Note use of sin/cos common routine depends on placement of Q coef table
+; immediately before P coef table.
+;-----------------------------------------------------------
+COSGUTS:
+	LEA 	COSQ,A2 	; COS Q COEF TABLE, P THEREAFTER
+	BSR.S	T2POVERQ	; W <-- T*T, X <-- T*T*P/Q
+
+	PEA 	(A2)		; W = T*T
+	PEA 	(A0)		; X = (T*T) * P/Q
+	ELFMULX			; X <-- T^4 * P/Q
+
+;-----------------------------------------------------------
+; Now compare T*T in W with 1/4, to determine which formula to continue with.
+;-----------------------------------------------------------
+	PEA 	FPKFOURTH	; 1/4
+	PEA 	(A2)		; W
+	ELFCMPX			; COMPARE AS W - 1/4
+	FBGTS	CGBIG
+
+;-----------------------------------------------------------
+; Finish with first formula above.
+;-----------------------------------------------------------
+	PEA 	FPKHALF 	; 1/2
+	PEA 	(A2)		; W = T*T
+	ELFMULX			; W <-- T*T/2
+
+	PEA 	(A2)		; W
+	PEA 	(A0)		; X = T^4 * P/Q
+	ELFSUBX			; X <-- (T^4 * P/Q) - T*T/2
+
+	MOVEA.L A4,A1		; A1 = RESULT
+	BSR 	A0TOA1		; RESULT = CURRENT X
+
+	PEA 	FPK1		; 1
+	PEA 	(A4)		; RESULT
+	ELFADDX			; RES = 1 - T*T/2 + T^4*P/Q
+	RTS
+
+;-----------------------------------------------------------
+; Evaluate long form of expression.
+;-----------------------------------------------------------
+CGBIG:
+	BCLR	#7,(A4) 	; RES <-- |T|
+
+	PEA 	FPKHALF 	; 1/2
+	PEA 	(A4)		; RES
+	ELFSUBX			; RES <-- T' = |T| - 0.5
+
+	PEA 	(A0)		; SAVE X FOR LATER SUB
+	MOVEA.L A4,A0		; RES
+	MOVEA.L A2,A1		; W
+	BSR 	A0TOA1		; W <-- T'
+
+	PEA 	FPKHALF 	; 1/2
+	PEA 	(A1)		; W
+	ELFMULX			; W <-- T'/2
+
+	PEA 	(A1)		; W
+	PEA 	(A4)		; RES
+	ELFMULX			; RES <-- T'*T'/2
+
+;-----------------------------------------------------------
+; X = T^4*P/Q PUSHED ABOVE
+;-----------------------------------------------------------
+	PEA 	(A4)		; RES
+	ELFSUBX			; RES <-- T'*T'/2 - T^4*P/Q
+
+	PEA 	(A1)		; W = T'/2
+	PEA 	(A4)		; RES
+	ELFADDX			; RES <-- T'/2 + (T'*T'/2 ...)
+
+	BCHG	#7,(A4) 	; RES <-- -RES
+
+	PEA 	FPK78		; 0.875 = 7/8
+	PEA 	(A4)		; RES
+	ELFADDX			; RES <-- 0.875 + ...
+	RTS
+
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; Tangent function.
+; Input:  A4 = operand T
+;	   D1 = class (1..6) reduced by #FCINF
+; Output: A4 = result
+; Uses:   A0-A2, D0-D2
+;
+;
+; About the argument reduction:  T is reduced MOD approximate pi/2,
+; leaving its magnitude no bigger than approximate pi/4.
+; Recall the identities:
+;	tan(T)		=  tan(T)
+;	tan(pi/2 + T)	= -1/tan(T)
+;	tan(pi + T) =  tan(T)
+; Then if input T = q*(pi/2) + r,
+;	q mod 2 determines whether to negate and reciprocate tan.
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+TANTOP:
+	MOVEQ	#NANTRIG,D0 	; ASSUME THE WORST
+	MOVEQ	#0,D2		; NO QUO ADJUSTMENT FOR TAN
+	SUBQ.B	#1,D1		; -1 FOR INF, 0 OR 0, ...
+	BMI 	ERRORNAN	; INF IS ILLEGAL
+	BEQ 	RESULTDELIVERED ; TAN(+-0) IS +-0
+
+;-----------------------------------------------------------
+; Have finite, nonzero argument.
+;-----------------------------------------------------------
+	BFEXTU	(A4){1:15},D0	; |arg| < 2.0^(-32)?		<4/30/92, JPO>
+	CMPI.W	#$3FDF,D0	;				<4/30/92, JPO>
+	BLT	TINYX		; yes, return input		<4/30/92, JPO>
+	BSR 	TRIGREDUCTION
+	BSR.S	TANGUTS
+
+;-----------------------------------------------------------
+; Check q mod 2 ...
+;-----------------------------------------------------------
+	ROR.W	#1,D2		; C BIT <-- QUO MOD 2
+	BCC.S	@21
+
+	BCHG	#7,(A4) 	; NEGATE TAN
+	MOVEA.L A4,A0
+	LEA 	STW(A6),A1	; MOVE TAN FOR RECIPROCAL
+	BSR 	A0TOA1		; W <-- -TAN
+	PEA 	(A1)		; NEED W FOR DIVIDE
+
+	LEA 	FPK1,A0 	; A0 = 1
+	MOVEA.L A4,A1		; RES
+	BSR 	A0TOA1		; RES <-- 1
+
+	PEA 	(A4)		; RES
+	ELFDIVX			; RES <-- -1/TAN
+
+;-----------------------------------------------------------
+; If TAN was 0 in last step, have infinity as result.	In this case, copy the
+; sign of the argument onto the resulting infinity.  By the nature of the
+; algorithm, flipping the result sign corrects the error.
+;-----------------------------------------------------------
+
+	BSR 	TESTDIVZER
+	BEQ.S	@21
+
+	BCHG	#7,(A4)
+@21:
+	BRA 	TRIGFINI
+
+
+;-----------------------------------------------------------
+; Evaluate tan(T) for |T| <= pi/4.
+; Use formulas:  (S = T*T)
+;	S <= 1/4:	T  +  (T^3/3 + T^5*P(S)/Q*S))
+;	else:		T' = (T - 3/4)/3
+;			T  +  S/4  +  S*(T'  +  T^3*P(S)/Q(S))
+;-----------------------------------------------------------
+TANGUTS:
+	LEA 	TANQ,A2 	; TAN Q COEFS, P IMMED AFTER
+	BSR 	T2POVERQ	; X <-- T^2*P/Q
+
+;-----------------------------------------------------------
+; Compute T^5*P/Q, common to both formulas; save T^3 in cell Z.
+;-----------------------------------------------------------
+	MOVEA.L A4,A0		; RES = T
+	LEA 	STZ(A6),A1
+	BSR 	A0TOA1		; Z = T
+
+	PEA 	(A2)		; W = T*T
+	PEA 	(A1)		; Z
+	ELFMULX			; Z = T^3
+
+	PEA 	(A1)		; Z = T^3
+	LEA 	STX(A6),A0
+	PEA 	(A0)		; X
+	ELFMULX			; T^5*P/Q
+
+;-----------------------------------------------------------
+; Compare T*T with 1/4 to decide which formula to continue.
+;-----------------------------------------------------------
+	PEA 	FPKFOURTH	; 1/4
+	PEA 	(A2)		; W = T*T
+	ELFCMPX			; COMPARE AS W - 1/4
+	FBGTS	TGBIG
+
+;-----------------------------------------------------------
+; Using first, simpler formula.
+;-----------------------------------------------------------
+	PEA 	FPK3		; 3
+	PEA 	(A1)		; Z = T^3
+	ELFDIVX			; Z <-- T^3/3
+
+	PEA 	(A1)		; Z
+	PEA 	(A0)		; X
+	ELFADDX			; X <-- T^3/3 + T^5*P/Q
+	BRA.S	TGFIN		; GO ADD TO T AND EXIT
+
+;-----------------------------------------------------------
+; Using more complicated formula.
+;-----------------------------------------------------------
+TGBIG:
+	PEA 	(A0)		; SAVE X ADRS FOR LATER ADD
+
+	MOVEA.L A4,A0		; A0 = T
+	LEA 	STY(A6),A1	; A1 = Y
+	BSR 	A0TOA1		; Y <-- T
+
+	PEA 	FPK34		; 3/4
+	PEA 	(A1)		; Y
+	ELFSUBX			; Y <-- T - 3/4
+
+	PEA 	FPK3		; 3
+	PEA 	(A1)		; Y
+	ELFDIVX			; Y <-- (T - 3/4)/3
+
+	PEA 	(A2)		; W = T*T
+	PEA 	(A1)		; Y = T'
+	ELFMULX				; Y <-- T*T*T'
+
+;-----------------------------------------------------------
+; X = T^5*P/Q ALREADY PUSHED
+;-----------------------------------------------------------
+	PEA 	(A1)		; Y
+	ELFADDX			; Y <-- T*T*T' + T^5*P/Q
+
+	PEA 	FPKFOURTH	; 1/4
+	PEA 	(A2)		; W = T*T
+	ELFMULX			; W <-- T*T/4
+
+	PEA 	(A2)		; W
+	PEA 	(A1)		; Y
+	ELFADDX			; Y <-- T*T/4 + T*T*T'/3 + ...
+
+	MOVEA.L A1,A0		; SET UP FOR LAST ADD...
+
+;-----------------------------------------------------------
+; Finish off tangent, adding (A0) into T in RES.
+;-----------------------------------------------------------
+TGFIN:
+	PEA 	(A0)		; EITHER X OR Y
+	PEA 	(A4)		; RES = T
+	ELFADDX			; RES <-- T + (...)
+	RTS
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; Arctan(T) for any  -INF <= T <= INF.
+; Input:  A4 = operand T
+;	   D1 = class (1..6) reduced by #FCINF
+; Output: A4 = result
+; Uses:   A0-A2, D0-D2
+;
+;
+; About the argument reduction:  ATAN(T) is evaluated for 0 <= T <= 1.
+; Recall the identities:
+;	atan(T) 	=  atan(T)
+;	atan(-T)	= -atan(T)
+;	atan(1/T)	=  pi/2 - atan(T)
+; If T < 0 then atan(-T) is computed, and the result negated.
+; If |T| > 1 then atan(1/|T|) is computed, and the result subtracted from pi/2.
+; To compute atan of reduced T use formulas:
+;	T <= ATnCons = 0.267...   T  -	T * P(T*T) / Q(T*T)
+;	else			  T  -	(A	+  (B*P(B*B)/Q(B*B) + x2fx2))
+;		where  x2 and x2fx2 are constants, about 0.5 and 0.05, and
+;		A = (T - x2)/(1 + (1/(T*x2))), and
+;		B = (T - x2)/(1 +	 (T*x2)).
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+ATANTOP:
+	SUBQ.B	#1,D1		; #FCINF ALREADY SUBTRACTED
+;	BGE.S	ATFINITE	;				DELETED <4/30/92, JPO>
+	BGT.B	ATHARD		; finite, nonzero input		<4/30/92, JPO>
+	BEQ.B	ATQUICK		; ATAN(+-0) = +-0		<4/30/92, JPO>
+ATPIBY2:			;				label ADDED <4/30/92, JPO>
+	LEA 	FPKPI2,A0	; GET PI/2
+	MOVEA.L A4,A1		; RESULT FIELD
+	BSR 	A0TOA1
+	CLR.B	D1		; ISOLATE SIGN IN HI BIT
+	OR.W	D1,(A4) 	; FORCE SIGN OF RESULT
+;	BRA.S	ATQUICK		;				DELETED <4/30/92, JPO>
+;ATFINITE:			;				label DELETED <4/30/92, JPO>
+;	BNE.S	ATHARD		; ZERO IF RESULT IS ZERO	DELETED <4/30/92, JPO>
+ATQUICK:
+	BRA 	RESULTDELIVERED
+ATHARD:
+	BFEXTU	(A4){1:15},D0	;				<4/30/92, JPO>
+	CMPI.W	#$3FDF,D0	; |arg| < 2.0^(-32)?		<4/30/92, JPO>
+	BLT	TINYX		; yes, return arg		<4/30/92, JPO>
+	CMPI.W	#$4040,D0	; |arg| >= 2.0^(65)?		<4/30/92, JPO>
+	BLT.B	@athard2	; no				<4/30/92, JPO>
+
+	BSR	FORCEINEXACT	; yes, force INEXACT		<4/30/92, JPO>
+	BRA.B	ATPIBY2		; return +-pi/2			<4/30/92, JPO>
+
+@athard2:			;				label ADDED <4/30/92, JPO>
+	BCLR	#7,(A4) 	; |T|, SIGN IN D1.W
+	BSR.S	ATANGUTS
+	CLR.B	D1		; CLEAR CLASS CODE
+	OR.W	D1,(A4) 	; REPLACE SIGN OF ATAN
+	BRA 	TRIGFINI
+
+;-----------------------------------------------------------
+; Use D2 to store Boolean about whether input T was inverted in order
+; to obtain an argument no bigger than one.
+;-----------------------------------------------------------
+ATANGUTS:
+	MOVEQ	#0,D2		; SET TO FALSE
+	PEA 	FPK1		; 1
+	PEA 	(A4)		; T
+	ELFCMPX			; COMPARE AS T-1
+	FBLES	AGNOINV
+
+	MOVEQ	#-1,D2		; SET TO TRUE
+	MOVEA.L A4,A0		; RES = T
+	LEA 	STW(A6),A1	; CELL W
+	BSR 	A0TOA1		; W <-- T
+	PEA 	(A1)		; ADRS OF W FOR DIV BELOW
+
+	LEA 	FPK1,A0 	; 1
+	MOVEA.L A4,A1		; RES
+	BSR 	A0TOA1		; RES <-- 1
+
+	PEA 	(A1)
+	ELFDIVX			; RES <-- 1/T
+AGNOINV:
+;-----------------------------------------------------------
+; Store a copy of reduced T on stack for later.
+;-----------------------------------------------------------
+	MOVE.L	(A4)+,-(SP)	; HI ORDER LONG
+	MOVE.L	(A4)+,-(SP)	; MED LONG
+	MOVE.W	(A4),-(SP)	; LOW WORD
+	SUBQ.L	#8,A4		; RESTORE RES PTR
+
+;-----------------------------------------------------------
+; Select short or long form based on RES vs ATnCons, about 0.268.
+;-----------------------------------------------------------
+	PEA 	FPKATNCONS
+	PEA 	(A4)		; RES
+	ELFCMPX			; COMPARE AS RES - ATNCONS
+	FBGTS	AGLONGFORM
+;-----------------------------------------------------------
+; Short form.
+;-----------------------------------------------------------
+	LEA 	ATANQ,A2
+	BSR 	POVERQ		; X <-- P(T*T)/Q(T*T)
+	PEA 	(A0)		; X = P(T*T)/Q(T*T)
+	PEA 	(A4)		; RES = T
+	ELFMULX			; RES <-- T*P/Q
+	BRA 	AGFINI
+
+;-----------------------------------------------------------
+; Long form.
+;-----------------------------------------------------------
+AGLONGFORM:
+	MOVEA.L A4,A0		; RES = T
+	LEA 	STW(A6),A1	; CELL W
+	BSR 	A0TOA1		; W <-- T
+
+	PEA 	FPKX2		; X2
+	PEA 	(A1)		; W = T
+	ELFMULX			; W <-- T*X2
+	PEA 	(A1)		; SAVE W FOR DIV BELOW
+
+	LEA 	FPK1,A0 	; 1
+	LEA 	STY(A6),A1	; CELL Y
+	BSR 	A0TOA1		; Y <-- 1
+
+;-----------------------------------------------------------
+; W = T*X2 PUSHED ABOVE
+;-----------------------------------------------------------
+	PEA 	(A1)		; Y
+	ELFDIVX			; Y <-- 1/(T*X2)
+
+	PEA 	FPK1		; 1
+	PEA 	(A1)		; Y = 1/(T*X2)
+	ELFADDX			; Y <-- 1 + 1/(T*X2)
+
+	PEA 	FPK1		; 1
+	PEA 	STW(A6) 	; W = T*X2
+	ELFADDX			; W <-- 1 + T*X2
+
+	PEA 	FPKX2		; CONSTANT X2
+	PEA 	(A4)		; RES = T
+	ELFSUBX			; RES <-- T-X2
+
+	MOVEA.L A4,A0		; RES = T-X2
+	LEA 	STZ(A6),A1	; CELL Z
+	BSR 	A0TOA1		; Z <-- T-X2
+
+	PEA 	STW(A6) 	; W = 1 + T*X2
+	PEA 	(A4)		; RES = T-X2
+	ELFDIVX			; RES <-- (T-X2)/(1 + T*X2) = B
+
+	PEA 	STY(A6) 	; Y = 1 + 1/(T*X2)
+	PEA 	(A1)		; Z = T-X2
+	ELFDIVX			; Z <-- (T-X2)/(1+1/(T*X2)) = A
+
+	LEA 	ATANQ,A2
+	BSR 	POVERQ		; X <-- P(B*B)/Q(B*B)
+;-----------------------------------------------------------
+; W <--	B*B, UNUSED
+; Y <--	JUNK
+; Z   =	A, STILL
+; RES =	B, STILL
+;-----------------------------------------------------------
+
+	PEA 	(A0)		; X = P(B*B)/Q(B*B)
+	PEA 	(A4)		; RES = B
+	ELFMULX			; RES <-- B*P/Q
+
+	PEA 	FPKX2FX2	; CONSTANT X2FX2
+	PEA 	(A4)		; RES = B*P/Q
+	ELFADDX			; RES <-- B*P/Q + X2FX2
+
+	PEA 	STZ(A6) 	; Z = A
+	PEA 	(A4)		; RES = ...
+	ELFADDX			; RES = A + B*P/Q + X2FX2
+
+;-----------------------------------------------------------
+; Finish up by computing:
+;	no inversion above: T - RES in RES
+;	inversion above:	pi/2 - (T - RES) in RES
+; Remember that T was pushed onto stack earlier.
+;-----------------------------------------------------------
+AGFINI:
+	LEA 	STW+8(A6),A1	; 8 BYTES INTO CELL W
+	MOVE.W	(SP)+,(A1)	; LOW WORD
+	MOVE.L	(SP)+,-(A1)
+	MOVE.L	(SP)+,-(A1) 	; W <-- SAVED T
+
+	PEA 	(A1)		; W = SAVED T
+	PEA 	(A4)		; RES
+	ELFSUBX			; RES - T
+
+	TST.W	D2		; NONZERO IF INVERTED
+	BNE.S	AGSUBPI2
+
+	BCHG	#7,(A4) 	; NEGATE TO T-RES
+	RTS 			; RETURN TO BELOW ATANTOP
+AGSUBPI2:
+	PEA 	FPKPI2		; PI/2
+	PEA 	(A4)		; RES
+	ELFADDX			; PI/2 - (T - RES)
+	RTS 			; RETURN TO BELOW ATANTOP
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; Random number generator.  Adapted from "A More Portable FORTRAN Random
+; Number Generator," Linus Schrage, ACM Transactions on Mathematical
+; Software, Vol. 5, No. 2, June 1979, pp. 132-138.
+;
+; NextX  <--  ARand * X  mod  PRand
+;	where  ARand = 7^5	and  PRand = 2^31-1
+; X is presumed to be an integer strictly between 0 and 2^31-1.
+; Input:  A4 = X
+; Output: A4 = NextX
+; Uses: D0
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+RANDTOP:
+;-----------------------------------------------------------
+; convert X to longint
+;-----------------------------------------------------------
+	MOVE.W	(A4),D1		; D1 <- exp
+	BMI.S	OLDRAND		; punt if negative
+	MOVE.L	2(A4),D2	; D2 <- sig.HI
+	BPL.S	OLDRAND		; punt if not normalized
+	MOVE.L	6(A4),D0	; D0 <- sig.LO
+	BNE.S	OLDRAND		; punt if nonzero
+	MOVE.L	#$401E,D0
+	SUB.W	D1,D0		; D0 <- right shift count
+	BLE.S	OLDRAND		; punt if <= 0 or if > 31
+	CMPI	#31,D0
+	BGT.S	OLDRAND
+	BFINS	D2,D1{0:D0}
+	BNE.S	OLDRAND		; punt if any shift-out bit is nonzero
+	LSR.L	D0,D2		; D2 <- longint representation of X
+
+	MULU.L	#16807,D1:D2	; multiply by 7^5
+	DIVU.L	#$7FFFFFFF,D1:D2	; D1 <- (X*7^5) mod (2^31 - 1)
+	BFFFO	D1{0:0},D2
+	MOVE.W	#$401E,D0	; convert longint in D1 to normalized extended
+	LSL.L	D2,D1		; D1 <- sig.hi
+	SUB.W	D2,D0		; D0.W <- sign/exp
+
+	TST.B	D3		; 96-bit extended format?
+	BPL.S	@1		; no. 80-bit
+
+	MOVE.W	D0,-2(A4)	; yes. write sign/exp to lead word
+@1:
+	MOVE.W	D0,(A4)+	; deliver new X sign/exp (pad word for 96-bit)
+	MOVE.L	D1,(A4)+	; deliver sig.HI
+	CLR.L	(A4)		; sig.LO must be zero
+
+;-----------------------------------------------------------
+; Restore original environment since operation raised no flags
+;-----------------------------------------------------------
+	MOVE.W	STENV(A6),(FPSTATE).W
+;-----------------------------------------------------------
+; Clean up the regs and exit.
+;-----------------------------------------------------------
+
+	MOVEM.L (SP)+,D0-D7/A0-A4	; RESTORE ALL REGS
+	UNLK	A6
+	ADDA.W	(SP),SP
+	RTS
+	
+
+
+
+OLDRAND:
+	PEA 	FPKARAND
+	PEA 	(A4)		; T
+	ELFMULX			; RES <-- T * ARAND
+
+	PEA 	FPKPRAND
+	PEA 	(A4)		; RES = T * ARAND
+	ELFREMX			; RES <-- (T * ARAND) REM PRAND
+
+	TST.B	(A4)		; IF RES < 0, MUST ADJUST UP
+	BPL.S	@1
+
+	PEA 	FPKPRAND
+	PEA 	(A4)
+	ELFADDX			; RES <-- (...) + PRAND
+@1:
+	BRA 	RESULTDELIVERED
+

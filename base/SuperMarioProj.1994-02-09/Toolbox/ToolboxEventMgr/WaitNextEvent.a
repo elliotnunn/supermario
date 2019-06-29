@@ -1,0 +1,94 @@
+;
+;	File:		WaitNextEvent.a
+;
+;	Contains:	This is the Classic Mac OS version of WaitNextEvent.
+;				It is completely replaced in MultiFinder.
+;
+;	Written by:	Phil Goldman and Ed Tecot
+;
+;	Copyright:	© 1988-1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <3>	 2/11/92	JSM		Moved this file to ToolboxEventMgr folder, keeping all the old
+;									revisions.
+;		 <2>	  1/4/90	dba		get rid of assembly warning by renaming a local
+;	   <1.0>	11/16/88	CCH		Added to EASE.
+;	  <S426>	 3/16/88	PYG		Handle overflow for timeout and control of mouse-moved diarrhea
+;	  <S380>	  2/4/88	EMT		Fix WaitNextEvent when mouseRgn is nil
+;
+
+WaitNextEvent	PROC	EXPORT
+
+mouseMovedMsg	EQU	$FA000000
+maxTickCount	EQU	$FFFFFFFF
+
+; Stack Frame
+retAddr		EQU		4
+mouseRgn	EQU		retAddr+4
+timeOutX	EQU		mouseRgn+4
+theEvent	EQU		timeOutX+4
+eventMask	EQU		theEvent+4
+retBool		EQU		eventMask+2
+
+; Locals
+; d3:			Tick time to wakeup (i.e. return)
+; d4:			Last mouse position
+
+			LINK	A6, #0					; Set up stack frame
+			MOVEM.L	D3-d4/A2, -(SP)			; Save registers						<S436/22Mar88> PYG
+			moveq.l	#$FFFFFFFF,d4			; pick a supposed invalid first value	<S436/22Mar88> PYG
+											; for the previous mouse position
+			MOVE.L	Ticks, D3				; Save Ticks on entry
+			ADD.L	timeOutX(A6),D3			; D3 is wakeup time
+			bcc.s	@WaitTimeOK				; if no (unsigned) overflow, branch		<S426/16Mar88> PYG
+			moveq.l	#maxTickCount,d3		; if overflow, peg to max tick count	<S426/16Mar88> PYG
+@WaitTimeOK									;										<S426/16Mar88> PYG
+			MOVE.L	theEvent(A6), A2		; We'll use this often
+
+@WaitLoop
+			_SystemTask
+
+			SUBQ.W	#2, SP					; Make space for return value
+			MOVE.W	eventMask(A6), -(SP)
+			MOVE.L	A2, -(SP)				; theEvent
+			_GetNextEvent
+			MOVE.B	(SP)+, retBool(A6)		; Stuff the boolean return value
+			BNE.S	@WaitDone				; If non-zero, we're done
+
+; GetNextEvent correctly stuffs evtTicks, evtMouse, evtMeta, and evtMBut fields
+			CMP.L	evtTicks(A2), D3		; Time to wake up?
+			BLS.S	@WaitDone				; If so, we're done
+
+			MOVE.L	mouseRgn(A6), D0		; Get the mouseRgn							<S380>
+			BEQ.S	@WaitLoop				; Loop if nil								<S380>
+
+			cmp.l	evtMouse(A2),d4			; is it the same as the last one?		<S436/22Mar88> PYG
+			beq.s	@WaitLoop				; if so, loop							<S426/16Mar88> PYG
+
+			move.l	evtMouse(A2),d4			; and save new value					<S436/22Mar88> PYG
+
+			SUBQ.W	#2, SP					; Make space
+			MOVE.L	evtMouse(A2), -(SP)		; pt for PtInRgn						<S426/16Mar88> PYG
+			MOVE.L	D0, -(SP)				; rgn for PtInRgn							<S380>
+			_PtInRgn
+			TST.B	(SP)+					; Is it in the region?
+			BNE.S	@WaitLoop				; If it is, loop around
+
+			MOVE.W	eventMask(A6), D0
+			BTST	#app4Evt, D0			; Accept app4?
+			BEQ.S	@WaitDone				; No, get out
+
+; Manufacture a mouse moved event
+			MOVE.W	#app4Evt, evtNum(A2)			; what = app4Evt
+			MOVE.L	#mouseMovedMsg, evtMessage(A2)	; message = MouseMoved
+			ST.B	retBool(A6)						; return True
+
+@WaitDone
+			MOVEM.L	(SP)+, D3-d4/A2			; Restore registers						<S436/22Mar88> PYG
+			UNLK	A6
+			MOVE.L	(SP), A0				; Get return address
+			LEA		retBool-4(SP), SP		; Pop the arguments
+			JMP		(A0)					; Return
+
+			ENDPROC

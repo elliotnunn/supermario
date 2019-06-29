@@ -1,0 +1,1664 @@
+;
+;	File:		SeekMask.a
+;
+;	Contains:	xxx put contents here (or delete the whole line) xxx
+;
+;	Written by:	xxx put name of writer here (or delete the whole line) xxx
+;
+;	Copyright:	© 1981-1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:   Mac32 Bigbang Sys606
+;
+;	Change History (most recent first):
+;
+;		 <4>	 9/18/90	BG		Removed <2>. 040s are behaving more reliably now.
+;		 <3>	 7/20/90	gbm		Change some identifiers to avoid conflicts with interfaces
+;		 <2>	 6/28/90	BG		Added EclipseNOPs to deal with flakey 040s.
+;	  <•1.6>	 7/14/89	BAL		For Aurora: Final CQD
+;	   <1.5>	 6/30/89	BAL		Now looks at runBuf(a6) to determine whether to use run clipping
+;	  <•1.4>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;	  <•1.3>	 4/12/89	BAL		Blasting in 32-Bit QuickDraw 1.0B1
+;				 11/5/88	BAL		Added transfer direction (RUNBUMP) to SeekMask interface so
+;									appropriate run mask could be generated.
+;				 10/1/88	BAL		Added RUNRTN, rtn to form n-bit run mask from 1-bit scan mask.
+;				 9/22/88	BAL		Consolidated initialization of region state records. Moved code
+;									here from Drawline, drawarc, rgnblt, and stretch. Obviated the
+;									need for combinations other than A, AB, and ABC.
+;				 9/18/88	BAL		Altered to use common stack frame file 'Drawing Vars.a'
+;				 12/1/86	EHB		Redid SeekMask routines to avoid JSR's to SeekRgn (at the
+;									expense of a bunch of extra code)
+;				 10/9/86	EHB		Added support for masks
+;				  7/5/86	EHB		Added routine GETSEEK to set up all seekRgn information
+;				 6/15/86	EHB		Removed scanbuf := RGNBUFFER (done externally, not in loop)
+;				 6/13/86	EHB		New today Broken out from Drawline, drawarc, rgnblt, stretch
+;									Modified to expand result according to depth
+
+		BLANKS	ON 
+		STRING	ASIS
+		
+		MACHINE MC68020
+
+;------------------------------------------------------------------
+;
+;  -->	SEEKMASK.a
+;
+;------------------------------------------------------------------
+
+;------------------------------------------------------------------
+;
+;  REGION CLIPPING
+;
+;  When region clipping is being done, the drawing routine calls a routine
+;  that seeks to the current scanline in all necessary regions, ANDs all the
+;  regions together (with a mask too, if necessary), and then expands that
+;  one-bit scanline to the current screen depth so that it can be used as a
+;  pixel mask.
+;
+;  The drawing routine first calls GETSEEK which places the routine that will
+;  do all this into SEEKMASK(A6).  (All drawing routines which call this routine
+;  must have the same stack frame as defined in StretchBits.)
+;
+;  GETSEEK sets up two routines:  SEEKMASK(A6) which is the routine that combines
+;  the appropriate number of regions together, and EXRTN(A6), which expands a
+;  scanline to the proper depth and is called by the routine in SEEKMASK(A6).
+;
+;
+;  APPLYING A MASK TO THE REGION
+;
+;  If a mask is to be combined with the regions, then DSTMASKBUF(A6) is non-zero
+;  and points to the mask for the current scanline.  The mask is one bit deep
+;  and has been stretched, if necessary to the same size as the destination.
+;  Note that although SeekRgn seeks to the proper scanline of the regions within
+;  this routine, the proper scanline of the mask must be maintained externally
+;  to this routine.
+;  
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	RgnBlt and everyone else (stretch,drawline,drawarc) compute bufSize as:		<C954> 08Nov87 BAL
+;
+;		[ (minRect.right-minRect.left) div 32 + 1 ] * pixelsize - 1
+;		
+;	This will result in an excess of upto (pixelsize-1) longs to be accessed during the
+;	region masked drawing.  Since region masks are created as long aligned 1-bit deep masks
+;	which are then expanded to the proper depth the RGNBUFFER on the stack must be the bulky
+;	size computed above (until seekMask is changed to be more intelligent) but the stackFrame
+;	variable bufSize which determines the width of the scanline actually written to can more
+;	accurately be computed as:
+;
+;		[ (minRect.right-minRect.left)  * pixelsize - 1 ] div 32
+;		
+
+
+xGETSEEK	PROC	EXPORT
+			EXPORT	GETSEEK,AllocRunBuf,gsRunTbl,gsExpTbl,gsSeekTbl
+			IMPORT	SEEKRGN,SEEKUP,SEEKDOWN
+			IMPORT	Table2,Table4
+;-----------------------------------------------------------------------
+;
+&CurFile	SETC	'SEEKMASK'
+			
+			INCLUDE	'DrawingVars.a'
+
+
+;	Low stack space error exit routine
+
+GetOutofTown
+		clr.l	StackFree(a6)				;guarantee stretch won't come back
+GetMoreStk
+		jmp		([goShow,a6])				;go show the cursor and return
+
+;-----------------------------------------------------------------------
+;
+;  ALLOCATE  A RUN BUFFER FOR RUN-MASK CLIPPING.				<BAL 21Sep88>
+;  Requires DrawingVars stack frame for inputs
+;  Returns ptr to stack buffer in a0
+;  Called by GetSeek, ScaleBlt
+;
+;  trashes: d0,d1,d2,a0
+;
+AllocRunBuf
+		move.l	(sp)+,d2					;get return address
+		moveq	#0,d1						;clear out high word
+		move.w	BufSize(a6),d1				;get longs in ScanBuf-1
+		addq.l	#2,d1						;get longs in ScanBuf+1
+		cmp.w	#5,DstShift(a6)				;is dest 32 bits/pixel ?
+		beq.s	@1							;yes, size <= N/2 + 1
+		move.l	d1,d0						;no, compute size <= 3(N+1)/2
+		add.l	d1,d1
+		add.l	d0,d1
+@1		lsr.l	#1,d1
+		addq.l	#3,d1						;got long cnt, 2 for slop
+		SUB.L	D1,STACKFREE(A6)			;IS THERE ENOUGH STACK?
+		bpl.s	@stkOK
+		bsr.s	GetMoreStk					;no, go look for more stack!
+@stkOK		
+		lsl.l	#2,d1						;convert to a byte count
+		sub.l	d1,sp						;allocate the buffer
+		move.l	sp,a0			 			;return where RunBuf is
+		addq	#4,a0						;leave a long in front for hacking
+		
+		jmp		(za0,d2.l)					;go back
+
+
+		
+	ALIGN Alignment	
+		
+;-------------------------------------------------
+;
+;	GetSeek(RgnHandle1, RgnHandle2, ..., HandleCount.L);
+;
+;   SET UP ADDRESS OF SEEK ROUTINE IN SEEKMASK(A6)
+;	SET UP ADDRESS OF EXPAND ROUTINE IN EXRTN(A6)
+;
+;	CLOBBERS:	A0-A3,D0-D4
+;
+;	A6 OFFSETS OF LOCAL VARIABLES AFTER LINK:
+;
+;	LINK DONE BY CALLER (STRETCHBITS, RGNBLT, ScaleBlt, DRAWLINE, DRAWARC, QuickPolys)
+;
+;
+GETSEEK
+
+		MOVE.L	4(SP),D3					;GET COUNT OF RGN HANDLES
+		LEA		12(SP,D3*4),A3				;POINT TO FIRST RGN PARAM
+		LEA		STATEA(A6),A1				;POINT AT FIRST STATE RECORD
+		CLR 	D4							;INIT ALL RGNS RECT
+
+;-----------------------------------------------------------------------
+;
+;  ALLOCATE  A RUN BUFFER FOR RUN-MASK CLIPPING.				<BAL 21Sep88>
+;
+		tst.l	runBuf(a6)					;are we run clipping?			<1.5> BAL
+		beq.s	NxtRgn						;no, don't allocate run buffer	<1.5> BAL
+		_AllocRunBuf						;go do it
+		move.l	a0,RunBuf(A6)	 			;remember where RunBuf is
+
+
+;----------------------------------------------------------------------
+;
+;  ALLOCATE BUFFERS AND INIT STATE RECORDS FOR EACH NON-RECT REGION
+;
+NXTRGN
+		MOVEQ	#10,D0
+		MOVE.L	-(A3),A0 					;GET RGNHANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE IT
+		CMP 	RGNSIZE(A0),D0				;IS RGN RECTANGULAR ?
+		BEQ.S	ARECT						;YES, SKIP IT
+
+		CMP		#2,D3						;IS THIS THE USER RGN?
+		BEQ.S	NOTRECT						;YES, DON'T TRIM
+		MOVE.L	(A3),-(SP)					;PUSH REGION HANDLE
+		PEA 	MINRECT(A6) 				;PUSH ADDR OF MINRECT
+		CLR.W	-(SP)						;pass Trim = False
+		_TRIMRECT							;CALL TRIMRECT (trashes a0)
+		blt.s 	GetOutofTown				;=>INTERSECTION EMPTY, QUIT & SHOW CURSOR
+		BEQ.S	ARECT						;YES, SKIP IT
+		MOVE.L	(A3),A0 					;GET RGNHANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE IT FOR INITRGN
+		
+NOTRECT
+		ADDQ.W 	#1,D4						;NO, SET UP FLAG
+		ADD.W	D4,D4						;SAVE FLAGS
+
+		MOVE	MINRECT+RIGHT(A6),D1		;GET MAXH
+		MOVE	BUFLEFT(A6),D2				;GET BUFLEFT
+		
+		MOVEQ	#0,D0						;CLEAR HIGH WORD OF D3
+		MOVE	D1,D0						;GET RIGHT
+		SUB		D2,D0						;GET WIDTH IN DOTS
+		LSR		#5,D0						;CONVERT TO LONGS
+		SUB.L	D0,STACKFREE(A6)			;IS THERE ENOUGH STACK?
+		bpl.s	@stkOK
+		bsr.s	GetMoreStk					;no, go look for more stack!
+@stkOK		
+		
+		MOVE	MINRECT+LEFT(A6),D0 		;GET MINH
+		_INITRGN 							;INIT STATE, ALLOC BUFFER
+		SUB		#RGNREC,A1					;BUMP TO NEXT RGN STATE RECORD
+ARECT
+		DBRA	D3,NXTRGN					;LOOP FOR ALL ACTIVE REGIONS
+
+;--------------------------------------------------------------------
+;
+;  IF ALL REGIONS ARE RECTANGULAR, AND THERE IS NO MASK, 
+;  THEN DRAW MINRECT INTO MASK BUFFER.  IF THERE IS A MASK, THEN INIT
+;  STATE RECORD FOR REGION A, AND DRAW MINRECT THERE INSTEAD.
+;
+		TST.L	DSTMASKBUF(A6)				;IS THERE A MASK?
+		BEQ.S	NOMASK
+
+		ADDQ	#1,D4						;ALTER RECTFLAG TO REFLECT MASK
+		MOVE.W	D4,RECTFLAG(A6)				;SAVE FOR GETRTNS
+		CMP.W	#1,D4						;ARE ALL RGNS RECT?
+		BGT.S	GETRTNS						;NO, ATLEAST ONE ACTIVE STATE REC
+		
+						;A1 POINTS TO STATE RECORD A
+						;A0 POINTS TO A VALID RGN
+
+		MOVE	MINRECT+RIGHT(A6),D1		;GET MAXH
+		MOVE	BUFLEFT(A6),D2				;GET BUFLEFT
+		
+		MOVEQ	#0,D0						;CLEAR HIGH WORD OF D3
+		MOVE	D1,D0						;GET RIGHT
+		SUB		D2,D0						;GET WIDTH IN DOTS
+		LSR		#5,D0						;CONVERT TO LONGS
+		SUB.L	D0,STACKFREE(A6)			;IS THERE ENOUGH STACK?
+		bpl.s	@stkOK
+		bsr.s	GetMoreStk					;no, go look for more stack!
+@stkOK		
+		
+		MOVE	MINRECT+LEFT(A6),D0 		;GET MINH
+		_INITRGN 							;INIT STATE, ALLOC BUFFER
+
+		MOVEQ	#0,D0						;PIXEL SHIFT FOR MASK = 0
+		MOVE.L	STATEA+SCANBUF(A6),A0		;POINT TO RECT BUFFER
+		BRA.S	DORECT
+
+NOMASK
+		MOVE	DSTSHIFT(A6),D0				;GET THE DST DEPTH
+		tst.l	runBuf(a6)					;are we run clipping?		<1.5> BAL
+		beq.s	@shiftOK					;no, use dstShift			<1.5> BAL
+		moveq	#0,d0						;yes, RGNBUFFER is 1 bit/pixel	<1.5> BAL
+@shiftOK
+		MOVE.W	D4,RECTFLAG(A6) 			;ARE ALL RGNS RECT ?
+		BNE.S	NOTRRGN 					;NO, CONTINUE
+		
+		MOVE.L	RGNBUFFER(A6),A0			;POINT TO REGION BUFFER
+
+DORECT	MOVE	MINRECT+LEFT(A6),D3 		;SET UP LEFT
+		SUB 	BUFLEFT(A6),D3				;MAKE IT BUFFER RELATIVE
+		MOVE	MINRECT+RIGHT(A6),D4		;SET UP RIGHT
+		SUB 	BUFLEFT(A6),D4				;MAKE IT BUFFER RELATIVE
+		_XorSlab 							;AND XOR BETWEEN THEM
+		BRA.S	GETRTNS						;=>SKIP NEXT TEST
+		
+
+;---------------------------------------------------------------------
+;
+;  IF ONLY ONE REGION IS NON-RECTANGULAR, AND THE DEPTH = 1, PLAY THE
+;  REGION DIRECTLY INTO THE MASK BUFFER (NO EXPANSION OR COMPOSITION).
+;
+NOTRRGN	TST		D0							;IS DST PIXELSIZE ONE?		<1.5> BAL
+		BNE.S	USEEXP						;=>NO, DON'T PLAY INTO MASK BUFFER
+		
+		CMP 	#2,D4						;ONLY 1 NON-RECT RGN?
+		BNE.S	GETRTNS 					;NO, CONTINUE
+		MOVE.L	RGNBUFFER(A6),STATEA+SCANBUF(A6) ;YES, PLAY DIRECTLY INTO MASK
+		BRA.S	GETRTNS
+
+;---------------------------------------------------------------------
+;
+;  ATLEAST ONE NON-RECT REGION AND DEPTH > 1 SO MUST USE EXPAND ROUTINE
+;
+USEEXP	OR		#1,RECTFLAG(A6)				;FORCE USE OF EXRTN
+
+;--------------------------------------------------------------------
+;
+;  GET SEEK ROUTINE INTO SEEKMASK(A6)
+;  GET EXPAND ROUTINE INTO EXRTN(A6) FOR SEEK ROUTINE
+;
+GETRTNS			
+			MOVE	DSTSHIFT(A6),D0				;GET SHIFT AMOUNT
+			move.l	gsRunTblPtr,A0				;GET ADDRESS OF ROUTINE TBL
+			add.l  	(a0,d0*4),A0				;CALC ROUTINE BASED ON DEPTH
+			MOVE.L	A0,RUNRTN(A6)				;RETURN RUN ROUTINE
+			
+			tst.l	runBuf(a6)					;are we run clipping?		<1.5> BAL
+			beq.s	@shiftOK					;no, use dstShift			<1.5> BAL
+			moveq	#0,d0						;yes, RGNBUFFER is 1 bit/pixel	<1.5> BAL
+@shiftOK			
+			SUB.L	A0,A0						;ASSUME NO EXPAND ROUTINE
+			SUB.L	#8,A3						;SKIP OVER LAST RGNHANDLE, COUNT
+			MOVE.L	(A3),A1						;GET RETURN ADDRESS
+			MOVE	RECTFLAG(A6),D1				;GET OFFSET TO SEEK ROUTINE
+			MOVE	D0,D2						;MAKE A COPY OF DSTSHIFT
+			OR		D1,D2						;ARE ALL RGNS RECT AND NO MASK AND 1 BIT DEEP?
+			BEQ.S	GOTXRTN						;YES, NO EXRTN
+			
+			move.l	gsExpTblPtr,A0				;GET ADDRESS OF ROUTINE TBL
+			add.l  	(a0,d0*4),A0				;PASS BACK OFFSET TO THE ROUTINE
+			
+GOTXRTN		MOVE.L	A0,EXRTN(A6)				;RETURN ADDRESS OF EXPAND ROUTINE
+			move.l	gsSeekTblPtr,A0				;GET TBL FOR SEEK ROUTINES
+			cmp.w	#7,d1
+			ble.s	@modeOK
+			sub.w	#10,d1						;fold the entries for a smaller tbl
+@modeOK		add.l	(a0,D1*4),A0				;ADD OFFSET TO ROUTINE
+			MOVE.L	A0,SEEKMASK(A6)				;RETURN SEEK ROUTINE
+			JMP		(A1)						;AND RETURN
+
+		
+	ALIGN 4	
+		
+;-------------------------------------------------
+;
+;  ROUTINES TO CONVERT A 1-BIT SCANLINE MASK TO
+;  A RUN MASK FOR THE CURRENT DEPTH
+;  Runs are computed for either forward or reverse blitting
+;
+gsRunTbl	DC.L	RUN1-gsRunTbl,RUN2-gsRunTbl,RUN4-gsRunTbl
+			DC.L	RUN8-gsRunTbl,RUN16-gsRunTbl,RUN32-gsRunTbl
+
+
+
+;-------------------------------------------------
+;
+;  ROUTINES TO EXPAND A SCANLINE TO THE CURRENT DEPTH
+;
+gsExpTbl	DC.L	SINGLE-gsExpTbl,DOUBLE-gsExpTbl,QUAD-gsExpTbl
+			DC.L	EIGHT-gsExpTbl,SIXTEEN-gsExpTbl,THRTWO-gsExpTbl
+
+
+;-------------------------------------------------
+;
+;  ROUTINES TO SEEK TO THE CURRENT SCANLINE OF ONE, TWO, OR THREE REGIONS,
+;  APPLY A MASK TO THAT SCANLINE, IF NECESSARY, AND THEN CALL THE ROUTINE
+;  IN EXRTN(A6) TO EXPAND TO THE CURRENT DEPTH.
+;
+
+gsSeekTbl 	DC.L	SEEKOK-gsSeekTbl				; IF RECT RGN, NO MASK
+			DC.L	RECTMASK-gsSeekTbl			; IF RECT RGN, MASK
+			DC.L	A-gsSeekTbl
+			DC.L	AX-gsSeekTbl
+			DC.L	ABC-gsSeekTbl; B-gsSeekTbl
+			DC.L	ABC-gsSeekTbl; BX-gsSeekTbl
+			DC.L	AB-gsSeekTbl
+			DC.L	AB-gsSeekTbl
+		;	DC.L	0; C-gsSeekTbl
+		;	DC.L	0; CX-gsSeekTbl
+		;	DC.L	0; AC-gsSeekTbl
+		;	DC.L	0; AC-gsSeekTbl
+		;	DC.L	0; BC-gsSeekTbl
+		;	DC.L	0; BC-gsSeekTbl
+		;	DC.L	ABC-gsSeekTbl
+		;	DC.L	ABC-gsSeekTbl
+
+		
+;--------------------------------------------------------------------
+;
+;  REGION IS RECTANGULAR (ALREADY DRAWN INTO STATEA+SCANBUF)
+;  Return a large scancount in d2 so that seekmask is not called again.
+;
+SEEKOK		move.w	#$7fff,d2					;return scan count = ∞	<1.5> BAL
+			RTS
+
+		
+		
+	ALIGN Alignment	
+		
+;--------------------------------------------------------------------
+;
+;  REGION IS RECTANGULAR (ALREADY DRAWN INTO STATEA+SCANBUF) BUT THERE IS A MASK
+;  SO WE MUST COMBINE REGION WITH MASK AND EXPAND INTO RGNBUFFER.
+;
+RECTMASK	MOVEM.L	D3-D5/A4-A6,-(SP)			;SAVE WORK REGISTERS
+			MOVE.L	STATEA+SCANBUF(A6),A1		;POINT AT THE BUFFER
+			MOVE.L	DSTMASKBUF(A6),D0			;POINT AT THE MASK
+			MOVE	STATEA+SCANSIZE(A6),D1		;GET SIZE OF MASK IN LONGS
+			MOVE.L	DSTMASKALIGN(A6),D5			;GET ALIGNMENT
+			MOVE.L	RGNBUFFER(A6),A0			;EXPAND INTO RGNBUFFER
+			MOVE.L	EXRTN(A6),A4				;GET EXPAND ROUTINE
+			LEA		RETRECTM,A5					;GET RETURN ADDRESS FOR LOOP
+			MOVE.L	D0,A6						;GET MASK BUFFER
+			MOVEQ	#0,D2						;SCANLOOPS WANT D2=0
+RECTMLOOP	BFEXTU	(A6){D5:0},D0				;EXTRACT A LONG OF MASK
+			ADDQ	#4,A6						;BUMP TO NEXT MASK LONG
+			AND.L	(A1)+,D0					;GET RECTANGULAR REGION
+			JMP		(A4)						;EXPAND DO INTO RGNBUFFER
+RETRECTM	DBRA	D1,RECTMLOOP				;LOOP FOR ALL LONGS IN SRC
+			MOVEM.L (SP)+,D3-D5/A4-A6			;RESTORE WORK REGISTERS
+RDONE		moveq	#1,d2						;return scan count = 1
+			RTS
+
+
+		
+	ALIGN Alignment	
+		
+;--------------------------------------------------------------------
+;
+;  ONLY REGION A IS NON-RECTANGULAR.  UPDATE IT AND USE IT AS THE MASK
+;
+;  IF DEPTH = 1 THEN PLAY DIRECTLY INTO RGNBUFFER, ELSE PLAY INTO SCANBUF
+;  AND EXPAND INTO RGNBUFFER.
+;
+A			LEA 	STATEA(A6),A1				;POINT TO OUR STATE RECORD
+			MOVE	VERT(A6),D0 				;GET VERT COORD
+			JMP		SEEKRGN						;=>PLAY DIRECTLY INTO RGNBUFFER
+												;AND RETURN
+												
+AX			MOVE	VERT(A6),D0 				;GET VERT COORD
+			CMP 	STATEA+NEXTV(A6),D0			;IS DESIRED VERT >= NEXTV ?
+			BGE.S	AXDOWN						;YES, BUMP DOWNWARD
+			CMP 	STATEA+THISV(A6),D0			;IS DESIRED VERT < CURRENT VERT ?
+			BLT.S	AXUP						;YES, BUMP UPWARD
+			TST.L	DSTMASKBUF(A6)				;IS THERE A MASK?
+			BEQ.S	RDONE						;=>NO, NO CHANGE IN REGION
+AXCHG		MOVE.L	STATEA+SCANBUF(A6),A1		;ELSE GET THE BUFFER
+			MOVE	STATEA+SCANSIZE(A6),D1		;GET THE BUFFER SIZE
+			BRA.S	CPY1BUF						;AND EXPAND INTO RGNBUFFER
+
+AXDOWN		LEA 	STATEA(A6),A1				;POINT TO PROPER STATE RECORD
+			JSR		SEEKDOWN					;SEEK DOWNWARD
+			BRA.S	AXCHG						;=>GO EXPAND THE BUFFER
+
+AXUP		LEA 	STATEA(A6),A1				;POINT TO PROPER STATE RECORD
+			JSR		SEEKUP						;SEEK UPWARD
+			BRA.S	AXCHG						;AND CONTINUE
+			
+			
+			
+CPY1BUF 	MOVE.L	DSTMASKBUF(A6),D0			;IS THERE A MASK?
+			BNE.S	CPY1MASK					;=>YES, APPLY MASK TO REGIONS
+			
+; EXPAND 1 REGION INTO REGION BUFFER
+			
+			MOVEM.L	D2-D4/A4-A5,-(SP)			;SAVE WORK REGISTERS
+			MOVE.L	RGNBUFFER(A6),A0			;EXPAND INTO RGNBUFFER
+			MOVE.L	EXRTN(A6),A4				;GET EXPAND ROUTINE
+			LEA		RETAX,A5					;GET RETURN ADDRESS FOR LOOP
+			MOVEQ	#0,D2						;SCANLOOPS WANT D2=0
+AXLOOP		MOVE.L	(A1)+,D0
+			JMP		(A4)						;EXPAND DO INTO RGNBUFFER
+RETAX		DBRA	D1,AXLOOP					;LOOP FOR ALL LONGS IN SRC
+			MOVEM.L (SP)+,D2-D4/A4-A5			;RESTORE WORK REGISTERS
+			RTS
+
+; COMBINE 1 REGION AND MASK AND EXPAND INTO REGION BUFFER
+
+CPY1MASK	MOVEM.L	D3-D5/A4-A6,-(SP)			;SAVE WORK REGISTERS
+			MOVE.L	RGNBUFFER(A6),A0			;EXPAND INTO RGNBUFFER
+			MOVE.L	EXRTN(A6),A4				;GET EXPAND ROUTINE
+			LEA		RETAXM,A5					;GET RETURN ADDRESS FOR LOOP
+			MOVE.L	DSTMASKALIGN(A6),D5			;ALIGN MASK TO DST
+			MOVE.L	D0,A6						;GET MASK BUFFER
+			MOVEQ	#0,D2						;SCANLOOPS WANT D2=0
+AXMLOOP		BFEXTU	(A6){D5:0},D0				;EXTRACT A LONG OF MASK
+			ADDQ	#4,A6						;BUMP TO NEXT MASK LONG
+			AND.L	(A1)+,D0					;GET RECTANGULAR REGION
+			JMP		(A4)						;EXPAND DO INTO RGNBUFFER
+RETAXM		DBRA	D1,AXMLOOP					;LOOP FOR ALL LONGS IN SRC
+			MOVEM.L (SP)+,D3-D5/A4-A6			;RESTORE WORK REGISTERS
+			moveq	#1,d2						;mask->force scan count = 1
+			RTS
+
+
+		
+	ALIGN Alignment	
+		
+;-------------------------------------------------------------------
+;
+;  REGIONS A AND B ARE NON-RECTANGULAR. UPDATE EACH,
+;  THEN FORM INTERSECTION IN THE MASK BUFFER.
+;
+AB			MOVE	VERT(A6),D0 				;GET VERT COORD
+			LEA 	STATEA(A6),A1				;POINT TO PROPER STATE RECORD
+			bsr.s	SeekAny						;make scanBuf current
+			MOVE	D2,-(SP)					;REMEMBER IF RGN CHANGED
+			LEA 	STATEB(A6),A1				;POINT TO PROPER STATE RECORD
+			bsr.s	SeekAny						;make scanBuf current
+			
+			move	(sp)+,d1					;get previous result
+			cmp		d2,d1						;get d2=min(d1,d2)
+			bgt.s	@min1
+			move	d1,d2
+@min1			
+ABCHG		MOVE.L	STATEA+SCANBUF(A6),A2
+			MOVE.L	STATEB+SCANBUF(A6),A1
+			MOVE	STATEA+SCANSIZE(A6),D1		;GET THE BUFFER SIZE
+
+CPY2BUF 	MOVE.L	RGNBUFFER(A6),A0			;FORM INTERSECTION IN RGNBUFFER
+			MOVE.L	EXRTN(A6),D0				;GET EXPAND ROUTINE
+			BNE.S	ABX							;=>NEED TO EXPAND
+			
+ABLOOP		MOVE.L	DSTMASKBUF(A6),D0			;IS THERE A MASK?
+			BNE.S	ABM							;=>YES, APPLY MASK TO REGIONS
+			
+; COMBINE TWO REGIONS WITHOUT EXPANDING
+
+			MOVE.L	(A2)+,D0
+			AND.L	(A1)+,D0
+			MOVE.L	D0,(A0)+
+			DBRA	D1,ABLOOP
+ABDONE		RTS 
+
+; COMBINE TWO REGIONS AND A MASK WITHOUT EXPANDING
+
+ABM			MOVEM.L	D5/A6,-(SP)					;SAVE WORK REGISTERS
+			MOVE.L	DSTMASKALIGN(A6),D5			;ALIGN MASK TO DST
+			MOVE.L	D0,A6						;GET MASK POINTER
+ABMLOOP		BFEXTU	(A6){D5:0},D0				;EXTRACT A LONG OF MASK
+			ADDQ	#4,A6						;BUMP TO NEXT MASK LONG
+			AND.L	(A2)+,D0					;GET FIRST REGION
+			AND.L	(A1)+,D0					;COMBINE WITH SECOND REGION
+			MOVE.L	D0,(A0)+					;AND PUT TO DST BUFFER
+			DBRA	D1,ABMLOOP					;REPEAT FOR ALL LONGS
+			MOVEM.L	(SP)+,D5/A6					;RESTORE WORK REGISTERS
+			moveq	#1,d2						;mask->force scan count = 1
+			RTS 
+
+
+
+;-------------------------------------------------------------------
+;
+;  Make scanBuf current for given vert (d0) and region state record (a1)
+;  May seek either up or down and returns count of valid scans for
+;  current direction in D2.
+;
+SeekAny		CMP 	NEXTV(A1),D0				;IS DESIRED VERT >= NEXTV ?
+			BGE		SEEKDOWN					;YES, BUMP DOWNWARD
+			CMP 	THISV(A1),D0				;IS DESIRED VERT < CURRENT VERT ?
+			BLT		SEEKUP						;YES, BUMP UPWARD
+			move.w	NEXTV(A1),D2				;assume top to bottom
+			sub.w	d0,d2						;compute scan down count
+			tst.l	DstRow(a6)					;seeking up or down?
+			bpl.s	@ok							;d2 is OK
+			move.w	d0,d2						;
+			sub.w	THISV(A1),D2				;compute scan up count
+			addq.w	#1,d2						;
+@ok			rts
+
+
+;-------------------------------------------------------------------
+
+
+
+ABX			MOVEM.L	D2-D5/A4-A6,-(SP)			;SAVE WORK REGISTERS
+			MOVE.L	DSTMASKBUF(A6),D2			;IS THERE A MASK?
+			BNE.S	ABXM						;=>YES, APPLY MASK TO REGIONS
+			
+; COMBINE TWO REGIONS AND EXPAND TO PROPER DEPTH
+
+			MOVE.L	D0,A4						;GET EXPAND ROUTINE
+			LEA		RETABX,A5					;GET RETURN ADDRESS FOR LOOP
+			MOVEQ	#0,D2						;SCANLOOPS WANT D2=0
+ABXLOOP		MOVE.L	(A2)+,D0
+			AND.L	(A1)+,D0
+			JMP		(A4)						;EXPAND DO INTO RGNBUFFER
+RETABX		DBRA	D1,ABXLOOP					;LOOP FOR ALL LONGS IN SRC
+			MOVEM.L (SP)+,D2-D5/A4-A6			;RESTORE WORK REGISTERS
+			RTS
+
+; COMBINE TWO REGIONS AND A MASK AND EXPAND TO PROPER DEPTH
+
+ABXM		MOVE.L	D0,A4						;GET EXPAND ROUTINE
+			LEA		RETABXM,A5					;GET RETURN ADDRESS FOR LOOP
+			MOVE.L	DSTMASKALIGN(A6),D5			;ALIGN MASK TO DST
+			MOVE.L	D2,A6						;GET ADDRESS OF MASK
+			MOVEQ	#0,D2						;SCANLOOPS WANT D2=0
+ABXMLOOP	BFEXTU	(A6){D5:0},D0				;EXTRACT A LONG OF MASK
+			ADDQ	#4,A6						;BUMP TO NEXT MASK LONG
+			AND.L	(A2)+,D0
+			AND.L	(A1)+,D0
+			JMP		(A4)						;EXPAND DO INTO RGNBUFFER
+RETABXM		DBRA	D1,ABXMLOOP					;LOOP FOR ALL LONGS IN SRC
+			MOVEM.L (SP)+,D2-D5/A4-A6			;RESTORE WORK REGISTERS
+			moveq	#1,d2						;mask->force scan count = 1
+			RTS
+
+
+
+		
+	ALIGN Alignment	
+		
+;-------------------------------------------------------------------
+;
+;  REGIONS A, B AND C ARE ALL NON-RECTANGULAR. UPDATE EACH,
+;  THEN FORM INTERSECTION IN THE MASK BUFFER.
+;
+ABC			MOVE	VERT(A6),D0 				;GET VERT COORD
+			LEA 	STATEA(A6),A1				;POINT TO PROPER STATE RECORD
+			bsr.s	SeekAny						;make scanBuf current
+			MOVE	D2,-(SP)					;REMEMBER IF RGN CHANGED
+			LEA 	STATEB(A6),A1				;POINT TO PROPER STATE RECORD
+			bsr.s	SeekAny						;make scanBuf current
+			MOVE	D2,-(SP)					;REMEMBER IF RGN CHANGED
+			LEA 	STATEC(A6),A1				;POINT TO PROPER STATE RECORD
+			bsr.s	SeekAny						;make scanBuf current
+			
+			move	(sp)+,d1					;get previous result
+			cmp		d2,d1						;get d2=min(d1,d2)
+			bgt.s	@min1
+			move	d1,d2
+@min1		move	(sp)+,d1					;get previous result
+			cmp		d2,d1						;get d2=min(d1,d2)
+			bgt.s	@min2
+			move	d1,d2
+@min2			
+ABCCHG		MOVE.L	STATEA+SCANBUF(A6),A3
+			MOVE.L	STATEB+SCANBUF(A6),A2
+			MOVE.L	STATEC+SCANBUF(A6),A1
+			MOVE.L	RGNBUFFER(A6),A0
+			MOVE	STATEC+SCANSIZE(A6),D1		;GET THE BUFFER SIZE (ALL SAME SIZE)
+			MOVE.L	EXRTN(A6),D0				;GET EXPAND ROUTINE
+			BNE		ABCX						;=>NEED TO EXPAND
+			
+			MOVE.L	DSTMASKBUF(A6),D0			;IS THERE A MASK?
+			BNE.S	ABCM						;=>YES, APPLY MASK
+			
+; COMBINE 3 REGIONS INTO REGION BUFFER WITHOUT EXPANDING
+
+ABCLOOP 	MOVE.L	(A3)+,D0
+			AND.L	(A2)+,D0
+			AND.L	(A1)+,D0
+			MOVE.L	D0,(A0)+
+			DBRA	D1,ABCLOOP
+			RTS
+
+; COMBINE 3 REGIONS AND MASK INTO REGION BUFFER WITHOUT EXPANDING
+
+ABCM		MOVEM.L	D5/A6,-(SP)					;SAVE WORK REGISTERS
+			MOVE.L	DSTMASKALIGN(A6),D5			;ALIGN MASK TO DST
+			MOVE.L	D0,A6						;GET ADDRESS OF MASK
+ABCMLOOP 	BFEXTU	(A6){D5:0},D0				;EXTRACT A LONG OF MASK
+			ADDQ	#4,A6						;BUMP TO NEXT MASK LONG
+			AND.L	(A3)+,D0					
+			AND.L	(A2)+,D0
+			AND.L	(A1)+,D0
+			MOVE.L	D0,(A0)+					;AND PUT TO REGION BUFFER
+			DBRA	D1,ABCMLOOP
+			MOVEM.L	(SP)+,D5/A6					;RESTORE WORK REGISTERS
+			moveq	#1,d2						;mask->force scan count = 1
+		 	RTS									;AND RETURN
+
+
+ABCX		MOVEM.L	D2-D5/A4-A6,-(SP)			;SAVE WORK REGISTERS
+			MOVE.L	DSTMASKBUF(A6),D2			;IS THERE A MASK?
+			BNE.S	ABCXM						;=>YES, APPLY MASK
+			
+; COMBINE 3 REGIONS AND EXPAND
+			
+			MOVE.L	D0,A4						;GET EXPAND ROUTINE
+			LEA		RETABCX,A5					;GET RETURN ADDRESS FOR LOOP
+			MOVEQ	#0,D2						;SCANLOOPS WANT D2=0
+ABCXLOOP	MOVE.L	(A3)+,D0
+			AND.L	(A2)+,D0
+			AND.L	(A1)+,D0
+			JMP		(A4)						;EXPAND DO INTO RGNBUFFER
+RETABCX		DBRA	D1,ABCXLOOP					;LOOP FOR ALL LONGS IN SRC
+			MOVEM.L (SP)+,D2-D5/A4-A6			;RESTORE WORK REGISTERS
+			RTS
+				
+; COMBINE 3 REGIONS AND MASK AND EXPAND
+				
+ABCXM		MOVE.L	D0,A4						;GET EXPAND ROUTINE
+			LEA		RETABCXM,A5					;GET RETURN ADDRESS FOR LOOP
+			MOVE.L	DSTMASKALIGN(A6),D5			;ALIGN MASK TO DST
+			MOVE.L	D2,A6						;GET ADDRESS OF MASK
+			MOVEQ	#0,D2						;SCANLOOPS WANT D2=0
+ABCXMLOOP	BFEXTU	(A6){D5:0},D0				;EXTRACT A LONG OF MASK
+			ADDQ	#4,A6						;BUMP TO NEXT MASK LONG
+			AND.L	(A3)+,D0
+			AND.L	(A2)+,D0
+			AND.L	(A1)+,D0
+			JMP		(A4)						;EXPAND DO INTO RGNBUFFER
+RETABCXM	DBRA	D1,ABCXMLOOP				;LOOP FOR ALL LONGS IN SRC
+			MOVEM.L (SP)+,D2-D5/A4-A6			;RESTORE WORK REGISTERS
+			moveq	#1,d2						;mask->force scan count = 1
+			RTS
+
+
+;-----------------------------------------------
+;	
+;	SCALING ROUTINES CALLED TO EXPAND A MASK BUFFER 
+;	FROM ONE BIT TO N-BITS DEEP.  THESE ROUTINES
+;	EXPAND A SINGLE LONG AT A TIME.
+;
+;	D0:	SRC DATA			A0: DSTPTR
+;	D1: LONGCOUNT			A1: SRC1
+;	D2: SCRATCH				A2: SRC2
+;	D3: BYTECNT/BITCNT		A3: SRC3
+;	D4: SCRATCH				A4:	RTN ADDRESS
+;	D5:						A5: RETURN ADDRESS
+;
+;-----------------------------------------------
+
+		
+	ALIGN Alignment	
+		
+;-----------------------------------------------
+;
+;  SCALE UP BY ONE USING INSCRUTABLE LOGIC
+;
+SINGLE		MOVE.L	D0,(A0)+					;WRITE OUT WORD
+			JMP		(A5)						;AND RETURN
+
+		
+	ALIGN Alignment	
+		
+DOUBLE	
+;-----------------------------------------------
+;
+;  SCALE UP BY TWO USING TABLE LOOKUP
+;
+;  D2 SHOULD BE 0 ON ENTRY
+;
+
+			MOVE.L	A5,-(SP)					; Save A5
+			LEA		Table2,A5					; A5->byte to word double table
+			CLR		D2							; clear upper bits of D2
+
+			MOVE.B	D0,D2						; D2 = 4th byte src
+			MOVE	(A5,D2*2),D4				; D4.lo = 4th word result
+			SWAP	D0							; 3412
+			MOVE.B	D0,D2						; D2 = 2nd byte src
+			MOVE	(A5,D2*2),D3				; D3.lo = 2nd word result
+			LSR.L	#8,D0						; x341
+			MOVE.B	D0,D2						; D2 = 1st byte src
+			SWAP	D3
+			MOVE	(A5,D2*2),D3
+			SWAP	D3							; D3 = 1st,2nd word results
+			SWAP	D0							; 41x3
+			MOVE.B	D0,D2						; D2 = 3rd byte of src
+			SWAP	D4
+			MOVE	(A5,D2*2),D4
+			SWAP	D4							; D4 = 3rd,4th word results
+			MOVE.L	D3,(A0)+
+			MOVE.L	D4,(A0)+
+			MOVE.L	(SP)+,A5
+			JMP		(A5)
+
+		
+	ALIGN Alignment	
+		
+QUAD
+;-----------------------------------------------
+;
+;  SCALE UP BY FOUR USING TABLE LOOKUP
+;
+;  D2 SHOULD BE 0 ON ENTRY
+;
+			MOVEQ	#3,D3						;DO 4 BYTES OF SRC
+@DOQUAD		ROL.L	#8,D0						;GET NEXT BYTE OF SRC
+			MOVE.B	D0,D2						;MAKE AN EXTRA COPY
+			MOVE.L	(TABLE4,PC,D2*4),(A0)+
+			DBRA	D3,@DOQUAD					;=>QUAD NEXT BYTE
+			JMP		(A5)						;AND RETURN
+
+				
+		
+	ALIGN Alignment	
+		
+EIGHT
+;-----------------------------------------------
+;
+;  SCALE UP BY EIGHT USING TABLE LOOKUP
+;
+;  D2 SHOULD BE 0 ON ENTRY
+;
+			MOVEQ	#3,D3						;DO 4 BYTES OF SRC
+@DOEIGHT	ROL.L	#8,D0						;GET A BYTE OF SRC
+			MOVE.B	D0,D2						;MAKE AN EXTRA COPY
+			LSR		#4,D2						;CLEAR HI NIBBLE 
+			MOVE.L	(TABLE8,PC,D2*4),(A0)+		;PUT FIRST LONG TO DST
+			MOVEQ	#$F,D2						;MASK FOR LO NIBBLE
+			AND		D0,D2 						;CLEAR HI NIBBLE
+			MOVE.L	(TABLE8,PC,D2*4),(A0)+		;PUT SECOND LONG TO DST
+			DBRA	D3,@DOEIGHT					;=>EIGHT NEXT BYTE
+			JMP		(A5)						;AND RETURN
+
+		
+	ALIGN Alignment	
+		
+SIXTEEN
+;-------------------------------------------------
+;
+;  SCALE UP BY 16
+;
+			
+			MOVEQ	#15,D3						;16 OUTPUT LONGS
+@SIXTENA 	ADD.L	D0,D0						;GET ONE BIT OF SRC
+			SUBX.L	D2,D2	 					;EXTEND THRU HI WORD
+		 	ADD.L	D0,D0						;GET ONE BIT OF SRC
+			SUBX.W	D2,D2	 					;EXTEND THRU SET LO WORD
+		 	MOVE.L	D2,(A0)+					;OUTPUT 1 RESULT
+			DBRA	D3,@SIXTENA					;
+			JMP		(A5)						;AND RETURN
+
+
+		
+	ALIGN Alignment	
+		
+THRTWO
+;-----------------------------------------------
+;
+;  SCALE UP BY 32
+;
+			MOVEQ	#31,D3						;32 OUTPUT LONGS
+@THRTY2 	ADD.L	D0,D0						;GET ONE BIT OF SRC
+			SUBX.L	D2,D2	 					;EXTEND THRU LONG
+		 	MOVE.L	D2,(A0)+					;OUTPUT 1 RESULT
+			DBRA	D3,@THRTY2					;
+			JMP		(A5)						;AND RETURN
+
+
+;-----------------------------------------------
+;	
+;	RUN MASK ROUTINES CALLED TO ENCODE A 1-BIT SCANLINE MASK 
+;	INTO A RUN MASK APPROPRIATE FOR THE DESTINATION DEPTH.
+;	THESE ROUTINES ARE CALLED ON A SCANLINE BASIS.
+;
+;	D0:	scratch				A0: scratch
+;	D1: scratch				A1: scratch
+;	D2: preserved			A2: scratch
+;	D3: preserved			A3: preserved
+;	D4: preserved			A4:	preserved
+;	D5:						A5: preserved
+;
+;	Clobbers:  D0-D1/A0-A2
+;
+;-----------------------------------------------
+
+		
+	ALIGN Alignment	
+		
+;-----------------------------------------------
+;
+;
+RUN1
+			move.l	RGNBUFFER(a6),a0
+			MOVEM.L	D1/D3-D6,-(SP)				;SAVE WORK REGISTERS
+
+			MOVE.L	RUNBUF(A6),A2				;point to run encoded mask buffer
+			MOVE.W	BUFSIZE(A6),D5				;get dest longs-1
+			moveq	#-1,d1						;get blit mask
+			moveq	#1,d4						;get bump size for blit
+			swap	d4
+		 	MOVE.L	(a0)+,d0					;prefetch first region data long
+			
+			move.w	RUNBUMP(a6),d6				;are we blitting forwards?
+			bpl.s	@nxtRun						;yes, go ahead
+			
+			moveq	#0,d0
+			move.w	d5,d0						;copy bufSize
+			asl.l	#2,d0						;get mask byte width
+			add.l	d0,a0						;point at last long in RGNBUFFER
+			move.l	d0,d3						;force skip to right edge
+		 	MOVE.L	-(a0),d0					;re-fetch first region data long
+			add.w	d6,a0						;predecrement
+			bra.s	@first1
+			
+@nxtRun		moveq	#0,d3						;init blit/mask, skip cnt
+@first1		tst.l	d0
+			beq.s	@cntSkip					;mask is all zeros
+@chkBlt		cmp.l	d1,d0						;is the mask all ones?
+			beq.s	@cntBlit					;yes, go cnt repeats
+			move.l	a2,a1						;save ptr to blit/skip long
+			addq.w	#4,a2						;bump past instruction long
+			bra.s	@cntMask
+
+@mask1		MOVE.L	(a0),d0						;all 0's?
+			add.w	d6,a0						;bump forward/backward in region
+			beq.s	@dumpMask					;yes, done with mask run
+			cmp.l	d1,d0						;all 1's?
+			beq.s	@dumpMask					;yes, done with mask run
+			add.l	d4,d3
+@cntMask	move.l	d0,(a2)+					;write out mask
+			dbra	d5,@mask1
+			
+			bset	#runMaskBit,d3
+			move.l	d3,(a1)
+			bra.s	@endRun
+
+@dumpMask	bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out blit/skip
+			bra.s	@nxtRun						
+
+@dumpBlit	move.l	d3,(a2)+					;write out blit/skip
+			bra.s	@nxtRun						
+
+@skip1		MOVE.L	(a0),d0						;get region data
+			add.w	d6,a0						;bump forward/backward in region
+			bne.s	@chkBlt
+@cntSkip	add.w	d6,d3						;accumulate skip (±4)
+			dbra	d5,@skip1
+			bra.s	@endRun
+
+@blit1		MOVE.L	(a0),d0						;get region data
+			add.w	d6,a0						;bump forward/backward in region
+			cmp.l	d1,d0
+			bne.s	@dumpBlit
+			add.l	d4,d3
+@cntBlit	dbra	d5,@blit1
+
+			move.l	d3,(a2)+					;write out blit/skip
+@endRun		move.l	d1,(a2)						;flag end of run data (-1L)
+			
+			MOVEM.L	(SP)+,D1/D3-D6				;RESTORE WORK REGISTERS
+			RTS
+	
+			
+
+		
+	ALIGN Alignment	
+		
+;-----------------------------------------------
+;
+;  Build a 2 bit run mask from a 1 bit scan mask
+;  for use when blitting Left to Right or Right to Left
+;
+;
+RUN2
+			move.l	RGNBUFFER(a6),a0
+			MOVEM.L	D1-D7/A3-A5,-(SP)			;SAVE WORK REGISTERS
+
+			MOVE.L	RUNBUF(A6),A2				;point to run encoded mask buffer
+			MOVE.W	BUFSIZE(A6),D5				;get dest longs-1
+			lea		TABLE2,a4					;point at doubling table
+			moveq	#-1,d1						;get blit mask
+			moveq	#1,d4						;get bump size for blit
+			swap	d4
+			move.l	d4,a5						;put blit bump size in a5
+			moveq	#$F,d4						;put nibble mask in d4
+			moveq	#0,d6						;clear out high end
+		 	MOVE.w	(a0)+,d0					;prefetch first region data word
+			
+			move.w	RUNBUMP(a6),d2				;are we blitting forwards?
+			move.w	d2,a3						;make a copy for skip bump
+			asr.w	#1,d2						;make into word bump
+			bpl.s	@nxtRun						;yes, go ahead
+
+@backwards			
+			addq.w	#2,d5						;make BufSize 1 based
+			and.w	#~1,d5						;round up to mult of pixelsize
+			moveq	#0,d0
+			move.w	d5,d0						;copy bufSize
+			add.l	d0,d0						;get mask byte width
+			add.l	d0,a0						;point at last long in RGNBUFFER
+			
+			add.l	d0,d0						;scale for dst bump
+			move.l	d0,d3						;force bump to far right
+		 	MOVE.w	-(a0),d0					;fetch last region data word
+			subq.w	#2,a0						;predecrement
+			bra.s	@first
+
+@nxtRun		moveq	#0,d3						;init blit/mask, skip cnt
+			tst.w	d0
+@first		beq.s	@cntSkip					;mask is all zeros
+@chkBlt		cmp.w	d1,d0						;is the mask all ones?
+			beq.s	@cntBlit					;yes, go cnt repeats
+			
+			move.l	a2,a1						;save ptr to blit/skip long
+			addq.l	#4,a2						;bump past instruction long
+			bra.s	@cntMask
+
+@mask1		MOVE.w	(a0),d0						;all 0's?
+			add.w	d2,a0						;bump for/backward in region
+			beq.s	@dumpMask					;yes, done with mask run
+			cmp.w	d1,d0						;all 1's?
+			beq.s	@dumpMask					;yes, done with mask run
+			add.l	a5,d3
+@cntMask	
+			MOVE.B	D0,D6
+			MOVE	(A4,D6*2),D7
+			SWAP	D7
+			ROL.W	#8,D0
+			MOVE.B	D0,D6
+			MOVE	(A4,D6*2),D7
+			SWAP	D7
+			MOVE.L	D7,(A2)+					;WRITE OUT MASK
+			dbra	d5,@mask1
+			
+			bset	#runMaskBit,d3
+			move.l	d3,(a1)
+			bra.s	@endRun
+
+@dumpMask	bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out blit/skip
+			bra.s	@nxtRun						
+
+@dumpBlit	move.l	d3,(a2)+					;write out blit/skip
+			bra.s	@nxtRun						
+
+@skip1		MOVE.w	(a0),d0						;get region data
+			add.w	d2,a0						;bump for/backward in region
+			bne.s	@chkBlt
+@cntSkip	add.w	a3,d3						;accumulate skip ±4
+			dbra	d5,@skip1
+			bra.s	@endRun
+
+@blit1		MOVE.w	(a0),d0						;get region data
+			add.w	d2,a0						;bump for/backward in region
+			cmp.w	d1,d0
+			bne.s	@dumpBlit
+			add.l	a5,d3
+@cntBlit	dbra	d5,@blit1
+
+			move.l	d3,(a2)+					;write out blit/skip
+@endRun		move.l	d1,(a2)						;flag end of run data (-1L)
+			
+			MOVEM.L	(SP)+,D1-D7/A3-A5			;RESTORE WORK REGISTERS
+			RTS
+			
+
+;-----------------------------------------------
+		
+
+	ALIGN Alignment	
+		
+		
+RUN4
+;-----------------------------------------------
+;
+;  SCALE UP BY FOUR USING TABLE LOOKUP
+;
+;
+			move.l	RGNBUFFER(a6),a0
+			MOVEM.L	D1-D7/A3/A4,-(SP)			;SAVE WORK REGISTERS
+
+			MOVE.L	RUNBUF(A6),A2				;point to run encoded mask buffer
+			MOVE.W	BUFSIZE(A6),D5				;get dest longs-1
+			LEA		TABLE4,A4					;point to quad table
+			moveq	#-1,d1						;get blit mask
+			moveq	#1,d4						;get bump size for blit
+			swap	d4
+			moveq	#0,d6						;clear out high end
+		 	MOVE.b	(a0)+,d0					;get region data
+			
+			move.w	RUNBUMP(a6),d2				;are we blitting forwards?
+			move.w	d2,a3						;save for skip bump
+			asr.w	#2,d2						;make into byte bump
+			bpl.s	@nxtRun						;yes, go ahead
+			
+@backwards			
+			addq.w	#4,d5						;make BufSize 1 based
+			and.w	#~3,d5						;round up to mult of pixelsize
+			moveq	#0,d0
+			move.w	d5,d0						;copy bufSize
+			add.l	d0,a0						;point at last long in RGNBUFFER
+			
+			lsl.l	#2,d0						;scale for dst bump
+			move.l	d0,d3						;force bump to far right
+		 	MOVE.b	-(a0),d0					;fetch last region data word
+			subq.w	#1,a0						;predecrement
+			bra.s	@first
+
+@nxtRun		moveq	#0,d3						;init blit/mask, skip cnt
+			tst.b	d0
+@first		beq.s	@cntSkip					;mask is all zeros
+@chkBlt		cmp.b	d1,d0						;is the mask all ones?
+			beq.s	@cntBlit					;yes, go cnt repeats
+			
+			move.l	a2,a1						;save ptr to blit/skip long
+			addq.l	#4,a2						;bump past instruction long
+			bra.s	@cntMask
+
+@mask1		MOVE.b	(a0),d0						;all 0's?
+			add.w	d2,a0						;bump for/back-wards 1 byte
+			beq.s	@dumpMask					;yes, done with mask run
+			cmp.b	d1,d0						;all 1's?
+			beq.s	@dumpMask					;yes, done with mask run
+			add.l	d4,d3
+@cntMask	
+			MOVE.B	D0,D6						;MAKE AN EXTRA COPY
+			MOVE.L	(A4,D6*4),(A2)+
+			dbra	d5,@mask1
+			
+			bset	#runMaskBit,d3
+			move.l	d3,(a1)
+			bra.s	@endRun
+
+@dumpMask	bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out blit/skip
+			bra.s	@nxtRun						
+
+@dumpBlit	move.l	d3,(a2)+					;write out blit/skip
+			bra.s	@nxtRun						
+
+@skip1		MOVE.b	(a0),d0						;get region data
+			add.w	d2,a0						;bump for/back-wards 1 byte
+			bne.s	@chkBlt
+@cntSkip	add.w	a3,d3						;accumulate skip bump (±4)
+			dbra	d5,@skip1
+			bra.s	@endRun
+
+@blit1		MOVE.b	(a0),d0						;get region data
+			add.w	d2,a0						;bump for/back-wards 1 byte
+			cmp.b	d1,d0
+			bne.s	@dumpBlit
+			add.l	d4,d3
+@cntBlit	dbra	d5,@blit1
+
+			move.l	d3,(a2)+					;write out blit/skip
+@endRun		move.l	d1,(a2)						;flag end of run data (-1L)
+			
+			MOVEM.L	(SP)+,D1-D7/A3/A4			;RESTORE WORK REGISTERS
+			RTS
+
+;
+;-----------------------------------------------
+				
+		
+	ALIGN Alignment	
+		
+		
+RUN8
+			tst.w	RunBump(a6)					;forward?
+			bmi		BackWards8					;yes, go there
+												;fall thru
+Forwards8
+;-----------------------------------------------
+;
+;  Build a 8 bit run mask from a 1 bit scan mask
+;  for use when blitting Left to Right
+;  -Consumes bytes and produces double longs 
+;
+			move.l	RGNBUFFER(a6),a0
+			MOVEM.L	D1-D6/A4,-(SP)				;SAVE WORK REGISTERS
+
+			MOVE.L	RUNBUF(A6),A2				;point to run encoded mask buffer
+			MOVE.W	BUFSIZE(A6),D5				;get dest longs-1
+			LEA		TABLE8,A4					;point to scale table
+			lsr.w	#1,d5						;get cnt of double longs-1
+			moveq	#-1,d1						;get blit mask
+			moveq	#1*2,d4						;get bump size for blit
+			swap	d4
+			moveq	#0,d6						;clear out high end
+			move.l	#$10000,d2					;init blit/mask to 2-1
+			
+		 	MOVE.b	(a0)+,d0					;get region data
+						
+@nxtRun		move.l	d2,d3						;init blit/mask, skip cnt
+			tst.b	d0
+			beq.s	@cntSkip					;mask is all zeros
+@chkBlt		cmp.b	d1,d0						;is the mask all ones?
+			beq.s	@cntBlit					;yes, go cnt repeats
+			
+			move.l	a2,a1						;save ptr to blit/skip long
+			addq.l	#4,a2						;bump past instruction long
+			bra.s	@cntMask
+
+@mask1		MOVE.b	(a0)+,d0					;all 0's?
+			beq.s	@dumpMask					;yes, done with mask run
+			cmp.b	d1,d0						;all 1's?
+			beq.s	@dumpMask					;yes, done with mask run
+			add.l	d4,d3
+@cntMask	
+			MOVE.B	D0,D6						;MAKE AN EXTRA COPY
+			LSR		#4,D6						;SHIFT FOR TABLE INDEX
+		;	MOVE.L	(TABLE8,PC,D6*4),(A2)+		;bigger and slower than below
+			MOVE.L	(A4,D6*4),(A2)+				;PUT FIRST LONG TO DST
+			MOVEQ	#$0F,D6 					;MASK FOR LO NIBBLE
+			AND		D0,D6						;MAKE AN EXTRA COPY
+			MOVE.L	(A4,D6*4),(A2)+				;PUT SECOND LONG TO DST
+			dbra	d5,@mask1
+			
+			bset	#runMaskBit,d3
+			move.l	d3,(a1)
+			bra.s	@endRun
+
+@dumpMask	bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out mask/skip
+			bra.s	@nxtRun						
+
+@dumpBlit	move.l	d3,(a2)+					;write out blit/skip
+			bra.s	@nxtRun						
+
+@skip1		MOVE.b	(a0)+,d0					;get region data
+			bne.s	@chkBlt
+@cntSkip	addq.w	#8,d3						;skip bump size is +8
+			dbra	d5,@skip1
+			bra.s	@endRun
+
+@blit1		MOVE.b	(a0)+,d0					;get region data
+			cmp.b	d1,d0
+			bne.s	@dumpBlit
+			add.l	d4,d3
+@cntBlit	dbra	d5,@blit1
+
+			move.l	d3,(a2)+					;write out blit/skip
+@endRun		move.l	d1,(a2)						;flag end of run data (-1L)
+			
+			MOVEM.L	(SP)+,D1-D6/A4				;RESTORE WORK REGISTERS
+			RTS
+
+
+;-----------------------------------------------
+
+		
+	ALIGN Alignment	
+		
+
+BackWards8
+;-----------------------------------------------
+;
+;  Build a 8 bit run mask from a 1 bit scan mask
+;  for use when blitting RIGHT to LEFT
+;  -Consumes bytes and produces double longs 
+;
+			move.l	RGNBUFFER(a6),a0
+			MOVEM.L	D1-D6/A4,-(SP)				;SAVE WORK REGISTERS
+
+			MOVE.L	RUNBUF(A6),A2				;point to run encoded mask buffer
+			MOVE.W	BUFSIZE(A6),D5				;get dest longs-1
+			LEA		TABLE8,A4					;point to scale table
+			moveq	#-1,d1						;get blit mask
+			moveq	#1*2,d4						;get bump size for blit
+			swap	d4
+			moveq	#0,d6						;clear out high end
+			move.l	#$10000,d2					;init blit/mask to 2-1
+			move.l	d2,d3						;init high word of instruction
+			
+			add.w	#8,d5
+			and.w	#~7,d5						;round up to mult of pixelsize
+
+			move.w	d5,d3						;copy bufSize
+			asr.w	#1,d3						;get mask byte width /8*4
+			add.w	d3,a0						;point at last long in RGNBUFFER
+			lsl.w	#3,d3						;force skip to right edge
+			subq.w	#1,d5						;make zero based
+			subq.w	#4,d3						;make zero based
+			lsr.w	#1,d5						;get cnt of double longs-1
+			
+		 	MOVE.b	-(a0),d0					;get region data
+			bra.s	@first
+						
+@nxtRun		move.l	d2,d3						;init blit/mask, skip cnt
+@first		tst.b	d0
+			beq.s	@cntSkip					;mask is all zeros
+@chkBlt		cmp.b	d1,d0						;is the mask all ones?
+			beq.s	@cntBlit					;yes, go cnt repeats
+			
+			move.l	a2,a1						;save ptr to blit/skip long
+			addq.l	#4,a2						;bump past instruction long
+			bra.s	@cntMask
+
+@mask1		MOVE.b	-(a0),d0					;all 0's?
+			beq.s	@dumpMask					;yes, done with mask run
+			cmp.b	d1,d0						;all 1's?
+			beq.s	@dumpMask					;yes, done with mask run
+			add.l	d4,d3
+@cntMask	
+			MOVEQ	#$0F,D6						;MASK FOR LO NIBBLE
+			AND		D0,D6 						;GET LO NIBBLE
+			MOVE.L	(A4,D6*4),(A2)+				;PUT SECOND LONG TO DST
+			MOVE.B	D0,D6						;MAKE AN EXTRA COPY
+			LSR		#4,D6						;SHIFT FOR TABLE INDEX
+		;	MOVE.L	(TABLE8,PC,D6*4),(A2)+		;bigger and slower than below
+			MOVE.L	(A4,D6*4),(A2)+				;PUT FIRST LONG TO DST
+			dbra	d5,@mask1
+			
+			bset	#runMaskBit,d3
+			move.l	d3,(a1)
+			bra.s	@endRun
+
+@dumpMask	bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out mask/skip
+			bra.s	@nxtRun						
+
+@dumpBlit	move.l	d3,(a2)+					;write out blit/skip
+			bra.s	@nxtRun						
+
+@skip1		MOVE.b	-(a0),d0					;get region data
+			bne.s	@chkBlt
+@cntSkip	subq.w	#8,d3						;skip bump size is -8
+			dbra	d5,@skip1
+			bra.s	@endRun
+
+@blit1		MOVE.b	-(a0),d0					;get region data
+			cmp.b	d1,d0
+			bne.s	@dumpBlit
+			add.l	d4,d3
+@cntBlit	dbra	d5,@blit1
+
+			move.l	d3,(a2)+					;write out blit/skip
+@endRun		move.l	d1,(a2)						;flag end of run data (-1L)
+			
+			MOVEM.L	(SP)+,D1-D6/A4				;RESTORE WORK REGISTERS
+			RTS
+
+
+
+		ALIGN	4
+
+TABLE8	DC.L	$00000000,$000000FF,$0000FF00,$0000FFFF
+		DC.L	$00FF0000,$00FF00FF,$00FFFF00,$00FFFFFF
+		DC.L	$FF000000,$FF0000FF,$FF00FF00,$FF00FFFF
+		DC.L	$FFFF0000,$FFFF00FF,$FFFFFF00,$FFFFFFFF
+
+		
+	ALIGN Alignment	
+		
+
+Forwards16
+;-----------------------------------------------
+;
+;  Build a 16 bit run mask from a 1 bit scan mask
+;  for use when blitting Left to Right
+;
+;
+			move.l	RGNBUFFER(a6),a0
+			MOVEM.L	D3-D5,-(SP)					;SAVE WORK REGISTERS
+
+			MOVE.L	RUNBUF(A6),A2				;point to run encoded mask buffer
+			MOVE.W	BUFSIZE(A6),D5				;get dest longs-1
+			moveq	#1,d4						;get bump size for blit
+			swap	d4
+			
+			moveq	#1,d0						;get 1 into high bit
+			ror.l	#1,d0						;to init data stream
+			moveq	#0,d3						;init blit/mask, skip cnt
+
+@skip1	 	add.l	d0,d0						;get one bit of src
+			bcc.s	@chkSkip 					;br if 0
+			bne.s	@BlitOrMask 				;br if 1
+			move.l	(a0)+,d0					;else get next long of region data
+			addx.l	d0,d0						;shift src bit out, 1 bit in
+			bcs.s	@BlitOrMask 				;br if 1
+
+@chkSkip	add.l	d0,d0						;another 0?
+			bcc.s	@cntSkip					;yes, its a skip
+@first01	move.l	a2,a1						;save ptr to mask/skip long
+			addq.l	#4,a2						;bump past instruction long
+			bra.s	@dump01
+			
+@cntSkip	addq.w	#4,d3						;bump skip by +4
+			dbra	d5,@skip1
+			bra.s	endRun16
+
+@BlitOrMask	add.l	d0,d0						;another 1?
+			bcs.s	@goBlit						;yes, begin a blit run
+@first10	move.l	a2,a1						;save ptr to mask/skip long
+			addq.l	#4,a2						;bump past instruction long
+			bra.s	@dump10
+
+@dumpMaskS	bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out mask/skip
+			moveq	#0,d3						;init blit/mask, skip cnt
+			bra.s	@cntSkip						
+
+@dumpMaskB	bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out mask/skip
+			moveq	#0,d3						;init blit/mask, skip cnt
+			bra.s	@goBlit						
+
+@chkMask0	add.l	d0,d0						;another 0?
+			bcc.s	@dumpMaskS					;yes, its a skip
+			add.l	d4,d3
+@dump01		move.l	#$ffff,(a2)+				;write out 01 mask
+			bra.s	@nextMask
+
+
+@mask1		add.l	d0,d0						;get one bit of src
+			bcc.s	@chkMask0 					;br if 0
+			bne.s	@chkMask1					;br if 1
+			move.l	(a0)+,d0					;else get next long of region data
+			addx.l	d0,d0						;shift src bit out, 1 bit in
+			bcc.s	@chkMask0 					;br if 0
+@chkMask1	add.l	d0,d0						;another 1?
+			bcs.s	@dumpMaskB					;yes, its a blit
+			add.l	d4,d3
+@dump10		move.l	#$ffff0000,(a2)+			;write out 10 mask
+@nextMask	dbra	d5,@mask1
+			bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out mask/skip
+			bra.s	endRun16
+
+@dumpBlitS	move.l	d3,(a2)+					;write out blit/skip
+			moveq	#0,d3						;init blit/mask, skip cnt
+			bra.s	@chkSkip						
+
+@dumpBlitM	move.l	d3,(a2)+					;write out blit/skip
+			moveq	#0,d3						;init blit/mask, skip cnt
+			bra.s	@first10						
+
+@blit1		add.l	d0,d0						;get one bit of src
+			bcc.s	@dumpBlitS 					;br if 0
+			bne.s	@chkBlit 					;br if 1
+			move.l	(a0)+,d0					;else get next long of region data
+			addx.l	d0,d0						;shift src bit out, 1 bit in
+			bcc.s	@dumpBlitS 					;br if 0
+@chkBlit	add.l	d0,d0						;another 1?
+			bcc.s	@dumpBlitM					;no, its a mask
+			add.l	d4,d3
+@goBlit		dbra	d5,@blit1
+			move.l	d3,(a2)+					;write out blit/skip
+			
+endRun16	moveq	#-1,d3						;get a long -1
+			move.l	d3,(a2)						;flag end of run data (-1L)
+			MOVEM.L	(SP)+,D3-D5					;RESTORE WORK REGISTERS
+			RTS
+
+
+;-----------------------------------------------
+
+		
+	ALIGN Alignment	
+		
+RUN16
+			lea		Forwards16,a0				;assume blitting left to right
+			move.l	a0,RunRtn(a6)				;go there from now on
+			tst.w	RunBump(a6)					;forward?
+			bpl.s	Forwards16					;yes, go there
+			lea		BackWards16,a0				;blitting right to left
+			move.l	a0,RunRtn(a6)				;go there from now on
+												;fall thru
+		
+BackWards16
+;-----------------------------------------------
+;
+;  Build a 16 bit run mask from a 1 bit scan mask
+;  for use when blitting RIGHT to LEFT
+;
+			move.l	RGNBUFFER(a6),a0
+			MOVEM.L	D3-D5,-(SP)					;SAVE WORK REGISTERS
+
+			MOVE.L	RUNBUF(A6),A2				;point to run encoded mask buffer
+			MOVE.W	BUFSIZE(A6),D5				;get dest longs-1
+			add.w	#16,d5
+			and.w	#~15,d5						;round up to mult of pixelsize
+
+			moveq	#1,d4						;get bump size for blit
+			swap	d4
+			
+			move.w	d5,d3						;copy bufSize
+			ext.l	d3							;clear out high end
+			asr.w	#2,d3						;get mask byte width /16*4
+			add.w	d3,a0						;point at last long in RGNBUFFER
+			lsl.w	#4,d3						;force skip to right edge
+			subq.w	#1,d5						;make zero based
+			subq.w	#4,d3						;make zero based
+			
+			moveq	#1,d0						;get 1 to init data stream
+@skip1		lsr.l	#1,d0						;get one bit of src
+			bcc.s	@chkSkip 					;br if 0
+			bne.s	@BlitOrMask 				;br if 1
+			move.l	-(a0),d0					;else get next long of region data
+			roxr.l	#1,d0						;shift src bit out, 1 bit in
+			bcs.s	@BlitOrMask 				;br if 1
+
+@chkSkip	lsr.l	#1,d0						;another 0?
+			bcc.s	@cntSkip					;yes, its a skip
+@first01	move.l	a2,a1						;save ptr to mask/skip long
+			addq.l	#4,a2						;bump past instruction long
+			bra.s	@dump01
+			
+@cntSkip	subq.w	#4,d3						;bump skip by -4
+			dbra	d5,@skip1
+			bra.s	endRun16					;use common exit
+
+@BlitOrMask	lsr.l	#1,d0						;another 1?
+			bcs.s	@goBlit						;yes, begin a blit run
+@first10	move.l	a2,a1						;save ptr to mask/skip long
+			addq.l	#4,a2						;bump past instruction long
+			bra.s	@dump10
+
+@dumpMaskS	bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out mask/skip
+			moveq	#0,d3						;init blit/mask, skip cnt
+			bra.s	@cntSkip						
+
+@dumpMaskB	bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out mask/skip
+			moveq	#0,d3						;init blit/mask, skip cnt
+			bra.s	@goBlit						
+
+@chkMask0	lsr.l	#1,d0						;another 0?
+			bcc.s	@dumpMaskS					;yes, its a skip
+			add.l	d4,d3
+@dump01		move.l	#$ffff0000,(a2)+			;write out 01 mask
+			bra.s	@nextMask
+
+
+@mask1		lsr.l	#1,d0						;get one bit of src
+			bcc.s	@chkMask0 					;br if 0
+			bne.s	@chkMask1					;br if 1
+			move.l	-(a0),d0					;else get next long of region data
+			roxr.l	#1,d0						;shift src bit out, 1 bit in
+			bcc.s	@chkMask0 					;br if 0
+@chkMask1	lsr.l	#1,d0						;another 1?
+			bcs.s	@dumpMaskB					;yes, its a blit
+			add.l	d4,d3
+@dump10		move.l	#$0000ffff,(a2)+			;write out 10 mask
+@nextMask	dbra	d5,@mask1
+			bset	#runMaskBit,d3
+			move.l	d3,(a1)						;write out mask/skip
+			bra.s	endRun16					;use common exit
+
+@dumpBlitS	move.l	d3,(a2)+					;write out blit/skip
+			moveq	#0,d3						;init blit/mask, skip cnt
+			bra.s	@chkSkip						
+
+@dumpBlitM	move.l	d3,(a2)+					;write out blit/skip
+			moveq	#0,d3						;init blit/mask, skip cnt
+			bra.s	@first10						
+
+@blit1		lsr.l	#1,d0						;get one bit of src
+			bcc.s	@dumpBlitS 					;br if 0
+			bne.s	@chkBlit 					;br if 1
+			move.l	-(a0),d0					;else get next long of region data
+			roxr.l	#1,d0						;shift src bit out, 1 bit in
+			bcc.s	@dumpBlitS 					;br if 0
+@chkBlit	lsr.l	#1,d0						;another 1?
+			bcc.s	@dumpBlitM					;no, its a mask
+			add.l	d4,d3
+@goBlit		dbra	d5,@blit1
+			move.l	d3,(a2)+					;write out blit/skip
+			bra.s	endRun16					;use common exit
+
+		
+	ALIGN Alignment	
+		
+
+
+Forwards32
+;-----------------------------------------------
+;
+;  Build a 32 bit run mask from a 1 bit scan mask
+;  for use when blitting Left to Right
+;
+			move.l	RGNBUFFER(a6),a0
+			MOVEM.L	D3-D5,-(SP)					;SAVE WORK REGISTERS
+
+			MOVE.L	RUNBUF(A6),A2				;point to run encoded mask buffer
+			MOVE.W	BUFSIZE(A6),D5				;get dest longs-1
+			moveq	#1,d4						;get bump size for blit
+			swap	d4
+			
+			moveq	#1,d0						;get 1 into high bit
+			ror.l	#1,d0						;to init data stream
+			moveq	#0,d3						;init blit/mask, skip cnt
+
+@skip1	 	add.l	d0,d0						;get one bit of src
+			bcc.s	@cntSkip 					;br if 0
+			bne.s	@cntBlit 					;br if 1
+			move.l	(a0)+,d0					;else get next long of region data
+			addx.l	d0,d0						;shift src bit out, 1 bit in
+			bcs.s	@cntBlit 					;br if 1
+
+@cntSkip	addq.w	#4,d3						;bump skip by +4
+			dbra	d5,@skip1
+			bra.s	endRun32
+
+			
+@goSkip		move.l	d3,(a2)+					;write out blit/skip
+			moveq	#0,d3						;init blit/mask, skip cnt
+			bra.s	@cntSkip						
+
+@blit1		add.l	d0,d0						;get one bit of src
+			bcc.s	@goSkip 					;br if 0
+			bne.s	@goBlit 					;br if 1
+			move.l	(a0)+,d0					;else get next long of region data
+			addx.l	d0,d0						;shift src bit out, 1 bit in
+			bcc.s	@goSkip 					;br if 1
+@goBlit		add.l	d4,d3						;bump blit count
+@cntBlit	dbra	d5,@blit1
+			move.l	d3,(a2)+					;write out blit/skip
+			
+endRun32	moveq	#-1,d3						;get a long -1
+			move.l	d3,(a2)						;flag end of run data (-1L)
+			MOVEM.L	(SP)+,D3-D5					;RESTORE WORK REGISTERS
+			RTS
+
+;-----------------------------------------------
+
+		
+	ALIGN Alignment	
+		
+RUN32
+			lea		Forwards32,a0				;assume blitting left to right
+			move.l	a0,RunRtn(a6)				;go there from now on
+			tst.w	RunBump(a6)					;forward?
+			bpl.s	Forwards32					;yes, go there
+			lea		BackWards32,a0				;blitting right to left
+			move.l	a0,RunRtn(a6)				;go there from now on
+												;fall thru
+
+BackWards32
+;-----------------------------------------------
+;
+;  Build a 32 bit run mask from a 1 bit scan mask
+;  for use when blitting RIGHT to LEFT
+;
+;	This should be optimized to look at longs as fast case
+;
+			move.l	RGNBUFFER(a6),a0
+			MOVEM.L	D3-D5,-(SP)					;SAVE WORK REGISTERS
+
+			MOVE.L	RUNBUF(A6),A2				;point to run encoded mask buffer
+			MOVE.W	BUFSIZE(A6),D5				;get dest longs-1
+			add.w	#32,d5
+			and.w	#~31,d5						;round up to mult of pixelsize
+
+			moveq	#1,d4						;get bump size for blit
+			swap	d4
+			
+			move.w	d5,d3						;copy bufSize
+			ext.l	d3							;clear out high end
+			asr.w	#3,d3						;get mask byte width /32*4
+			add.w	d3,a0						;point at last long in RGNBUFFER
+			lsl.w	#5,d3						;force skip to right edge
+			subq.w	#1,d5						;make zero based
+			subq.w	#4,d3						;make zero based
+			
+			moveq	#1,d0						;get 1 to init data stream
+@skip1	 	lsr.l	#1,d0						;get one bit of src
+			bcc.s	@cntSkip 					;br if 0
+			bne.s	@cntBlit 					;br if 1
+			move.l	-(a0),d0					;else get next long of region data
+			roxr.l	#1,d0						;shift src bit out, 1 bit in
+			bcs.s	@cntBlit 					;br if 1
+
+@cntSkip	subq.w	#4,d3						;bump skip by -4
+			dbra	d5,@skip1
+			bra.s	endRun32
+
+			
+@goSkip		move.l	d3,(a2)+					;write out blit/skip
+			moveq	#0,d3						;init blit/mask, skip cnt
+			bra.s	@cntSkip						
+
+@blit1		lsr.l	#1,d0						;get one bit of src
+			bcc.s	@goSkip 					;br if 0
+			bne.s	@goBlit 					;br if 1
+			move.l	-(a0),d0					;else get next long of region data
+			roxr.l	#1,d0						;shift src bit out, 1 bit in
+			bcc.s	@goSkip 					;br if 1
+@goBlit		add.l	d4,d3						;bump blit cnt
+@cntBlit	dbra	d5,@blit1
+			move.l	d3,(a2)+					;write out blit/skip
+			bra.s	endRun32					;use common exit
+			
+			
+			ENDPROC

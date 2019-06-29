@@ -1,0 +1,1569 @@
+;
+;	File:		ShutDownMgr.a
+;
+;	Contains:	This file contains the core routines pertaining to the ShutDown trap
+;				for both the ROM and the System.
+;
+;				ShutDown takes a command parameter and either:
+;
+;				sdInit:			0) initialize the ShutDown queue
+;				sdPowerOff:		1) turn the power off (or give a dialog on machines without soft power-down)
+;				sdRestart:		2) restart the machine
+;				sdInstall:		3) install a ShutDown task in the list
+;				sdRemove:		4) remove a ShutDown task
+;				sdUserChoice:	5) notify the user that the machine is going to power off, then turn power off
+;				sdSoftOff:		6) notify the user that the machine can be ShutDown, or return to Finder 
+;
+;	Written by:	Donn Denman 8/22/86
+;
+;	Copyright:	© 1992-1993 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	  <SM33>	 11/6/93	SAM		Roll <MC8> from mc900ftjesus.
+;	   <MC8>	 11/6/93	SAM		Now handle the restart from the "..safe to switch off..." case
+;									correctly (ie restore the nanok warmstart).
+;	  <SM32>	 11/6/93	SAM		Roll <MC7> from mc900ftjesus.
+;	   <MC7>	 11/6/93	SAM		Changed ClearWarmStart to check for a V0 style emulator and if
+;									present to clear the emu warmstart flag.
+;	  <SM31>	10/29/93	CCH		Modified KillEDisk to deal with EDisks that don't use checksums.
+;	   <MC5>	10/11/93	CCH		Modified KillEDisk to use new HwPriv parms on PowerPC.
+;	   <MC4>	 9/27/93	SAM		Added ClearWarmstart too.
+;	   <MC3>	 9/27/93	SAM		Added exports of DoRAMDiskAlert, KillEDisk, FindEDisk,
+;									ShutRestart, and ShutPower for vectorization.
+;	   <MC2>	 9/25/93	SAM		Completely cleaned up this file.  Removed tons of shit, bogus
+;									and sloppy code.  Looking more and more like it was in Terror...
+;	  <SM28>	 8/12/93	BG		Converted references to gestaltCyclone40 to gestaltQuadra840AV.
+;	  <SM27>	 7/20/93	SAM		Removed the Scruffy code from ShutRestart. (we will never be a
+;									Mac II).
+;	  <SM26>	 7/13/93	RB		For the third time, removed checks for 67C ROM.
+;	  <SM25>	 6/14/93	kc		Roll in Ludwig.
+;	   <LW3>	 5/27/93	KW		Added code in the Shutdown Continue Proc from the
+;									ShutDownMgrPatches.a from the gibbly to remove the Chassis Sw
+;									TimeMgr Task if you are running on a Cyclone CPU. The Chassis Ss
+;									TimeMgr Task is piggybacked onto the emKeyTmTaskPtr
+;	   <LW2>	 5/14/93	KW		After calling "DoRAMDiskAlert", if user hit cancel remove the
+;									tickletimer and send cuda and EnDisPDM command with PDMContinue.
+;									Fixes some radar bug
+;	  <SM24>	  4/8/93	SAM		Added some Supports24bit conds around swapmmu code in
+;									ClearWarmStart and KillEDisk.
+;	  <SM23>	  3/9/93	jmp		Cleaned up the ShutDown/Restart blank-the-screen code so that it
+;									now works more consistently across all CPUs (i.e., due to the
+;									fact that various CPUs these days don't tie reset to I/O, the
+;									desktop could sometimes persist thru bootbeep).
+;	  <SM22>	01-18-93	jmp		Added a TimeMgr-based timeout task that forces the wait-eject
+;									code to terminate (if it isn’t already done) after 2 seconds.
+;									This prevents things like stuck disks, etc…, from hanging the
+;									restart/shutdown sequence.
+;	  <SM21>	12-17-92	jmp		Removed the Wait500ms routine in favor of “wait for floppy
+;									eject” described in <SM20>.
+;	  <SM20>	12-16-92	jmp		Added some code that waits until the drive queue has noticed
+;									that all floppies have been ejected (in DoUnmount) before
+;									shutting down or restarting.
+;	  <SM19>	 12/9/92	RB		Remove (AGAIN) the check for Terror ROMs regarding EDisk. This
+;									ain't Terror, Also save and restore A5 in BlankScreen so that
+;									the cursor is not trashed on Macs that don't support soft
+;									shutdown.
+;	  <SM18>	11/20/92	FU		Removed another tickle cuda call.
+;	  <SM17>	11/20/92	RB		Removed the call to TickleCuda.
+;	  <SM16>	11/20/92	GS		(bg)  Updated ShutPower to include the chks for Sonic to issue a
+;									reset to the Sonic Chip before executing the Shutdown.  Removed
+;									the EnablePDMsgs from ShutInit.  Now found in Boot3.a.  Added
+;									the CloseLCDVideo, DockInitSCC routines for the portables.
+;	  <SM15>	 11/3/92	SWC		Changed ShutdownEqu.a->Shutdown.a and SlotEqu.a->Slots.a.
+;	  <SM14>	 10/8/92	GS		Added a 500ms delay before pulling the power plug in the
+;									ShutPower routine to help with the async call by New Age to
+;									eject the floppy.
+;	  <SM13>	 9/28/92	RB		Fix the Soft Power Shutdown on the Quadra 900 and 950. ••• WHEN
+;									UPDATING FROM REALITY OR HORROR, DO NOT MESS WITH SHUTINIT, make
+;									sure that it still calls EnablePDMsgs, AND that EnablePDMsgs has
+;									a ble, not bne !!!!!
+;	  <SM12>	  9/3/92	PN		Nuke the check for IIci because this is SuperMario.
+;	  <SM11>	 8/19/92	CSS		Update from Reality:
+;									<52> 8/18/92 DTY	Change the name of BootGlobs to StartGlobals to avoid confusion
+;														with BootGlobals, which is used by the boot code in Boot[1-3].a.
+;	  <SM10>	 7/28/92	MR		Restart crashes under VM because a switch
+;									to supervisor mode is   done only if ROM is IIci. Now checks for
+;									SuperMario
+;	   <SM9>	 7/7/92		CSS		Update from Reality:
+;									<51> 6/2/92	JSM	#1031451 <csd>: Like we do on the PowerBook 140 and 170, close
+;													the video driver at shutdown or restart for the PowerBook 145.
+;									<50> 4/9/92	JSM	#1026795,<DTY>: Set CLUT to 50% gray on restart for the LC II as
+;													well as the LC.
+;	   <SM8>	  7/1/92	RB		Do the EDisk check at Shutdown without checking the ROM version
+;									of Terror, since SuperMArio also has Edisk. Do not call Cuda on
+;									machines without it.
+;	   <SM7>	 6/26/92	GS		ReIncluded ROMBind, InstallProc, and PatchProc  Linked Patch
+;									Macro calls to support CubeE builds.
+;	   <SM6>	 6/23/92	GS		Having a problem with the latest set of check-ins. The Header
+;									format could not be found. Cleaning up header...
+;	   <SM5>	 6/23/92	GS		Was a Bad Dog!!!!  Re Including the LinkedPatchMacros.a for
+;									support of Non-SuperMario ROM based machines.  
+;									H/W specific chks in place for Egret chip with Cuda FW.
+;									Rolled in changes for the Soft Power off support with code from
+;									Cyclone version of Regatta.  This includes chks in the sdSoftOff
+;									code to chk for Cuda FW in the Egret chip.  Removed Linked patch
+;									macro support.
+;	   <SM3>	 5/16/92	kc		Roll in Horror Changes. Include PowerPrivEqu instead of
+;									ROMPrivateEqu.
+;	   <SM2>	  4/1/92	JSM		Roll-in changes from Reality:
+;		<49>	  4/1/92	JSM		#1025166,<DTY>: Roll-in code formerly in the file
+;									ShutDownRAMDiskPatchINIT.a that puts up a warning dialog if a
+;									user tries to shutdown with a RAM disk, and make it work for ROM
+;									builds, too.
+;		<48>	 2/11/92	JSM		Moved this file to ShutDownMgr folder, keeping all the old
+;									revisions; cleanup header.
+;		<47>	 12/4/91	csd		#1016450: Added support for Scruffy. If Scruffy is running, we
+;									turn off the MMU before jumping to the ROM code which does a
+;									RESET. Otherwise, the RAM-based MMU tables get lost when the
+;									RESET causes the ROM to overlay RAM.
+;		<46>	 12/2/91	SAM		Using official boxflag equates now.
+;		<45>	10/29/91	SAM		Fix comment header.
+;		<44>	10/29/91	SAM		Special case the Macintosh Portable in the Restart code to not
+;									execute the RESET instruction.
+;		<43>	10/28/91	SAM/KSM	Rolled in Regatta changes. Fixed up the Restart sequence.
+;										Mike saves my butt. (JMP)  Changed the branch case after the
+;											call to FindEDisk and explicitly set D0 if an EDisk was found.
+;										Added code to "_Shutdown" poweroff to look for an EDisk and if
+;											found to clear its checksum data - effectively invalidating the
+;											disk (no matter how much the RAM persists after a shutdown!)
+;										Changed register usage of last change from A1 to A0.  It was causing
+;											non Jaws machines to hang at restart
+;										(HJR) Added new restart sequence for Tim because of some hardware
+;											limitations. (BG) Universalized the code that decides whether to 
+;											enable PowerDownMsgs.
+;										(jmp) Added an include for 'InternalOnlyEqu.a' for BoxFlags.
+;											Modified the DoDrivers routine to not “kiss” the TIM, TIM-LC,
+;											Spike, and Eclipse video drivers goodbye. Modified the
+;											ShutRestart & ShutPower routines to turnoff TIM and TIM-LC video
+;											after all restart procs have been run.
+;										All $67C machines that are running VM will get switched into
+;											supervisor mode before jumping to the ROM restart vector. Non
+;											$67C's never switch to supervisor mode. (bg) Enable Egret
+;											PowerDown messages on Eclipse.
+;		<42>	 7/10/91	dba		end of the forPost70 conditional; we are past 7.0 for good
+;		<41>	 6/12/91	LN		added #include 'ROMPrivateEqu.a'
+;		<40>	 6/12/91	LN		removed #include 'HardwareEqu.a'
+;		<39>	 6/11/91	gbm		dba, dty: change Gestalt call for post-7.0 to check
+;									hasSoftPowerOff instead of SE/30 machine type; also use new
+;									“needs RESET” selector; and nuke Regatta conditionals
+;		<38>	  4/2/91	dba		use the real _EnterSupervisorMode from Traps.a, instead of
+;									defining a local constant here
+;		<37>	  4/2/91	SAM		Changed the Restart code to put the machine back in Supervisor
+;									mode (if VM is on) before restarting (in the Regatta build).
+;		<36>	 3/13/91	bbm		&dty; I almost got it right last time. I need to make sure that
+;									the shutdown tasks get executed on machines that have no soft
+;									poweroff.
+;		<35>	 3/11/91	bbm		&CCH; <#31191bbm>;  Userchoice automatically did the poweroff
+;									routines even though we may be doing a restart.  This meant we
+;									did a cold start even though we wanted a warm start.
+;		<34>	  3/4/91	dba		dty: get rid of SysVers conditionals
+;		<33>	 1/15/91	stb		& dba; fix ROM build by changing JSRROM to JSRROM.FAR
+;		<32>	 1/14/91	stb		& PKE; Fix lack-of-port bug in BlankScreen
+;		<31>	  1/8/91	SAM		Changed all occurrences of gestaltXO to GestaltMacClassic
+;		<30>	  1/8/91	gbm		(dba) use peaResident to avoid losing modules
+;		<29>	 9/25/90	SAM		Changed boxElsie/boxErickson to boxMacLC/boxMacIIsi.
+;		<28>	 9/13/90	BG		Removed <24>. 040s are behaving more reliably now.
+;		<27>	 8/31/90	CV		Moved the code to gray the Elsie screen on shutdown to occur
+;									after shutdown tasks are executed.
+;		<26>	 8/24/90	SAM		Added StripAddress to InitShutDown to lose the HiBits in the
+;									proc ptr so the CPU doesnt puke on an RTS in 32 bit mode.
+;		<25>	 8/23/90	GMR		NEEDED FOR SIXPACK!! Fixed task which clears warmstart to make a
+;									runtime check on HwCfgFlags before calling SwapMMUMode.
+;		<24>	 7/16/90	BG		Added EclipseNOPs for flakey 040s.
+;		<23>	 6/25/90	CCH		Added EXPORT of ShutDownDisp.
+;		<22>	 6/22/90	DTY		Fixed includes so ROM builds don’t break.
+;		<21>	 6/21/90	DTY		Moved ShutDownMgrINIT.a InstallProc to end of this file. Moved
+;									_SDInit code into InstallProc. System versions of ShutDown
+;									Manager will not have _SDInit as a selector. _SDInit selector
+;									still available in ROM builds.  Check gestaltMisc for
+;									gestaltSquareMenus to determine background colour in BlankScreen
+;									instead of looking at machine type.
+;		<20>	 6/21/90	DTY		Shutdown Manager now loaded as lpch on all systems.  Removed all
+;									references to asINIT.  Changed entry point of _Shutdown to
+;									ShutDownDispatch.  _SDInit code comes after dispatch routine,
+;									and now called from ShutDownMgrINIT.a.
+;		<19>	 6/20/90	DTY		Made Shutdown Manager a linked patch under 7.0
+;		<18>	 6/18/90	DDG		NEEDED FOR SIXPACK: Fixed use of RESET instruction, so that we
+;									RESET on an XO.
+;		<17>	 6/18/90	DDG		NEEDED FOR SIXPACK: fixed the graying of the elsie screen (we
+;									need to use ioRefNum instead of ioVRefNum).
+;		<16>	 6/12/90	DAF		Added CLUT-based screen graying on restart for Elsie only.
+;		<15>	 6/11/90	DTY		Pass Shutdown constants from ShutDownEqu.a instead of sdBit
+;									constants to RemoveOtherType to get proper bit alignment for the
+;									compare.
+;		<14>	 6/11/90	DDG		NEEDED FOR SIXPACK: Put back some obsolete code that checks for
+;									the presence of switcher and calls _ExitToShell instead of
+;									shutting down. This fixes a bug in OnCue.
+;		<13>	  6/8/90	DTY		Added RemoveOtherType routine to remove sdOnRestart procedures
+;									when calling ShutDwnPower, and to remove sdOnPowerOff procedures
+;									when calling ShutDwnRestart, so that CallRoutines can
+;									differentiate between the two, and provide more specific times
+;									to call shutdown routines.
+;		<12>	 5/29/90	DDG		NEEDED FOR SIXPACK: Changed all the sixpack conditionals from
+;									six-point-oh-seven to six-point-oh-six.
+;		<11>	 5/16/90	DDG		NEEDED FOR SIXPACK: The ClearWarmStart routine now checks for the
+;									machine being a Mac Plus, and if that is the case, then
+;									WarmStart is NOT cleared (it doesn't exist on the MacPlus)
+;		<10>	  5/2/90	CV		Adding include of 'GestaltPrivateEqu.a'.
+;		 <9>	 3/22/90	GA		Removing the code which stops Egret ADB autopoll         and
+;									Egret one second interrupts.  These         functions are now
+;									done by diagnostics calling         a routine in EgretMgr.a
+;		 <9>	 3/22/90	GA		Removing the code which stops Egret ADB autopoll and Egret one
+;									second interrupts. These functions are now done by diagnostics
+;									calling a routine in EgretMgr.a
+;		 <8>	 2/28/90	GA		Changed the System Restart code supporting Egret to conform with
+;									the new Egret Manager Parameter block Model.
+;		 <7>	 2/15/90	GA		Changed the Conditional if hasEgret to If ForRom AND HasEgret to
+;									fix a broken BigBang Build.
+;		 <6>	 2/14/90	GA		Added support to the Restart code to issue a stop autopoll and
+;									stop 1 sec. irq to Egret before restarting the system.
+;		 <5>	 1/12/90	SES		NEEDED FOR 6.0.5: Added shut down task to clear warm start flag
+;									on a power off. This means that the machine will do a cold start
+;									if the user selects 'Shut Down', but will still do a warm start
+;									if the user selects 'Restart'.
+;		 <4>	 1/11/90	CCH		Added include of “HardwarePrivateEqu.a”.
+;		 <3>	  1/3/90	CCH		Changed Gestalt equate filename back to GestaltEqu.a.
+;		 <2>	  1/2/90	CCH		Changed the name of the Gestalt equate file.
+;	   <3.0>	 11/2/89	dba		exported ShutInit
+;	   <2.9>	10/31/89	dba		changed to load as a patch instead of an INIT
+;	  <•2.9>	10/31/89	dba		forced submission (Reality was full)
+;	   <2.8>	10/11/89	dba		added sdUserChoice selector; added comments; made some more
+;									subroutines; got rid of some code to handle Switcher and 128K
+;									Macs; got rid of equates which are already in ShutDownEqu.a;
+;									changed rules for white border, soft power-off, and RESET (these
+;									will use new Gestalt selectors before 7.0 ships)
+;	   <2.7>	 7/12/89	GGD		NEEDED FOR AURORA, once again, changed which machines do a RESET
+;									inst in the Restart code. Added comments explaining why some
+;									machines need it, and why some others must not use it.
+;	   <2.6>	 6/26/89	PKE		NEEDED FOR 6.0.4 (and 7.0): Fixed definition of DHTrapNumber.
+;	   <2.5>	 6/20/89	CCH		Put RESET back in for all but HcMac.
+;	   <2.4>	 6/20/89	CCH		Modified to assemble for System file.
+;	   <2.3>	 6/15/89	CSL		Took out the temporary quick and dirty fix in shut down with
+;									parity RAM.
+;	   <2.2>	 5/30/89	CSL		Temporary quick and dirty fix for shut down with parity RAM,
+;									zero out WarmStart during power off to ensure a real cold boot
+;									next time.
+;	   <2.1>	 5/23/89	DAF		Hid cursor on powerdown for Aurora
+;	   <2.0>	 5/10/89	CCH		Removed RESET instruction, since either we’re powering down or
+;									jumping to ROM, which will do a RESET anyway.
+;	   <1.9>	 4/27/89	CCH		Doesn’t execute a RESET on restart if running out of RAM.
+;	   <1.8>	  3/6/89	GGD		Changed ReStart again, jump to restart routine at ROMBase+$0A,
+;									instead of fetching the reset PC from the ROM, to allow for the
+;									case where the reset PC may not point into read ROM space (may
+;									use zero based space). Added support for RAM based ROM onMacPP,
+;									to not execute a reset instruction on restart. Included
+;									HardwareEqu.a for rom header equate.
+;	   <1.7>	 2/21/89	rwh		fix restart - can’t assume RAM present after a reset.
+;	   <1.6>	  2/8/89	MSH		Don’t use the RESET intruction on the portable
+;	   <1.5>	11/21/88	CCH		Changed ForRam equates to ForRom.
+;	   <1.4>	11/18/88	DHD		Cased out the portable during shutdown we always call _PowerOff
+;	   <1.3>	11/16/88	CCH		Took out include of “nTraps.a”
+;	   <1.2>	11/16/88	DAF		Updated restart for Mac II machines
+;	   <1.1>	11/10/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	   <1.6>	10/11/88	DHD		Updated screen clearing code to work on any CPU
+;	   <1.5>	10/11/88	DHD		removed code specific to the portable Mac.
+;	  <•1.4>	 9/23/88	CCH		Got rid of inc.sum.d and empty nFiles
+;	   <1.3>	  9/9/88	MSH		Removed hardware equate use for clearing screen before sleep.
+;									Use lomem values instead.
+;	   <1.2>	  9/6/88	MSH		Added screen clear and delay for disk eject before sleep.
+;	   <1.1>	 7/21/88	MSH		Add Sleep and reset to HcMac shutdown.
+;	   <1.0>	 2/11/88	BBM		Adding file for the first time into EASE…
+;	   <DHD>	 9/15/87	DHD			Donn Hilsinger Denman that is - Changed the UnMountVol to the HFS
+;									flavor or UnMount. This really does an UnMountVol regardless of
+;									whether or not there are open files. Since the disk will be shut
+;									down, it seems like the right thing...
+;	   <EKH>	 8/25/87	EKH		Ed Heyl that is - Added '_ShutDown' equate so that it would build
+;									under MPW 1.0 - remember Don that is what everybody else uses. I
+;									copied the equate from MPW 2.0s AIncludes:Traps.a.
+;	   <DLD>	  4/6/87	DLD		Now	clear the resume proc before putting up the shutdown alert, so
+;									the resume button won’t show.
+;	   <DLD>	11/19/86	DLD		Fixed a bug in ShutInstall. Was pushing the return address twice.
+;									Removed push just before RTS.
+;	   <DLD>	  9/5/86	DLD		changes ForROM
+;	   <DLD>	 8/22/86	DLD		New today.
+;
+
+				LOAD		'StandardEqu.d'
+				include		'LinkedPatchMacros.a'
+				Include		'InternalOnlyEqu.a'				; <4> jmp
+				include		'MMUEqu.a'
+				include		'BootEqu.a'
+				include		'HardwarePrivateEqu.a'
+				include		'PowerPrivEqu.a'
+				include		'GestaltEqu.a'
+				include		'GestaltPrivateEqu.a'
+				include		'UniversalEqu.a'
+				include		'ShutDown.a'
+				include		'Slots.a'
+				include		'ROMEqu.a'
+				include		'EgretEqu.a'
+				include		'EDiskEqu.a'
+				include		'DialogsPriv.a'					; <49> for _SetDialogDefaultItem, etc
+				
+				MACRO										; <MC2> SAM
+				SETMACHINE
+		IF CPU = 020 THEN
+				MACHINE		MC68020
+		ELSEIF CPU = 030 THEN
+				MACHINE		MC68030
+		ELSEIF CPU = 040 THEN
+				MACHINE		MC68040
+		ELSE
+				AERROR		'Unknown CPU type'
+		ENDIF
+				ENDM
+	
+				SETMACHINE
+
+
+UnimplementedTrapNumber		EQU		$A89F					; _UnImplemented
+VMGlobals					EQU		$0B78
+
+; private selectors (public selectors are in ShutDownEqu.a)
+
+sdInit			equ		0				; initialize the ShutDown Mgr
+sdUserChoice	equ		5				; turn power off, but let the user know
+sdSoftOff		equ		6				; SoftPower Off, ShutDownMgr
+
+; SDInstall takes a flags word in D1: bits in the flag word are:
+
+sdBitPowerOff	EQU		0				; Call routine just before PowerOff.
+sdBitReStart	EQU		1				; Call routine just before a Reboot.
+sdBitUnMount	EQU		2				; Call routine before UnMounting Vols.
+sdBitDrivers	EQU		3				;  before Driver Goodbye Kiss.
+
+; local equates
+
+QSDProcPtr		EQU		QType+2
+QSDRecSize		EQU		QSDProcPtr+4
+
+SDHeader 		EQU 	$BBC			; low mem for ROM version
+
+;_______________________________________________________________________
+;
+; ShutDownINIT
+;	Install default shutdown procedures in the shutdown queue.
+;	Will not stick around in System builds, but will be there for ROMs.
+;_______________________________________________________________________
+
+ShutInit		PROC	Export
+				moveq	#10,D0					; SD Queue Header is pointed to by low memory in ROM
+				_NewPtr sys,clear
+				move.l	A0,SDHeader
+
+				pea		DoDrivers				; the default routine to unload				
+				move.w	#SDOnUnMount,-(SP)		; all drivers with a goodbye
+				jsr		ShutInstall				; install it in the queue
+
+				pea		DoUnmount				; the default routine to unmount volumes		
+				move.w	#sdRestartOrPower,-(SP)	; do before power-off or restart
+				jsr		ShutInstall
+
+				pea		ClearWarmStart
+				move.w	#sdOnPowerOff,-(SP)		; only on 'shut down'						<26>
+				jsr		ShutInstall				; install it in the queue					<26>
+
+				Rts
+
+
+;_______________________________________________________________________
+;
+; Routine:		ShutDown
+;
+; Arguments:	A0 (input) :	address of a ShutDown routine
+;				D0 (input) :    command word (SDInit, SDPowerOff ...)
+;				D1 (input) :    for an SDInstall operation, the flags word.
+;
+; Function: 	This routine dispatches to one of several functions:  SDInit
+;					initializes the ShutDown Queue and sets up a default
+;					shutdown routine to eject disks.  SDPowerOff calls the
+;					power down routines, and then turns power off (or waits
+;					for the user to do so).  SDRestart calls the restart routines
+;					and then does a re-boot.  SDInstall installs a power
+;					off or restart proc.  SDRemove removes a proc.
+;
+; ShutDown(OpWord)
+;
+;_______________________________________________________________________
+				EXPORT	Shutdown
+				
+ShutDown		move.l	(SP)+,D2			; save return
+				move.w	(SP)+,D0			; get opcode word
+				move.l	D2,-(SP)			; restore the return
+				subq	#SDPowerOff,D0
+				bcs.w	ShutInit			; if d0=0, _SDInit a selector in ROM versions
+				beq		ShutPower			; if d0=1, Shutdown
+
+				subq	#SDInstall-SDPowerOff,D0	
+				bcs		ShutRestart			; if d0=2, carry set, bra to restart
+				beq.s	ShutInstall			; if d0=3, Install
+
+				subq.w	#sdUserChoice-sdInstall,d0	
+				bmi.s	ShutRemove			;if  d0=4, Remove
+				beq		UserChoice			; if d0=5, User Choice
+@unknownSelector
+				rts							; unknown selector (do nothing, assume no parameters)
+
+;_______________________________________________________________________
+;
+; ShutInstall - Installs a shutDown procedure in the SD Queue.
+;		Entry On Stack: Long - Proc pointer, to install in Queue, call later.
+;						Word - Flags word, with low bits defining when to call proc.
+;
+; ShutDown(Proc, WhenFlags, 3)
+;_______________________________________________________________________
+
+				EXPORT	ShutInstall
+ShutInstall
+				move.l	(SP)+,D2
+				move.w	(SP)+,D1				; get flags word
+				move.l	(SP)+,a1				;  and ProcPointer
+				move.l	D2,-(SP)
+				moveq	#QSDRecSize,D0			; create the queue element.
+				_NewPtr sys
+				move.w	D1,QType(A0)			; stuff in the flags and proc.
+				move.l	A1,QSDProcPtr(A0)
+
+				move.l SDHeader,A1			 	; get address of queue
+				_Enqueue						; install it in the queue
+				Rts
+
+;_______________________________________________________________________
+;
+; ShutRemove - Removes a shutDown procedure in the SD Queue.
+;		Entry:	TOS - Proc pointer, to remove from the Queue.
+;		Exit:	D0 - Error Code.
+;
+; ShutDown(Proc, 4)
+;_______________________________________________________________________
+
+				Export	ShutRemove
+ShutRemove
+				move.l	(SP)+,D2
+				move.l	(SP)+,A0				; get proc pointer from NOS
+				move.l	D2,-(SP)
+				move.l	A2,-(SP)
+				move.l SDHeader,A1	 			; get address of queue
+				AddQ	#QHead,A1				; point to the head
+				move.l	(A1)+,A2
+				move.l	(A1),D0					; remember the tail
+				beq.s	@NotFound				; are there any entries?
+
+; Search for the matching entry.
+
+@ScanLoop
+				cmp.l	QSDProcPtr(A2),A0		; is this the one?
+				beq.s	@Found
+
+				move.l	QLink(A2),A1			; get the link to the next.
+				cmp.l	A2,D0					; did we do the end?
+				move.l	A1,A2
+				Bne.S	@ScanLoop
+@NotFound
+				moveq	#qErr,D0				; return error - not found.
+				Bra.S	@Terminate
+@Found
+				move.l SDHeader,A1				; get the SD Queue Header A1.
+				move.l	A2,A0
+				_Dequeue						; remove it from the linked list.
+				move.l	A2,A0
+				_DisposPtr						; de-allocate the memory for the pt
+@Terminate
+				move.l	(SP)+,A2				; restore work registers
+				Rts
+
+;_______________________________________________________________________
+;
+; ShutRestart - do a shut-down and restart the system
+;
+;		Entry:	no parameters
+;		Exit:	never does.
+;
+; ShutDown(2)
+;_______________________________________________________________________
+;
+;	Some history for all you young'ns:
+;
+;	Some things to be aware of about the RESET instruction on various Macintosh Products	<2.7>
+;
+;	1)	This code is in ROM on Aurora, Esprit, F19, and all new CPUs.  It is in RAM, from
+;		the System Disk on the Mac Plus, SE, II, IIx, IIcx, SE30.
+;
+;	2)	StartInit contains a RESET instruction in ROM on the 68020/030 CPU ROMs.
+;
+;	3)	On the Mac Plus and Mac SE, a RESET will cause the 68000 to get a Reset, and it
+;		will switch into overlay mode, and  Re-Boot through the reset vector.
+;
+;	4)	When running a ROM image out of RAM, we do not want to do a RESET, because it will
+;		cause a switch into overlay mode, and the RAM base code cannot be fetched.
+;
+;	5)	On 68030 based machines, if the translation tables are in RAM (AURORA/F19, VM or Romulator),
+;		you should not do a RESET when the MMU is enabled, even if you are executing in ROM.
+;		If there is a miss in the ATC, it will attempt to fetch descriptors from RAM, but overlay
+;		is now enabled, and data from ROM will be used instead, causing lots of problems.
+;
+;	6)	Esprit has some problem when RESET is executed, and RESET should NEVER be used.
+;
+;	7)	This all means that RESET is only needed on a MacPlus and MacSE.
+;		It might not be a problem on machines based on the MacII/IIx ROMs,
+;		since they have the MMU tables in ROM, but it is not reccommended.
+;		All other situations should not do a RESET in Shutdown.
+;
+
+						
+				export	ShutRestart	
+ShutRestart		
+				with	ROMHeader				
+
+				moveq	#sdOnPowerOff,d5		; Remove poweroff routines from the queue		<13>
+				bsr		RemoveOtherRoutines
+
+				moveq	#SDBitRestart,D0		; remember that we will reboot.
+				bsr		CallRoutines			; do the shutDown cleanup.
+
+				moveq	#1,D5					; Go ahead and hide cursor/close LCDs.
+				bsr		BlankDesktop			; Go blank the desktop.
+
+				move.l	ROMBase,A2					; point to the ROM
+				lea		ROMHeader.Restart(A2),A2	; point to the restart routine
+
+				move.l	#emuWarmStartConst,D0	; Does the upper long match?
+				move.l	#WmStConst,D1			; Does the upper long match?
+				bsr		UpdateEmuWarmstart		; Write the warmstart (We may have come from a shutdown...) <MC8>
+							
+				tst.l	VMGlobals				; Is VM running?
+				bmi.s	@noVM					; -> No.  Assume we're in Supervisor Mode				
+				_EnterSupervisorMode			; Enter supervisor mode (don’t worry about munging the stack...)
+@noVM
+				bsr		DockInitSCC				; reset the SCC	(if we have Power controls)				<SM16><3>
+
+				TestFor	JawsExists				; are we running on a Tim machine with JAWS				<SM16><5> HJR
+				beq.s	@noJAWS					; -> No JAWS, jump to RESTART now.						<SM16><43>
+
+				with	PmgrRec, pmCommandRec
+@JawsRestartSeq									; -- Special Case for JAWS --							<5> HJR
+				move.l	PMgrBase,a0				; get pointer to the power manager globals
+				move.l	HDVector(a0),a0			; get pointer to hard disk power down
+				jsr		(a0)					; kill the hard disk
+				lea		-pmBlkSize(sp),sp		; Create stack frame									<v5.7>
+				lea		pmData(sp),a0			; Get pointer to a xmit buffer
+				move.l	a0,pmRBuffer(sp)		; Load pointer to receive buffer
+				move.l	a0,pmSBuffer(sp)		; Load pointer to xmit buffer
+				clr.l	(a0)					; No data
+				clr.w	pmLength(sp)			; No data
+				move.w	#$21,pmCommand(sp)		; ADB autopoll disable
+				move.l	sp,a0					; a0 get pointer to paramter block
+				_PmgrOp							; go kill the machine
+				clr.l	pmData(a0)				; clear data
+				clr.w	pmLength(a0)			; clear length
+				move.w	#$d0,pmCommand(sp)		; reset CPU command
+				move.w	Timedbra,d1				; set-up our counter
+				lsl.w	#2,d1					; give ourselves 4 milliseconds
+				_PmgrOp							; go kill the machine
+
+@waitloop		dbra	d1,@waitloop			; stick around for 4 milliseconds
+												; Fall into the JMP to Restart							<43>
+
+	; Finally!  Restart the machine by Jumping through the Restart vector in the ROM header
+	
+@noJAWS			JMP		(A2)					; exit thru the restart routine							<mc2>				
+
+;________________________________________________________________________________________________
+
+
+
+;_______________________________________________________________________
+;
+; ShutPower - Do a shutDown and power off the system if possible.  If it’s
+;				and older system (no power off ability) then put up an
+;				alert that the system can go down now.
+;
+;		Entry:	no parameters
+;		Exit:	never does.
+;
+; ShutDown(1)
+;_______________________________________________________________________
+				export	ShutPower
+				
+ShutPower		
+				bsr		DoRAMDiskAlert			; Check for RAM disk.  Should we kill the power?
+				beq		@continuePowerOff		; -> Yes.  Pull the plug!				
+				rts								; Cancel the Shutdown.
+
+@continuePowerOff
+
+				moveq	#sdOnRestart,D5			; Remove all restart procedures from the queue	<13>
+				bsr.w	RemoveOtherRoutines		; Go remove these procedures from the queue		<13>
+
+				moveq	#SDBitPowerOff,D0		; pass parameter: power off.
+				bsr.w	CallRoutines			; do cleanup and check if new mac.
+
+				moveq	#1,D5					; Go ahead and hide cursor/close LCDs.
+				bsr		BlankDesktop			; Clear the whole desktop.
+								
+				bsr		FindEDisk				; Do we have an EDisk in the drive Q?
+				beq.s	@noEDisk				; -> Nope, continue w/power off
+				bsr		KillEDisk				; Clear the EDisk's checksum data (invalidate the disk)
+@noEDisk
+
+	; Send Sonic a soft reset																	<16> thru next <16>
+
+				TestFor	SonicExists				; Does this machine have a SONIC ENet chip?
+				beq.s	@noSONIC				; IF hasSONIC THEN
+
+				With	DecoderInfo
+				movea.l	UnivInfoPtr,a0			;     get address of universal product info
+				adda.l	ProductInfo.DecoderInfoPtr(a0),a0; and point to table of base addresses
+				moveq	#SonicExists,d0			;     get offset to Sonic base address
+				movea.l	(a0,d0.w*4),a0			;     grab Sonic base address
+				tst.l	a0						;     check address just in case its bogus (?)
+				beq.s	@noSONIC				;     dont do anything if address is zero
+				bset	#7,(a0)					;     bit 7 of SonicAddr+0 causes a SW reset
+				EndWith
+@noSONIC										; ENDIF											<16>
+
+				bsr		CheckForSoftPowerOff	; does this machine have software power-off?
+				bz.s	@noSoftPowerOff			; no, don’t even try it
+
+				_PowerOff						; turn power off
+												; it’s nice that we fall through if PowerOff does nothing
+@noSoftPowerOff
+				_InitCursor
+				moveq	#shutDownAlert,D0
+
+;_______________________________________________________________________
+;
+; DoSysErrDialog
+;
+;	Put up a dialog (done by the system error handler).
+;	The system error ID must be in D0.
+;
+;_______________________________________________________________________
+
+DoSysErrDialog
+				clr.l	ResumeProc				; don’t show resume button
+				_SysError						; will never return
+
+;_______________________________________________________________________
+;
+; UserChoice
+;
+;	Start off as a power-off. If the machine supports soft power-off,
+;	we give the user a choice between Restart and Shut Down (some of the
+;	code to handle this is in system error tables). If the machine
+;	does not support soft power-off, Shut Down and Restart are equivalent,
+;	so we put up an alert with a single Restart button (the text reflects
+;	the fact that the computer made the choice).
+;
+;_______________________________________________________________________
+
+UserChoice
+				moveq	#0,D5					; Don’t hide cursor/close LCDs.
+				bsr		BlankDesktop			; Clear the entire desktop for consistency.
+
+				bsr		CheckForSoftPowerOff	; does this machine have software power-off?
+				bz.s	@noSoftPowerOff			; no!
+
+				move.w	#dsShutDownOrRestart,d0	; yes, let the user choose Shut Down or Restart
+				bra.s	DoSysErrDialog
+
+@noSoftPowerOff
+				moveq	#sdBitPowerOff,d0		; notify just as we would for PowerOff
+				bsr.s	CallRoutines			; go do the notification
+
+				move.w	#dsSwitchOffOrRestart,d0	; no, let the user switch off or Restart
+				bra.s	DoSysErrDialog
+
+
+;_______________________________________________________________________
+;
+; CallRoutines
+;		Entry:	D0 - Bit number to test (shutdown type).
+;		Exit:	regs saved.
+;_______________________________________________________________________
+
+CallRoutines
+				movem.l	A1-A3/D0-D5,-(SP)
+				move.w	D0,D4
+
+; Call Cleanup for Drivers, and Custom cleanup Procs.
+
+				moveq	#SDBitDrivers,D5		; do Pre-Driver cleanUp
+				bsr.s	CallCleanUp
+
+; Call Cleanup to unmount volumes, and then custom PowerOff/Restart.
+
+				moveq	#SDBitUnMount,D5		; do Vol UnMounts
+				bsr.s	CallCleanUp
+				move.w	D4,D5					; do PowerOff or ReStart cleanup
+				bsr.s	CallCleanUp
+
+; set up the flags for the caller.
+
+				movem.l	(SP)+,A1-A3/D0-D5
+				Rts
+
+;_______________________________________________________________________
+;
+; RemoveOtherRoutines - Remove all occurences of the passed in shutdown procedure type from the shutdown queue.	<13>
+;		This differentiates routines that wish to be executed before drivers on restart, but not at all on poweroff
+;		(as an example).  Before, there was no differentiation between restart and poweroff for routines that were
+;		to run before drivers close, or before volumes are unmounted.  There are cases when such differentiation
+;		is desired, but was previously impossible.  By removing routines of the “other” type (other being restart on
+;		a poweroff, and vice versa), the only routines left in the queue are those that should be executed.  Routines
+;		that execute on both poweroff and restart are left in the queue.  On a final note, the routines aren’t actually
+;		removed from the queue, since the machine will either be powered off or restarted in a few seconds, so it really
+;		doesn’t matter what gets left lying around in memory.  This way, a call to _SDRemove is saved.
+;
+;		Entry:	D5 - Bit number of shutdown type to remove from queue
+;		Exit:
+;_______________________________________________________________________
+
+RemoveOtherRoutines
+				move.l	SDHeader,A1				; get header into A1.
+				Lea		QHead(A1),A3			; point to the head
+				move.l	(A3)+,A2
+				move.l	(A3),D3					; remember the tail
+				beq.s	@NotFound				; are there any entries?
+
+; Find entry that matches the type to remove
+
+@ScanLoop
+				move.l	QLink(A2),A3			; get the link to the next
+				move.w	QType(A2),D0			; get the shutdown flags
+				andi.w	#3,d0					; We’re only interested in the poweroff and restart bits
+				cmp.w	d0,d5					; Is this a type that should be removed?
+				bne.S	@DontRemove				; don’t remove this entry
+
+; now remove the proc from the queue.
+; Since the whole state of the machine is going into la-la land very shortly, there’s no point
+; in actually removing the procedure.  Just zapping the shutdown flags to zero to prevent this
+; routine from being found again is good enough.												<13>
+
+				clr.w	QType(a2)				; QType holds the shutdown flags
+
+@DontRemove
+				cmp.l	A2,D3					; at the end?
+				move.l	A3,A2
+				Bne.S	@ScanLoop
+@NotFound
+				Rts
+
+;_______________________________________________________________________
+;
+; CallCleanUp
+;		Entry:	D5 - Bit number to test (shutdown type).
+;		Exit:
+;_______________________________________________________________________
+
+CallCleanUp
+				move.l SDHeader,A1					; get header into A1.
+				Lea		QHead(A1),A3			; point to the head
+				move.l	(A3)+,A2
+				move.l	(A3),D3					; remember the tail
+				beq.s	@NotFound				; are there any entries?
+
+; Search for an entry that wants a call now.
+
+@ScanLoop
+				move.l	QLink(A2),A3			; get the link to the next
+				move.w	QType(A2),D0			; get the shutdown flags
+				BTst	D5,D0					; want call now?
+				beq.s	@DontCallUs				; don’t call for this kind
+
+; call the proc, with bit number in D0, in case it cares.
+
+				move.l	QSDProcPtr(A2),A0		; call the shutdown routine
+				move.w	D5,D0					; pass bit number in D0
+				Jsr		(A0)
+
+; now remove the proc from the queue.
+; Since the whole state of the machine is going into la-la land very shortly, there’s no point
+; in actually removing the procedure.  Just zapping the shutdown flags to zero to prevent this
+; routine from being found again is good enough. <13>
+
+				clr.w	QType(a2)				; QType holds the shutdown flags
+@DontCallUs
+				cmp.l	A2,D3					; at the end?
+				move.l	A3,A2
+				Bne.S	@ScanLoop
+@NotFound
+				Rts
+
+;_______________________________________________________________________
+;
+; DoDrivers - The Default shutdown routine to kiss all of the drivers
+;					goodbye.
+;		Entry:	No paramters.
+;
+;_______________________________________________________________________
+
+			export	DoDrivers
+DoDrivers
+			; first, send a doGoodBye call to all drivers that want one
+
+			MOVEM.L	D0-D1/D4-D7/A0-A1,-(SP)			; save registers		<4> jmp
+			SUB		#IOQElSize,SP					; allocate pBlock
+			MOVE	#-1,CSCode(SP)					; set up control code
+			MOVE.L	UTableBase,A1					; point to unit table
+			MOVE.W	UnitNtryCnt,D1					; get # entries in unit table
+@loop
+			MOVE.L	(A1)+,D0						; get the DCE handle
+			BEQ.S 	@next		 					; if NIL, try next one
+
+			MOVE.L	D0,A0							; get the DCE handle
+			MOVE.L	(A0),A0 						; get the DCE pointer
+
+;------------------------------------------------------------------------	<4> jmp
+			
+			Btst	#dRamBased,DCtlFlags+1(A0)		; If we’ve got a pointer, then just skip
+			Beq.s	@skipVidChk						;	this code (our drivers are RamBased).
+			
+			Move.l	A0,D7							; Save pointer to DCE.
+			Move.l	A1,D6							; Save UTable pointer.
+			
+			Move.l	dCtlDriver(A0),A0				; Get handle to driver.
+			Move.l	(A0),A0							; Get pointer to driver.
+			Lea		drvrName(A0),A0					; Point to driver name.
+			Move.l	A0,D5							; Save it for later.
+			
+			moveq	#0,D0							; Prepare D0.
+			Move.b	(A0),D0							; Get the length of the driver name.
+			Move.w	D0,D4							; Make a copy.
+			Addq	#2,D4							; Adjust offset to version field (len + 1)
+			Bclr	#0,D4							; Adjust offset for word alignment.
+			Move.w	(A0,D4.w),D4					; Get the version number.
+			Bne.s	@endVidChk						; If non-zero, then just leave.
+			
+			Swap	D0								; Get 1st string length into hi-word.
+			Addq	#1,A0							; Point to text of driver name.
+			Lea		TimVidTitle,A1					; Point to TIM/TIM-LC’s video driver name.
+			Move.b	(A1)+,D0						; Get 2nd string length into lo-word.
+			_CmpString								; Compare drvrName with TimVidTitle.
+			Tst.b	D0								; If this is the TIM/TIM-LC driver,
+			Beq.s	@fixFlags						;	then don’t kiss it goodbye.
+			
+			Move.l	D5,A0							; Restore pointer to driver name.
+			moveq	#0,D0							; Re-prepare D0.
+			Move.b	(A0)+,D0						; Get length of 1st string…
+			Swap	D0								; 	…into the hi-word.
+			Lea		DAFBVidTitle,A1					; Point to Spike/Eclipse video driver name.
+			Move.b	(A1)+,D0						; Get 2nd string length into lo-word.
+			_CmpString								; Compare drvrName with DAFVidTitle.
+			Tst.b	D0								; If this is the DAFB (Spike/Eclipse) driver,
+			Beq.s	@fixFlags						;	then don’t kiss it goodbye.
+			Bra.s	@endVidChk						; Otherise, just leave.
+			
+@fixFlags	Move.l	D7,A0							; Restore pointer to DCE.
+			Bclr	#DNeedGoodbye,DCtlFlags(A0) 	; Reset the good-bye kiss flag.
+
+@endVidChk	Move.l	D7,A0							; Restore pointer to DCE.
+			Move.l	D6,A1							; Restore pointer to UTable.
+			
+@skipVidChk
+
+;------------------------------------------------------------------------	<4> jmp		
+			
+			BTST	#DNeedGoodbye,DCtlFlags(A0) 	; need a goodbye kiss?
+			BEQ.S 	@next		 					; not tonight dear
+
+			; we found one that needs a goodbye call so issue the control call
+
+			MOVE.W	DCtlRefNum(A0),IORefNum(SP) 	; set up the refNum
+			MOVE.L	SP,A0							; point to the DCE
+			_Control								; kiss it goodbye...
+@next
+			SUBQ		#1,D1						; check next entry
+			BNE.S 	@loop	 						; if so, loop
+
+			; done, return
+
+			ADD		#IOQElSize,SP					; deallocate pBlock
+			MOVEM.L	(SP)+,D0-D1/D4-D7/A0-A1			; restore registers		<4> jmp
+			RTS
+
+;------------------------------------------------------------------------	<4> jmp		
+
+			String	Pascal
+
+TIMVidTitle
+			DC.W	'.Display_Video_Apple_TIM'		; Name of TIM/TIM-LC Video Driver.
+
+DAFBVidTitle
+			DC.W	'.Display_Video_Apple_DAFB'		; Name of Spike/Eclipse Video Driver.
+
+;------------------------------------------------------------------------	<4> jmp		
+
+;_______________________________________________________________________
+;
+; DoUnmount - Unmount all of the volumes on line, so the disks will be updated before our power off.
+;
+;		Entry:	No parameters.
+;
+;_______________________________________________________________________
+
+			export	DoUnmount
+DoUnmount
+			sub		#IOQElSize,SP				; allocate pBlock
+
+; Go through the VCB Queue to Flush and eject all volumes.
+
+		  	move.l	SP,A0						; point to the parameter block
+			clr.L	ioVNPtr(A0)
+			clr.W	ioRefNum(A0)
+			move.l	VCBQHdr+QHead,A1			; get the queue header
+			move.l	VCBQHdr+QTail,D2			; get the tail too
+			beq.s	@AllFlushed
+			bsr		ZapVCBQueue					; wipe out the whole queue
+
+@AllFlushed
+			add.W	#IOQElSize,SP				; deallocate pBlock
+			
+	; Wait for all floppy drives that have diskettes inserted to eject, or for 2 seconds,
+	; whichever comes first.  (Note:  This should now be “universal,” even
+	; for CPUs that don’t have auto-eject floppy mechanisms.)
+
+taskActive	equ		7							; High bit of qType word is active flag.
+
+			moveq.l	#(tmXQSize/2)-1,D0			; Set up the init-loop counter.
+@clrTask	clr.w	-(Sp)						; Allocate and clear a TMTask record.
+			dbra	D0,@clrTask					; Do it one word at a time.
+			move.l	Sp,A0						; Point to the TMTask record.
+			_InsXTime							; Install it.
+			
+			move.l	#2*1000*1000,D0				; We need ~1.5sec, but we’ll say 2sec for safety.
+			neg.l	D0							; (Negate for µsec timer.)
+			_PrimeTime							; Start the TMTask.
+
+			move.l	DrvQHdr+QHead,D0			; Now, get a pointer to the first drvQElem.
+@Repeat		move.l	D0,A1						; Copy the drvQElem pointer into A1.
+			cmpi.w	#-5,dqRefNum(A1)			; If this isn’t a floppy (.Sony) driver drive,
+			bne.s	@Until						;	then just go on.
+			
+@WaitEject	btst.b	#taskActive,qType(A0)		; If the TMTask has completed,
+			beq.s	@TimedOut					;	then we can now exit this loop.
+			move.l	-4(A1),D0					; Otherwise, get the drvQElem flags.
+			andi.l	#$00FF0000,D0				; If the media is still in the mechanism,
+			bne.s	@WaitEject					;	then just wait.
+			
+@Until		move.l	qLink(A1),D0				; Otherwise, get the next entry in the queue.
+			bne.s	@Repeat						; Loop until done.
+			
+@TimedOut	_RmvTime							; Remove TMTask.
+
+			adda.w	#tmXQSize,Sp				; Reclaim the stack space.
+		  	rts
+
+;_______________________________________________________________________					<5>
+;
+; ClearWarmStart - Shutdown task to clear warm start variable if user
+;					chooses 'Shut Down' from the Finder.
+;
+;_______________________________________________________________________					<5>
+
+			export	ClearWarmStart
+
+ClearWarmStart
+			movea.l	BootGlobPtr,A0					; point to bootGlobals
+			clr.l	StartGlobals.sgWarmStart(A0)	; clear warm start flag
+			clr.l	WarmStart						; write warm start constant to indicate warm start
+			
+			moveq	#0,D0							; hi long
+			moveq	#0,D1							; lo long
+			bsr.l	UpdateEmuWarmstart				; Clear the warmstart					<MC8>	
+			
+			rts
+
+
+
+;_______________________________________________________________________					<MC8> SAM
+;
+; UpdateEmuWarmstart - 
+;
+;	 The emulator warmstart flag lives in the writeprotected diagnostic info block in the Nanokernel's
+;	 data page.  We need to "map" the diag page to a normally mapped page of RAM, write the warmstart
+;	 constant, and remap the memory back the way it was.  Oh, I'm using logical page number 1
+;	 (i.e. $1000 - 4k pages). Oh, yeah, the RAM at $1000 never actually gets modified...
+;
+;	Entry - D0.l warmstart low
+;			D1.1 warmstart high
+;
+;_______________________________________________________________________					<MC8>
+			Export	UpdateEmuWarmstart
+
+UpdateEmuWarmstart	
+			With	nkDiagInfo	
+
+			testFor	has68kEmulator					; Does this machine have a V0 style emulator?
+			beq		@Done							; -> Nope, we're done.  Exit.
+			
+			move	SR,-(SP)						; Save SR
+			ori.w	#hiIntMask,SR					; Disable interrupts
+			movem.l	D2-D7,-(SP)						; Save some D regs
+			
+			move.l	D0,D6
+			move.l	D1,D7
+			move.w	#12,D2							; Shift Count (12 bits in 4k)
+			
+			lea		1,A0							; Logical page #1 ($1000)
+			_nkGetPTEntryGivenPage					; Get its Pte
+			move.l	D0,D3							; Save the Pte in D3
+			
+			move.l	(nkDiagInfoPtr),D0				; Get the DiagPage Logical Address
+			move.l	D0,D5							; Make a copy
+			and.l	#4096-1,D5						; Get the offset into the page
+			
+			lsr.l	D2,D0							; Make it a page number
+	
+			move.l	D0,A0							; Page into A0
+			_nkGetPTEntryGivenPage					; Get the Diag Pte
+			move.l	D0,D4							; Save it
+			
+			lea		1,A0							; Get the buffer page number in A0
+			lea		1,A1							; Say page is inited (#1)
+			_nkMMUMarkBacking						; Mark this page as outta here
+	
+			lea		1,A0							; Logical Page number of the buffer
+			move.l	D4,D0							; Get the Diag Pte
+			lsr.l	D2,D0							; Get its Physical Page number
+			move.l	D0,A1							; Set Physical Page
+			_nkMMUMarkResidentGlue					; Map the diag's physical address to the buffer's logical addr
+	
+			lea		$1000,A0						; Get our logical starting point
+			add.l	D5,A0							; Add in the offset from the start of the diag page
+			
+			move.l	D6,DiagWarmStartLow(A0)
+			move.l	D7,DiagWarmStartHigh(A0)
+	
+			lea		1,A0							; Get the lo Page number in A0
+			lea		1,A1							; Say page is inited (#1)
+			_nkMMUMarkBacking						; Mark this page as outta here
+	
+			lea		1,A0							; Get the lo Page number in A0
+			move.l	D3,D0							; Get the LoPage's Pte
+			lsr.l	D2,D0							; Get its Physical Page number
+			move.l	D0,A1							; Set Physical Page
+			_nkMMUMarkResidentGlue					; Move the HiPage to the loPage's logical addr
+	
+			movem.l	(SP)+,D2-D7						; Save some D regs
+			move	(SP)+,SR						; Restore IRQ enable state
+
+@Done		rts										; all done
+			
+			EndWith
+
+;_______________________________________________________________________					<5>
+; ZapVCBQueue - This routine goes through the VCB Queue, and calls HUnmountVol for each entry.
+;
+;		Entry:	A0 - IOParam Block
+;				A1 - Pointer to current Entry
+;				D2 - Tail entry Pointer.
+;		Exit:	A1 - Pointer to next Entry.
+;				D1 - Preserved.
+;_______________________________________________________________________					<5>
+
+ZapVCBQueue
+			move.w	D1,-(SP)			; save for re-entrancy.
+			
+			move.w	vcbVRefNum(A1),D1	; get a VRefNum
+			move.l	QLink(A1),-(SP)		; go on to the next VCB
+			cmp.l	D2,A1
+			move.l	(SP)+,A1
+			beq.s	@FlushTime			; have we reached the end?
+			bsr.s	ZapVCBQueue			; not yet, save the VRefNum, call self.
+@FlushTime
+			move.w	D1,ioVRefNum(A0)	; set up the refNum in the PBlock.
+			_Eject
+			_HUnMountVol				; shut the volume down.
+			move.w	(SP)+,D1			; restore crucial VRefNum
+			Rts							; for reentrancy.
+
+;_______________________________________________________________________
+;
+; BlankDesktop
+;
+;	Blank the whole deskstop. This fills the entire desktop with black.
+;	It used to be the case that we wanted the screen to go white on
+;	portables, but that causes a really ugly white flash, and it’s
+;	not necessary since portables always (famouse last words) have
+;	soft power.  Note that this routine is now also called by restart
+;	instead of only during shutdown.  The reason for this is that
+;	many newer CPUs don’t pass the reset instruction thru the CPU
+;	to the I/O devices.  As a result, the desktop can persist on many
+;	displays thru BootBeep until PrimaryInit, which looks bad.
+;
+;	Note that it also hides the cursor, for a more tidy look.
+;
+;_______________________________________________________________________
+
+			IMPORT	AllocFakeRgns			;
+
+BlankDesktop
+
+			MOVE.L	A5,-(Sp)				; Save A5-world. Why?
+
+; Somewhat stolen from StartAlert.a
+
+			TST.B	D5						; If we’re not supposed to hide the cursor,
+			BEQ.S	@SkipHide				;	then just go on.
+			_HideCursor						; Otherwise, hide it.
+@SkipHide
+
+			LEA 	-4(SP),A5				; start A5 here
+			SUB.W	#GrafSize+140,SP		; allocate global, port space
+			MOVE.L	SP,A6					; remember start of port
+
+			PEA 	-4(A5)					; point to QD global space
+			MOVE.B	QDExist,D3				; preserve state of QDExist flag (don't let us affect it)
+			_InitGraf						; initialize QuickDraw
+			MOVE.B	D3,QDExist
+
+			; allocate a grafPort using the stack and initialize it
+
+			BigJsr	AllocFakeRgns,A1		; init dummy vis and clip to wide-open			
+			MOVE.L	A6,-(SP)				; push address of grafPort
+			_InitPort						; initialize the port.  This particular case
+											;  doesn’t move memory, even when it calls COPYRGN!
+			MOVE.L	clipRgn(sp),-(sp)		; region for FillRgn
+
+			MOVE.L  GrafGlobals(A5),A1		; get QuickDraw globals
+			PEA		black(A1)				; get black
+
+			_FillRgn						; fill, wide region, with wide clip in wide bounded port
+											;  i.e. fill all screens with the appropriate color.
+											;  doesn’t move memory.
+			ADD.W	#GrafSize+140,SP		; dispose of the port
+			
+			TST.B	D5						; If we’re not supposed to close LCDs,
+			BEQ.S	@SkipClose				;	then just go on.
+			BSR		CloseLCDVideo			; Otherwise, close ’em.
+@SkipClose
+
+			MOVE.L	(Sp)+,A5				; Restore A5-world.
+			RTS
+
+
+;_______________________________________________________________________
+;
+; CheckForSoftPowerOff
+;
+;	Check to see if this machine has a working PowerOff trap.
+;
+;	Note that this must be accurate for machines like the SE/30, since
+;	it is sometimes used to decide whether the user has choice between
+;	Shut Down and Restart.
+;
+;	Returns: Z if there is no soft power-off, NZ if there is
+;
+;_______________________________________________________________________
+
+CheckForSoftPowerOff
+
+			move.l	#gestaltHardwareAttr,d0		; check for soft power-off hardware				<39>
+			_Gestalt							; Gestalt										<39>
+			move.l	a0,d0						;	It’s not just a good idea.					<39>
+			btst	#gestaltHasSoftPowerOff,d0	;	It’s the law.								<39>
+
+			rts
+
+
+;————————————————————————————————————————————————————————————————————————————————————————			 <4> HJR
+; Routine:	CloseLCDVideo																			  |
+;																									  v
+; Inputs:	none 
+;
+; Outputs:	none
+;
+; Trashes:	D0
+;
+; Function:	Run through the slot manager record looking for apple video.  Afterward check
+;			if the video is of type LCD.  If so, then close the video driver.  
+;————————————————————————————————————————————————————————————————————————————————————————
+
+CloseLCDFrame		RECORD	0, DECR
+CloseLCDCntBlk		DS.B	IOVQElSize				; control call parm block
+CloseLCDSpBlk		DS.B	spBlock.spBlockSize		; Slot Manager param block.
+CloseLCDFrameSize	EQU		*						; size of frame
+					ENDR
+
+CloseLCDVideo		
+CloseLCDVideoRegs	REG		D1/A0-A1	
+		WITH CloseLCDFrame,spBlock
+			LINK	A6,#CloseLCDFrameSize			; allocate variable space
+			MOVEM.L	CloseLCDVideoRegs,-(SP)			; Save them regs
+			LEA		CloseLCDSpBlk(A6),A1			; Get pointer to spBlock
+			MOVEA.L	A1,A0							; Set pointer to A0
+			CLR.B	spSlot(A0)						; Set slot number
+			MOVEQ	#0,D1							; set spId to 0
+			CLR.B	spExtDev(A0)					; No external devices
+			MOVE.W	#CatDisplay,spCategory(A0)		; Look for this slot's card
+			MOVE.W	#TypVideo,spCType(A0)			; Make sure it is video
+			MOVE.W	#DrSwApple,spDrvrSW(A0)			; Make sure it is from Apple
+			MOVE.B	#1,spTBMask(A0)					; mark spDrvrHw field as don’t care
+@sNextLoop
+			MOVEA.L	A1,A0							; Get pointer to spBlock
+			MOVE.B	D1,spId(A0)						; Set spID
+			_sNextTypesRsrc							; get the spsPointer
+			BNE.S	@Done
+
+			MOVE.B	spId(A0),D1						; Save spId for later use
+			MOVE.B	#sVidAttributes,spId(A0)		; read flag field in sRsrc
+			_sReadWord								; ...pointed to by spsPointer
+			BNE.S	@sNextLoop						; no flags - find next sRsrc
+
+			MOVEQ.L	#1<<fLCDScreen,D0				; got flag word
+			AND.W	spResult+2(A0),D0				; test if LCD screen
+			BEQ.S	@sNextLoop
+			
+			LEA		CloseLCDCntBlk(A6),A0			; Get pointer to ioPB
+			MOVE.W	spRefNum(A1),ioRefNum(A0)		; Get the driver refNum
+			_Close									; Close the driver
+
+			BRA.S	@sNextLoop
+@Done
+			MOVEM.L	(SP)+,CloseLCDVideoRegs			; Restore them regs
+			UNLK	A6								; Clean up the stackframe
+			RTS										;												<4> HJR
+		ENDWITH
+
+
+
+;__________________________________________________________________________________		<7> SAM
+;
+;	FindEDisk - Find the EDisk DriveQ entry, the Drive num, and the Driver refNum.
+;				Compares the Driver names of each drive in the drive queue to ".EDisk"
+;
+;	Entry:
+;	Exit:
+;		D0 - Clear if EDisk was NOT found												<8> jmp
+;		D2 - Drive Number
+;		D3 - Driver RefNum
+;		A0 - Drive Queue Element Ptr
+;__________________________________________________________________________________		<7> SAM
+
+			EXPORT	FindEDisk
+FindEDisk
+						
+; Look through the Drive Queue to find each drive's Driver
+
+			MOVE.L	A2,-(SP)				; Save A2
+@Ok			LEA		DrvQHdr+2,A0			; Start of drive queue.
+@DriveLoop	MOVE.L	(A0),D0					; Get a drive entry
+			BEQ.S	@NoRAMDisk				; -> No more drives. No Edisk, bail out
+			MOVE.L	D0,A0					; Pointer to queue element.
+			MOVE.W	dQDrive(A0),D2			; Get the drive num in D2 for later.
+			MOVE.W	dQRefNum(A0),D0			; Get the Driver reference number.
+			MOVE.W	D0,D3					; Put the Driver RefNum in D3
+			ADDQ.W	#1,D0					; Calc the UnitTable entry
+			NEG.W	D0						;
+			ASL.W	#2,D0					; (-1 * RefNum) * 4
+			
+; Found a drive & its RefNum.  Look for the driver in the UnitTable
+
+			MOVE.L	UTableBase,A1			; Get the UnitTable base address
+			MOVE.L	(A1,D0.W),A1			; Get the DCE handle
+			MOVE.L	(A1),A1					; Get the DCE ptr
+			BTST.B	#dRAMBased,dCtlFlags+1(A1)	; Is the driver RAM based?
+			BEQ.S	@GotPtr					; -> No. Its a pointer. Dont Dereference it.
+			MOVE.L	dCtlDriver(A1),A1		; Dereference the DCE handle
+@GotPtr		MOVE.L	(A1),A1					; Point to the driver
+			LEA		drvrName(A1),A1			; Pointer to driver name
+		
+; Found the Driver, see if the drvrName = .EDisk
+
+			LEA		EDiskName,A2			; Pointer to RAM disk driver name.
+			MOVEQ	#0,D0					; Init length of driver name.
+			MOVE.B	(A2),D0					; Get the Name string length byte
+@CharLupe	CMP.B	(A2)+,(A1)+				; Does this char match?
+			BNE.S	@DriveLoop				; -> No.  Try another Drive.
+			DBRA	D0,@CharLupe			; Keep looping till we run out 'o chars
+			
+			MOVEQ	#1,D0					; Force D0 to be non-zero (we found the '.EDisk').	<8> jmp
+			
+@NoRAMDisk	MOVEM.L	(SP)+,A2				; Restore A2.
+			RTS								; No disk.  Bail out.
+
+EDiskName	DC.W	'.EDisk'				; EDisk driver name
+
+
+
+
+;__________________________________________________________________________________		<7> SAM
+;
+;	KillEDisk - Given a Ptr to the EDisk's DriveQElem, get the logical start of
+;				the EDisk checksum data, Write enable the EDisk RAM, and whack
+;				the checksums data so the volume will not be mounted next time
+;				no matter how much the RAM persists after a power down!
+;
+;	Entry:
+;		A0 - EDiskDrive Queue Element Ptr
+;__________________________________________________________________________________		<7> SAM
+hwEDiskProt	EQU		8						; _hwPriv Write protect EDisk selector
+BytesToKill	EQU		$8000					; Number of bytes to erase from base of EDisk data area
+
+			EXPORT	KillEDisk
+KillEDisk	
+			WITH	EDiskDriveInfo
+			
+			MOVE.L	DataStartPtr(A0),A2		; Get Ptr to the start of the data area
+			CMP.B	#EMMU1,MMUType			; Check for PowerPC MMU emulation
+			BNE.S	@noEMMU					; IF we have an EMMU THEN
+			MOVE.L	A2,A0					;	get ptr to start of data area
+			MOVE.L	#BytesToKill,A1			;	get number of bytes to erase
+			MOVE.L	#(0<<16)|hwEDiskProt,D0	;	_HwPriv EDisk write protect selector and "unprotect" parm
+			BRA.S	@unProtect				; ELSE
+@noEMMU		MOVE.L	CheckSumPtr(A0),A0		;	Get Ptr to the start of the checksum area, if it exists
+			TST.L	A0						;	Check if RAM Disk is using checksums
+			BNE.S	@cksumOn				;	IF checksumming is off THEN
+			MOVE.L	A2,A0					;	  base address of RAM disk is same as DataStartPtr
+@cksumOn									;	ENDIF
+			SUB.L	A1,A1					;	Protect flag.  Zero = Unprotect
+			MOVEQ	#hwEDiskProt,D0			;	_HwPriv EDisk write protect selector
+@unProtect									; ENDIF
+			_HwPriv							; Write Enable the EDisk RAM
+			CMPI.W	#paramErr,D0			; Does not clear D0 on success, Check for failure
+			BEQ.S	@Done					; -> enable failed.  Bail out now or Bus Error!		
+			
+			MOVE.W	#BytesToKill/4-1,D2		; number of bytes to erase
+@whackLupe									; LOOP (to erase bytes in data area)
+			CLR.L	(A2)+					;	clear a longword
+			DBRA	D2,@whackLupe			; UNTIL (we've erased all bytes)
+
+@Done		RTS
+
+			ENDWITH
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; DoRAMDiskAlert <49>
+;
+; If a RAM disk exists, and we're powering off as opposed to restarting, we want to display an alert
+; warning that the contents of the RAM disk will be lost and give the user a chance to cancel the
+; shutdown.  This code is called from a patch in System builds, and from ShutPower directly for
+; ROM builds.
+;
+; Entry:	no parameters
+; Exit:		d0 is false and Z flag set if we should continue the shutdown
+;			d0 is true and Z flag not set if we should abort the shutdown
+;
+; if the option key is held down, return false
+; if no RAM disk exists, return false
+; if there are no visible files on the RAM disk, return false
+; otherwise, put up an alert asking if the shutdown should continue
+; return false if OK is hit, true if cancel is hit
+;
+			Export	DoRAMDiskAlert
+			
+DoRAMDiskAlert
+
+			move.l	a2,-(sp)				; save a2
+
+CheckForOptionKey
+			btst.b	#2,KeyMap+7				; don’t do anything if option key is held down
+			bne		exitFalse
+
+CheckIfRAMDiskExists
+			movem.l	d2-d3,-(sp)				; save registers munged by FindEDisk
+			bsr		FindEDisk				; is there a RAM disk?
+			move.w	d3,d1					; save driver refNum in d1
+			movem.l	(sp)+,d2-d3				; restore registers
+			tst.w	d0
+			beq		exitFalse				; no RAM disk
+
+			; get VCB pointer in a2
+
+			lea		VCBQHdr+2,a2			; start of volume queue
+@volumeLoop
+			move.l	(a2),d0					; is there another volume?
+			beq		exitFalse				; no? then RAM disk is not mounted
+			move.l	d0,a2					; pointer to VCB
+			cmp.w	vcbDRefNum(a2),d1		; same driver?
+			bne.s	@volumeLoop				; no? then check next volume
+
+CheckForVisibleFiles
+			link	a6,#-108
+			lea		-108(a6),a0				; paramater block
+			clr.l	ioNamePtr(a0)			; don't care about name
+			move.w	vcbVRefNum(a2),ioVRefNum(a0); volume reference number
+			clr.w	ioFDirIndex(a0)			; init index
+
+@fileLoop
+			move.l	#fsRtDirID,ioDirID(a0)	; only check root
+			addq.w	#1,ioFDirIndex(a0)		; next index
+			_GetCatInfo						; get info for file
+			cmp.w	#fnfErr,d0				; are we done?
+			beq.s	@exitCheck				; yes? then leave
+
+			btst	#4,ioFlAttrib(a0)		; folder?
+			beq.s	@checkInvis				; no? then see if it's a desktop file
+			tst.l	ioFlUsrWds(a0)			; Finder 7.0 folder?
+			bne.s	@exitCheck				; no? then warn user
+			tst.l	ioFlUsrWds+4(a0)		; Finder 7.0?
+			bne.s	@exitCheck				; no? then warn user
+			tst.w	ioFlUsrWds+20(a0)		; any files in folder?
+			beq.s	@fileLoop				; no? then check next file
+			bra.s	@exitCheck				; yes? then warn user
+
+@checkInvis
+			btst	#14,HFileParam.ioFlFndrInfo+fdFlags(a0)	; is the file Invisible?
+			bne.s	@fileLoop				; -> yes, ignore this file
+
+@checkDesktop
+			cmp.l	#'FNDR',ioFlUsrWds(a0)	; old Desktop type?
+			bne.s	@checkNewDesktop		; no? then check to see if new type
+			cmp.l	#'ERIK',ioFlUsrWds+4(a0) ; correct file type?
+			beq.s	@fileLoop				; yes? then check next file
+			bra.s	@exitCheck				; no? then warn user
+
+@checkNewDesktop
+			cmp.l	#'DMGR',ioFlUsrWds+4(a0) ; correct creator type for new Desktop?
+			beq.s	@checkType				; yes? then check type
+			cmp.l	#'pds ',ioFlUsrWds+4(a0) ; correct creator type for file sharing?
+			bne.s	@exitCheck				; no? then warn user
+
+@checkType
+			cmp.l	#'BTFL',ioFlUsrWds(a0)		; correct file type?
+			beq.s	@fileLoop					; yes? then check next file
+			cmp.l	#'DTFL',ioFlUsrWds(a0)		; no? then check other possible type
+			beq.s	@fileLoop					; yes? then check next file
+
+@exitCheck
+			unlk	a6							; get rid of parameter block
+			beq.s	exitFalse					; if no files that we care about, continue shutdown
+
+DoTheDialog
+
+ShutDownDLOGID			EQU		-16535			; ID of DLOG in System file
+ShutDownOKButton		EQU		1				; dialog item of OK button
+ShutDownCancelButton	EQU		2				; dialog item of Cancel button
+
+			pea		vcbVN(a2)					; put volume name in warning message
+			clr.l	-(sp)						; nil
+			clr.l	-(sp)						; nil
+			clr.l	-(sp)						; nil
+			_ParamText							; set dialog parameters
+
+			subq	#4,sp						; room for DialogPtr
+			move.w	#ShutDownDLOGID,-(sp)		; resource ID
+			clr.l	-(sp)						; use heap storage
+			move.l	#-1,-(sp)					; put it in front
+			_GetNewDialog
+			move.l	(sp),a2						; save dialog in a2
+			tst.l	(sp)+						; did we get a dialog?
+			beq.s	exitFalse					; no, bail
+			
+			; let the Dialog Mgr outline the OK button and handle processing
+			; of both it and the Cancel button
+			
+			subq	#2,sp						; room for OSErr result
+			move.l	a2,-(sp)					; dialogPtr
+			move.w	#ShutDownOKButton,-(sp)		; default item 
+			_SetDialogDefaultItem
+			
+												; ignore error and let _SetDialogCancelItem use it
+			move.l	a2,-(sp)					; dialogPtr
+			move.w	#ShutDownCancelButton,-(sp)	; cancel item 
+			_SetDialogCancelItem
+			addq	#2,sp						; ignore error
+
+			; do the dialog
+
+			subq	#2,sp						; space for returned item
+			clr.l	-(sp)						; use standard filter proc
+			pea		4(sp)						; VAR item.
+			_ModalDialog						; wait for OK or Cancel
+
+			move.l	a2,-(sp)
+			_DisposeDialog						; kill dialog.
+			
+			cmpi.w	#ShutDownCancelButton,(sp)+	; hit cancel button?
+			bne.s	exitFalse					; no, hit OK, so continue shutdown
+
+exitTrue	move.w	#true,d0					; don’t continue shutdown
+			bra.s	justExit
+
+exitFalse	move.w	#false,d0					; allow shutdown to continue
+
+justExit	move.l	(sp)+,a2					; restore a2
+			rts
+			
+;________________________________
+;
+;	Docking Dispatch Trap
+;
+
+DockInitSCC		MOVEM.L	D0-D2/A0-A2,-(SP)			;														<3>
+				MOVE.W	#UnimplementedTrapNumber,D0	; does the _DockingDispatch trap exist?
+				_GetTrapAddress	,NEWTOOL
+				MOVEA.L	A0,A1
+				MOVE.W	#$AA57,D0
+				_GetTrapAddress	,NEWTOOL
+				CMPA.L	A0,A1
+				BEQ.S	@Done						; -> no, skip it
+				MOVEQ	#sccOn-256,D0				; turn SCC power on
+				BSR.S	@SCCPower
+				BSR.S	InitSCC						; reset the SCC so it doesn't cause us trouble
+				MOVEQ	#sccOff,D0					; turn SCC power off
+				BSR.S	@SCCPower
+@Done			MOVEM.L	(SP)+,D0-D2/A0-A2
+				RTS
+@SCCPower
+				TestFor	hwCbPwrMgr					; does this machine have a Power Manager?
+				BEQ.S	@NoPMGR						; -> nope, skip
+				MOVE.B	D0,-(SP)
+				MOVE.L	SP,-(SP)					;  pmRBuffer
+				MOVE.L	(SP),-(SP)					;  pmSBuffer
+				MOVE.W	#1,-(SP)					;  pmLength = 1 byte to send
+				MOVE.W	#powerCntl,-(SP)			;  pmCommand = power control
+				MOVEA.L	SP,A0						; point to the parameter block
+				_PMgrOp								; turn SCC power on or off
+				LEA		pmRBuffer+4+2(SP),SP		; toss the parameter block and buffer
+@NoPMGR			RTS
+InitBData
+				DC.B	9,$C0						; do a hard reset
+				DC.B	9,$40						; reset the channel
+				DC.B	4,$4C						; set async mode (magic?)
+				DC.B	2,$00						; zero interrupt vector for dispatcher
+				DC.B	3,$C0						; DCD not an auto-enable
+				DC.B	15,$00						; no interrupts
+				DC.B	0,$10						; reset ext/sts interrupts twice
+				DC.B	0,$10
+				DC.B	1,$00						; no interrupts
+InitBLth		EQU 	*-InitBData
+	
+InitAData		DC.B	9,$80						; reset the channel
+				DC.B	4,$4C						; set async mode (magic?)
+				DC.B	3,$C0						; DCD not an auto-enable
+				DC.B	15,$00						; no interrupts
+				DC.B	0,$10						; reset ext/sts interrupts twice
+				DC.B	0,$10
+				DC.B	1,$00						; no interrupts
+InitALth		EQU 	*-InitAData
+	
+	
+InitSCC
+				TestFor	SCCIOPExists				; see if we have a SCC IOP
+				bne.s	@hasIOP						; if so, don't try to initialize it
+				MOVEA.L	SCCWr,A0					; point to SCC base write address (chan B)
+				MOVEA.L	SCCRd,A1					; point to SCC base read address (chan B)
+				LEA 	InitBData,A2				; point to channel B init data
+				MOVEQ	#InitBLth,D1				;  and set up the length
+				BSR.S	@WriteSCC					; then init channel B
+	
+				ADDQ.W	#ACtl,A0					; adjust SCC addresses for channel A
+				ADDQ.W	#ACtl,A1
+													; A2 points to channel A's init data
+				MOVEQ	#InitALth,D1				;  init data length
+@WriteSCC		MOVE.B	(A1),D2 					; read to make sure SCC is sync'ed up
+				BRA.S	@2							; delay for timing, too
+@1				MOVE.L	(SP),(SP)					; delay long for reset
+				MOVE.L	(SP),(SP)
+				MOVE.B	(A2)+,(A0)
+@2				DBRA	D1,@1
+	
+@hasIOP			RTS
+ 				
+		endwith	
+		ENDP
+		END

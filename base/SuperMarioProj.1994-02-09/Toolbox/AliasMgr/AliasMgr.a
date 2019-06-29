@@ -1,0 +1,437 @@
+;
+;	File:		AliasMgr.a
+;
+;	Contains:	Alias Manager trap dispatcher and gestalt support
+;
+;	Written by:	Prashant Patel
+;
+;	Copyright:	© 1989-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM3>	10/28/92	SWC		Changed ATalkEqu.a->AppleTalk.a.
+;		<17>	  6/2/92	JSM		Move AliasMgrInstall here (and capitalize it) from
+;									AliasMgrPatch.a since it's used by both the ROM and System
+;									builds.
+;		<16>	 2/27/91	PP		ich,#ich-AMgr-0096:Interface for GetExportedFolderInfo has
+;									changed.
+;		<15>	 1/30/91	gbm		sab, #38: Reorganize some of the include files, change CASE to
+;									OBJ to avoid several case sensitivity bugs in the assembler
+;		<14>	 1/25/91	PP		ich,#81507:Add FollowFinderAlias as an internal trap selector so
+;									Finder can use it.
+;		<13>	 1/14/91	PP		(sad) Add GetFolderName. Get rid of short branch warnings.
+;		<12>	12/20/90	PP		(ich) Added BlockInit routine.
+;		<11>	  9/1/90	PP		SetArrowCursor is selector id 29.
+;		<10>	  8/6/90	PP		Support auto volume mount for foreign file systems other than
+;									AppleShare.
+;		 <9>	  7/2/90	PP		Add ReleaseFolder and ResolveAliasFile.
+;		 <8>	 6/15/90	PP		Remove "SelectAlias" and associated Traps.  Allow a way for
+;									building AliasMgr as an INIT overpatch.
+;		 <7>	 5/10/90	JSM		Use secondary jump table so we can be a linked patch.
+;		 <6>	  5/3/90	PP		Incorporate Diet tips.
+;		 <5>	  3/8/90	PP		Add Trap selectors #8 and #9 for minimal alias support.
+;		 <4>	 2/27/90	PP		Add Trap selector #10 for FindFolderInternal.
+;		 <3>	  2/6/90	PP		Remove CatSearch glue.
+;		 <2>	  1/4/90	PP		Add gestalt support.
+;	   <2.0>	 12/8/89	dnf		remove CatSearch macro definition
+;	   <1.9>	11/27/89	prp		SetArrowCursor is a Trap selector routine.
+;	   <1.8>	10/30/89	prp		• Add AL_findVolume internally selected trap.
+;	   <1.7>	10/13/89	prp		Added AL_appendPString and AL_displayAlert as internal Trap
+;									selectors.
+;	   <1.6>	 10/2/89	prp		Added 'GetAliasInfo' routine.
+;	   <1.5>	 9/18/89	prp		AL_filterFile is an additional trap selector.
+;	   <1.4>	  9/6/89	prp		Added DisposeAlias back until DPMgr is in sync.
+;	   <1.3>	  9/6/89	prp		Changes from CodeReview.
+;	   <1.2>	  8/7/89	prp		Additional Trap selector routines.
+;	   <1.1>	  6/5/89	prp		Folder Manager is added as part of Alias Manager.
+;	   <1.0>	 5/30/89	prp		Initial Release
+;				 5/28/89	prp		Initial Creation
+;
+
+				TITLE		'AliasMgr.a - alias trap'
+				CASE		OBJ
+
+				PRINT		OFF
+				LOAD		'StandardEqu.d'
+				INCLUDE 	'LinkedPatchMacros.a'	; <17>
+				INCLUDE		'GestaltEqu.a'
+				INCLUDE		'InternalMacros.a'
+				INCLUDE		'AppleTalk.a'
+				PRINT		ON
+
+DEBUG				default		false				; debugging off by default
+FOR_AMGR_PATCH_INIT	default		false				; AliasMgrPatchINIT off by default
+
+;===============================================================================
+;
+;	ALIASMGRINSTALL()														<17>
+;
+;	InstallProc for the Alias Manager.  Calls InitFolderManager and installs
+;	the Alias Manager and Folder Manager Gestalt routines.  For this
+;	reason, Gestalt must be installed before us.
+;
+;===============================================================================
+ALIASMGRINSTALL	InstallProc	(Plus,SE,II,Portable,IIci)
+
+				IMPORT		InitFolderManager
+				IMPORT		gestaltAliasMgr
+				IMPORT		gestaltFolderMgr
+
+				JSR			InitFolderManager			; set up the Folder Manager
+
+				MOVE.L		#gestaltAliasMgrAttr,d0		; AliasMgr Gestalt selector
+				leaResident	gestaltAliasMgr,a0			; get gestaltFunction ProcPtr
+				_NewGestalt
+
+				MOVE.L		#gestaltFindFolderAttr,d0	; FolderMgr Gestalt selector
+				leaResident	gestaltFolderMgr,a0			; get gestaltFunction ProcPtr
+				_NewGestalt
+
+				RTS
+				ENDPROC									; end of ALIASMGRINSTALL
+
+;===============================================================================
+;
+;	PROCEDURE	ALIAS(); - alias manager trap
+;
+;===============================================================================
+
+				PROC
+
+				EXPORT		ALIAS
+				
+; macro to build jump table
+	if FOR_AMGR_PATCH_INIT then
+
+				Bra.s		ALIAS				; Allow this file to be compiled as a patch.
+	endif
+	
+				MACRO
+					JT		&entry
+					DC.W	JumpTo&entry - JumpTable
+				ENDM
+
+JumpTable										; offsets to alias manager routines
+				JT			FindFolder			; 0 find folder by type (Folder Manager)
+				JT			AL_CANONIFYFILE		; 1 canonify a filename				
+				JT			AL_NEWALIAS			; 2 create a new alias
+				JT			AL_RESOLVEALIAS		; 3 resolve "the" alias
+				DC.W		0					; 4 select an alias (obsolete)
+				JT			AL_MATCHALIAS		; 5 match an alias for >=1 matches
+				JT			AL_UPDATEALIAS		; 6 update an alias
+				JT			AL_GETALIASINFO		; 7 get alias information 
+				JT			AL_NEWALIASMINIMAL	; 8 create a new minimal alias
+				JT			AL_NEWALIASMINIMALFROMFULLPATH ; 9 create a new minimal alias from fullpath
+				JT			FindFolderInternal	; 10 find folder internal (For Installer)
+				JT			ReleaseFolder		; 11 release folder (Folder Manager)
+				JT			AL_RESOLVEALIASFILE ; 12 Resolve an alias created by Finder
+				JT			AL_ALIASVOLUMEMOUNT ; 13 Mount a foreign volume
+				JT			GetFolderName		; 14 get special folder name (Folder Manager)
+				JT			AL_FOLLOWFINDERALIAS ; 15 Follow an alias created by Finder
+
+ReservedPublic
+EndReserved
+; following are alias manager support routines that are good candidates for a
+; generalized file manager utility routines.
+				JT			ALI_FINDVOLBYNAME	; 16 find volume by name
+				JT			ALI_FINDDIRBYID		; 17 find directory by ID
+				JT			ALI_FINDBYNAME		; 18 find file/directory by name
+				JT			ALI_FINDFILEBYID	; 19 find file by cnodeID
+				JT			ALI_FINDFILEBYNUM	; 20 find file by file number
+				JT			ALI_ISFULLPATH		; 21 Is given path a full path?
+				JT			ALI_GETFILENAME		; 22 parse filename from full or partial path
+				JT			ALI_STRIPFILENAME	; 23 strip filename from full or partial path
+				JT			ALI_COPYPSTRING		; 24 copy a pascal string
+				JT			ALI_FSEQUALSTRING	; 25 comapare FileSystem fileName string
+				JT			ALI_BLOCKINIT		; 26 init a block with given char
+				JT			ALI_BLOCKCOMPARE	; 27 comapare two blocks
+				JT			ALI_APPENDPSTRING	; 28 append a pascal string
+				JT			SETARROWCURSOR		; 29 set arrow cursor
+JumpEnd
+
+minSelector		EQU			(JumpTable - JumpTable) / 2		; no private routines
+maxSelector		EQU			(JumpEnd - JumpTable) / 2 - 1
+minReservedSelector EQU		(ReservedPublic - JumpTable) / 2
+maxReservedSelector EQU		(EndReserved - JumpTable) / 2 - 1
+
+ALIAS			; actual dispatcher starts here
+
+lEntry
+				CMP.B		#minSelector, D0		; do range checking
+				BLT.S		lBadSelector			; too small
+				CMP.B		#maxSelector, D0
+				BGT.S		lBadSelector			; too big
+				CMP.B		#minReservedSelector, D0 ; do reserved range checking
+				BLT.S 		lDispatch				; it is a valid public call
+				CMP.B		#maxReservedSelector, D0 
+				BLE.S		lBadSelector			; reserved public call
+
+lDispatch
+				EXT.W		D0						; selector OK
+				ASL.W		#1, D0					; extend and shift
+				MOVE.W		JumpTable(D0.W), D0		; get the offset
+				JMP			JumpTable(D0.W)			; jump to it
+
+lBadSelector
+				LSR.W		#8, D0					; get the stack frame size
+				MOVEA.L		(A7)+, A0				; move the return address
+				ADD.W		D0, A7					; pop the parameters
+				MOVE.W		#corErr, (A7)			; core routine number not in range
+				JMP			(A0)					; return to caller
+
+;
+; Because linked patches don't allow word references to other modules,
+; the jump table before this one points to the following "real" jump table,
+; which does a JMP to the actual routine.
+;
+
+; macro to build "real" jump table
+
+				MACRO
+					JumpTo	&name
+					IMPORT	&name
+					JumpTo&name: JMP &name
+				ENDM
+
+				CODEREFS	FORCEJT				; we don't want PC relative here
+RealJumpTable
+				JumpTo		FindFolder			; 0 find folder by type (Folder Manager)
+				JumpTo		AL_CANONIFYFILE		; 1 canonify a filename				
+				JumpTo		AL_NEWALIAS			; 2 create a new alias
+				JumpTo		AL_RESOLVEALIAS		; 3 resolve "the" alias
+				JumpTo		AL_MATCHALIAS		; 5 match an alias for >=1 matches
+				JumpTo		AL_UPDATEALIAS		; 6 update an alias
+				JumpTo		AL_GETALIASINFO		; 7 get alias information 
+				JumpTo		AL_NEWALIASMINIMAL	; 8 create a new minimal alias
+				JumpTo		AL_NEWALIASMINIMALFROMFULLPATH ; 9 create a new minimal alias from fullpath
+				JumpTo		FindFolderInternal	; 10 find folder internal (For Installer)
+				JumpTo		ReleaseFolder		; 11 release folder (Folder Manager) 
+				JumpTo		AL_RESOLVEALIASFILE ; 12 Resolve an alias created by Finder
+				JumpTo		AL_ALIASVOLUMEMOUNT ; 13 Mount a foreign volume
+				JumpTo		GetFolderName 		; 14 Get a special folder name
+				JumpTo		AL_FOLLOWFINDERALIAS ; 15 Follow an alias created by Finder
+				JumpTo		ALI_FINDVOLBYNAME	; 16 find volume by name
+				JumpTo		ALI_FINDDIRBYID		; 17 find directory by ID
+				JumpTo		ALI_FINDBYNAME		; 18 find file/directory by name
+				JumpTo		ALI_FINDFILEBYID	; 19 find file by cnodeID
+				JumpTo		ALI_FINDFILEBYNUM	; 20 find file by file number
+				JumpTo		ALI_ISFULLPATH		; 21 Is given path a full path?
+				JumpTo		ALI_GETFILENAME		; 22 parse filename from full or partial path
+				JumpTo		ALI_STRIPFILENAME	; 23 strip filename from full or partial path
+				JumpTo		ALI_COPYPSTRING		; 24 copy a pascal string
+				JumpTo		ALI_FSEQUALSTRING	; 25 comapare FileSystem fileName string
+				JumpTo		ALI_BLOCKINIT		; 26 init a block with given char
+				JumpTo		ALI_BLOCKCOMPARE	; 27 comapare two blocks
+				JumpTo		ALI_APPENDPSTRING	; 28 append a pascal string
+				JumpTo		SETARROWCURSOR		; 29 set arrow cursor
+
+				CODEREFS	FORCEPC
+
+				ENDPROC
+
+;===============================================================================
+;
+;	PROCEDURE	gestaltAliasMgr(); - alias manager gestalt function
+;
+;  FUNCTION	gestaltAliasMgr (
+;		    	gestaltSelector: 	OSType;		= PACKED ARRAY [1..4] OF CHAR;
+;			VAR gestaltResult:		Longint;
+;			):						OSErr;		= Integer;
+;
+;===============================================================================
+
+gestaltAliasMgr			PROC	EXPORT				
+				
+					resultsStackFrame
+error				ds.w		1					; the resulting error code
+					parametersStackFrame
+gestaltSelector		ds.l		1					; the selector type
+gestaltResult		ds.l		1					; returned result
+					endStackFrame
+					
+				linkSave
+				
+				MOVE.W 		#gestaltUndefSelectorErr,D0 ; assume bad selector was passed
+				CLR.L		D1						; initialize return result code
+				CMP.L		#gestaltAliasMgrAttr,gestaltSelector(A6) 
+				BNE.S		@done					; not the right selector
+				BSET.L		#gestaltAliasMgrPresent,D1 ; set the presence bit
+				CLR.W		D0						; no error
+@done
+				MOVE.L		gestaltResult(a6),A0	; load address of result
+				MOVE.L		D1,(A0)					; return the computed result
+				MOVE.W		D0,error(A6);			; return error code
+				
+				restoreUnlinkReturn
+
+				ENDPROC
+
+;********************************************************************************
+; Since VolMount glue is not released on EASE, it is
+; released as part of Alias Manager.
+; Glue for GetExportedFolderInfo is here also.
+; Remove following code when the glue is officially released.
+;********************************************************************************
+;___________________________________________________________________________
+;
+;    	AppleShare Volume Mount Trap Glue Code
+;
+;	Ruth Hennigar
+;	Copyright Apple Computer, Inc.  1986 - 1989
+;	All Rights Reserved
+;
+;    	Modification History:
+;
+;	5/9/89	RH	New today.  Created glue code for the two new $A060 traps
+;			GetVolMountInfo and VolumeMount
+;	6/13/89	RH	Moved constants from drEqu.a to here.
+;
+;___________________________________________________________________________
+
+VolMIntf	PROC
+
+	EXPORT  GETVOLMOUNTINFOSIZE, GETVOLMOUNTINFO, VOLUMEMOUNT, GETEXPORTEDFOLDERINFO
+;
+; new $A060 traps for getVolMountInfo & VolumeMount routines
+;
+GetVMInfoSize	EQU	63		; index of getVolMountInfoSize trap	
+GetVMInfo		EQU	64		; index of getVolMountInfo trap	
+VMount			EQU	65		; index of volumeMount trap
+ServerControl	EQU	0		; index of ServerControl trap
+
+	  				
+GETEXPORTEDFOLDERINFO:
+	MOVEA.L		6(A7), A0		; get the param block pointer
+	MOVE.L		#ServerControl, D0 ; our dispatch number
+	DC.W		$A094			; special server control call Trap
+	MOVEA.L		(A7)+, A0		; move the return address
+	ADDA.L		#6, A7			; blow away the parameters
+	MOVE.W		D0, (A7)		; write function result
+	JMP			(A0)			; go home
+		
+;________________________________________________________________________________
+;
+; Routine:      GetVolMountInfoSize
+;
+; Function:	Returns the volume mount information size from the VCB that is needed 
+;		to allocate storage for actual volume mount informaion.
+;	
+; Pascal interface:
+;   Function GetVolMountInfoSize  (volRefNum: Integer;
+;                      	  sizeInBytes: ^Integer): OSErr;
+;________________________________________________________________________________
+;
+GETVOLMOUNTINFOSIZE:  
+	LINK    A6,#-ioHFQElSiz	; Allocate space for a IO ParmBlock
+	BSR.S   ClrStkPB		; Get a pointer to the cleared parameter block
+;
+; At this point, the stack looks as follows:
+;
+;   (A6) --> Old A6
+;  4(A6) --> Return address
+;  8(A6) --> Pointer to returned size info
+; 12(A6) --> Volume Ref Num
+; 14(A6) --> Return value
+;
+	MOVE.L	8(A6),ioBuffer(A0)	; Copy returned size pointer into ioBuffer
+	MOVE.W	12(A6),ioVRefNum(A0) ; Copy Volume RefNum 
+	MOVE.W	#GetVMInfoSize,D0      ; Indicate requested function
+	DC.W	$A060               ; Dispatch call
+	MOVE.W	D0,14(A6)           ; Return final result
+
+	UNLK	A6		; Pop off the call frame
+	MOVE.L	(SP)+,A0		; Save the return address
+	ADDA.W	#6,SP		; Pop off the incoming arguments
+	JMP	(A0)		; And call it a day.
+
+;________________________________________________________________________________
+;
+; Routine:      GetVolMountInfo
+;
+; Function:	Returns the information from the VCB that is needed to mount a
+;		volume (zone, server and volume name, volume password, 
+;		user name and password
+;	
+; Pascal interface:
+;   Function GetVolMountIntfo  (volRefNum: Integer;
+;                      	  volInfoPtr: ^VolumeLocation): OSErr;
+;________________________________________________________________________________
+;
+GETVOLMOUNTINFO:  
+	LINK    A6,#-ioHFQElSiz	; Allocate space for a IO ParmBlock
+	BSR.S   ClrStkPB		; Get a pointer to the cleared parameter block
+;
+; At this point, the stack looks as follows:
+;
+;   (A6) --> Old A6
+;  4(A6) --> Return address
+;  8(A6) --> Pointer to volume Information record
+; 12(A6) --> Volume Ref Num
+; 14(A6) --> Return value
+;
+	MOVE.L	8(A6),ioBuffer(A0)	; Copy volInfo pointer into ioBuffer
+	MOVE.W	12(A6),ioVRefNum(A0) ; Copy Volume RefNum 
+	MOVE.W	#GetVMInfo,D0       ; Indicate requested function
+	DC.W	$A060               ; Dispatch call
+	MOVE.W	D0,14(A6)           ; Return final result
+
+	UNLK	A6		; Pop off the call frame
+	MOVE.L	(SP)+,A0		; Save the return address
+	ADDA.W	#6,SP		; Pop off the incoming arguments
+	JMP	(A0)		; And call it a day.
+
+;________________________________________________________________________________
+;
+; Routine:	VolumeMount
+;
+; Function:	Mounts the volume specified by the zone, server and volume name, 
+;		volume password, user name and password in the VolInfo record passed
+;		into this routine.  Returns the vRefNum of the volume as well.
+;	
+; Pascal interface:
+;   Function VolumeMount  (volInfoPtr: ^VolumeLocation;
+;		   VAR volRefNum:  Integer): OSErr;
+;________________________________________________________________________________
+;
+VOLUMEMOUNT:  
+	LINK    A6,#-ioHFQElSiz	; Allocate space for a IO ParmBlock
+	BSR.S   ClrStkPB		; Get a pointer to the cleared parameter block
+;
+; At this point, the stack looks as follows:
+;
+;   (A6) --> Old A6
+;  4(A6) --> Return address
+;  8(A6) --> volRefNum
+; 12(A6) --> Pointer to volume Information record
+; 16(A6) --> Return value
+;
+	MOVE.L	12(A6),ioBuffer(A0) ; Copy volume info record into ioBuffer 
+	MOVE.W	#VMount,D0	; Indicate requested function
+	DC.W	$A060               ; Dispatch call
+	MOVE.W	D0,16(A6)           ; Return final result
+	
+	MOVEA.L	8(A6),A1		; A1 points to volRefNum parameter
+	MOVE.W	ioVRefNum(A0),(A1)	; return the vRefNum
+
+	UNLK	A6		; Pop off the call frame
+	MOVE.L	(SP)+,A0		; Save the return address
+	ADDA.W	#8,SP		; Pop off the incoming arguments
+	JMP	(A0)		; And call it a day.
+
+
+;
+; A small setup subroutine.  Assuming the caller has executed
+; a LINK A6,#-ioHFQElSiz, this routine points A0 to the start of a
+; cleared parameter block.
+;
+; D0 is trashed.
+;
+ClrStkPB    MOVEA.L A6,A0               ; Point to top of parameter block
+            MOVE.W  #(ioHFQElSiz/2-1),D0 ; DBRA word loop index
+@1          CLR.W   -(A0)               ; ...cleared.
+            DBRA    D0,@1               ;
+            RTS                         ; And we're done.
+	
+			END
+
+

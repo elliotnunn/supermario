@@ -1,0 +1,171 @@
+;
+;	File:		FontMath.a
+;
+;	Contains:	xxx put contents here xxx
+;
+;	Written by:	xxx put writers here xxx
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <2>	 11/5/90	MR		Rename FixMulDiv to LongMulDiv [rb]
+;		 <1>	10/20/90	MR		68000 versions of some routines in FontMath.c. [rj]
+;
+;	To Do:
+;
+
+			Case		On
+			Blanks		Off
+
+	IF 0 THEN
+		;	long LongMulDiv(long a, long b, long c)
+		LongMulDiv		Func			Export
+			move.l		(sp)+,a0
+			lea			(sp),a1			; get parameters
+			move.l		(a1)+,d0		; get a
+			move.l		(a1)+,d1		; get b
+			move.l		(a1),d2			; get c
+			beq.s		@div0
+			bpl.s		@1
+			neg.l		d2
+		@1:
+			asr.l		#1,d2
+			muls.l 		d1,d1:d0		; compute a*b
+			bpl.s		@2
+			neg.l		d2
+		@2:
+			add.l		d2,d0
+			bfexts		d2{0:1},d2
+			addx.l		d2,d1
+			divs.l		(a1),d1:d0		; compute (a*b+c/2)/c
+			bvc.s		@3
+			move.l		(a1),d0
+		@div0:
+			eor.l		d1,d0
+			bmi.s		@div1
+			move.l		#$7fffffff,d0
+			bra.s		@3
+		@div1:
+			move.l		#$80000000,d0
+		@3:
+			jmp			(a0)
+	ENDIF
+
+
+;	long ShortMulDiv(long a, short b, short c)
+;
+;	d3			a
+;	d4			b
+;	d5			c
+;	d6			sign
+;
+ShortMulDiv		Func			Export
+	move.l		(sp)+,a0		; get return address
+	move.l		sp,a1			; get parameters
+	movem.l		d3-d6,-(sp)
+@0:
+	move.l		(a1)+,d3		; get a
+	smi			d6				; set sign
+	bpl.s		@1
+	neg.l		d3				; a = -a
+@1:
+	move.l		(a1)+,d4		; get b
+	bpl.s		@2
+	not.b		d6				; change sign
+	neg.l		d4				; b = -b
+@2:
+	move.l		(a1)+,d5		; get c
+	bpl.s		@3
+	not.b		d6				; change sign
+	neg.l		d5				; c = -c
+@3:
+	move.w		d3,d0			; get a.lo
+	mulu.w		d4,d0			; compute a.lo * b
+	move.l		d5,d1			; get c
+	asr.l		#1,d1			; compute c / 2
+	add.l		d1,d0			; compute a.lo * b + c / 2
+	move.l		d0,d1
+	clr.w		d0
+	swap		d0				; get (a.lo * b + c / 2).hi
+	move.l		d3,d2
+	swap		d2				; get a.hi
+	mulu.w		d4,d2			; compute a.hi * b
+	add.l		d2,d0			; compute a.hi * b + (a.lo * b + c / 2).hi
+	divu.w		d5,d0			; compute the hi word of the result
+	bvs.s		@div0
+	bmi.s		@div0
+	swap		d0				; get the remainder of the division
+	swap		d1
+	move.w		d0,d1
+	swap		d1				; put the remainder in hi word
+	divu.w		d5,d1			; compute lo word of result
+	move.w		d1,d0			;join result
+	tst.b		d6				; check sign
+	beq.s		@done
+	neg.l		d0
+	bra.s		@done
+@div0:
+	moveq		#1,d0
+	ror.l		#1,d0			; negative infinity
+	tst.b		d6				; check sign
+	bne.s		@done
+	not.l		d0				; positive infinity
+@done:
+	movem.l		(sp)+,d3-d6
+	jmp			(a0)
+
+
+
+;	long ShortFracMul(long a, ShortFrac b)
+;
+;	d0			hilong
+;	d1			midlong
+;	d2			lowlong
+;	d3			a
+;	d4			b
+;	d5			sign
+;
+ShortFracMul	Func			Export
+	move.l		(sp)+,a0		; get return address
+	move.l		sp,a1			; get parameters
+	movem.l		d3-d5,-(sp)
+@0:
+	move.l		(a1)+,d3		; get a
+	smi			d5				; set sign
+	bpl.s		@1
+	neg.l		d3				; a = -a
+@1:
+	move.l		(a1)+,d4		; get b
+	bpl.s		@2
+	not.b		d5				; change sign
+	neg.l		d4				; b = -b
+@2:
+	move.l		d3,d1			; get a
+	swap		d1				; a.hi in d1.w
+	mulu.w		d4,d1			; compute a.hi * b
+	swap		d1				; (a.hi * b).lo in d1.hi and vice-versa
+	move.w		d1,d0			; grab (a.hi * b).hi in d0.w
+	move.w		#$2000,d1		; d1 + (1 << 13) { like clr.w and add.l }
+	move.w		d3,d2			; get a.lo
+	mulu.w		d4,d2			; compute a.lo * b
+	add.l		d1,d2			; a.lo * b + ((a.hi * b).lo).hi + (1 << 13)
+	cmp.l		d2,d1			; check for overflow
+	bls.s		@3
+	addq		#1,d0			; carry bit
+@3:
+	swap		d0
+	clr.w		d0
+	lsl.l		#2,d0			; d0 <<= 18
+	andi.w		#$c000,d2		; kill low 14 bits
+	rol.l		#2,d2
+	swap		d2				; d2 >>= 14
+	add.l		d2,d0			; here's the unsigned answer
+	tst.b		d5				; check sign
+	beq.s		@done
+	neg.l		d0
+@done:
+	movem.l		(sp)+,d3-d5
+	jmp			(a0)
+
+	END

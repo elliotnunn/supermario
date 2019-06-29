@@ -1,0 +1,765 @@
+;
+;	File:		PrintGlue.a
+;
+;	Contains:	This code is the printing glue for 128K ROM printing
+;
+;	Copyright:	© 1985-1993 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM4>	 6/28/93	kc		Roll in Ludwig.
+;	   <LW2>	 6/25/93	fau		(with mal and chp):  If the PDEF is 32 bytes or less, go flush
+;									the cache, in case the developer is using the PDEF as a stub and
+;									stuffing their own code.
+;	   <SM3>	 11/5/92	SWC		Changed PrEqu.a->Printing.a and
+;									PrintCallsEqu.a->PrintTrapsEqu.a.
+;		<SM1>	 6/15/92	CSS		Take out forRom and CubeE conditionals because the forRomed code is old
+;									and this is CubeE.  The net effect of which is to make printing work
+;									on SuperMario!!!!!
+;		<17>	12/16/91	IH		Fix 1018177 in theFuture. Search for symbol "PURGEALIAS".  Do
+;									not release the print driver alias and make it non-purgable
+;									before calling ResolveAlias.
+;		<16>	11/27/91	DTY		Don’t save LastSPExtra around _HOpenResFile any more now that
+;									_HOpenResFile checks to see if the font caches should be
+;									flushed.
+;		<15>	 10/4/91	gbm		#1013134,#1013156: Work around a case where the font caches
+;									would get flushed repeatedly during printing
+;		<14>	  3/6/91	NB		Bug: NB-3. Reviewed by csd. An earlier fix to error handling
+;									caused the error to not be overwritten if it was already set.
+;									However, since PrOpen doesn't reset the error to noErr at
+;									startup, any printing error that stays in low-mem after closing
+;									the printing manager prevents subsequent printing calls. Now
+;									PrOpen (actually PrOpenDrvr) will reset the error to noErr
+;									before opening the driver.
+;		<13>	  3/5/91	PN		Fix the warning by putting back the END statement at the end
+;		<12>	  3/1/91	NB		If the resource for the alias is not found, then we would
+;									normally return resNotFound. The glue used to return fnfErr
+;									whenever it couldn't open the driver and applications have coded
+;									for that error. Rather than add an error code, we map
+;									resNotFound to fnfErr and save the user some grief. We also put
+;									PrError into D0 at exit. This is needed because PrLoadDriver
+;									returns the error in D0.
+;		<11>	 2/21/91	NB		Bug: NB-2. Reviewed by dba. Fixed a bug in PrLoadDriver in which
+;									it was overwriting the error. This would occasionally cause a
+;									cancel request from the user (iUsrAbort) to be replaced with
+;									noErr. Now it preserves the error if the error is already set.
+;		<10>	  8/9/90	CCH		Added System 6 print glue back in, conditionalized for ROM only.
+;		 <8>	  8/1/90	gbm		fix Darin “BoneHead” Adler’s “optimization”
+;		 <7>	 7/23/90	dba		change this into a linked patch
+;		 <6>	 7/20/90	gbm		get rid of the warning
+;		 <5>	 5/18/90	PP		Pass address of “fromFile” correctly to ResolveAlias call.
+;		 <4>	 4/17/90	NB		Removed GetResource error messages when the alias is not present.
+;									Fixed a bad cleanup condition (called ReleaseResource on a nil
+;									handle on an error (no harm, though)).
+;		 <3>	 4/10/90	NB		Missed a TST.W D0. Without which, the condition codes for the
+;									BNE.S which followed weren't always right. This caused
+;									occasionally stack explosions.
+;				  4/9/90	Nik		Added call to PrLoadDriver. This loads in the driver based on
+;									the 'alis' -8192 resource in the system file, rather than on the
+;									system printer string. OpenResFile and .Print also make this
+;									call, instead of doing it themselves.
+;	   <1.2>	 9/20/89	CCH		Rolled in System version from System sources.
+;	   <1.3>	 8/28/89	SES		Removed references to nFiles.
+;	   <1.2>	  8/4/89	NMB		Restored to 6.0 version of PrGlue. Ginsu is no longer in the 7.0
+;									builds of the system (sigh). The glue is now a ptch, rather than
+;									part of Rom7xFix.a, at least....
+;	   <1.1>	  5/8/89	NMB		Gutted the whole thing and replaced it with a new glue which
+;									supports the new printing manager (Ginsu)
+;	   <1.0>	11/16/88	CCH		Added to EASE.
+;				 2/22/87	Jay		1). Restore curMap before jumping into the print code. This used
+;									to be done after comming back from the print code. The reason
+;									for this fix is that by leaving curMap pointing to us we might
+;									kick the application out of the resource search path. What if we
+;									need a resource out of the application file while we are inside
+;									the print code? 2). Also, under PrintOpen, Move PrintVars+iPrErr
+;									to d0 instead of testing it. This is because if PrDrvrOpen
+;									failed then it puts the error is in low memory but D0 (which is
+;									also the error) gets written over on the way out from
+;									PrDrvrOpen. PrintOpen tests low memory and if it is an error,
+;									goes to LLOut which puts D0 in low memory! D0 at this point is
+;									bad and the application does not get the correct error code. 3).
+;									Save curMap in a3 before getting the PDEF resource the first
+;									time.
+;				 2/13/87	Jay		 1). Fixed a BAD bug with stack corruption on error exit if the
+;									printer resource file does not exist in the system folder. - In
+;									OpenRF, return _OpenRFPerm error in d0 - Removed ResErr check
+;									after OpenRF call under OpenPrRF. The error is already in d0. -
+;									Under OpenPrRF, if we have an error from OpenRF, put that error
+;									in low memory and branch to GlueAbort. It used to bne to LLOut.
+;									- Cleaned up GlueOut to eliminate call to _BlockMove. 2). Don't
+;									close the driver during PrClose. Close the resource file only.
+;									This is to eliminate the overhead of going thru .Print
+;									everytime. NOTE: The old PrLink used to leave the driver open.
+;									It must have been changed when PrLink was changed to PrGlue (I
+;									think!). - Removed call to _PrDrvrClose from PrintClose.
+;				12/23/86	Jay		If the GetResource call to get a PDEF fails, don't give up. The
+;									printer resfile may not be in the resource search path. Save and
+;									restore the user resource map around the GetResource (for PDEF)
+;									call. Get the printer resfile refnum from the low memory print
+;									var ($944+$E) or open the printer resource file to get it. After
+;									opening the printer resource file, save the refnum in low
+;									memory. The code to get the printer resfile refnum is now in a
+;									procedure called OpenRF. Check the print error after _PrDrvrOpen
+;									call in PrintOpen.
+;				 11/7/86	Jay		Fixed bugs in PrDrvrDCE and PrDrvrVers. Put the result on the
+;									stack at (sp) instead of at 12(a6). Then, jump to GlueOut
+;									instead of LLOut. Changed Bra.s at PrOCerr to Bra.
+;				 11/7/86	Jay		Fixed bug in PurgePr and NoPurgePr. Check the lower byte of
+;									flags to see if the driver is RAM based.
+;				  8/1/86	David		Added PrGeneral call
+;				 9/17/85	Leo		Converted to Ira's New Assembler
+;				 9/10/85	Leo		New trap files, added GoSetVol Changed this file to PrintGlue.a
+;									no include files
+;				 8/17/85	Leo		Integrated PrScreen, went to single Trap and selector.
+;				  8/6/85	Leo		Added calls to SetVol/GetVol
+;				 7/16/85	Leo		Fixed bug with stripping return values Removed PrCfgDialog Fixed
+;									values in PrGlueTable
+;				 7/13/85	Leo		from old PrLink
+;
+; This code is the printing glue for 128K ROM printing
+; calls.  In this ROM, there is a single trap for printing,
+; which is this code.  This code takes the selctor, which
+; is the last parameter to every printing call, and
+; dispatches to the correct routine.
+;
+; There are two types of printing routines:  those related
+; to the high-level (PrOpenPage, etc.) interface, and
+; those related to the low-level (driver calls) interface.
+; The low-level interface calls are also referred to as
+; 'non-link' routines throughout the comments, for reasons
+; which totally escape me.
+;
+; The high-level interfaces are handled as one block,
+; collectively referred to as PrGlue.  These routines
+; simply fetch the appropriate PDEF resource from the
+; current printer resource file, and jsr to a certain
+; offset into the resource.  Which PDEF to use and
+; how far into the PDEF to Jsr to are recorded in
+; PrGlueTable, along with useful information like
+; the number of bytes of parameters and return value
+; there are for each entry.  This information is used
+; to allow PrGlue to build a stack frame for the routine
+; and call the PDEF, after which it copies the return
+; information back up on the stack and returns.
+;
+; The non-link routines are mostly calls on the
+; .Print driver.  They get themselves a iopb and
+; make the call, or twiddle some aspect of the
+; driver.  The routines that fool with the DCE
+; of the driver or the handle to the driver itself
+; get the DCE by making a Status call on the
+; driver, and pulling the DCEPtr out of the CSParam
+; area of the iopb.
+;
+; PrOpen and PrClose are high-level routines that
+; do not dispatch to a PDEF.  They are responsible
+; for opening/closing the current printer resource file.
+; They also Open/Close the .Print driver.
+;
+; These routines are called with a final parameter,
+; in addition to the ones listed in Inside Mac.
+; As the last parameter, they take a longword
+; full of information.  The format of this long
+; is like so:
+;
+; 31	   23	 	15		 7	  	  0
+; +--------+--------+--------+--------+
+; |xxxxxxxx|xxxxxxxx|xxxxxxxx|xxxxxxxx|
+; +--------+--------+--------+--------+
+; Bits 31-27: Selector for the various routines in the glue
+; Bits 26-24: Number of bytes of function result for this routine
+;			  (must be either 0, 2, or 4)
+; Bits 23-16: ID of PDEF to call for high level routines
+; Bits 15-08: The number of bytes of parameters
+;			  to this routine
+; Bit  07:	  1 if the PDEF should be unlocked after
+;			  the call (high level routines)
+; Bits 06-00: The offset into the PDEF to Jsr to
+;			  (high level routines)
+; 31			  23			  15			  7				  0
+; +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+; |		    |	  |				  |				  |	|			  |
+; +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+;	   |       |          |               |        |       |
+;	   |  Result Bytes	  |               |    Unlock Flag |
+;Routine Selector     PDEF ID      Parameter Bytes   PDEF Offset
+;
+;
+; Routine				Selector value
+; -------               -------- -----
+; (high-level routines)
+; PrOpenDoc				0
+; PrCloseDoc			1
+; PrOpenPage			2
+; PrClosePage			3
+; PrintDefault			4
+; PrStlDialog			5
+; PrJobDialog			6
+; PrStlInit				7
+; PrJobInit				8
+; PrDlgMain				9
+; PrValidate			10
+; PrJobMerge			11
+; PrPicFile				12
+; PrHack				13
+; PrGeneral             14
+; (low-level and 'non-link' routines)
+; PrDrvrOpen			16
+; PrDrvrClose			17
+; PrDrvrDCE				18
+; PrDrvrVers			19
+; PrCtlCall				20
+; PrPurge				21
+; PrNoPurge				22
+; PrError				23
+; PrSetError			24
+; PrOpen				25
+; PrClose				26
+;
+
+			LOAD			'StandardEqu.d'
+			INCLUDE			'Printing.a'
+			INCLUDE         'PrPrivate.a'
+			INCLUDE			'PrintTrapsEqu.a'
+			INCLUDE			'Folders.a'
+			INCLUDE			'Aliases.a'
+			INCLUDE			'LinkedPatchMacros.a'
+
+			MACHINE MC68020							; needed for cache flush <LW2> fau
+
+;************************************************************************************************
+;* _MDebugStr takes a string for a parameter and calls DebugStr with it.
+;*
+;* Example: 	_MDebugStr 'In PrOpen'
+;************************************************************************************************
+
+				MACRO
+				_MDebugStr	&dbgStr
+
+				PEA			@dbgAddr
+				_DebugStr
+				BRA.S		@pastDbgAddr
+@dbgAddr		DC.B		&dbgStr
+				ALIGN		2
+@pastDbgAddr
+				ENDM
+
+PrGlue			PatchProc	$A8FD,(Plus,SE,II,Portable,IIci)
+;
+; A few constants regarding selector values:
+PrDocLimit		EQU		3			; Highest selector for doc loop routine
+PDEFLimit		EQU		15			; Highest selector for high-level (PDEF-calling)
+									; routines
+;
+; PrGlue Entry points are below.  The idea of this entry setup is to allow PrGlue
+; to determine what entry point was used in very little code space.  The Bsr.s
+; pushes the return address on the stack, which PrGlue then uses to derive which
+; entry point was used.  The key is that the entry points here are arranged in
+; the same order as the table PrGlueTable, below.
+;
+; Constants:  Offsets into the PrGlue information
+Selectr	EQU		8+0			; Selector for routine invoked	(Most  significant 5 bits)
+FuncByt	EQU		8+0			; Bytes of function result		(Least significant 3 bits)
+PDEFId	EQU		8+1			; ID of the PDEF to call		(8 bits)
+ParmByt	EQU		8+2			; Bytes of parameters			(8 bits)
+CodeOfs	EQU		8+3			; Offset into the PDEF of the code for this function (7 bits)
+;
+; Parameters to the Glue:
+longAt	EQU		8			; Offset from a6 of longWord o'info
+;
+; PrGlue itself
+
+		Link	a6,#0					; Stack frame, no local variables
+		Movem.l a3-a4,-(sp)				; Save the regs we will use to hold info across
+										; the call to the actual print routine
+; Get selector in d1
+		Moveq	#0,d1
+		Move.b	Selectr(a6),d1			; Get the byte containing it
+		Lsr.b	#3,d1					; Move selector over
+		Beq.s	OpenDocOnly				; PrOpenDoc has a bunch of special case code, so don't
+										; get the ID the way we do it normally
+; If it's a low-level call, dispatch to that stuff
+		Tst.b	Selectr(a6)				; Test the selector: high-level or low-level?
+		Bmi		LowLevel				; Send the low-level calls off to thier corner
+; Get Id of PDEF that this call will be dispatched to in d2
+		Moveq	#0,d2					; Preset for PDEFId in d2
+		Move.b	PDEFId(a6),d2			; Get PDEF Id from Glue Parameter.
+		Bne.s	GetPDEF					; If that's nonzero, it's the id.  If it's zero,
+										; the id should be gotten from printing globals
+		Moveq	#3,d2				  	; Mask for PrintLoop type from Globals.  This
+										; is also the PDEF Id to use
+		And.b	PrintVars+bDocLoop,d2	; Get that info into d2
+		Bra.s	GetPDEF					; ...and go to it
+OpenDocOnly
+; For OpenDoc, we get the print loop type, which is the PDEF Id, from
+; the print record passed by the caller as a parameter.
+		Move.l	20(a6),a0				; Get handle to print record
+		Move.l	(a0),a0					; Deref Handle
+		Moveq	#3,d2					; Mask for doc loop type
+		And.b	PrJob+bJDocLoop(a0),d2	; Mask off them bits
+		Andi.b	#$FC,PrintVars+bDocLoop	; Clear out those two bits in PrintVars
+		Or.b	d2,PrintVars+bDocLoop	; and put the new bits in
+;
+; Get that PDEF
+GetPDEF
+		Move.w	CurMap, a3				; <22Feb87> JNP save user's resfile refnum in a3
+        Clr.l   -(sp)                   ; Room for the GetResource result
+        Move.l  #'PDEF',-(sp)           ; Type
+        Move    d2,-(sp)                ; id
+        _GetResource
+        Move.l  (sp)+,d0 
+		Tst.l	d0						; Test the result of GetResource
+		Bne.s	GotPDEF					; we have the PDEF
+		
+; CurMap may be set to point to the user's res file. We need to set it to point to our resfile.
+; Check the low memory global iPrRefNum. If it is $FFFF (i.e is not used and is initialised)
+; then open the printer resource file to get our refnum. Otherwise use the refnum stored in the 
+; low memory global to call _UseResFile. Check the result of this call, if it failed then open 
+; the printer resource file to get our ref num.
+
+		Cmpi.w	#$FFFF, iPrRefNum		; is our refnum in low memory?
+		Beq.s	OpenPrRF				; no, open the printer resource file
+		Move.w	iPrRefNum, -(sp)		; Try _UseResFile on this refnum
+		_UseResFile
+		Tst.w	ResErr					; Did it work?
+		Bne.s	GetRsrc					; Yes, so get the PDEF
+OpenPrRF
+		MOVE.W	D2, -(SP)				; save D2 across the call to FetchDriver
+		Bsr		FetchDriver				; Open our res file
+		MOVE.W	(SP)+, D2				; restore D2 as soon as possible
+		Tst.w	d0						; success?
+		Beq.s	Continue				; <13Feb87> JNP yes, continue
+		Move.w	d0, PrintVars+iPrErr	; <13Feb87> JNP no, set error and get out.
+		Bra		GlueAbort				; <13Feb87> JNP
+Continue								; <13Feb87> JNP
+		Move.w	iPrRefNum, -(sp)
+		_UseResFile						; our resfile is opened, now let's use it.
+GetRsrc
+        Clr.l   -(sp)                   ; Room for the GetResource result
+        Move.l  #'PDEF',-(sp)           ; Type
+        Move    d2,-(sp)                ; id
+        _GetResource					; get that PDEF
+        Move.l  (sp)+,d0 
+		Tst.l	d0						; Test the result of GetResource
+		Bne.s   GotPDEF
+; Can't get the resource... set PrError, and jump down to the return point
+		Move.w	a3, -(sp)				; User's res file refnum
+		_UseResFile						; Restore user's Resource map. Refnum is on the stack.
+		Move.w	#resNotFound,PrintVars+iPrErr
+		Bra		GlueAbort
+;
+GotPDEF
+		Move.l	d0,a4					; Transfer the handle to an a-reg
+		Move.l	a4,a0					; Lock that baby down
+
+; Some programmers are pretty slimy and load a PDEF that is empty.  They then					<LW2> fau
+; stuff some code into it.  However, since HLOCK does not flush the cache anymore,				<LW2> fau
+; the code that they stuff into it might not get written back to memory.  To solve this,		<LW2> fau
+; we check here whether the PDEF resource size is less than, say, 32 bytes.  If so, we			<LW2> fau
+; assume that they have already loaded the PDEF and modified it, so we flush the cache			<LW2> fau
+; for them.																						<LW2> fau
+
+		_GetHandleSize					; How big is our PDEF Handle					<LW2> fau
+		cmp.l		#32,D0				; Is it "small"									<LW2> fau
+		bhi.s		@RealPDEF			; no, don't flush the cache						<LW2> fau
+		jsr			([jCacheFlush])		; else, flush the caches.						<LW2> fau
+@RealPDEF										;										<LW2> fau
+		_HLock
+;<22Feb87> JNP Restore curMap before jumping into the print code.
+		Move.w	a3, -(sp)				; <22Feb87> JNP user's resfile refnum
+		_UseResFile						; <22Feb87> JNP Restore user's Resource map.
+; Copy the parameters and return value of the routine down onto the stack again
+		Lea		12(a6),a0				; Start of old parameters
+		Moveq	#7,d0					; Get bytes of param + bytes of return value in d0
+		and.b	FuncByt(a6),d0			; Together, these are the number of bytes to copy
+		Add.b	ParmByt(a6),d0
+		Sub.w	d0,sp					; We know the thing isn't actually more than a word wide
+		Move.l	sp,a1					; Beginning of destination
+		_BlockMove						; Note: Leaves d0 = 0
+; Call the routine.  The offset into the PDEF to jump to is given by the glue parameter
+		Move.b	CodeOfs(a6),d0			; Get offset (note high part of d0 is still 0)
+		Andi.b	#$7F,d0					; Mask off the unlock bit that is stored there
+		Move.l	(a4),a0					; Deref PDEF handle
+		Jsr		0(a0,d0)				; Call the routine
+; Unlock the PDEF if the unlock bit from PrGlueTable is set
+		Move.b	CodeOfs(a6),d0			; The unlock bit is the high-order bit of this byte, so...
+		Bpl.s	NoUnlock
+		Move.l	a4,a0
+		_HUnlock						; make it float again
+NoUnlock
+		Bra		GlueOut
+;
+; All the low-level routines are implemented here
+LowLevel
+; Allocate and set up for .Print call a iopb on
+; the stack
+		Sub.w	#IOQElSize,sp			; Get an iopb
+		Lea		PrintName,a0			; Address of .Print string
+		Move.l	a0,ioFileName(sp)		; Put in iopb
+		Move.w	#iPrDrvrRef,ioRefNum(sp); Put refNum in iopb
+		Clr.b	ioPermssn(sp)			; Always a good idea
+		Move.l	sp,a0					; Put pointer in a0
+; The selector is in d1.  We're gonna do a jump table on
+; it.  After the jump table, everybody should branch
+; back to LLOut.
+		Moveq	#0,d0					; Since LLOut uses d0 as a return code,
+										; let's make sure it's something reasonable
+		Bclr	#4,d1					; We don't want the high bit
+		Add.w	d1,d1					; Shift selector left one
+		Move.w	LLJump(d1),d1			; Get jump table entry
+		Jmp		LLJump(d1)				; Go to correct entry
+LLJump
+		DC.W	DrvrPrOpen-LLJump	 	; PrDrvrOpen			16
+		DC.W	DrvrPrClose-LLJump		; PrDrvrClose			17
+		DC.W	DrvrDCE-LLJump			; PrDrvrDCE				18
+		DC.W	DrvrVers-LLJump			; PrDrvrVers			19
+		DC.W	CtlCall-LLJump			; PrCtlCall				20
+		DC.W	PurgePr-LLJump			; PrPurge				21
+		DC.W	NoPurgePr-LLJump		; PrNoPurge				22
+		DC.W	GetError-LLJump			; PrError				23
+		DC.W	SetError-LLJump			; PrSetError			24
+		DC.W	PrintOpen-LLJump		; PrOpen				25
+		DC.W	PrintClose-LLJump		; PrClose				26
+		DC.W	LoadDriver-LLJump		; Load Driver			27
+		DC.W	LLBadParam-LLJump		; not implemented		28
+		DC.W	LLBadParam-LLJump		; not implemented		29
+		DC.W	LLBadParam-LLJump		; not implemented		30
+		DC.W	LLBadParam-LLJump		; not implemented		31
+LLBadParam
+		Move.w	#paramErr,PrintVars+iPrErr	; Yes, say params in error
+GlueAbort
+		Moveq	#0,d1					; Get the number of bytes of parameter to this entry in d1
+		Move.b	ParmByt(a6),d1			; Get from the glue parameter, source of all knowledge...
+		Bra		PrExit
+
+LoadDriver
+		BSR		FetchDriver				; error in D0
+
+;	LLOut is the exit point for this routine. It takes the error in D0 and sets
+;	iPrErr with it. We only want that to happen under two circumstances:
+;	[1] when the error is uninitialized and
+;	[2] when the error is noErr.
+;	If the error is already set, we want to leave it alone. This code manages
+;	that change.		<11>
+
+		MOVE.W	PrintVars+iPrErr, D1	; get the error in D1 (faster than low-mem access)
+		CMPI.W	#-1, D1					; is error uninitialized?
+		BEQ		LLOut					; Yes, use D0 to set it.
+		
+		TST.W	D1						; Otherwise, is an error pending?
+		BZ		LLOut					; no, so set the error from D0 in LLOut
+		MOVE.W	D1, D0					; otherwise, refresh the D0 error for exit
+		BRA		LLOut					; LLOut will therefore not reset the error.
+
+PrintOpen
+		_PrDrvrOpen						; Open the .Print driver
+		Move.w	PrintVars+iPrErr, d0	; <22Feb87> JNP Move the error into d0
+		BNE.S	PrOCerr					;abort if error.
+		ST		-(SP)					;Mark call "open", by setting a byte true on stack (NB, 3/23/90)
+		BRA.S	PrOCcom
+PrintClose
+;<13Feb87> JNP removed call to _PrDrvrClose
+		; DON'T check for an answer		; just keep slogging through
+		SF		-(SP)					;Mark Call "close" by setting stack byte false. <NB: 3/23/90>
+PrOCcom
+		Bsr		FetchDriver				; Open the printer resource file, error in D0
+		MOVE.B	(SP)+, D1				; get the flag byte in D1. Always clean up stack!
+
+		Tst.w	D0
+		Bne.s	PrOCerr					; Error! get out
+; Test result of OpenResFile
+		Move.w	iPrRefNum, d0			; get the refnum in d0
+		Tst.w	ResErr
+		Bne.s	@26
+;Now return for opens, or close the resfile with the id
+;found above if closing.
+		TST.B	D1						;Open Call?
+		BNZ.S	@26						;Yes: Go home
+		MOVE.W	D0,-(SP)				;No: CloseResFile. Push the refnum param
+		_CloseResFile
+@26
+		Move.w	ResErr,d0
+PrOCerr
+		Bra		LLOut
+DrvrPrOpen
+		CLR.W	PrintVars+iPrErr		; force error to noErr at startup for a clean beginning
+		_Open							; Do the open
+		Bra.s	LLOut					; and out
+DrvrPrClose
+		_Close							; Do the close
+		Bra.s	LLOut					; and out
+DrvrDCE									;
+		Bsr.s	GetDCEHandle			; Get DCE handle in a0
+		add.w 	#IOQELSize-4, sp		; Leave room for the DCEHandle
+		Move.l	a0, (sp)				; Move the handle to the stack, 
+										; Glueout will pick up the value and adjust the stack
+		Bra.s	GlueOut					; get out
+DrvrVers								; 
+		Bsr.s	GetDCEHandle			; Get DCE handle in a0
+		Move.l	(a0),a0					; Deref it
+		Moveq	#0, d0
+		Move.b	DCtlQueue+1(a0),d0		; Get the version byte
+		add.w 	#IOQELSize-2, sp		; Leave room for one word
+		Move.w	d0, (sp)				; Move the version# to the stack, 
+										; Glueout will pick up the value and adjust the stack
+		Bra.s	GlueOut					; Get out
+CtlCall
+		Move.l	12(a6),csParam+8(a0)	; lParam3
+		Move.l	16(a6),CSParam+4(A0)	; lParam2
+		Move.l	20(a6),CSParam(A0)		; lParam1
+		Move.w	24(a6),CSCode(A0)		; iWhichCtl
+		_Control
+		Bra.s   LLOut					; and out
+PurgePr
+		Bsr.s	GetDCEHandle			; Get DCE handle in a0
+		Move.l	(a0),a0					; Deref DCE handle
+		Btst	#dRAMBased,dCtlFlags+1(a0); Is this a RAM-based driver?
+		Beq.s	LLOut					; No?  Well then it's not gonna purge
+		Move.l	DCtlDriver(a0),a0		; Get driver handle
+		_HPurge							; make purgeable
+		Bra.s	LLOut
+NoPurgePr
+		Bsr.s	GetDCEHandle			; Get DCE handle in a0
+		Move.l	(a0),a0					; Deref DCE handle
+		Btst	#dRAMBased,dCtlFlags+1(a0); Is this a RAM-based driver?
+		Beq.s	LLOut					; No?  Well then it's won't purge anyway
+		Move.l	DCtlDriver(a0),a0		; Get driver handle
+		_HNoPurge						; make non purgeable
+		Bra.s	LLOut
+GetDCEHandle
+		Move.w	#1,csCode(a0)			; The old get-the-DCE status call
+		_Status
+		Move.l	csParam(a0),a0			; Get DCE Handle
+		Rts
+GetError
+		add.w	#IOQElSize-2,sp			; Strip parameter block except for one word
+		Move.w	PrintVars+iPrErr,(sp)	; Get error code
+		Bra.s	GlueOut
+SetError
+		Move.w	12(a6),d0				; Set the error code in register
+;
+; LLOut: All the low-level routines return here, with
+; their error code in d0.
+LLOut
+		Add.w	#IOQElSize,sp			; Strip parameter block
+		Move.w	d0,PrintVars+iPrErr		; Set return code
+GlueOut
+;
+; Get the number of bytes of parameter to this entry in d1
+		Moveq	#0,d1
+		Move.b	ParmByt(a6),d1			; Get from the table, source of all knowledge...
+; Copy the function value, if any, back up to the caller's stack frame
+		Moveq	#7,d0					; We're going for # bytes function value in d0
+		and.b	FuncByt(a6),d0			; Got 'em
+		Beq.s	NoRetVal
+		Move.l	sp,a0					; The function left its result on top of stack
+		Lea		12(a6,d1),a1			; The place we want to go is after the original params
+		Lsr.w	#1, d0					; <13Feb87> JNP
+		Bra.s	@1						; <13Feb87> JNP
+@2		Move.w	(sp)+, (a1)+			; <13Feb87> JNP
+@1		Dbf		d0, @2					; <13Feb87> JNP
+NoRetVal
+		Move.w	PrintVars+iPrErr, d0	; Leave function result in D0 <12> NB
+PrExit
+;
+; Unwind our stack frame and strip the params (# bytes params still in d1)
+		Movem.l	(sp)+,a3-a4
+		Unlk	a6
+		Move.l	(sp)+,a0				; Return address
+		Adda.l	d1,sp					; Strip params
+		Addq	#4,sp					; Strip glue parameter
+		Jmp		(a0)					; ...and we're out
+;
+; Subroutines for PrGlue
+;
+
+kStartupDisk		EQU	-1
+
+;************************************************************************
+; FindSpecialFolder - find the dirID of a special folder
+;	<12jan90 fjs, 3/22/90 used a stack frame: nb>
+;
+;	in:	d0 = foldertype 	(ie 'extn')
+;	out:	d0 = dirID 			(or 0 if an error occurred)		( this is a lie --sad & ich )
+;************************************************************************
+
+FSFStackFrame	RECORD	0,decr
+
+vRefNum			DS.W	1
+dirID			DS.L	1
+
+kFSFSize		EQU	*
+				ENDR
+
+FindSpecialFolder
+				WITH		FSFStackFrame
+				LINK		A6, #kFSFSize
+				SUBQ.W		#2, SP						; space for error
+				MOVE.W		#kStartupDisk, -(SP)		; this volume
+				MOVE.L		D0, -(SP)					; folder type (input)
+				SF			-(SP)						; don't create
+				PEA			vRefNum(A6)					; ptr to the output vRefNum
+				PEA			dirID(A6)					; ptr to output dirID
+				_FindFolder
+				MOVE.W		(SP)+, D0					; fetch error
+				BNZ.S		@bail						; oh, well. Unlink and out.
+
+				MOVE.L		dirID(A6), D0				; if no error, copy dirID into output reg.
+
+@bail			UNLK			A6
+				RTS
+				ENDWITH
+
+;************************************************************************
+; FetchDriver: open the system printer's resource file:
+;	We do this by resolving the alias written into the system file by
+;	the chooser.  This alias maps from the system file to the driver.
+;	We canonify the system file, and then call ResolveAlias to create
+;	a canonified representation of the driver.  That representation
+;	contains the information needed by HOpenResFile, which we then call.
+;	Any error is returned in D0.
+;************************************************************************
+
+FetchDriver
+
+;************************************************************************
+; CanonSysFile: Canonify the system file
+;
+;	sysFileCanon(A6) contains the output CanonSpec if the routine succeeds.
+;	If an error occurs, the entire routine is abandoned, with the error in D0.
+;
+; pascal OSErr CanonifyFile(short vRefNum,
+;							long dirID,
+;							const Str255 *fileName,
+;							CanonicalFileSpec	*canonicalFile);
+;************************************************************************
+
+SpecRec			RECORD	0,decr
+
+sysFileSpec		DS.B	FSSpec.size
+driverSpec		DS.B	FSSpec.size
+aliasHandle		DS.L	1
+wasChanged		DS.B	1
+	if	theFuture	then								; PURGEALIAS
+aliasState		DS.B	1					; State of the alias
+	endif 												; PURGEALIAS
+	
+	ALIGN	2
+
+kSpecSize		EQU	* - SpecRec
+				ENDR
+
+
+kAliasID		EQU		-8192							; System Printer alias's resID
+
+				WITH	SpecRec
+
+				LINK	A6, #kSpecSize
+
+				MOVE.L	#kSystemFolderType, D0			; get this folder's dirID
+				BSR.S	FindSpecialFolder				; if cond code < 0, then we have an error
+				BMI		@Bail							; if failure, exit routine, error in D0
+
+		; create a file spec for the system file
+
+				MOVE.W	#kStartupDisk, sysFileSpec + FSSpec.vRefNum(A6)	; VRefNum of startup disk
+				MOVE.L	D0, sysFileSpec + FSSpec.parID(A6)					; dirID from FetchSpecialFolder
+				
+				MOVEQ	#0, D0				; clear out D0 for BlockMove
+				LEA		SysResName, A0		; Copy system file's name
+				MOVE.B	(A0), D0			; which is this long
+				ADDQ.B	#1, D0				; plus that length byte!
+				LEA		sysFileSpec + FSSpec.name(A6), A1	; to the FSSpec
+				_BlockMove
+				
+		; ResolveDriver: Resolve the alias using the system file's FSSpec.
+
+				SUBQ	#4, SP							; allocate space for GetResource
+				MOVE.L	#rAliasType, -(SP)				; get this type
+				MOVE.W	#kAliasID, -(SP)				; get this ID
+				_GetResource							; fetch, boy!
+				MOVE.L	(SP)+, D0						; this is the handle
+				MOVE.L	D0, aliasHandle(A6)				; save it across all these calls
+				BNZ.S	@ResolveIt						; got one. Off we go...
+
+; This is a new problem for the glue. If the resource for the alias is not found, then
+; we would normally return resNotFound. The glue used to return fnfErr whenever it couldn't
+; open the driver and applications have coded for that error. Rather than add an error
+; code, we map resNotFound to fnfErr and save the user some grief.
+
+@failedGetRes
+				MOVE.W	ResErr, D0						; copy error into output var
+				BNZ.S	@Bail							; and exit if non-zero
+				MOVE.W	#fnfErr, D0						; else, return fnfErr so apps alert the user correctly
+				BRA.S	@Bail							; and exit.
+
+@ResolveIt		
+	if	theFuture	then								; PURGEALIAS
+				Move.l	aliasHandle(A6),A0
+				_HGetState
+				Move.b	D0,aliasState(A6)				; Save the Alias state.
+				_HNoPurge								; Make the alias non-purgeable
+	endif 												; PURGEALIAS
+
+				SUBQ.W	#2, SP							; space for error
+				PEA		sysFileSpec(A6)					; first parameter
+				MOVE.L	D0, -(SP)						; the alias handle
+				PEA		driverSpec(A6)					; ptr to driverSpec
+				PEA		wasChanged(A6)					; ptr to output boolean (ignored)
+				_ResolveAlias
+				MOVE.W	(SP)+, D0						; got the error here.
+				BNZ.S	@Cleanup
+
+				TST.B	wasChanged(A6)					; check if the alias needs updating
+				BZ.S	@CallHOpenRes					; Nope, keep going
+
+				MOVE.L	aliasHandle(A6), -(SP)			; Now set the resource changed
+				_ChangedResource
+				TST.W	ResErr
+				BNZ.S	@Cleanup						; exit on error
+				
+				CLR.W	-(SP)							; Update the system file
+				_UpdateResFile							; (refnum = 0)
+				TST.W	ResErr
+				BNZ.S	@Cleanup						; exit on error
+
+@CallHOpenRes
+				SUBQ.W	#2, SP							; space for function result
+				MOVE.W	driverSpec + FSSpec.vRefNum(A6), -(SP)	; parameter 1: vRefNum
+				MOVE.L	driverSpec + FSSpec.parID(A6), -(SP)	; parameter 2: parent ID
+				PEA		driverSpec + FSSpec.name(A6)			; parameter 3: ptr to fileName
+				MOVE.B	#fsCurPerm, -(SP)				; set permission to "current"
+				_HOpenResFile
+
+				MOVE.W	(SP)+, D0						; grab function result
+
+				MOVE.W	D0, iPrRefNum					; If it worked, then set the refnum
+				MOVE.W	ResErr, d0						; set the error in D0
+
+@Cleanup
+
+	if	theFuture	then								; PURGEALIAS
+				Move.l	aliasHandle(A6),A0
+				Move.b	aliasState(A6),D0				; Restore the alias state.
+				_HSetState
+	endif
+				MOVE.L	aliasHandle(A6), -(SP)			; release the alias resource
+				_ReleaseResource
+
+@Bail			UNLK	A6								; error in D0.
+				RTS
+				ENDWITH
+
+; Name of the .Print driver
+
+			STRING	PASCAL
+PrintName	DC.B	'.Print'
+			ALIGN
+
+			ENDPROC
+
+			
+			END
+
+
+

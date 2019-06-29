@@ -1,0 +1,456 @@
+;
+;	File:		DPInstaller.a
+;
+;	Contains:	xxx put contents here xxx
+;
+;	Written by:	xxx put writers here xxx
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <2>	 3/16/90	BBH		made it compile
+;		 <1>	 3/14/90	BBH		first checked in
+;	   <61+>	 2/20/90	BBH		
+;
+;	To Do:
+;
+
+;	note that we have jammed the dispatch code resource ID to be the same for 
+;	bit and little models.  we will want to fix this when we put in 6.x
+;	compatibility again.
+;
+
+; ~@~Projector~@~ Copyright © 1987, 1988, 1989 Apple Computer, Inc.  All rights reserved.   
+; ~@~Projector~@~ File: DPInstaller.a,39+  (3/27/89 9:30:39 AM)   
+; File : DPInstaller.a
+;
+;	The following assembler code installs ComToolBox trap dispatcher as called
+;	from the Mac boot process as an external ptch resource.
+;
+;
+;	Written by Dean Wong  May 1988
+;
+;	(c) 1988 by Apple Computer, Inc. All rights reserved.
+;
+;	MODIFICATION HISTORY :
+;
+;	Major modifications Byron Han, February 1-3, 1989 to do dynamic patching, etc.
+;
+;	INSTALLATION PROCEDURES
+;		SHIFT during boot will cause toolbox to NOT be installed
+;		
+;		COMMAND key will cause SMALL MEMORY DISPATCHER to be installed
+;		COMMAND plus CAPS LOCK causes LARGE MEMORY DISPATCHER to be installed
+;
+;		Otherwise, one machines with 1 Meg or less, SMALL MEMORY DISPATCHER is installed
+;		Machines with more than 1 Meg, LARGE MEMORY DISPATCHER is installed
+;
+;	Changed 2/17/89 from INIT-31 mechanism to external patch file.
+;	Only major changes are to change makefile from INIT to ptch
+;	
+;	Also forcing into the system heap this INIT because we will dynamically
+;	resize the system heap (by moving the application heap up by the amount
+;	in sysz.
+;
+;	Modification History
+;		<1.1>		BBH		Added clearing of A1 before checking if manager loaded
+;							so that we wouldn't install an garbage manager vector into the
+;							table if the manager did not exist
+;
+;		5/11/89		BBH		Changed startup code because INIT 31 used to put handle into A0
+;								now since we are pre INIT-31, need to RecoverHandle on
+;								entry point.  Also eliminate DetachResource call
+;		5/24/89		BBH		Changed baseID from -10240 to -10176
+;		7/20/89		BBH		Change some BRA's to BRA.S's
+;		7/27/89		BBH		Changed ctbz ID from 0 to baseID
+;							Chain runs ctb∂'s from baseID, baseID+1, etc...
+;							Added comments on bigModel
+;							Changed ctbd from 3 to baseID
+;							load cmtb (manager code) from baseID on up
+;							
+;							BadID and OldID were reversed in the constants area
+;		10/13/89	BBH		Added compiler directive around ShowInit call
+;							If compiling for WHEATIES/BILL then do not ShowInit
+;		10/30/89	BBH		WHEATIES/BILL build defaults to no Shift override on install
+;							no Command override on memory model
+;							large memory model ONLY
+;		2/5/90		BBH		>= 3meg == large memory model for wheaties
+;							> 1 meg == large memory model for specialk
+;							Actually, we always use the small memory model now
+;
+			PRINT		OFF
+			INCLUDE 	'Traps.a'
+			INCLUDE		'SysEqu.a'
+			PRINT		ON
+			INCLUDE		'CommToolboxPriv.a'
+			
+	IF (&TYPE('Debugging') = 'UNDEFINED') THEN		; start <BBH>
+			Debugging: EQU 0
+	ENDIF													; end <BBH>
+
+UNUSED		EQU		$A09F			; 
+
+DISPATCHSIZE	EQU	16					; # of managers supported
+
+Installer	MAIN
+			IMPORT	Dispatcher, EndDisp, MiniDispatcher, EndMiniDisp, LoadCMTB, ShowINIT, Chain, MiniPreflight
+			
+		IF Debugging THEN
+			_Debugger
+		ENDIF
+		
+			MOVEM.L	D3-D5/A1-A2, -(SP)	; save registers
+			
+									; use to just take A0 and HLock it since Init 31 put handle
+									; into A0.  but since we are now installed before Init 31
+									; A0 contains the master pointer to the handle
+									; so we get the pointer to start of the code, and do
+									; a recover handle.  the hlock it.  this is just safety
+									; since the init should be built with the resLocked bit set
+									
+			LEA		Installer,A0	; get pointer to start of code
+			_RecoverHandle			; recover the handle
+			_HLock					; Init31 places my init handle in A0 (lock just in case)
+			
+;			MOVE.L	A0,-(SP)		; push A0 onto stack
+;			_DetachResource			; removed 5/11/89 BBH
+
+;                     keyboard handling
+;  ====================================================
+;  10 kcode     55		56		57		58		59	
+;  hx			37		38		39		3A		3B
+;  key			cmd		shf		cap		opt		ctl
+;  dm 17A		8000	0001	0002	0004	0008
+;  ====================================================
+
+;	check to see if trap already initialized
+			MOVE.W	#$A08B, D0	; get the comm toolbox trap
+			_GetTrapAddress	,NEWOS	; get location
+			MOVE.L	A0,A1			; save it
+			
+			MOVE.W	#UNUSED, D0		; unimplemented trap
+			_GetTrapAddress	,NEWOS	;
+			
+			CMP.L	A1,A0			; compare trap with uninstalled trap
+			BNE		@Chain			; trap is already initialized
+									; dont need to install managers and traps
+									; so go to chain
+			
+;-----------------------------------------------------------------------------------------
+;-------Install the Macintosh Communications Toolbox now----------------------------------
+;-----------------------------------------------------------------------------------------
+;
+;	Do a machine check for top of memory.  Note that we can futz with this here to
+;	force tiny or large machine installation…
+;
+@GoOn		MOVE.L	#MemTop, A0		; find out how big the machine is
+			MOVE.L	(A0),A0
+			
+;	Less than or equal to 1Meg, so install tiny dispatcher		
+@Tiny		
+			MOVE.L	#CTB_DispatcherID,A2		; use universal dispatcher
+
+			CLR.L	-(SP)			; make space for handle
+			MOVE.L	#CTB_DispatcherType,-(SP)	; resource type for dispatcher
+			MOVE.W	A2,-(SP)		; push id version
+			_GetResource
+			MOVE.L	(SP)+,A0		; get the resource handle
+			MOVE.L	A0,D0			; testing
+			BNE.S	@TinyOK			; ok
+			BRA		@Cleanup		; reset the trap vector
+@TinyOK		_HUnlock				; unlock it
+			_MoveHHi				; move it high
+			_HLock					; lock it down
+			MOVE.L	A0,-(SP)		; save handle
+
+		IF Debugging THEN
+			BRA		@DoDetach		; load minidispatcher and go on
+		ELSE
+			BRA.S	@DoDetach		; load minidispatcher and go on
+		ENDIF
+			
+
+; detach dispatcher code into system heap 
+@DoDetach	
+									; at this point we need to place the appropriate
+									; value into the Big field ...
+			MOVE.L	(SP),A0			; get the handle
+			MOVE.L	(A0),A0			; dereference
+			
+		IF Debugging THEN
+			PEA		#'about to stuff the table'
+			_DebugStr
+		ENDIF
+			MOVE.W	#0,dispatchBig(A0);
+			MOVE.W	#0,80(A0)		; 	small
+			
+			MOVE.L	(SP),A0			; get A0 (handle to resource) back
+			_HUnlock				; unlock it
+			_MoveHHi				; move it high
+			_HLock					; lock it down
+			MOVE.L	A0,-(SP)		; push onto stack
+			_DetachResource			; detach it	- res mgr calls trash D0/A0
+			
+			MOVE.L	(SP)+,A0		; retrieve A0 (see @DoDetach)
+			MOVE.L	(A0),A0			; get pointer to dispatch code
+			MOVE.W	#$A08B, D0	; ComToolBox trap number
+			_SetTrapAddress ,NEWOS	; setup my trap dispatcher
+						
+			BRA.S	@Chain			; go for chaining
+
+;	Cleanup resets the trap vector and jumps to display code
+@Cleanup	MOVE.W	#UNUSED, D0		; unimplemented trap
+			_GetTrapAddress	,NEWOS	; get location
+			
+			MOVE.W	#$A08B, D0		; unimplemented trap
+			_SetTrapAddress ,NEWOS	; setup my trap dispatcher
+			
+			BRA.S	@BYEBYE		; go do deepshit icon
+									; skip chaining
+
+;	Chain will eecut ctb patch resources in numerical order
+@Chain		JSR		Chain			; execute ctb∂ resources in order
+
+;	Display will show the icon
+@BYEBYE	
+					
+		
+			MOVEM.L	(SP)+, D3-D5/A1-A2	; restore registers
+			RTS
+
+
+			ENDMAIN
+	
+
+
+;
+;
+;	CHAIN will execute all resources of type ctb∂ starting with ID 
+;	baseID, baseID+1, baseID+2, ... ...
+;	If CHAIN fails to load a resource, it terminates.  In other words,
+;	if the resources with ID baseID, baseID+1, baseID+2, baseID+4, baseID+5 exist
+;	only the first three will be executed
+;
+
+CHAIN		PROC		EXPORT
+			MOVEM.L		D0-D7/A0-A6,-(SP)	; save ALL registers
+		IF Debugging THEN
+			PEA			#'Enterring Chains'
+			_DebugStr
+		ENDIF
+			MOVE.W		#CTB_Patch1,D1		; set up counter
+			
+@TopOfLoop	CLR.L		-(SP)			; space for the handle
+			MOVE.L		#CTB_PatchType,-(SP)	; push resource type
+			MOVE.W		D1,-(SP)		; push index
+			_Get1Resource				; Get1Resource
+			MOVE.L		(SP)+,A0		; retrieve the handle
+			MOVE.L		A0,D0			; for testing	
+			BEQ.S		@Exit			; NIL so exit
+			
+			MOVE.L		(A0),A1			; get pointer
+			MOVEM.L		D1/A0,-(SP)		; save registers
+			JSR			(A1)
+			MOVEM.L		(SP)+,D1/A0		; D1 is the index, A0 is the resource handle
+			
+			MOVE.L		A0,-(SP)		; push resource
+			_ReleaseResource			; release the resource
+			
+			ADDQ		#1,D1			; increment the counter
+			BRA.S		@TopOfLoop		; go to top
+@Exit		MOVEM.L		(SP)+,D0-D7/A0-A6		; restore ALL registers
+			RTS
+			ENDPROC
+					
+		
+DoIt		PROC	EXPORT
+
+			IF Debugging THEN
+				PEA		#'Look at a7 for return address and handle'
+				_DebugStr
+			ENDIF
+		
+			MOVEM.L	D0-D7/A0-A6,-(SP)		; save the registers
+
+			IF	Debugging THEN
+				PEA		#'After MOVEMing'
+				_DebugStr
+			ENDIF
+			
+;	stack is now
+;		theHandle    17*4
+;		return address 16*4
+;		d0
+;		d1
+;		d2
+;		d3
+;		d4
+;		d5
+;		d6
+;		d7
+;		a0
+;		a1
+;		a2
+;		a3
+;		a4
+;SP -->
+		
+			MOVE.L	64(SP),A0				; get the handle
+			
+			IF Debugging THEN
+				PEA		#'A0 should have the handle'
+				_DebugStr
+			ENDIF
+			
+			MOVE.L	(A0),A1					; dereference
+			JSR		(A1)					; jsr to it
+			
+			MOVEM.L	(SP)+,D0-D7/A0-A6		; restore registers
+			
+			MOVE.L	(SP)+,(SP)				; pop return address over theHandle
+			RTS								; back to normal space
+			ENDPROC
+			;
+;	stack frame
+;
+;	return value (word)
+;	table base (long)
+;	return address (long)
+; 	old A6
+
+LOADCMTB	FUNC	EXPORT
+rval		EQU		12					; stack frame offsets to get to pushed values
+abase		EQU		8
+raddr		EQU		4
+
+	IF Debugging THEN
+		PEA	#'Enterring newLoadCMTB'
+		_DebugStr
+	ENDIF
+	
+			LINK	A6,#0					; make a stack frame
+			MOVEM.L	D0-D7/A0-A4,-(SP)		; save registers
+			
+			MOVE.L	raddr(A6),A4			; return address
+			MOVE.L	abase(A6),A3			; address of base of dispatch table
+			MOVE.W	rval(A6),D6				; get return space
+			
+			CLR.W	D6						; optimism (this is the return value)
+			
+			CLR.W	-(SP)					; make space for resource
+			MOVE.L	#CTB_ConnectionMgrType,-(SP)			; push onto stack
+			_Count1Resources
+			MOVE.W	(SP)+,D0
+			BNE.S	@Clear
+			MOVE.W	#1,D6					; return 1 in D6 
+			BRA		@Exit
+						
+@Clear		
+		IF 	Debugging THEN
+			PEA	#'clearing'
+			_DebugStr
+		ENDIF
+			MOVE.L	A3,A2					; get a copy of the base of dispatch table
+			MOVE.L	#1,D7					; index
+@ClearTop	CLR.L	(A2)+					; clear out the table
+			ADDQ	#1,D7
+			CMP.L	#DISPATCHSIZE,D7
+			BLE.S	@ClearTop
+			
+		IF 	Debugging THEN
+			PEA	#'getting'
+			_DebugStr
+		ENDIF
+
+			MOVE.L	A3,A2					; get a copy of the base of dispatch table
+			MOVE.W	#1,D7					; start manager # from 1
+@GetNext	
+			CLR.L	-(SP)					; make space for resource
+			MOVE.L	#CTB_ConnectionMgrType,-(SP)			; push onto stack
+			
+			MOVE.W	D7,D5					; calculate the actual resource ID
+			SUB.W	#1,D5					; which starts from baseID, baseID+1, ...
+			ADD.W	#CTB_ConnectionMgrID,D5				; instead of 1, 2, 3, 4, 5...
+			
+			MOVE.W	D5,-(SP)				; push resource ID
+			_Get1Resource					; get the resource - this trashes D0 and A0
+			MOVE.L	(SP)+,A0				; get the resource 
+			MOVE.L	A0,D5					; make a copy
+
+			MOVE.L	#0,A1						; clear pointer to manager code <1.1>
+			
+			TST.L	D5						; for testing if NIL
+			BEQ.S	@BottomOfLoop			; none with this ID
+			
+			_GetHandleSize					; get size of handle
+			TST.L	D0						; test result code
+			BLT.S	@Aborting
+			
+			MOVE.L	D5,A1					; get the saved handle
+			MOVE.L	D0,D1					; save size
+			_NewPtr ,SYS					; size is in D0
+			
+			MOVE.L	A0,D0					; test the handle
+			TST.L	D0
+			BNE.S	@Copy					; NIL so we couldn't allocate it
+			
+		IF 	Debugging THEN
+			PEA	#'failure'
+			_DebugStr
+		ENDIF
+			MOVE.L	D5,-(SP)				; push the resource onto stack
+			_ReleaseResource				; and release the mutherf*****
+											; this will pop off the resource		
+			BRA.S	@Aborting
+@Copy										; lock it down
+		IF 	Debugging THEN
+			PEA	#'make another'
+			_DebugStr
+		ENDIF
+			MOVE.L	A0,A1					; deference the memory handle
+			MOVE.L	D5,A0					; get the resource handle
+			MOVE.L	(A0),A0					; dereference it once
+			MOVE.L	D1,D0					; get the count
+			_BlockMove
+			
+			MOVE.L	D5,-(SP)				; push the resource onto stack
+			_ReleaseResource				; and release the mutherf*****
+											; this will pop off the resource
+@BottomOfLoop	
+			MOVE.L	A1,(A2)+				; put into the table
+			ADD.W	#1,D7					; increment the counter
+			CMP.W	#DISPATCHSIZE,D7
+			
+			BGT.S	@Exit
+			BRA.S	@GetNext
+			
+@Aborting	MOVE.W	#2,D6					; return 2 (bad memory condition)
+			
+		IF 	Debugging THEN
+			PEA	#'Aborting'
+			_DebugStr
+		ENDIF
+			MOVE.L	A3,A2					; make a copy
+			MOVE.L	#1,D7					; index
+@AbortTop	MOVE.L	(A2),A1					; clear out the table
+			CLR.L	(A2)+
+			MOVE.L	A1,D0					; do we have an entry?
+			BEQ.S	@AbortEnd
+			
+			MOVE.L	A1,A0
+			_DisposPtr
+			
+			
+@AbortEnd	
+			ADDQ	#1,D7
+			CMP.L	#DISPATCHSIZE,D7
+			BLE.S	@AbortTop
+			
+@Exit		MOVE.W	D6,rval(A6)				; push return value
+			MOVEM.L	(SP)+,D0-D7/A0-A4		; restore registers
+			UNLK	A6						; destroy stack frame
+			MOVE.L	(SP)+,(SP)				; pop return address over handle
+			RTS
+			ENDFUNC
+				END

@@ -1,0 +1,1045 @@
+;
+;	File:		ResourceMgrPatches.a
+;
+;	Contains:	Fixes to the resource manager, including:
+;
+;			x	rom heap down sizing on fx/ci	———> moved to Rovr.a so 6.0 could avoid switch-launch problems
+;				unique id returning a better value
+;				getresource return an error
+;				SetResFileAttrs and mapReadOnly
+;				Clear result on failure in Get[1]IndexedResource
+;
+;				and much, much, more
+;
+;	Written by:	Brian McGhie & Scott Boyd
+;
+;	Copyright:	© 1990-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM8>	 7/27/92	FM		Move the DirID aware patches from ResourceMgrExtensions to here
+;									because they are implemented in ResourceMgr.a which wants to use
+;									ResourceMgrExtensions.a in the ROMBuild.
+;		<6+>	 6/13/92	CS		Rollin Reality changes:
+;									<24> 6/12/92 DTY 	#1032324: Add a patch to RGetResource to start searching from
+;														TopMapHndl. This patch is necessary because if MakeITable is
+;														called from inside FMSwapFont like it can be, chances are, the
+;														current resource map will be pointing at a font map below the
+;														system map, and the call to get the 'mitq' resource out of the
+;														system file will fail.
+;									<23> 5/27/92 DTY 	#1008888: Of course, SuitCase’s code has changed between
+;														versions. Change the code that checks for SuitCase’s patch to
+;														RsrcZoneInit to calculate a checksum of the first 8 words of
+;														this patch, so we can compare against different checksums for
+;														different versions.
+;		<SM5>	 4/23/92	CS		Apply changes from Reality <21> - <22>:
+;									<22> 3/30/92 DTY #1025140,<FM>: Remove GetIndexed patches. The functionality of
+;									these patches have been rolled into the override patches for
+;									these routines.
+;									<21> 3/16/92 DTY #1024511: Move ROZ cutback code back here from ROvr.a.
+;		 <4>	 3/11/92	stb		remove forROM code.  Patches.a files should never be ROMified.
+;									roll changed-FOND flushing code into ResourceMgr.a.
+;									added comments about which routines were rolled into ResourceMgr.a.
+;									Note that Plus patches do not need to go into ResourceMgr.a.
+;		 <3>	  3/4/92	PN		Fix MyuniqueID to do ROM build
+;		 <2>	 2/13/92	PN		Add conditionals for rom build. DontLetSuitcasePatchRsrcZoneInit
+;									needs to be rolled in. • Pre-SuperMario comments follow •
+;		<20>	  2/3/92	DTY		#1021208: Compatiblity hack for Suitcase II. The patch to
+;									_RsrcZoneInit in ResourceOverridePatches.a winds up in an
+;									infinite loop because SuitCase’s patch to _RsrcZoneInit makes a
+;									circular resource chain. Since our patch does the same thing
+;									that SuitCase’s wants to do, patch _SetTrapAddress to watch
+;									patches to _RsrcZoneInit. If the patch code is Suitcase’s patch
+;									code, don’t install the patch. An imbedded semaphore is
+;									necessary so that once Suitcase has tried to apply the patch, we
+;									don’t have to prevent any other patches.
+;		<19>	  1/3/92	DTY		Make sure the handle isn’t nil in CheckCandidate.
+;		<18>	12/19/91	DTY		#1018500: Do the same thing for _AddResource and _RmveResource.
+;									(This avoids any changes to the Finder on Mover invocations.)
+;		<17>	12/18/91	DTY		Oops. My finger slipped on that last checkin. That was a bug fix
+;									for Radar bug number #1018500: Patch _ChangedResource to
+;									invalidate the 'FOND' candidate list if a 'FOND' resource in the
+;									candidate cache is being changed.
+;		<16>	12/18/91	DTY		\
+;		<15>	12/12/91	DTY		Take out the last fix. The Component Manager is being changed to
+;									take care of this.
+;		<14>	12/12/91	DTY		QuickTime expects _HomeResFile to return the real file reference
+;									number for a resource. _HomeResFile returns 0 for system
+;									resources. Add a tail patch to _HomeResFile to return SysMap
+;									instead of 0.
+;		<13>	 2/13/91	JSM		dba,#JSM-213: Add come-from patch on _SetHandleSize inside
+;									ResizeMap when called from RmveName to handle resource maps with
+;									shared name list entries more robustly.
+;		<12>	 1/17/91	dba		(bbm & stb) fix AddResource with NIL string.
+;		<11>	12/14/90	bbm		(djw) roll in linked comefrompatch from patchplusrom.a into
+;									resourcemgrpatches.a.
+;		<10>	12/11/90	bbm		(JSM) moved the superpatch fix to ResourceMgrPatches.a, as this
+;									comefrom patch is now a linked patch.
+;		 <9>	 12/4/90	gbm		<stb> Make a REALLY simple patch to LoadResource to always call
+;									StripAddress on the handle, to strip away variation codes on
+;									defproc handles
+;		 <8>	11/28/90	JSM		<bbm> Move come-from patches on _NewHandle and _DisposeHandle
+;									inside UpdateResFile here from PatchPlusROM.a.
+;		 <7>	 9/11/90	csd		Rewrote the patch to Unique1ID so that it doesn’t eat stack if
+;									it has to try more than once for a legal ID.
+;		 <6>	 8/15/90	stb		Fix my typo on UniqueID
+;		 <4>	 7/30/90	stb		conditionalize out some fixes for 6.0.x
+;		 <4>	 7/30/90	stb		move heap down-sizing to Rovr.a
+;		 <3>	 7/12/90	stb		test, debug
+;		 <1>	  7/9/90	stb		first checked in
+;
+;	To Do:
+;		Return ResNotFound in GetResource once GetResource come-from patches are lpch’s
+;		? getindexedresource in numerical order
+;		? Turn AddResource into a ReplaceResource
+;		SetResFileAttrs and mapReadOnly; teach to actually set the bit on disk
+;
+
+		load		'StandardEqu.d'
+		include		'fontPrivate.a'
+		include		'ResourceMgrPriv.a'
+		include		'LinkedPatchMacros.a'
+
+AfterCreateInCreateResFile ROMBind (Plus,$137BC),(SE,$0DDB8),(II,$126F4),(Portable,$13D52),(IIci,$1AF6A)
+AfterOpenRFInORFCommon ROMBind (Plus,$1379C),(SE,$0DD98),(II,$126D4),(Portable,$13D32),(IIci,$1Af4A)
+
+AfterStdZEntryInCreateResFile ROMBind (Plus,$137AA),(SE,$0DDA6),(II,$126E2),(IIci,$1AF58),(Portable,$13D40)
+
+ROMOpenRFPerm	ROMBind (Plus,$1381A),(SE,$0DE1C),(II,$12758),(IIci,$1AFCE),(Portable,$13DB6)
+
+StdZEntry		ROMBind (Plus,$13F4E),(SE,$0E558),(II,$12E90),(IIci,$1B700),(Portable,$144E8)
+Std1Entry		ROMBind (Plus,$13F52),(SE,$0E55C),(II,$12E94),(IIci,$1B704),(Portable,$144EC)
+RStdExit			ROMBind (Plus,$1400C),(SE,$0E616),(II,$12F4E),(IIci,$1B7C4),(Portable,$145A6)
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	<20> Don’t let Suitcase’s patch to _RsrcZoneInit happen.
+;   !!!!!!! NEVER ROLL THIS INTO ROM !!!!!!!!
+
+kRsrcZoneInitTrapWord	equ		$A996						; Suitcase patches by the trap word, not by the number.
+
+DontLetSuitcasePatchRsrcZoneInit	PatchProc	_SetTrapAddress,(Plus,SE,II,Portable,IIci)
+			move.w	PatchState,-(sp)
+			tst.w	(sp)+									; Has this patch already fired?
+			bneOld											; Yes.  Let it go through.
+			cmpi.w	#kRsrcZoneInitTrapWord,d0				; Patching _RsrcZoneInit?  (Suitcase uses the full trapword, so this might filter out other patches.)
+			bneOld											; No.  Let it go.
+			
+			movem.l	d0-d1/a0-a2,-(sp)						; Save the registers we’re using
+			
+; Calculate a checksum of the first 8 words of this patch routine so we can make sure it’s
+; one of several versions of SuitCase.
+
+			moveq	#0,d0									; <23>
+			moveq	#7,d1									; <23> Loop for 8 words
+			move.l	a0,a2									; <23> Use a copy of the patch routine pointer
+@formChecksum
+			add.w	(a2)+,d0								; <23> Add a word to the checksum
+			dbra	d1,@formChecksum						; <23>
+			
+; Compare this checksum against a list of checksums for versions we know about.
+; (Or rather, versions that Dean bothered to checksum.)
+			
+			lea		SuitcaseChecksums,a1					; <23> A list of checksums for different versions of SuitCase
+@codeMatchLoop
+			move.w	(a1)+,d1								; <23> Get a checksum
+			bz.s	@notSuitcaseCode						; <23> If we’re out of checksums, it’s not SuitCase.  (At least, not one we know about)
+			cmp.w	d1,d0									; <23> Does this checksum match the calculated one?
+			bne.s	@codeMatchLoop							; <23> If it doesn’t, try another checksum.
+			
+; This is Suitcase’s code.  Return instead of patching _RsrcZoneInit
+			
+			lea		PatchState,a0
+			move.w	#1,(a0)									; Don’t fire this patch any more
+			movem.l	(sp)+,d0-d1/a0-a2
+			rts
+			
+; This wasn’t Suitcase’s code.  Apply this patch to _RsrcZoneInit
+			
+@notSuitcaseCode
+			movem.l	(sp)+,d0-d1/a0-a2
+			jmpOld
+			
+PatchState
+			dc.w	0
+SuitcaseChecksums											; SuitCase II version number:
+			dc.w	$5A77									; 1.2.10
+			dc.w	$5AF9									; 1.2.11
+			dc.w	$5B87									; 1.2.12
+			dc.w	0										; 
+			EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	<16> Flush 'FOND' candidate lists if calling _ChangedResource on a 'FOND'.
+;	<18> Do the same on _AddResource and _RmveResource as well.
+;
+;	rolled in to ResourceMgr.a 3/19/92 stb
+
+CheckForChangedFOND	PatchProc	_ChangedResource,(Plus,SE,II,Portable,IIci)
+			Import	FlushChangedFONDs
+			
+			move.l	4(sp),-(sp)
+			clr.l	-(sp)
+			clr.w	-(sp)
+			bsr		FlushChangedFONDs
+			jmpOld
+			EndProc
+			
+CheckForAddedFOND	PatchProc	_AddResource,(Plus,SE,II,Portable,IIci)
+			Import	FlushChangedFONDs
+			
+			move.l	14(sp),-(sp)							; Resource handle
+			move.l	14(sp),-(sp)							; Resource type
+			move.w	16(sp),-(sp)							; Resource ID
+			bsr		FlushChangedFONDs
+			jmpOld
+			EndProc
+			
+CheckForRemovedFOND	PatchProc	_RmveResource,(Plus,SE,II,Portable,IIci)
+			Import	FlushChangedFONDs
+			
+			move.l	4(sp),-(sp)
+			clr.l	-(sp)
+			clr.w	-(sp)
+			bsr		FlushChangedFONDs
+			jmpOld
+			EndProc
+
+FlushChangedFONDs	Proc	Export	
+StackFrame	Record	{A6Link},Decr
+paramBegin	equ		*
+resHandle	ds.l	1
+addResType	ds.l	1										; <18> Type for _AddResource
+addResID	ds.w	1										; <18> ID for _AddResource
+paramSize	equ		paramBegin - *
+retAddr		ds.l	1
+A6Link		ds.l	1
+resID		ds.w	1
+resType		ds.l	1
+resName		ds.b	256
+localSize	equ		*
+			EndR
+			
+			With	StackFrame
+			link	a6,#localSize
+			move.l	d1,-(sp)
+			
+;
+; Check to see if we’re being called from CheckForAddedFOND.
+;
+
+			tst.l	addResType(a6)							; <18>
+			bz.s	@notAddResourcePatch					; <18>
+			
+			move.l	addResType(a6),resType(a6)				; <18>
+			move.w	addResID(a6),resID(a6)					; <18>
+			bra.s	@isItAFOND								; <18>
+			
+;
+; Get information about the resource that was changed.
+;
+			
+@notAddResourcePatch
+			move.l	resHandle(a6),-(sp)
+			pea		resID(a6)
+			pea		resType(a6)
+			pea		resName(a6)
+			_GetResInfo
+
+; See if it’s a 'FOND' resource.
+
+@isItAFOND
+			cmp.l	#'FOND',resType(a6)
+			bne.s	@notFONDResource						; It’s not a FOND
+			
+;
+; It’s a 'FOND'.  If the candidate lists have this 'FOND' cached,
+; invalidate it.
+;
+
+			move.l	ExpandMem,a0
+			move.l	ExpandMemRec.emSplineKey(a0),a0			; Get handle to TrueType globals
+			move.l	(a0),a0									; Point to it.
+			lea		splineKeyRec.fondCache(a0),a0			; Point to candidate cache
+			move.l	(a0),-(sp)
+			bsr		CheckCandidate							; See if this candidate matches the 'FOND' ID that has changed
+			tst.w	d1										; Font family number was left in D0 if handle was not disposed
+			bne.s	@notFlushed
+			clr.l	(a0)+									; Clear out candidate entry
+@notFlushed
+			move.l	(a0),-(sp)								; <22> Check the next one, too
+			bsr		CheckCandidate
+			tst.w	d1										; Font family number was left in D0 if handle was not disposed
+			bne.s	@notFONDResource
+			clr.l	(a0)									; <22>
+@notFONDResource
+			move.l	(sp)+,d1
+			unlk	a6
+			move.l	(sp)+,a0
+			add.w	#paramSize,sp
+			jmp		(a0)
+
+;
+; Compare the ID of the cached FOND information.  If the ID matches the resource that changed,
+; invalidate the candidate entry.
+;
+
+CheckCandidate
+			movem.l	a0/a1,-(sp)
+			move.l	12(sp),d0								; Get the handle
+			bz.s	@notSameFamily							; <19> Bail out if handle is NIL
+			move.l	d0,a0
+			move.l	(a0),d0									; Get the pointer
+			bz.s	@notSameFamily							; <19> Bail again if needed
+			move.l	d0,a1
+			moveq	#-1,d1									; Assume handle is not disposed
+			move.w	(a1),d0									; Fetch the font family number
+			cmp.w	resID(a6),d0							; Compare it against the resource ID of the changed 'FOND'
+			bne.s	@notSameFamily							; Don’t invalidate if not the right ID
+			_DisposeHandle									; If ID matches, dispose the handle
+			moveq	#0,d1									; Mark as handle was disposed
+@notSameFamily
+			movem.l	(sp)+,a0/a1
+			move.l	(sp)+,(sp)
+			rts
+			EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;
+;	ROM heap (Read-Only Zone aka ROZ) down-sizing on fx/ci
+;
+;	For every resource in the rom that has no name, the resource manager assumes
+;	a length of 255 (-1 treated as unsigned).  This is designed to cut the size of
+;	the ROZ back by the over-allocated amount.  The ROZ is always a 32-bit addressed zone.
+;
+;	Definition:
+;		trailer block:  that invisible block at the end of heap zone which the zone header.bkLim
+;						  points to.
+;
+;	Steps:
+;		find the ROZ map
+;		find the ROZ
+;		size-down the resource map handle to match the map size value (which is correct)
+;		copy the trailer block to the new physical end of the resource map
+;			This effectively blows away any blocks between the map and the trailer
+;			While there shouldn't be any there, there is a free block which will be smashed
+;		change bkLim to point to the new trailer
+;		set the zone block size down to (bkLim+trailerPhysicalSize)-zoneStart
+;		
+;
+
+; format of a 32-bit block header
+blkHeaderSize	EQU		12
+hdrPhysicalSize	EQU		4
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+		
+ROZSizeCorrection InstallProc (IIci)
+
+		move.l	RomMapHndl,a4			; save handle to rom map
+
+		move.l	a4,a0					; find ROM Zone
+		_HandleZone
+		move.l	a0,a3					; save for later in a3
+
+		move.l	(a4),a0					; point at map and dereference handle
+		move.l	MapSize(a0),d4			; get current size and save it in d4
+
+; this fails with -99 if the zone is marked read only
+
+		bclr	#ROZ,flags(a3)			; make it not a read-only zone
+		move.l	d4,d0					; cut back map to actual size
+		move.l	a4,a0
+		_SetHandleSize					; sizing down, so it should not fail
+		bset	#ROZ,flags(a3)			; make it read-only again
+		
+;	move trailer block to the position right after map to close the gap that 
+;	was left after sizing the handle back down to the correct size.
+
+		move.l	(a4),a1					; get start of map
+		sub		#blkHeaderSize,a1		; point at block header for block containing map
+		add.l	hdrPhysicalSize(a1),a1	; point at end of map (start plus size)
+		move.l	bkLim(a3),a0			; source is the trailer block
+		move.l	hdrPhysicalSize(a0),d0	; move the physical block size number of bytes (is normally #$10)
+		_BlockMove
+
+		move.l	a1,bkLim(a3)			; fix zone header.bkLim to point to new last block
+		clr.l	zcbFree(a3)				; No free bytes left in this zone.
+		
+;	cut back the heap zone block
+
+		move.l	a1,d0					; figure new zone size
+		add.l	hdrPhysicalSize(a1),d0	; move the physical block size number of bytes (is normally #$10)
+		sub.l	a3,d0					; new size = header.bkLim + trailerPhysicalSize - zoneStart
+		move.l	a3,a0
+		_SetPtrSize						; chop, chop
+										; don’t check for error, as we couldn’t handle it anyway.
+		rts
+
+		EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	<24> Make RGetResource start searching from the top of the resource chain.
+;
+;		RGetResource starts searching for resources from the current resource map.
+;		However, if the call to RGetResource inside of MakeITable is made when
+;		FMSwapFont calls MakeITable, chances are the current resource map will be
+;		below the system file, and the call to RGetResource to get the 'mitq' resource
+;		from the system file will fail.
+;		Inside Macintosh Volume V states that RGetResource “searches the chain of open
+;		resouce files (including the System Resource File) for the given resource”.  I’m
+;		taking artistic license and interpretting this to mean that it searches from the
+;		top of the resource chain instead of from the current resource map.  Making this
+;		change in interpretation will allow the RGetResource call in MakeITable to always
+;		succeed.
+
+StartRGetResourceSearchFromTopOfResourceChain	PatchProc	_RGetResource,(Plus,SE,II,Portable,IIci)
+
+StackFrame	Record	{RetAddr},Decr
+result		ds.l	1
+paramBegin	equ		*
+type		ds.l	1
+ID			ds.w	1
+paramSize	equ		paramBegin - *
+retAddr		ds.l	1
+			EndR
+		
+		With	StackFrame
+		move.l	type(sp),a0				; Get the resource type to search for
+		move.w	ID(sp),d0				; Get the resource ID to search for
+		
+		move.w	CurMap,-(sp)			; Save the current resource map.
+		subq	#4,sp					; Make room for a result
+		move.l	a0,-(sp)				; Push the type again
+		move.w	d0,-(sp)				; And the ID.
+		
+		move.l	TopMapHndl,a0			; Get resource map at top of resource chain
+		move.l	(a0),a0
+		move.w	mRefNum(a0),CurMap		; Make the top map the current one
+		
+		jsrOld							; Call RGetResource
+		move.l	(sp)+,result+2(sp)		; Percolate the result back up.  Need to add 2 because CurMap is on the stack.
+		
+		move.w	(sp)+,CurMap			; Restore the current resource map
+		move.l	(sp)+,a0				; Get the return address
+		addq	#paramSize,sp			; Pop off the parameters
+		jmp		(a0)					; Return to the caller
+		EndProc
+		
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	UniqueID return non-system values, i.e. > 127
+;
+;		Until this patch uniqueID would return a nonnegative value.  This prevented
+;		applications from creating a resource in the owned resource range.  This did
+;		not prevent creating a resource in the system range (0 to 127).  This adds a
+;		check for that range and recurse on failure.  Note stack frame maintained.
+;	rolled in to ResourceMgr.a 2/26/92 stb
+
+MyUnique1ID		PatchProc	_Unique1ID,(Plus,SE,II,Portable,IIci)
+
+		import	MyUniqueID
+
+		st		ResOneDeep				; entry for one map deep call
+		jmp		MyUniqueID				; can’t fall through to a linked patch, the
+										;   code might be rearranged.
+		EndProc
+
+MyUniqueID		PatchProc	_UniqueID,(Plus,SE,II,Portable,IIci)
+
+		move.w	D1, -(SP)				; Resource Manager preserves all but A0/D0
+		move.b	ResOneDeep, D1			; get OneDeep state upon entry to use for each call
+@loop
+		move.b	D1, ResOneDeep			; make OneDeep state correct every time
+		subq	#2, SP					; room for returned ID
+		move.l	2+2+4(SP), -(SP)		; copy resource type
+		jsrOld							; call the real UniqueID
+		move.w	(SP)+, D0				; get the unique ID
+		cmp.w	#128, D0				; is it legal?
+		blt.s	@loop					; if not, try again
+
+		move.w	(SP)+, D1				; restore
+		move.l	(SP)+, A0				; return address
+		addq	#4, SP					; pop resource type parameter
+		move.w	D0, (SP)				; ID result
+		jmp		(A0)					; return
+
+		EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	AddResource nil name																		<12>
+;
+;		Before this patch existed, passing a nil to AddResource would use the string starting
+;		at address 0. This was a common mistake, and it simplifies the Finder to not have to
+;		handle this case.
+;
+;		Luckily, there at least one zero byte in low memory, which will serve for an empty
+;		string. We use the global OneOne, which contains $00010001, for the one zero we need.
+;		Also, since OneOne is a low-memory address, we only need to stuff the low word, since
+;		the high word is always zero when the patch triggers. If you have read this far into
+;		the comment, you have far too much time on your hands. Go fix a bug.
+;
+;	rolled in to ResourceMgr.a 2/17/92 stb at AddName
+
+AddResourceNILNameFix	PatchProc	_AddResource,(Plus,SE,II,Portable,IIci)
+
+		tst.l	4(sp)					; test name pointer (last parameter)
+		bne.s	@old					; if not NIL, do the standard thing
+		move.w	#OneOne,6(sp)			; if NIL, set up low word so pointer points at a zero byte
+@old
+		jmpOld
+
+		EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patches on _NewHandle and _DisposeHandle inside UpdateResFile						<8>
+;
+; (Patch #29a)
+;
+; These patches fix the bug present in Macintosh Plus UpdateResFile which tries to
+; allocate a buffer of at least 4k to do its work in.  The problem is that NewHandle
+; may fail to give us the desired 4k buffer.  This patch handles that case by allocating 4k
+; buffer on the stack.  Two different patches need to take place.  First is a patch to
+; _NewHandle to allocate a pseudo-handle on the stack when we are called from UpdateResFile
+; the memory mgr cannot come up with the 4K.  Then there is a corresponding patch to
+; DisposHandle to get rid of the thing; the trick to detecting this pseudo-handle is
+; to compare it with sp.  When the pseudo-handle is disposed we bypass the memory mgr
+; entirely because the bogus handle is garbage.	 In both cases we can bypass the typical
+; memory manager finale with d0 and MemErr since the Rsrc mgr ignores them in these
+; special cases.
+;
+; At point of entry to NewHandle the stack is:
+;   rts to dispatch < A1 < D1 < D2 < A2 < junk.w < sr < rts to caller < xxx
+; so 24 or $18 is the offset to rts to caller.  The ReturnAddressDepth linked patch macro
+; calculates this correctly.
+;
+; After the pseuo-handle is set up the situation is:
+;   rts to dispatch < A1 < D1 < D2 < A2 < junk.w < sr < rts to caller <
+;   < 1000 bytes taken from stack < 24 bytes of former rts/A1/D1/D2/A2/jnk/sr <
+;   < bogus master ptr pointing to first of 1000 bytes< xxx
+;
+; At point of entry to DisposHandle the stack is:
+;   rts to dispatch < A0 < A1 < D1 < D2 < A2 < junk.w < sr < rts to caller < xxx
+; so 28 or $1C is the offset to rts to caller.  The ReturnAddressDepth linked patch macro
+; calculates this correctly.
+
+AfterNewHandleInUpdateResFile		ROMBIND				(Plus,$139C2)
+AfterDisposeHandleInUpdateResFile	ROMBIND				(Plus,$13A0C)
+
+UpdateResFileNewHandleFailure		ComeFromPatchProc	_NewHandle,AfterNewHandleInUpdateResFile,(Plus)
+
+        jsrOld					; go do the new handle
+        tst.w   D0				; check error							    <23Apr86>
+        beq.s   @9				; if not, just return
+
+        lea     ReturnAddressDepth(sp),A0	; point to the return address.
+        move.l  A0,A1		    ; for my indexing
+        suba.w  #1000,sp	    ; get some space for a buffer on the stack
+        move.l  (A1),D2		    ; D2 is temp variable saving our return address
+        move.l  sp,(A1)		    ; this is a master pointer to our buffer
+        move.l  D2,-(sp)	    ; push our return address
+
+        ; Need to copy rts2disp,A1,D1,D2,A2,jnk/sr - 6 longs - to new top of stack  <23Apr86>
+        moveq   #5,D2		    ; D2 will be a loop counter
+@1      move.l  -(A1),-(sp)	    ; move the valid dispatcher data down
+        dbra    D2,@1		    ;
+
+        ; Now stuff a magic variable in the presumptuous rsrc mgr.
+        MOVEQ   #64,D3		    ; we will grab 1024 bytes off of the stack
+        ASL     #4,D3		    ; D3 will be the size of the buffer
+
+@9      rts						; and return (setting neither d0 nor MemErr, mind you,
+								; since it seems the RsrcMgr ignores them)	    <23Apr86>
+
+		ENDPROC
+
+UpdateResFileDisposeHandleCleanup	ComeFromPatchProc	_DisposeHandle,AfterDisposeHandleInUpdateResFile,(Plus)
+
+        cmpa.l  A3,SP		    ; we don't need this buffer so get rid of it
+        bhiOld				    ; CC=HI means buffer is not on stack
+
+        ; Must copy rts2disp,A0,A1,D1,D2,A2,jnd/sr,rts - 8 longs - to forthcoming top of stack. <23Apr86>
+        ; By good planning, A3 in rsrc mgr points to bogus master ptr, the cell where the rts
+        ; to caller will go, and (A3) is the long just above the block to be moved.
+        moveq   #7,D2		    ; get count+1 for loop				        <23Apr86>
+        move.l  (A3),A2		    ; get pointer to long before the dispatch stuff
+        addq    #4,A3		    ; point just beyond target area
+@0      move.l  -(A2),-(A3)	    ; move dispatch data down
+        dbra    D2,@0		    ; loop for entire dispatch area
+
+        move.l  A3,SP		    ; fix sp to point at real stack, deallocating pseudo-handle
+        rts			    		; return to dispatcher&caller without setting
+                                ; d0 or MemErr				    <23Apr86>
+
+		ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	LoadResource - 																		<9>
+;																						<9>
+;		Always strip the handle we get, just in case it's a defproc handle and			<9>
+;		there's some variation code bits left over.										<9>
+;	rolled into ResourceMgr.a 2/17/92 stb
+
+MyLoadResource	PatchProc	_LoadResource,(Plus,SE,II,Portable,IIci)
+
+		move.l	d0, -(sp)		; save d0, because LoadResource preserves ALL registers	<9>
+		move.l	8(sp), d0		; get the handle (past old d0 and the return address)	<9>
+		_StripAddress			; shave off the variation code (maybe)					<9>
+		move.l	d0, 8(sp)		; put the handle back where we got it					<9>
+		move.l	(sp)+, d0		; restore d0											<9>
+		jmpOld					; jump back (probably to ROM)							<9>
+
+		EndProc					;														<9>
+
+;_______________________________________________________________________________________
+; Patch for openresfile superload subroutine											<10>
+;
+; When Superloading resource files, the rom first checks the resource manager cache
+; (located at HSCache).  Unfortunately, the rom code used offsets into the cache as
+; addresses of the cache.  We fix the problem by patching MaxBlock.  MaxBlock is called
+; just before the spurious code.  We now check the values located at the address of the
+; resource manager cache added to the offsets, and return into rom.
+;_______________________________________________________________________________________
+
+FixSuperLoadEquates	ComeFromAfterPatchProc	_MaxBlock,AfterMaxBlockInGetMaxLoad,(Plus)
+
+AfterMaxBlockInGetMaxLoad	ROMBind		(Plus, $135B8)
+GetMaxLoadAfterPreLock		ROMBind		(Plus, $135D2)
+GetMaxLoad@4    			ROMBind		(Plus, $135D6)
+SizeFits     				ROMBind		(Plus, $135FA)
+
+		CMP.L	D7,D0					; does compact or growheap get us more?
+		BLE.S	@MaxInD7				; D7 already has max value,
+		MOVE.L	D0,D7					; ... else D7 = amount we can grow heap.
+@MaxInD7								; D7 now has the maximum we can grow
+		move.l	HSCache+PreExtra,D0		; calc how much to read in for superload?
+		jsrROM	SizeFits				; check to see if this size fits in buff
+		bplROM	GetMaxLoad@4			; CC=PL if this fits
+		move.l	HSCache+PreUnlock,D0	; check if PreUnlock fits
+		jsrROM	SizeFits				; check to see if this size fits in buff
+		bplROM	GetMaxLoad@4			; CC=PL if this fits
+		move.l	HSCache+PreLock,D0		; check if Prelock fits
+		jmpROM	GetMaxLoadAfterPreLock	; and return to the ROM
+
+		ENDPROC							; <10>
+
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; BadMapCheckInCheckMap
+;
+;	If the resource file is trashed, OpenResFile should return an error when it
+;	tries to open the file.  There is an obscure bug where the type offset in
+;	the map is odd, which causes the validity check (in routine CheckMap inside
+;	ResourceMgr.a) during openresfile to get an address error.  We fix the
+;	problem by checking the map before the validity check checks the map.  The
+;	last trap before the check is _Read.  This patch checks to see if we just
+;	read in the map, and does a precheck.  If the map is bad, it trashes the
+;	ram copy and passes control on the the rom.  When the real check is called
+;	it fails the first test, instead of address erroring on the second check.
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+NewMapStack			Record	0
+dispatcherReturn	DS.L	1				;return address to the dispatcher
+dispatcherRegs		DS.L	5				;dispatcher saves five regs.
+dispatcherResult	DS.L	1				;dispatcher pops this result long.
+readReturn			DS.L	1				;return address for the _Read trap.
+RdResgisters		DS.L	4				;four registers saved by RdData.
+RdDataReturn		DS.L	1				;return address (to NewMap?)
+					EndR
+
+AfterReadInRdData			ROMBIND	(Plus,$14250)	; address if coming from RdData call
+AfterBsrReadDataInNewMap	ROMBIND	(Plus,$136B4)	; address if coming from NewMap’s call
+
+BadMapCheckInCheckMap	ComeFromAfterPatchProc	_Read,AfterReadInRdData,(Plus)
+
+		With	NewMapStack
+
+		cmpROM	AfterBsrReadDataInNewMap,RdDataReturn(sp)	; check if coming from the bug in rsrcmgr
+		bne.s	@exit
+
+		move.l	(A4),A1						; A4-handle to map, A1-preserved by dispr
+		btst	#0,mTypes+1(A1)				; check for an odd value in type offset
+		beq.s	@exit						; ... if not odd, just exit
+
+		move.b	#1,(A1)						; make sure eof for maxRFEOF is bad
+		move.l	(A1),8(A1)					; ... so maxRFEOF returns value >= $02000000
+@exit
+		rejoinROM
+
+		EndWith
+
+		ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _SetHandleSize inside ResizeMap when called from RmveName					<13>
+;
+; This patch makes RmveResource and SetResInfo more robust when removing a resource name if other
+; resources share the same entry in the resource name list in the resource map.  While it is
+; questionable whether such a resource file is valid, the fact remains that some resource files
+; do share name list entries.
+;
+; The problem is that RmveName shrinks the resource name list and hence the resource map
+; each time a resource is removed.  Thus, if resources share name list entries, the map would be
+; shrunk too much.  This patch fixes this by setting the name list offsets to -1 (implying no name)
+; for other resources that share the same name as the one being deleted.
+;
+; This bug became more visible in 7.0 with Mover deleting resources.  Specifically, apparently
+; in some versions of the Adobe font Garamond suitcase file the FONT resources share the same,
+; zero length name list entry.
+;
+;	rolled in to ResourceMgr.a 2/17/92 stb with significant rewrite (see NameUsedByOthers)
+
+AfterSetHandleSizeInResizeMap		ROMBIND				(Plus,$147F4),(SE,$0EE16),(II,$13750),(Portable,$14DA8),(IIci,$1BFCC)
+AfterResizeMapInRmveName			ROMBIND				(Plus,$1483A),(SE,$0EE5C),(II,$13796),(Portable,$14DEE),(IIci,$1C012)
+GetRsrcCnt							ROMBIND				(Plus,$13EF2),(SE,$0E4FC),(II,$12E34),(Portable,$1448C),(IIci,$1B6A4)
+At9InRmveName						ROMBIND				(Plus,$14858),(SE,$0EE7A),(II,$137B4),(Portable,$14E0C),(IIci,$1C030)
+
+RmveNameNameListFix					ComeFromPatchProc	_SetHandleSize,AfterSetHandleSizeInResizeMap,(Plus,SE,II,Portable,IIci)
+
+ResizeMapCallerReturnAddressDepth	EQU					$30
+
+		jsrOld																						; always do the _SetHandleSize
+		cmpROM					AfterResizeMapInRmveName,ResizeMapCallerReturnAddressDepth(SP)		; was ResizeMap called from RmveName?
+		bne.s					@return																; no, just return
+		lea						RmveNamePatch,a1													; otherwise, make ResizeMap return to us
+		move.l					a1,ResizeMapCallerReturnAddressDepth(SP)
+@return
+		rts
+
+RmveNamePatch
+		MOVEM.L D3-d6/A2-A3,-(SP)		; Save rest of registers.						<24aug85> BBM	<13>
+
+		move.w	d2,d6					; calculate offset of end of removed name in d6					<13>
+		sub.w	d1,d6					; subtract negative length to advance to end of name			<13>
+
+		jsrROM 	GetRsrcCnt				; Check all entries and update name offsets.	<24aug85> BBM	<13>
+@1
+		CMP.W	RNameOff(A2),D2 		; is this name offset >= the removed one?						<13>
+		bgt.s	@notBlownAway			; no, so this name wasn’t blown away							<13>
+		cmp.w	RNameOff(A2),d6			; is this name offset >= the end of the removed one				<13>
+		ble.s	@notBlownAway			; yes, so this name wasn’t blown away							<13>
+		move.w	#-1,RNameOff(a2)		; nuke the name	offset											<13>
+		bra.s	@2						; and advance to the next resource								<13>
+
+@notBlownAway
+		CMP.W	RNameOff(A2),D2 		; is this name offset < the removed one?		<24aug85> BBM 
+		BGE.S	@2						; if so, skip it, else
+		ADD.W	D1,RNameOff(A2) 		; Offset shrinks by D1. 
+@2
+		ADD.W	#RESize,A2				; point to the next entry
+		DBRA	D4,@1					; if there are more entries loop back			<24aug85> BBM
+		MOVEM.L (SP)+,D3-d6/A2-A3		; Restore inner regs.							<24aug85> BBM	<13>
+
+		jmpROM	At9InRmveName			; continue with ROM version
+
+		ENDPROC							; <13>
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	GetResource — return an error
+;
+;		During MacPlus development, the resource manager started returning many
+;		more errors in ResErr.  The programmer could then call ResError to check
+;		if the last resource manager call he made worked.  Unfortunately, when the
+;		check was added to GetResource, it broke MultiPlan.  Since compatability
+;		was the buzz word of the day, and MultiPlan was a significant player, we
+;		decided to delay returning an error.  Times have changed.  Excel is here,
+;		death to MultiPlan., and long live robustness.  We will see if this works.
+
+; This patch is still turned off, because we haven’t had a good chance to do compatibility testing
+; to see which applications this affects. We wanted to do that for 7.0, but somehow it slipped
+; through the cracks until it was too late.
+
+	if 0 then
+
+MyGet1Resource	PatchProc	_Get1Resource,(Plus,SE,II,Portable,IIci)
+		import	MyGetResource
+
+		st		ResOneDeep				;entry for one map deep call
+		jmp		MyGetResource			;can’t fall through to a linked patch
+		EndProc
+
+MyGetResource	PatchProc	_GetResource,(Plus,SE,II,Portable,IIci)
+
+		subq	#4,sp					;room for the result
+		move.l	4+4+2(sp),-(sp)			;copy the type (skip the result, return addr., and id)
+		move.w	4+4+4(sp),-(sp)			;copy the ID (skip the type, result, and return addr.)
+		jsrOld							;do real GetResource
+		move.l	(sp)+,4+2+4(sp)			;put the result down (skip the return addr., id, and type)
+		bne.s	@success
+		tst.w	ResErr					;check if reserr is already filled in ¿¿¿ Why ???
+		bne.s	@success
+		move.w	#ResNotFound,ResErr 	; ...else mark as ResNotFound
+@success
+		move.l	(sp)+,a0				;get the return address
+		lea		2+4(sp),sp				;remove the parameters
+		jmp		(a0)
+
+		EndProc
+
+	endif
+;____________________________________________________________________________________________________
+; StdDirIDExit
+;
+; This is a way out of Resource Mgr patches that clears the dirID global.
+; It does very little of what StdExit in the Resource Manager does:
+; For example, it does not restore saved registers.
+
+StdDirIDExit	PROC	EXPORT
+
+		move.l	ExpandMem,a0			; point to extended low-memory
+		clr.l	ExpandMemRec.resourceMgrDirID(a0)	; get rid of special dirID (done in StdExit on newer ROMs)
+
+		move.l	(sp)+,a0				; get return address in A0
+		add.l	d0,sp					; pop off parameters
+		jmp		(a0)					; return
+
+		endproc	
+	
+	
+	
+	
+;____________________________________________________________________________________________________
+; CreateResFile(fileName: Str255);
+
+CreateResFileDirIDExit PatchProc	_CreateResFile,(Plus,SE,II,Portable,IIci)
+		import	StdDirIDExit
+
+		move.l	4(sp),-(sp)				; pass file name
+	If forRom Then													; <2> kc.start
+		Import	CreateResFile
+		jsr		CreateResFile
+	Else
+		jsrOld							; create resource file
+	Endif															; <2> kc.end
+
+		moveq	#4,d0					; get size of parameters
+		jmp		StdDirIDExit			; clear the dirID and exit (done by StdExit on newer ROMs)
+
+		endproc
+
+;____________________________________________________________________________________________________
+; HCreateResFile(vRefNum: INTEGER; dirID: LONGINT; fileName: Str255);
+; This procedure needs to be named differently to get linked into LinkedPatches.rsrc by LinkPatch.
+
+CreateDirIDResFile PatchProc	_HCreateResFile,(Plus,SE,II,Portable,IIci)
+		import	StdDirIDExit
+
+		move.l	ExpandMem,a0			; point to extended low-memory
+		move.l	4+4(sp),ExpandMemRec.resourceMgrDirID(a0)	; jam in the dirID
+
+		move.w	4+4+4(sp),d0			; get the vRefNum
+
+		move.l	4(sp),-(sp)				; pass file name
+		pea		ReturnHere				; start doing a CreateResFile
+		jsrROM	StdZEntry				; save registers, etc. (D0 is saved across this call)
+		move.w	d0,ioStkFrame+ioVRefNum(a6)	; stuff vRefNum into parameter block
+		jmpROM	AfterStdZEntryInCreateResFile	; join CreateResFile
+ReturnHere
+
+		moveq	#4+4+2,d0				; get size of parameters
+		jmp		StdDirIDExit			; clear the dirID and exit (done by StdExit on newer ROMs)
+
+		endproc
+
+;____________________________________________________________________________________________________
+; OpenResFile(fileName: Str255): INTEGER;
+
+OpenResFileDirIDExit PatchProc	_OpenResFile,(Plus,SE,II,Portable,IIci)
+		import	StdDirIDExit
+
+		subq	#2,sp					; make room for result
+		move.l	2+4(sp),-(sp)			; pass file name
+	If forRom Then													; <2> kc.start
+		Import	OpenResFile
+		jsr		OpenResFile
+	Else
+		jsrOld							; open resource file
+	Endif															; <2> kc.end
+		move.w	(sp)+,4+4(sp)			; propagate result out
+
+		moveq	#4,d0					; get size of parameters
+		jmp		StdDirIDExit			; clear the dirID and exit (done by StdExit on newer ROMs)
+
+		endproc
+
+;____________________________________________________________________________________________________
+; OpenRFPerm(fileName: Str255; vRefNum: INTEGER; permission: SignedByte): INTEGER;
+
+OpenRFPermDirIDExit PatchProc	_OpenRFPerm,(Plus,SE,II,Portable,IIci)
+		import	StdDirIDExit
+
+		subq	#2,sp					; make room for result
+		move.l	2+4+2+2(sp),-(sp)		; pass file name
+		move.w	4+2+4+2(sp),-(sp)		; pass vRefNum
+		move.b	2+4+2+4(sp),-(sp)		; pass permission
+
+		jsrOld							; open resource file
+
+		move.w	(sp)+,4+2+2+4(sp)		; propagate result out
+
+		moveq	#2+2+4,d0				; get size of parameters
+		jmp		StdDirIDExit			; clear the dirID and exit (done by StdExit on newer ROMs)
+
+		endproc
+
+;____________________________________________________________________________________________________
+; HOpenResFile(vRefNum: INTEGER; dirID: LONGINT; fileName: Str255; permission: SignedByte): INTEGER;
+; This procedure needs to be named differently to get linked into LinkedPatches.rsrc by LinkPatch.
+
+OpenDirIDResFile PatchProc	_HOpenResFile,(Plus,SE,II,Portable,IIci)
+		import	StdDirIDExit
+
+		move.l	ExpandMem,a0			; point to extended low-memory
+		move.l	4+2+4(sp),ExpandMemRec.resourceMgrDirID(a0)	; jam in the dirID
+
+		subq	#2,sp					; make room for result
+		move.l	2+4+2(sp),-(sp)			; pass file name
+		move.w	4+2+4+2+4+4(sp),-(sp)	; pass vRefNum
+		move.b	2+4+2+4(sp),-(sp)		; pass permission
+		jsrROM	ROMOpenRFPerm			; open resource file
+		move.w	(sp)+,4+2+4+4+2(sp)		; propagate result out for HOpenResFile
+
+		moveq	#2+4+4+2,d0				; get size of parameters
+		jmp		StdDirIDExit			; clear the dirID and exit (done by StdExit on newer ROMs)
+
+		endproc
+
+;____________________________________________________________________________________________________
+; patch to Create to use dirID
+;
+; This patch should only apply to the Create call in CreateResFile.
+; Since come-from patches are a pain, instead we assume that the “resourceMgrDirID”
+; global will be zero, except for some cases when Create is called from CreateResFile.
+;
+; Come-from patches are now cake with linked patches, so this routine has been changed into
+; a proper come-from patch.  <2>  DTY 6/27/90
+
+
+NewCreate ComeFromPatchProc	_Create,AfterCreateInCreateResFile,(Plus,SE,II,Portable,IIci)
+		move.l	a0,-(sp)				; save pointer to the old parameter block
+
+		sub		#ioHQElSize,sp			; make room for new parameter block
+
+		move.l	ioFileName(a0),ioFileName(sp)	; use the same file name
+		move.w	ioVRefNum(a0),ioVRefNum(sp)		; use the same vRefNum
+		move.b	ioFileType(a0),ioFileType(sp)	; use the same “file type”
+		move.l	ExpandMem,a1					; point to extended low-memory
+		move.l	ExpandMemRec.resourceMgrDirID(a1),d0	; get the dirID
+		move.l	d0,ioDirID(sp)					; put in the dirID
+
+		move.l	sp,a0					; use the new parameter block
+		or.w	#newHFS,d1				; set the HFS bit in the trap word (passed by dispatcher)
+		jsrOld							; Call old _Create
+
+		add		#ioHQElSize,sp			; get rid of the parameter block
+
+		move.l	(sp)+,a0				; get pointer to the old parameter block
+		move.w	d0,ioResult(a0)			; put result in the old parameter block
+
+		rts
+
+		endproc
+
+;____________________________________________________________________________________________________
+; patch to OpenRF to use dirID
+;
+; This patch should only apply to the OpenRF call in ORFCommon.
+; Since come-from patches are a pain, instead we assume that the “resourceMgrDirID”
+; global will be zero, except for some cases when OpenRF is called from ORFCommon.
+;
+; Come-from patches are now cake with linked patches, so this routine has been changed into
+; a proper come-from patch.  <2>  DTY 6/27/90
+
+NewOpenRF ComeFromPatchProc	_OpenRF,AfterOpenRFInORFCommon,(Plus,SE,II,Portable,IIci)
+		move.l	a0,-(sp)				; save pointer to the old parameter block
+
+		sub		#ioHQElSize,sp			; make room for new parameter block
+
+		move.l	ExpandMem,a1			; point to extended low-memory
+		move.l	ExpandMemRec.resourceMgrDirID(a1),d0	; get the dirID
+		move.l	d0,ioDirID(sp)			; put in the dirID
+
+		move.l	ioFileName(a0),ioFileName(sp)	; use the same file name
+		move.w	ioVRefNum(a0),ioVRefNum(sp)		; use the same vRefNum
+		move.b	ioFileType(a0),ioFileType(sp)	; use the same “file type”
+		move.b	ioPermssn(a0),ioPermssn(sp)		; use the same permissions
+		move.l	ioOwnBuf(a0),ioOwnBuf(sp)		; and the same file buffer
+
+		move.l	sp,a0					; use the new parameter block
+		or.w	#newHFS,d1				; set the HFS bit in the trap word (passed by dispatcher)
+		jsrOld							; Call old _OpenRF routine
+
+		move.w	ioRefNum(sp),d1			; get the refNum result into a register
+
+		add		#ioHQElSize,sp			; get rid of the parameter block
+
+		move.l	(sp)+,a0				; get pointer to the old parameter block
+		move.w	d0,ioResult(a0)			; put result in the old parameter block
+		move.w	d1,ioRefNum(a0)			; put refNum in the old parameter block
+
+		rts
+
+		endproc
+
+;____________________________________________________________________________________________________
+; Un-implement (de-announce) _AddReference and _RmveReference traps
+
+InstallResourceMgrExtensions	InstallProc	(Plus,SE,II,Portable,IIci)
+
+		move.w	#$9f,d0
+		_GetTrapAddress newTool			; get the address of the Unimplemented trap
+		move.w	#$1AC,d0
+		_SetTrapAddress newTool			; nuke AddReference
+		move.w	#$1AE,d0
+		_SetTrapAddress newTool			; nuke RmveReference
+
+		rts
+
+		EndProc
+
+;____________________________________________________________________________________________________
+; patch to _SetEOF inside CheckGrow to check for resource file too large
+;
+; CheckGrow is called by AddResource, ChangedResource, SetResInfo, and (more or less) by
+; SetResourceSize above. It calls _SetEOF to grow the file to accomodate these operations.
+; Unfortunately, while the File Mgr supports files > 16 meg, the Resource Mgr does not.
+; This patch checks if the size passed to _SetEOF is too big, and returns eofErr (for lack of
+; a better error) in this case.
+
+ValidateFileSizeInCheckGrow ComeFromPatchProc _SetEOF,AfterSetEOFInCheckGrow,(Plus,SE,II,Portable,IIci)
+	
+		tst.b	(a1)					; get new size of file set up by CheckGrow (a1 points to ioLEOF inside param block)
+										; note: 16 meg = $01000000, so if any bits are set in first byte it’s >= 16 meg
+		beqOld							; no, grow the file as usual
+		move.w	#eofErr,d0				; yes, return an error (not really an eofErr, but it is the end of the resource fork)
+		rts
+
+		endproc
+
+;____________________________________________________________________________________________________
+
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	STILL TO DO
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	? GetIndResource in numerical order
+;
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	? Turn AddResource into a ReplaceResource
+;
+;		In the past AddResource would allow you to add a resource that is the same
+;		Type and ID and Name as a resource already present in the file.  This is a
+;		patch that removes the old resource before adding the new one.
+;
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	SetResFileAttrs and mapReadOnly
+;
+;		The resource manager allows you to set the mapReadOnly bit. However, that
+;		doesn’t do what you think it does.  The mapReadOnly bit is used for internal
+;		housekeeping while the file is open.  It signals to the resource manager
+;		that this file was opened read only.  Upon CloseResFile or UpdateResFile the
+;		resource manager aborts when it sees this flag set, and writes nothing to
+;		disk.  There is no way to set the mapReadOnly bit on disk using the normal
+;		resource manager calls.
+;
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		END

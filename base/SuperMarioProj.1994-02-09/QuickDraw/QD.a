@@ -1,0 +1,505 @@
+;
+;	File:		QD.a
+;
+;	Contains:	RAM Based Color QuickDraw
+;
+;	Written by:	Bruce Leak
+;
+;	Copyright:	© 1989-1991, 1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM2>	 9/12/93	SAM		Added "NOT forROM" around the code that implements
+;									_Translate24to32.  SuperMario is a 32-bit only ROM.
+;		<19>	 8/30/91	DTY		Define hasCQD since we took it out of BBSStartup.  QuickDraw
+;									used to use {Defs32}, so hasCQD needs to be true as it was in
+;									that case.
+;		<18>	 7/10/91	JSM		Remove obsolete SysVers conditional and some code that never is
+;									compiled.
+;		<17>	 6/14/91	JL		Removed benign redefinition of HWCfgFlags declared in Private.a.
+;		<16>	 6/12/91	LN		Removed #includes for private interfaces from public interfaces.
+;									Changed #include 'HardwareEqu.a' to 'HardwarePrivateEqu.a'
+;		<15>	 8/17/90	KON		Added support for Restor Macro so traps can be installed to
+;									point to ROM addresses.
+;		<14>	 7/26/90	KON		Removed nsStackerr, now defined in ColorEqu.a
+;		<13>	 7/24/90	gbm		axe some duplicate definitions
+;		<12>	 7/11/90	gbm		argh, more asm warnings bite the dust
+;		<11>	 6/25/90	DVB		Fix alignment problem
+;		<10>	 6/25/90	CL		Included fontPrivate.a for build
+;		 <9>	 6/20/90	CL		Taking out rswapmmuMode since it now exists in qdHooks.a.
+;		 <8>	 5/30/90	JT		Added equates for hasPenFraction for the included source files
+;									that need it.
+;		 <7>	  2/2/90	BAL		Unhook the crsr code from the vbl task during the
+;									installation process. Deallocate old crsr data
+;									structures before jetisoning them.
+;		 <6>	  2/1/90	BAL		Unhook the crsr code from the vbl task during the installation
+;									process. Deallocate old crsr data structures before jetisoning
+;									them.
+;		 <5>	 1/18/90	DVB		Include PalettePriv.a
+;		 <4>	 1/17/90	BAL		Made the installation of the new crsr code AUX conditional.
+;		 <3>	 1/15/90	BAL		For AUX: Only install Translate24To32 if it doesn't already
+;									exist.
+;		 <2>	  1/3/90	EMT		(with BAL) Moved trap installs to QDTrapInstall.a.
+;	   <2.7>	11/19/89	BAL		Added StdOpcodeProc to the install process.
+;	   <2.6>	11/18/89	BAL		Added QuickerDraw conditional "Quicker" for fast 8-bit
+;									arithmetic modes
+;	   <2.5>	11/17/89	BAL		Moved GetPMData outside of a conditional
+;	   <2.4>	11/16/89	BAL		Added GetPMData as a vector for picture unpacking.
+;	   <2.3>	11/15/89	KON		Split GetPMData.a into separate file and included here and in
+;									B&W QD.
+;	   <2.2>	 11/8/89	BAL		Added NewOpenPicture and suppport for special cased 8 bit
+;									arithmetic modes.
+;	   <2.1>	 11/1/89	BAL		Reworked to support separate "32-Bit QuickDraw" builds as well.
+;	  <•2.0>	10/10/89	djw		Removed _alloccursor, _initcursor since the magical slot manager
+;									patch takes care of that for us.
+;	   <1.9>	 9/25/89	CCH		Changed include of "DeclRomEqu.a" to "ROMEqu.a".
+;	   <1.8>	 9/25/89	BAL		Made compatible with the current version of qdTrapInstall.a
+;	   <1.7>	 9/25/89	BAL		Removed _debugger from install process
+;	   <1.6>	 9/25/89	BAL		Merged into System 7.0 EASE build process; broke off text/font
+;									stuff.
+;	   <1.5>	 6/30/89	BAL		Now supports ram based build of aurora sources
+;	  <•1.4>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;
+
+;--------------------------------------------------------------------------------
+;
+;		QuickDraw patch program
+;
+;--------------------------------------------------------------------------------
+
+
+			BLANKS		ON
+			STRING		ASIS
+			
+			MACHINE	MC68020
+;--------------------------------------------------------------------------------
+; This file builds Color QuickDraw
+;
+;--------------------------------------------------------------------------------
+;Modification History
+;
+;
+
+	IF (&TYPE('useColorICON') = 'UNDEFINED') THEN
+useColorICON	EQU		0
+	ENDIF
+	
+	IF (&TYPE('installText') = 'UNDEFINED') THEN
+installText		EQU		0
+	ENDIF
+	
+	IF (&TYPE('installFont') = 'UNDEFINED') THEN
+installFont		EQU		installText
+	ENDIF
+	
+	IF (&TYPE('installAllQD') = 'UNDEFINED') THEN
+installAllQD	EQU		0
+	ENDIF
+	
+	IF (&TYPE('separateFile') = 'UNDEFINED') THEN
+separateFile	EQU		0
+	ENDIF
+	
+ROMPaletteMgr	EQU 1
+has32BitQD		EQU 1
+Quicker			EQU 1
+
+	IF (&TYPE('hasPenFraction') = 'UNDEFINED') THEN
+		IF forROM THEN
+hasPenFraction	EQU		0
+		ELSE
+hasPenFraction	EQU		1
+		ENDIF
+	ENDIF
+
+	if (&type('hasCQD') = 'UNDEFINED') then
+		hasCQD:	equ		1
+	endif
+	
+
+PrintinROM		EQU	1
+PrNonPortable 	EQU 1
+WholeErrors 	EQU 1
+
+	print	off
+	
+			INCLUDE		'quickequ.a'
+			INCLUDE		'SysEqu.a'
+			INCLUDE		'syserr.a'
+			INCLUDE		'toolequ.a'
+			INCLUDE		'fasttraps.a'
+			INCLUDE		'qdHooks.a'
+			INCLUDE 	'fontPrivate.a'
+				 
+			INCLUDE 	'colorequ.a'
+			INCLUDE		'SlotMgrEqu.a'
+			INCLUDE		'ROMEqu.a'
+			INCLUDE		'VideoEqu.a'
+			INCLUDE		'HardwarePrivateEqu.a'
+			INCLUDE		'PaletteEqu.a'
+			INCLUDE		'PalettePriv.a'
+			
+_FixDiv			OPWORD $A84D
+_PMForeColor	OPWORD $Aa97
+_PMBackColor	OPWORD $Aa98
+
+		
+		MACRO
+		_SeedFill
+		JSR		([$E00+$39*4])
+		ENDM
+		
+		MACRO
+		_CalcMask
+		JSR		([$E00+$38*4])
+		ENDM
+		
+		MACRO
+		_rGetCTSeed
+		JSR		([$E00+$228*4])
+		ENDM
+		
+	
+		MACRO
+		_ColorThing2Index
+		JSR		([$E00+$392*4])
+		ENDM
+		
+		MACRO
+		_tstMFExists
+		move.l 		($E00+$9f*4),d0		;get address of unimplemented trap
+		cmp.l		($E00+$8f*4),d0		;same as OSDispatch?
+		ENDM
+		
+	
+
+;Sleezy Low-Memory Locations pilfered by FCQD	
+	
+FMSynthXtra		equ		$c1c
+jpCicn			equ		$1c4c
+
+;$d44 is a block of 12 lowmem bytes: Could be good!
+ShieldJunkBase	EQU		$d44
+
+ShieldRect		EQU		ShieldJunkBase
+ShieldDepth		EQU		ShieldJunkBase+8
+	
+;new private equates used by FCQD	
+
+runMaskBit		equ		30				;bit number for run MASK instruction
+staleRGBbkBit	equ		2				;bit number in PMFlags
+staleRGBfgBit	equ		3				;bit number in PMFlags
+PMVersMask		EQU		$7FFF			; mask to remove high bit of version
+fAddr32clean	EQU		$8000			; flag to say pixMap's baseAddr is 32 bit clean
+
+CLUTBusy		EQU		13				; bit number in CTFlags (TransIndex) to 
+										;   mark CLUT is being changed in SetEntries
+										
+          PRINT     NOGEN,NOMDIR
+          PRINT     ON
+
+
+BlockHead	MAIN		EXPORT	
+
+			Export	CodeStart
+
+			Import 	Install
+			
+			bra.l		Install
+			
+			DC.B		'ptchQD32'
+			ALIGN
+			
+			
+				GBLC	&CurFile	;current file name used by Drawing Vars
+
+CodeStart	equ *
+
+	if separateFile then
+			lea 	BlockHead,a0			; get block start pointer in a0
+			rts
+	endif
+
+	if quicker then
+				INCLUDE	'arith8blt.a'
+	endif
+				INCLUDE	'GDevice.a'
+				INCLUDE	'LCURSOR.a'
+	if installText then
+				INCLUDE	'DRAWTEXT.a'
+				INCLUDE	'TEXT.a'
+	endif
+				INCLUDE	'LINES.a'
+				INCLUDE	'PUTLINE.a'
+				INCLUDE	'DRAWLINE.a'
+				INCLUDE	'RGNBLT.a'
+				INCLUDE	'RECTS.a'
+				INCLUDE	'BITBLT.a'
+				INCLUDE 'cCrsrCore.a'
+				INCLUDE	'QDUtil.a'
+				INCLUDE	'Colorasm.a'
+				INCLUDE	'Patterns.a'
+				INCLUDE	'GRAFAsm.a'
+				INCLUDE	'PICTURES.a'
+				INCLUDE	'getPMData.a'
+				INCLUDE	'POLYGONS.a'
+				INCLUDE	'RRECTS.a'
+				INCLUDE	'DRAWARC.a'
+				INCLUDE	'BITMAPS.a'
+				INCLUDE	'REGIONS.a'
+				INCLUDE	'SEEKRGN.a'
+				INCLUDE	'STRETCH.a'
+				INCLUDE	'seekMask.a'
+				INCLUDE	'OVALS.a'
+				INCLUDE	'ARCS.a'
+				INCLUDE	'SORTPOINTS.a'
+				INCLUDE	'PUTRGN.a'
+				INCLUDE	'ColorMgr.a'
+				INCLUDE	'ANGLES.a'
+				INCLUDE	'PUTOVAL.a'
+				INCLUDE	'PACKRGN.a'
+				INCLUDE	'RGNOP.a'
+				INCLUDE	'MaskAsm.a'
+				INCLUDE	'PaletteMgr.a'
+	if installText then
+				INCLUDE 'fontmgr.a'
+	endif
+				INCLUDE	'GWorld.a'
+
+;----------------------------------------------------------------------
+
+
+CodeEnd	PROC EXPORT
+
+			bra.s	@1
+@CutBack	DC.L	0						;do nothing flag for cut back code
+@1
+			lea		@CutBack,a1				;set up pointer to end o' code
+			rts
+
+
+Install	PROC EXPORT
+			IMPORT	CodeEnd,CodeStart
+			IMPORT	FastStart
+
+			lea			CleanStart,A0
+			move.l		A0,D0
+			_StripAddress					; clean the pc
+			move.l		D0,-(sp)
+DummyTask	rts								; go there
+CleanStart
+
+			PEA	-4(A5)						; push address of QuickDraw vars
+			_InitGraf	     				; initialize QuickDraw
+			_HideCursor						; restore the screen data
+
+
+	if separateFile then
+			bsr.l 		CodeStart			; get src pointer in a0
+			bsr.s 		CodeEnd 			; get end pointer in a1
+			sub.l		a0,a1				; compute size
+			move.l		a1,d0				; get size in d0
+			sub.l		d0,BufPtr			; make room above stack
+			move.l		BufPtr,a1			; get dst in a1
+			MOVE.L		A1,A4				; copy dst ptr
+			sub.l		a0,a4				; compute there-here offset
+			_BlockMove
+	else
+			sub.l		a4,a4				; compute there-here offset
+	endif
+	
+			MOVE.W		HwCfgFlags,D0		; check ‘em the compulsive way
+			BTST		#hwCbAUX,D0			; is it A/UX time?			
+			BNE.S		@skipCrsr			; if so, show the crsr
+			lea			DummyTask,a0
+			move.l		a0,JCrsrTask		; unhook the crsr during install
+@skipCrsr
+
+			JSR 	FastStart
+		
+
+			MOVE.W		HwCfgFlags,D0		; check ‘em the compulsive way
+			BTST		#hwCbAUX,D0			; is it A/UX time?			
+			BNE.S		@AUX				; if so, show the crsr
+
+			move.l	crsrPtr,a0				; pick up handle to crsr save record
+			move.l	(a0),a2
+			move.l	CCMap(a2),-(sp)			; get handle to crsr pixmap
+			_disposPixmap
+			move.l	CCData(a2),a0			; get handle to crsr color data
+			_disposHandle
+			move.l	CCSave(a2),a0			; get handle to save bits under crsr
+			_disposHandle
+			move.l	crsrPtr,a0				; pick up handle to crsr save record
+			_disposHandle
+
+	 
+			MOVE.L	MINUSONE,CRSRPTR		; deallocate crsr data
+			
+		;	LEA		JAllocCrsr,A1			; first entry in second table
+		;	move.l	(a1),a1					; get vector
+		;	JSR		(a1)					; allocate it right
+		;	_InitCursor
+			
+			bra.s	@noAUX
+@AUX
+			_InitCursor						; make sure the cursor gets shown
+@noAUX	
+			clr.l	-(sp)					; take params from theGD
+			clr.l	-(sp)
+			clr.w	-(sp)
+			_MakeITable						; force a rebuild of the ITab
+	
+	
+	IF useColorICON	THEN
+	
+theZone		equ		$118
+sysZone		equ		$2a6
+			
+			move.l	theZone,-(sp)
+			move.l	sysZone,theZone
+			
+			subq	#4,sp					;make room for result
+			move.w	#32,-(sp)				;push id
+			_getCicon
+			move.l	(sp)+,a0				;get cicn handle
+			move.l	a0,jpCicn				;save for later
+			_MoveHHi
+			_HLock
+			
+			MOVE.L	(A0),A3							; keep pointer in A3
+			MOVE	iconPMap+bounds+bottom(A3),D3	; get bottom
+			SUB		iconPMap+bounds+top(A3),D3		; calc height, keep in D3
+			
+; set the base addresses of the pixMap, the mask, and the bitMap
+			
+			LEA		iconRec(A3),A0			 		; point to the mask data
+			MOVE.L	A0,iconMask+baseAddr(A3)		; and set the mask's base address
+			MOVE	iconMask+rowBytes(A3),D0		; get mask's rowbytes
+			MULU	D3,D0							; get size of mask
+			ADD.L	D0,A0							; point to BitMap data
+			MOVE.L	A0,iconBMap+baseAddr(A3)		; and set the b/w icon's base address
+			
+			MOVE.L	iconData(A3),A0					; get the pixmap data handle
+			_MoveHHi
+			_HLock
+			MOVE.L	(A0),A0							; point at the data
+			MOVE.L	A0,iconPMap+baseAddr(A3)		; and set the color icon's base address
+			
+			move.l	(sp)+,theZone
+			
+	ENDIF
+			
+	if not separateFile then
+			bsr.l 	CodeEnd 			; get end pointer in a1
+			move.l	a1,a0				; copy for cut back code
+	endif
+			rts
+			 
+
+
+
+;--------------------------------------------------------------------------------------
+
+FastStart	PROC	EXPORT
+			IMPORT	INITCRTABLE,CRSRVBLTASK,Translate24To32
+	
+			; This patch installs the Translate24To32 routine as trap number $A091 if it doesn't
+			; already exist. Since this is the very first implementation of Translate24To32,
+			; if another version is already installed, it is a later version, which we don't want
+			; to override.
+
+			; Does the Translate24To32 dispatch trap exist?
+	IF NOT forROM THEN							; SuperMario is a 32-bit only ROM.
+			MOVE.W	#$A091, D0					; Translate24To32 Trap number
+			_GetTrapAddress ,NewOS				; get the address of Translate24To32
+			MOVEA.L	A0, A1						; Hold it for a sec
+			MOVE.W	#$A89F, D0					; get address of Unimplemented trap
+			_GetTrapAddress
+			CMPA.L	A0,A1						; see if a later version is already installed
+			BNE.S	@skip						; if so, we're done
+
+			move.w	#$91,d0
+			lea ((Translate24To32).L,pc),a0	; install address translation routine
+			ADD.L	A4,a0					; really get the actual address
+			_SetTrapAddress ,newOS	
+@skip		
+	ENDIF
+			lea		$4081c11c,a0			;point to copyright notice in rom78
+			move.l	a0,d7					;make a copy
+			
+			MOVE.W		HwCfgFlags,D0			; check ‘em the compulsive way
+			BTST		#hwCbAUX,D0				; is it A/UX time?			
+			BNE.S		MDONE					; if so, skip crsr installs
+
+		;offset from here to there in a4
+
+			lea ((InitCrTable).L,pc),a2		; get address of jump table
+			LEA		JHideCursor,A1			; first entry in the lo-mem jump table
+			MOVE.L	A2,A0					; get a trashable copy of the table addr
+			MOVEQ   #7,D1					; there are 8 vectors
+@8			MOVEQ	#0,D2					; clear the register for add
+			MOVE.W	(A0)+,D2				; get a vector (actually an offset)
+			ADD.L	A2,D2					; get the actual address
+			ADD.L	A4,D2					; really get the actual address
+			MOVE.L	D2,(A1)+				; and put in the lo-mem table
+			DBRA	D1,@8					; do them all
+			
+			LEA		JAllocCrsr,A1			; first entry in second table
+			MOVEQ   #1,D1					; there are 2 vectors
+@9			MOVEQ	#0,D2					; clear the register for add
+			MOVE.W	(A0)+,D2				; get a vector (actually an offset)
+			ADD.L	A2,D2					; get the actual address
+			ADD.L	A4,D2					; really get the actual address
+			MOVE.L	D2,(A1)+				; and put in the lo-mem table
+			DBRA	D1,@9					; do them all
+			
+			MOVE.L	Mouse,D0			; get the current mouse position...
+			LEA     MTemp,A0            ; point to the temp mouse variable
+			MOVE.L  D0,(A0)+            ; put MTemp AT 15,15
+			MOVE.L  D0,(A0)+            ; put RawMouse AT 15,15 TOO
+			MOVE.L  D0,(A0)+            ; put Mouse AT 15,15 TOO
+			MOVE.L	#0,(A0)+			; top = 0, left = 0
+			MOVE.W	ColLines,(A0)+		; set bottom
+			MOVE.W  RowBits,(A0)		; set left
+			MOVE.W  #$0006,CrsrThresh   ; CrsrThresh
+MDONE
+	
+			MOVEM.L	A2-A3,-(SP)			; save regs
+
+			LEA		LastTrap,A2			; point to end
+			LEA		FirstTrap,A3		; point to first trap
+NxtTrap		MOVE.L	A3,d1				; get pointer to offset
+			ADD.L	(A3)+,d1			; add offset to pointer
+			ADD.L	A4,D1				; really get the actual address
+			moveq	#0,d0
+			MOVE.W	(A3)+,D0			; get trap number
+			bpl.s	@NotROMAddress
+			and.w	#$7fff,d0			;strip high bit indicating it's a ROM address
+			move.l	-6(a3),d1			;get ROM offset
+			add.l	ROMBase,d1			;make it real
+@NotROMAddress
+			lsl.l	#2,d0
+			move.l	d0,a0
+			add.w	#$0e00,a0
+			move.l	d1,(a0)				; _SetTrapAddress ,New,Tool
+			CMP.L	A3,A2				; done yet?
+			BNE.S	NxtTrap				; =>no
+
+			MOVE.W	HwCfgFlags,D0		; check ‘em the compulsive way
+			BTST	#hwCbAUX,D0			; is it A/UX time?			
+			BNE.S	@AUX				; if so, skip crsr installs
+			lea ((CrsrVBLTask).L,pc),a0	; install cursor VBL task
+			ADD.L	A4,A0				; really get the actual address
+			MOVE.L  A0,JCrsrTask        ; JCrsrTask
+@AUX
+
+			move.l	$1204,jswapfont		;font manager hack
+			MOVEM.L	(SP)+,A2-A3			; restore regs
+			
+			RTS							; and return
+
+			INCLUDE	'QDTrapInstall.a'
+
+				END
+

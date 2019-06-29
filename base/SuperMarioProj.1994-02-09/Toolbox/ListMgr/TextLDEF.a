@@ -1,0 +1,335 @@
+;
+;	File:		TextLDEF.a
+;
+;	Contains:	LDEF 0 - Standard List Definition Procedure for simple text.
+;
+;				This is the standard List defProc.  Its primary task is to draw
+;				the contents of a list manager cell, either selected or deselected.
+;				It is passed a pointer to the cell's data, the length of the cell's
+;				data, and a rectangle in which to draw the cell.  When it is called,
+;				the clip region is set to that rect.  The cell data does NOT include a
+;				length byte.
+;
+;				Originally written by Ernie Beernink in March 1985.
+;
+;				Contains two copies of the LDEF, one for 7.0 and one for 6.0.x systems.
+;				The System 7.0 version automatically condenses and truncates text that is
+;				too long for the cell.
+;
+;	Copyright:	© 1985-1992 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM4>	 11/5/92	SWC		Changed PackMacs.a->Packages.a.
+;		<SM3>	10/14/92	CSS		Change some branch short instructions to word branches.
+;		<11>	 2/26/92	DTY		#1018596: When calculating the pen position to start drawing the
+;									text for a cell, take teSysJust into account for right-left
+;									systems. If teSysJust is non zero, compute the pen position from
+;									the right side of the cell.
+;		<10>	 3/19/91	ngk		VL,#b6-ngk-003: fix bug in restoring text face
+;		 <9>	  3/4/91	dba		dty: get rid of SysVers conditionals
+;		 <8>	 7/20/90	gbm		get rid of Asm warning
+;		 <7>	  3/9/90	HJR		Fix assembling problem.
+;		 <6>	  3/8/90	JAL		Removed include of QuickEqu.a because it was colliding with StandardEqu.d
+;		 <5>	  3/5/90	PKE		Added smTruncEnd as truncWhere parameter for TruncText call,
+;									since TruncText interface now matches former NTruncText
+;									interface.
+;		 <4>	 1/25/90	JSM		There is no Script Manager call to determine if truncation is
+;									needed, OK to use TextWidth.
+;		 <3>	 1/12/90	JSM		Remove unnecessary MOVE.W.
+;		 <2>	 1/12/90	JSM		6.0/7.0 bifurcation.  For 7.0, added automatic truncation and
+;									condensing when text is too long, along with general cleanup.
+;	   <1.2>	11/17/89	dba		got rid of checks for 64K ROMs
+;	   <1.1>	 8/28/89	SES		removed references to nFiles
+;	   <1.0>	11/16/88	CCH		added to EASE
+;				  6/8/87	sad		color hilighting, truncation (conditional) (version $0001)
+;		<S3>	  1/5/87	JTC		32-bit support changes.
+;
+;	To Do:
+;
+
+; Register Usage:
+;
+;	A2 = handle to list data
+;	A3 = pointer to ListRecord (LHandle dereferenced)
+;	A4 = cell's rectangle (LRect), also used to store length of string copied to stack
+;
+;	D3 = length of text to draw (LDataLen)
+;	D4 = current style before condensing
+;	D5 = offset to text in list data handle (LDataOffset)
+;	D6 = pointer to the list data (A2 dereferenced)
+;	D7 = width of cell available for drawing
+
+				LOAD	  	'StandardEqu.d'
+				INCLUDE		'Packages.a'
+
+doTruncate		EQU			1	; do truncation
+doCondense		EQU			1	; condense text before trying to truncate
+
+LDEF0			PROC		EXPORT
+
+; PROCEDURE		DrawCell(LMessage:INTEGER; LSelect:BOOLEAN; LRect:Rect; LCell: Cell;
+;				LDataOffset, LDataLen:INTEGER; LHandle:Handle);
+
+; Message equates:
+
+;InitMsg		EQU			0	; tell drawing routines to init themselves
+;DrawMsg		EQU			1	; draw (and de/select) the indicated data
+;HiliteMsg		EQU			2	; de/select the indicated data
+;CloseMsg		EQU			3	; shut down, the list is being disposed
+
+; Stack Frame definition for ListDefProc 0
+
+LHandle			EQU			8				; Handle to list data record
+LDataLen		EQU			LHandle+4		; length of data
+LDataOffset		EQU			LDataLen+2		; offset to data
+LCell			EQU			LDataOffset+2	; cell that was hit
+LDrawRect		EQU			LCell+4			; rect to draw in
+LSelect			EQU			LDrawRect+4		; 1=selected, 0=not selected
+LMessage		EQU			LSelect+2		; 0=Init, 1=Draw, 2=Hilite, 3=Close
+LParamSize		EQU			LMessage+2-8	; # of bytes of parameters
+
+				BRA.S		@0				; enter here
+
+; standard header
+
+				DC.W		0					; flags word
+				DC.B		'LDEF'				; type
+				DC.W		0					; ID
+				DC.W		$0002				; version
+@0
+				LINK		A6,#0				; set up a stack frame
+				MOVEM.L		D3-D7/A2-A4,-(SP)	; save the usual stuff
+				MOVE.L		LHandle(A6),A0		; get handle to list record
+				MOVE.L		(A0),A3				; get pointer to (locked) record
+
+				MOVE.W		LMessage(A6),D0		; why am I being called?
+
+				SUBQ		#1,D0				; check next in line
+				BEQ.S		ListDraw			; code = 1 -> draw cell
+				SUBQ		#1,D0				; check next
+				BEQ.S		LHilite				; code = 2 -> invert cell
+				BPL.S		LDefExit			; other calls not needed here
+
+;---------------
+; LInit
+; Here is the code that does the initialization for this defproc
+
+LInit
+
+; just set up our indent
+
+				SUBQ		#8,SP				; make room for GetFontInfo record
+				MOVE.L		SP,-(SP)			; point to it
+				_GetFontInfo					; and go get info
+
+				MOVE.W		(SP),indent+v(A3)	; indent.v := ascent
+				MOVE.W		#4,indent+h(A3)		; indent.h := 4
+				ADDQ		#8,SP				; fix up stack
+LDefExit
+				MOVEM.L		(SP)+,D3-D7/A2-A4	; restore the usual stuff
+				UNLK		A6					; unlink our frame
+				MOVE.L		(SP)+,A0			; get return address
+				ADD.L		#LParamSize,SP		; strip off parameters
+				JMP			(A0)				; and return
+
+;---------------
+; LHilite -- Here is the code that hilights/unhilights the
+; cell.	 We know that it's drawn, and that we're only called
+; if it needs to be de/selected, so inverrect is all we need.
+
+LHilite
+				BCLR		#7,HiliteMode		; now in color! <8jun87>
+				MOVE.L		LDrawRect(A6),-(SP)	; push rect
+				_InverRect						; and invert it
+				BRA.S		LDefExit			; all done
+
+;---------------
+; ListDraw -- Here is the code that does the drawing
+; for the defProc.
+
+ListDraw
+				MOVE.L		LDrawRect(A6),A4	; get rect into A4
+				tst.b		TESysJust+1			; <11> Check system justification
+				bz.s		@isLeftJustified	; <11>
+@isRightJustified
+				move.w		right(a4),d0		; <11>
+				sub.w		indent+2(a3),d0		; <11>
+				move.w		d0,-(sp)			; <11> Calculate indent from right
+				move.w		top(a4),d0			; <11>
+				add.w		indent(a3),d0		; <11>
+				move.w		d0,-(sp)			; <11> Calculate indent from top
+				bra.s		@positionPen		; <11> Move the pen
+@isLeftJustified
+				MOVE.L		topLeft(A4),-(SP)	; move pen to indent point
+				MOVE.L		indent(A3),-(SP)
+				PEA			4(SP)
+				_AddPt
+@positionPen
+				_MoveTo
+
+; use default text mode
+
+				_PenNormal
+
+				MOVE.L		cells(A3),A2		; get data handle
+				MOVEA.L		A2,A0				; data handle			<S3>
+				_HGetState						; D0 := lock state		<S3>
+				MOVE.B		D0,-(SP)			; save lock state		<S3>
+				_HLock							; lock across QD calls	<S3>
+
+				MOVE.L		A4,-(SP)			; clear out the rect
+				_EraseRect
+
+				MOVE.W		LDataLen(A6),D3		; anything to draw?
+
+			IF doCondense THEN
+				BLE			@noDraw				; =>nope, don't draw <22jul87 sad>
+			ELSE
+				BLE.S		@noDraw				; =>nope, don't draw <22jul87 sad>
+			ENDIF	; IF doCondense
+
+			IF doTruncate THEN					; should we do truncation if needed?
+
+				MOVE.L		(A2),D6				; D6.L = ptr to the text
+				MOVE.W		LDataOffset(A6),D5	; D5.W = offset to first byte of this cell
+
+; calculate available width
+
+				MOVE.W		right(A4),D7		; D7 = width = right
+				SUB.W		left(A4),D7			; minus left
+				SUB.W		indent+h(A3),D7		; minus left indent
+				SUB.W		#1,D7				; minus right indent
+
+; calculate the width of the text to avoid unecessary calls to _TruncText
+
+				SUB.W		#2,SP				; space for width
+				MOVE.L		D6,-(SP)			; pointer to text
+				MOVE.W		D5,-(SP)			; offset to first byte
+				MOVE.W		D3,-(SP)			; length of text
+				_TextWidth
+				CMP.W		(SP),D7				; will string fit? <11> Leave width on stack
+				BGE 		@noTruncate			; yes, no need to truncate <SM3> CSS 
+
+				addq		#2,sp				; <11> Width isn’t needed til after truncation.  Lose it.
+				
+			IF doCondense THEN
+
+; condense the text first before calling _TruncText
+
+				MOVE.L		GrafGlobals(A5),A0	; get QuickDraw globals
+				MOVE.L		thePort(A0),A0		; get grafport
+				MOVE.B		txFace(A0),D0		; get current style				<10 #b6-ngk-003>
+				MOVE.W		D0,D4				; save current style in D4.W
+				BSET		#condenseBit,D0		; add condensed
+				MOVE.W		D0,-(SP)			; and set it
+				_TextFace
+
+			ENDIF	; IF doCondense
+
+; duplicate current text for _TruncText so we don't change the actual data
+
+				MOVE.W		D3,D0				; get length of text
+				BTST		#0,D0				; is it odd?
+				BZ.S		@notOdd				; no
+				ADDQ.W		#1,D0				; make length even
+
+@notOdd
+				MOVE.W		D0,A4				; save length of copy in A4.W
+				SUB.W		D0,SP				; make space on the stack
+				MOVE.L		SP,A1				; destination string
+				MOVE.L		D6,A0				; pointer to text
+				ADD.W		D5,A0				; offset to source
+				MOVEQ		#0,D0				; get a long count
+				MOVE.W		D3,D0				; get length
+				_BlockMove						; copy current text to stack
+
+; call _TruncText to truncate the text
+
+				MOVE.W		D3,-(SP)			; save pre-truncated length of text
+
+				SUBQ		#2,SP				; returns whether string truncated
+				MOVE.W		D7,-(SP)			; width
+				PEA			6(SP)				; textPtr
+				PEA			8(SP)				; length
+				MOVE.W		#smTruncEnd,-(SP)	; truncate at end					<5>
+				_TruncText
+
+				ADDQ		#2,SP				; ignore result
+
+; for right justified systems, shift the pen position left the width of the text.
+
+				tst.b		TESysJust+1			; <11> Right justified?
+				bz.s		@dontShiftPen		; <11> No.  Don’t move the pen
+				move.w		(sp),d0				; <11> Length of truncated text
+				subq		#2,sp				; <11>
+				pea			4(sp)				; <11> Pointer to truncated string
+				clr.w		-(sp)				; <11> Offset to first byte
+				move.w		d0,-(sp)			; <11> Length of truncated string
+				_TextWidth						; <11> Find out how wide it is
+				neg.w		(sp)				; <11> Use -width as amount to move the pen horizontally
+				clr.w		-(sp)				; <11> Don’t shift it vertically
+				_Move							; <11> Move the pen.
+				
+; draw the truncated text
+
+@dontShiftPen
+				MOVE.W		(SP)+,D0			; get truncated length
+				PEA			(SP)				; point to the truncated text
+				CLR.W		-(SP)				; no offset
+				MOVE.W		D0,-(SP)			; truncated length
+				_DrawText
+
+				ADD.W		A4,SP				; strip off truncated text
+
+			IF doCondense THEN
+
+; restore original style
+
+				MOVE.W		D4,-(SP)			; restore old style
+				_TextFace
+
+			ENDIF	; IF doCondense
+
+				BRA.S		@noDraw				; done drawing truncated text
+
+@noTruncate
+
+; Move the pen for right justified systems.
+
+				tst.b		TESysJust+1			; <11> Check justification
+				bnz.s		@shiftPen			; <11> Pen needs to be moved
+				addq		#2,sp				; <11> Lose the string width for left justified systems
+				bra.s		@drawCellText		; <11>
+@shiftPen
+				neg.w		(sp)				; <11> Use -width as amount to move then pen horizontally
+				clr.w		-(sp)				; <11> Don’t move vertically
+				_Move							; <11> Move the pen.
+
+; draw the text
+
+@drawCellText
+				MOVE.L		D6,-(SP)			; point to the text
+				MOVE.W		LDataOffset(A6),-(SP)	; offset to first byte
+				MOVE.W		D3,-(SP)			; and number of bytes
+				_DrawText
+
+			ELSE	; compiled for no truncation
+
+				MOVE.L		(A2),-(SP)			; point to the text
+				MOVE.W		LDataOffset(A6),-(SP)	; offset to first byte
+				MOVE.W		D3,-(SP)			; and number of bytes
+				_DrawText
+
+			ENDIF	; IF doTruncate
+
+@noDraw
+				MOVEA.L		A2,A0				; data handle			<S3>
+				MOVE.B		(SP)+,D0			; saved lock state		<S3>
+				_HSetState						; stuffed back to handle<S3>
+
+				TST.B		LSelect(A6)			; selected? <22jul87 sad>
+				BNZ.S		LHilite				; yes <22jul87 sad>
+				BRA.S		LDefExit			; and return
+
+			END

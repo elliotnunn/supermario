@@ -1,0 +1,813 @@
+;EASE$$$ READ ONLY COPY of file “BITBLT.m.a”
+; 1.1	CCH 11/11/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.2	CCH 10/12/1988 Changed “m.GrafType.a” to “GrafType.m.a”.
+; 1.1	MSH 5/18/88 Changed inclides to use m.GRAPHTYPES to work under EASE.
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+
+		BLANKS	ON
+		STRING	ASIS
+
+		INCLUDE  'GRAFTYPES.m.a'
+;---------------------------------------------------------------
+;
+;  --> BITBLT.TEXT
+;
+;  Low-level bit boundary block transfer.
+;
+
+
+BITBLT	PROC  EXPORT
+		IMPORT LEFTMASK,RIGHTMASK,PATEXPAND
+;--------------------------------------------------------------
+;
+;  PROCEDURE BitBlt(srcBits,dstBits: BitMap;
+;			srcRect,dstRect: Rect;
+;			mode: INTEGER; pat: Pattern);
+;
+;  TRANSFERS A RECTANGULAR BLOCK OF BITS WITH NO CLIPPING AT ALL.
+;  MODE SPECIFIES THE COMBINATION MODE AND WHETHER THE SOURCE SHOULD COME
+;  FROM THE SOURCE BITMAP OR FROM A REPEATING PATTERN.
+;
+;  COPYRIGHT APPLE COMPUTER INC.
+;  WRITTEN BY BILL ATKINSON
+;
+;  POSITION INDEPENDENT AND RE-ENTRANT, CLOBBERS ONLY A0.
+;
+;  MODES:	   0 SRC		 --> DST
+;		   1 SRC OR  DST --> DST
+;		   2 SRC XOR DST --> DST
+;		   3 SRC BIC DST --> DST
+;
+;		   4 (NOT SRC)	   --> DST
+;		   5 (NOT SRC) OR  DST --> DST
+;		   6 (NOT SRC) XOR DST --> DST
+;		   7 (NOT SRC) BIC DST --> DST
+;
+;		   8 PATTERN	 --> DST
+;		   9 PATTERN OR  DST --> DST
+;		  10 PATTERN XOR DST --> DST
+;		  11 PATTERN BIC DST --> DST
+;
+;		  12 (NOT PATTERN)		   --> DST
+;		  13 (NOT PATTERN) OR  DST --> DST
+;		  14 (NOT PATTERN) XOR DST --> DST
+;		  15 (NOT PATTERN) BIC DST --> DST
+;
+;
+
+
+;----------------------------------------------------
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	22				;SIZE OF PARAMETERS
+SRCBITS 		EQU 	PARAMSIZE+8-4			;LONG, ADDR OF BITMAP
+DSTBITS 		EQU 	SRCBITS-4			;LONG, ADDR OF BITMAP
+SRCRECT 		EQU 	DSTBITS-4			;LONG, ADDR OF RECT
+DSTRECT 		EQU 	SRCRECT-4			;LONG, ADDR OF RECT
+MODE			EQU 	DSTRECT-2			;WORD
+PAT 		EQU 	MODE-4				;LONG, ADDR OF PATTERN
+
+
+;----------------------------------------------------
+;
+;  A6 OFFSETS OF LOCAL VARIABLES AFTER LINK:
+;
+EXPAT			EQU 	-64 			;16 LONGS
+SRCV			EQU 	EXPAT-2 			;WORD
+DSTV			EQU 	SRCV-2				;WORD
+SRCROW			EQU 	DSTV-2				;WORD
+DSTROW			EQU 	SRCROW-2			;WORD
+srcBump 		EQU 	DSTROW-2			;WORD
+HEIGHT			EQU 	srcBump-2			;WORD
+WORDCNT 		EQU 	HEIGHT-2			;WORD
+SAVEA5			EQU 	WORDCNT-4			;LONG
+VARSIZE 		EQU 	SAVEA5				;SIZE OF LOCAL VARIABLES
+
+
+;-------------------------------------------------------------------
+;
+;  ENTER HERE.	CALLER TAKES CARE OF CURSOR.
+;
+		LINK	A6,#VARSIZE 			;ALLOCATE LOCAL VARIABLES
+		MOVEM.L D3-D7/A2-A5,-(SP)			;SAVE REGS
+		MOVE.L	A5,SAVEA5(A6)				;SAVE GLOBAL POINTER
+
+
+;----------------------------------------------------------------------
+;
+;  GET PARAMETER POINTERS IN REGISTERS
+;
+		MOVE.L	SRCRECT(A6),A2				;A2 POINTS TO SRCRECT
+		MOVE.L	DSTRECT(A6),A3				;A3 POINTS TO DSTRECT
+		MOVE.L	SRCBITS(A6),A4				;A4 POINTS TO SRCBITS
+		MOVE.L	DSTBITS(A6),A5				;A5 POINTS TO DSTBITS
+
+
+;-------------------------------------------------------------
+;
+;  CALC HEIGHT OF DSTRECT.	QUIT IF HEIGHT <= 0
+;
+		MOVE	BOTTOM(A3),D0				;GET BOTTOM
+		SUB 	TOP(A3),D0				;CALC HEIGHT
+		BLE 	GOHOME					;QUIT IF HEIGHT <= 0
+		MOVE	D0,HEIGHT(A6)				;SAVE FOR LATER
+
+
+;--------------------------------------------------------------
+;
+;  SET UP FOR TOP TO BOTTOM, LEFT TO RIGHT
+;  GET SRC AND DST TOP AND ROWBYTES
+;
+		MOVEQ	#2,D3					;BUMP:=2 (TRANSFER LEFT TO RIGHT)
+		MOVE	TOP(A2),D0				;GET SRC TOP
+		SUB 	BOUNDS+TOP(A4),D0			;CONVERT SRC TOP TO GLOBAL
+		MOVE	D0,SRCV(A6) 			;SAVE FOR LATER
+
+		MOVE	TOP(A3),D0				;GET DST TOP
+		SUB 	BOUNDS+TOP(A5),D0			;CONVERT DST TOP TO GLOBAL
+		MOVE	D0,DSTV(A6) 			;SAVE FOR LATER
+
+		MOVE	ROWBYTES(A4),SRCROW(A6) 		;SRCROW:=SRCBITS.ROWBYTES
+		MOVE	ROWBYTES(A5),DSTROW(A6) 		;DSTROW:=DSTBITS.ROWBYTES
+
+
+;--------------------------------------------------------------------
+;
+;  SET UP INVERT FLAG, IN CASE SRC OR PATTERN WILL BE INVERTED
+;
+		CLR 	D7					;SAY NOT INVERTED
+		MOVE	MODE(A6),D0 			;GET TRANSFER MODE
+		BTST	#2,D0					;IS MODE AN INV. ONE ?
+		BEQ.S	MODEOK					;NOT INVERTED, CONTINUE
+		NOT 	D7					;INVERTED, PUT -1 IN INVERT REG
+MODEOK	BTST	#3,D0					;WILL WE USE PATTERN ?
+		BEQ.S	DIREC					;NO, DON'T BOTHER TO SET UP
+
+
+;------------------------------------------------------------
+;
+;  PATTERN WILL BE USED.  EXPAND 8 BYTE PATTERN TO 16 LONGS.
+;
+		MOVE	BOUNDS+LEFT(A5),D2			;GET GLOBAL-LOCAL OFFSET
+		MOVE.L	PAT(A6),A0				;POINT TO BYTE WIDE PATTERN
+		LEA 	EXPAT(A6),A1				;POINT TO EXPANDED PATTERN
+		MOVE.L	SAVEA5(A6),A5				;GET GLOBAL POINTER
+		JSR 	PATEXPAND				;EXPAND 8 BYTES TO 16 LONGS
+		MOVE.L	DSTBITS(A6),A5				;RESTORE A5 TO DSTBITS
+
+
+;------------------------------------------------------------
+;
+;  SET UP (VERT * 4) MOD 64 AS PATTERN SELECTOR
+;
+		MOVEQ	#$F,D7					;TREAT COORD MOD 16
+		AND 	TOP(A3),D7				;GET DST TOP LOCAL COORD
+		LSL 	#2,D7					;QUAD FOR LONG PATTERNS
+		MOVE.L	EXPAT(A6,D7),D6 			;GET FIRST PATTERN DATA
+		BRA.S	NOTSRC					;NOT USING SRC, SKIP OVER
+
+
+;-----------------------------------------------------------
+;
+;  SOURCE WILL BE USED, SO SET UP VERT AND HORIZ DIRECTIONS
+;  SUCH THAT SRC WON'T GET CLOBBERED TILL AFTER IT HAS BEEN USED
+;
+DIREC	MOVE.L	BASEADDR(A4),D0 			;GET SRC BASEADDR
+		CMP.L	BASEADDR(A5),D0 			;ARE SRC AND DST ARRAYS THE SAME ?
+		BNE.S	GETSRC					;NO, DONT WORRY ABOUT OVERLAP
+		MOVE	SRCV(A6),D0 			;GET SRCV
+		CMP 	DSTV(A6),D0 			;IS SRCV > DSTV ?
+		BGT.S	GETSRC					;YES, CONTINUE WITH TOP TO BOTTOM
+		BLT.S	UPSIDE					;NO, DO UPSIDE DOWN
+		MOVE	LEFT(A2),D0 			;SAME VERT, CHOOSE HORIZ DIRECTION
+		SUB 	BOUNDS+LEFT(A4),D0			;CONVERT SRC LEFT TO GLOBAL
+		MOVE	LEFT(A3),D1 			;GET DST LEFT
+		SUB 	BOUNDS+LEFT(A5),D1			;CONVERT TO GLOBAL
+		CMP 	D1,D0					;IS SRCLEFT < DSTLEFT ?
+		BGE.S	GETSRC					;NO, DO LEFT TO RIGHT
+		NEG 	D3					;YES, BUMP:=-2 (RIGHT TO LEFT)
+		BRA.S	GETSRC					;CONTINUE
+
+
+;----------------------------------------------------------
+;
+; DO UPSIDE DOWN TO AVOID CLOBBERING SRC
+;
+UPSIDE	MOVE	HEIGHT(A6),D0				;GET HEIGHT
+		SUB 	#1,D0					;CALC HEIGHT-1
+		ADD 	D0,SRCV(A6) 			;SRCVERT:=SRCV+HEIGHT-1
+		ADD 	D0,DSTV(A6) 			;DSTVERT:=DSTV+HEIGHT-1
+		NEG 	SRCROW(A6)				;SRCROW:=-SRCROW
+		NEG 	DSTROW(A6)				;DSTROW:=-DSTROW
+
+
+;-----------------------------------------------------
+;
+;  SET UP SHIFTCNT IN D6 (RELATIVE SHIFT BETWEEN SRC & DST)
+;
+GETSRC	MOVE	LEFT(A3),D6 			;GET DST LEFT
+		SUB 	BOUNDS+LEFT(A5),D6			;CONVERT TO GLOBAL
+		MOVE	LEFT(A2),D1 			;GET SRC LEFT
+		SUB 	BOUNDS+LEFT(A4),D1			;CONVERT TO GLOBAL
+		SUB 	D1,D6					;CALC DELTA HORIZ
+		AND 	#$F,D6					;SHIFTCNT:=DELTA HORIZ MOD 16
+
+
+;------------------------------------------------------------
+;
+;  SET UP SRCLEFT IN A4, ADDR OF LEFTMOST SRC WORD
+;  (GOODBYE SRCBITS PTR)
+;
+		MOVE	SRCV(A6),D0 			;GET FIRST SRC VERT
+		MULU	ROWBYTES(A4),D0 			;CALC SRC ROWBYTES * FIRST SRC VERT
+		MOVE.L	BASEADDR(A4),A4 			;GET START OF SRC BITMAP
+		ADD.L	D0,A4					;ADD TO BITMAP START
+		ADD 	D6,D1					;CALC SRCH+SHIFTCNT
+		ASR 	#3,D1					;CONVERT BITS TO BYTE OFFSET
+		AND 	#$FFFE,D1				;TRUNC TO WORD BOUNDARY
+		ADD 	D1,A4					;LEAVE SRCLEFT IN A4
+
+
+;------------------------------------------------------------
+;
+;  SET UP DSTLEFT IN A5, ADDR OF LEFTMOST DST WORD
+;  (GOODBYE DSTBITS PTR)
+;
+NOTSRC	MOVE	LEFT(A3),D1 			;GET DST LEFT
+		SUB 	BOUNDS+LEFT(A5),D1			;CONVERT TO GLOBAL
+		MOVE	DSTV(A6),D0 			;GET FIRST DST VERT
+		MULU	ROWBYTES(A5),D0 			;CALC DSTROW * FIRST DST VERT
+		MOVE.L	BASEADDR(A5),A5 			;GET START OF DST BITMAP
+		ADD.L	D0,A5					;ADD DSTV*DSTROW
+		MOVE	D1,D0					;COPY DSTLEFT GLOBAL
+		ASR 	#4,D1					;CONVERT FROM DOTS TO WORDS
+		ADD 	D1,D1					;DOUBLE FOR BYTES
+		ADD 	D1,A5					;LEAVE DSTLEFT IN A5
+
+
+;-------------------------------------
+;
+;  SET UP LEFTMASK IN D4
+;  (GOODBYE SRCRECT PTR)
+;
+		MOVE	D0,D1					;SAVE DSTH
+		JSR 	LEFTMASK				;GET LEFTMASK
+		MOVE	D0,D4					;PUT IN D4
+
+
+;-------------------------------------
+;
+;  SET UP RIGHTMASK IN D5
+;  (GOODBYE DSTRECT PTR)
+;
+		AND 	#$F,D1					;TREAT DSTH MOD 16
+		MOVE	RIGHT(A3),D0				;GET DST RIGHT
+		SUB 	LEFT(A3),D0 			;CALC WIDTH
+		BLE 	GOHOME					;QUIT IF WIDTH <= 0
+		ADD 	D1,D0					;CALC (DSTH MOD 16) + WIDTH
+		MOVE	D0,D1					;MAKE AN EXTRA COPY
+		JSR 	RIGHTMASK				;GET RIGHT MASK
+		MOVE	D0,D5					;SAVE RIGHTMASK IN D5
+
+
+;------------------------------------------------
+;
+;  CALC TOTAL NUMBER OF DST WORDS-1
+;
+		ASR 	#4,D1					;CALC ((DSTH MOD 16)+WIDTH) DIV 16
+		MOVE	D1,WORDCNT(A6)				;SAVE AS WORDCNT
+		MOVE	D1,D2					;set up for below
+
+;
+;  Set up srcBump and dstBump, assuming bumping to the right
+;
+		ADD 	D1,D1					;calc 2*wordCount
+		MOVE	D1,D0					;make a copy
+		ADD 	#2,D0					;adjust for total bytesNeeded
+
+;--------------------------------------------------------------------------
+;
+;  IF DRAWING BACKWARDS FROM RIGHT, then adjust dstBump,
+;  ADJUST SRCADDR,DSTADDR TO FIRST WORD,
+;  AND SWAP LEFT AND RIGHT MASKS FOR FIRSTMASK AND LASTMASK.
+;
+		MOVE	D3,A0					;put hBump (+-2) into A0
+		TST 	D3					;ARE WE STARTING ON THE LEFT ?
+		BPL.S	DIROK					;YES, CONTINUE
+		NEG 	D0					;calc -1 * bytesNeeded
+		ADD 	D1,A5					;ADJUST DSTADDR TO RIGHTMOST
+		ADD 	D1,A4					;ADJUST SRCADDR TO RIGHTMOST
+		EXG 	D4,D5					;FIRSTMASK=RIGHT,LASTMASK=LEFT
+
+DIROK	MOVE	srcRow(A6),srcBump(A6)
+		SUB 	D0,srcBump(A6)				;srcBump := srcRow +- bytesBumped
+		MOVE	dstRow(A6),A3
+		SUB 	D0,A3					;dstBump := dstRow +- bytesBumped
+
+
+;----------------------------------------------
+;
+;  SET UP MODE CASE JUMP IN A1
+;
+GETMODE MOVE	MODE(A6),D0 			;GET TRANSFER MODE
+		BNE.S	NOTFAST 				;BR IF NOT MODE 0
+		TST 	D6					;IS SHIFTCNT 0 ?
+		BNE.S	NOTFAST 				;NO, CONTINUE
+		TST 	WORDCNT(A6) 			;IS WORDCNT > 0 ?
+		BLE.S	NOTFAST 				;NO, CONTINUE
+		LEA 	SETUP0,A1				;USE FAST COPY.
+		TST 	D3					;ARE WE BUMPING LEFT TO RIGHT ?
+		BPL.S	NEXTROW 				;YES, ALL SET
+		LEA 	LEFT0,A1				;NO, USE BACKWARDS LOOP
+		BRA.S	NEXTROW
+
+NOTFAST AND 	#$B,D0					;TREAT MODE MOD 16 AND KILL INVERT BIT
+		MOVE	D0,D1					;MAKE A COPY
+		AND 	#3,D0					;MASK FOR LOW BITS ONLY
+		ADD 	D0,D1					;MAKE MODIFIED MODE * 2 FOR INDEX
+		TST 	D2					;IS DST ALL IN ONE WORD ?
+		BNE.S	DOMAIN					;NO, USE FIRST JUMP TABLE
+		ADD 	#16,D1					;YES, USE SECOND JUMP TABLE
+DOMAIN	LEA 	MODETAB,A1				;GET ADDRESS OF MODE TABLE
+		ADD 	0(A1,D1),A1 			;POINT TO THIS MODE'S ROW LOOP
+
+
+;---------------------------------------------------------
+;
+;  OUTER LOOP:	DO EACH SCAN LINE AND COME BACK TO NXTSRC OR NXTPAT.
+;  SOME MODES OPTIMIZE AND DO WHOLE OUTER LOOP AND COME BACK TO GOHOME.
+;
+NEXTROW MOVE	HEIGHT(A6),D3				;get height
+		SUB 	#1,D3					;init DBRA rowcount
+
+ROWLOOP MOVE	D4,D1					;MASK:=FIRSTMASK
+		MOVE	WORDCNT(A6),D2				;GET WORDCOUNT
+		JMP 	(A1)					;DO THIS ROW AND COME BACK
+
+NXTSRC	ADD 	srcBump(A6),A4				;bump srcPtr to next row
+		ADD 	A3,A5					;BUMP DSTADDR TO NEXT ROW
+		DBRA	D3,ROWLOOP				;loop for all srcRows
+		BRA.S	GOHOME					;then quit
+
+NXTPAT	ADD 	#4,D7					;BUMP PATTERN SELECTOR
+		AND 	#$3F,D7 				;MOD 64 FOR 16 LONG REPEAT
+		MOVE.L	EXPAT(A6,D7),D6 			;GET PATTERN DATA FOR NEXT ROW
+		ADD 	A3,A5					;BUMP DSTADDR TO NEXT ROW
+		DBRA	D3,ROWLOOP				;loop for all srcRows
+												;then quit
+
+GOHOME	MOVEM.L (SP)+,D3-D7/A2-A5			;RESTORE REGS
+		UNLINK	PARAMSIZE,'BITBLT  '
+
+
+
+;---------------------------------------------------------------;
+;									;
+;  INTERFACE TO EACH BITBLT SCANLINE LOOP:				;
+;									;
+;  REGISTERS:	A0: hBump (+-2) 		D0: scratch 		;
+;			A1: MODE CASE JUMP		D1: FIRSTMASK			;
+;			A2: used for loop jmp	D2: WORDCNT 		;
+;			A3: dstBump 		D3: height-1			;
+;			A4: SRCPTR			D4: FIRSTMASK			;
+;			A5: DSTPTR			D5: LASTMASK			;
+;			A6: LOCALS			D6: SHIFTCNT OR PATTERN ;
+;			A7: STACK PTR			D7: INVERT OR PAT-SEL	;
+;									;
+;---------------------------------------------------------------;
+
+MODETAB DC.W	 MAIN0-MODETAB	;JUMP TABLE USED IF DST WIDER THAN ONE WORD
+		DC.W	 MAIN1-MODETAB
+		DC.W	 MAIN2-MODETAB
+		DC.W	 MAIN3-MODETAB
+		DC.W	 SETUP8-MODETAB
+		DC.W	 MAIN9-MODETAB
+		DC.W	 SETUP10-MODETAB
+		DC.W	 MAIN11-MODETAB
+
+		DC.W	 END0-MODETAB	;JUMP TABLE USED IF DST FITS IN ONE WORD WIDE
+		DC.W	 END1-MODETAB
+		DC.W	 END2-MODETAB
+		DC.W	 END3-MODETAB
+		DC.W	 WORD8-MODETAB
+		DC.W	 END9-MODETAB
+		DC.W	 END10-MODETAB
+		DC.W	 END11-MODETAB
+
+
+;------------------------------------------------------------
+;
+;  OPTIMIZE RIGHT HORIZONTAL SCROLL IF NO SHIFT.
+;  ONLY IF MODE 0, BUMPING RIGHT TO LEFT, WORDCNT > 0, AND NO SHIFT.
+;
+LEFT0	MOVE	(A4),D0 		;GET SRC FROM BITMAP
+		ADD 	A0,A4			;BUMP LEFT
+		AND 	D1,D0			;MASK FIRST WORD
+		NOT 	D1			;MAKE NOTMASK
+		AND 	(A5),D1 		;GET DATA FROM DST
+		OR		D1,D0			;MERGE WITH SRC DATA
+		MOVE	D0,(A5) 		;PUT RESULT TO DST
+		ADD 	A0,A5			;BUMP LEFT
+		MOVEQ	#-1,D1			;FLUSH MASK FOR END0
+		SUB 	#1,D2			;DEC WORD COUNT
+		BEQ.S	END0			;BR IF NO UNMASKED WORDS
+		SUB 	A0,A4			;GET READY FOR PRE-DECREMENT
+		SUB 	A0,A5			;GET READY FOR PRE-DECREMENT
+		LSR 	#1,D2			;HALVE WORDCOUNT FOR LONGCOUNT
+		BCC.S	LONE0			;BR IF EVEN # WORDS LEFT
+		MOVE	-(A4),-(A5) 	;ELSE MAKE EVEN BY DOING A WORD
+		SUB 	#1,D2			;ADJUST LONGCOUNT
+		BRA.S	LMORE0			;SEE IF ANY LONGS LEFT TO DO
+LTWO0	MOVE.L	-(A4),-(A5) 	;MOVE A LONG WORD
+LONE0	MOVE.L	-(A4),-(A5) 	;MOVE ANOTHER LONG
+		SUB 	#2,D2			;ANY UNMASKED LONGS LEFT IN ROW ?
+LMORE0	BGT 	LTWO0			;YES, AT LEAST 2 LONGS LEFT
+		BEQ 	LONE0			;YES, FINISH UP LAST LONG
+		ADD 	A0,A4			;RETURN TO NORMAL AFTER PRE-DECREMENT
+		ADD 	A0,A5			;RETURN TO NORMAL AFTER PRE-DECREMENT
+		BRA.S	END0			;DO LAST WORD WITH MASK
+
+
+;------------------------------------------------------------
+;
+;  OPTIMIZE VERTICAL AND LEFT HORIZONTAL SCROLL IF SHIFT = 0.
+;  ONLY IF MODE 0, BUMPING LEFT TO RIGHT, WORDCNT > 0, AND NO SHIFT.
+;
+SETUP0	LEA 	FAST0,A1				;only do setup once
+		LEA 	COPYBIG,A2				;point to big copy
+		BRA 	CALCLP					;share loop calc
+
+FAST0	MOVE	(A4)+,D0		;GET SRC FROM BITMAP
+		AND 	D1,D0			;MASK FIRST WORD
+		NOT 	D1			;MAKE NOTMASK
+		AND 	(A5),D1 		;GET DST DATA
+		OR		D1,D0			;MERGE WITH SRC DATA
+		MOVE	D0,(A5)+		;PUT RESULT TO DST
+		MOVEQ	#-1,D1			;FLUSH MASK FOR END0
+		SUB 	#1,D2			;DEC WORD COUNT
+		BEQ.S	END0			;BR IF NO UNMASKED WORDS
+
+		JSR 	(A2)			;call unwound copy loop
+		MOVEQ	#-1,D2			;force finish up below
+
+;-------------------------------------------------------
+;
+;  MODE 0 OR 4: SRC --> DST
+;
+END0	AND 	D5,D1					;MASK:=MASK AND LASTMASK
+MAIN0	MOVE.L	-2(A4),D0				;GET SRC FROM BITMAP
+		ADD 	A0,A4					;BUMP SRCPTR LEFT OR RIGHT
+		LSR.L	D6,D0					;ALIGN TO DST
+		EOR 	D7,D0					;INVERT SRC IF MODE BIT 2 SET
+		AND 	D1,D0					;MASK SRC
+		NOT 	D1					;FORM NOTMASK
+		AND 	(A5),D1 				;GET DST DATA
+		OR		D1,D0					;MERGE WITH SRC DATA
+		MOVE	D0,(A5) 				;PUT RESULT TO DST
+		ADD 	A0,A5					;BUMP DSTPTR LEFT OR RIGHT
+		MOVEQ	#-1,D1					;FLUSH MASK
+		SUB 	#1,D2					;DEC WORD COUNT
+		BGT 	MAIN0					;BR IF UNMASKED WORDS LEFT
+		BEQ 	END0					;DO LAST WORD WITH LASTMASK
+		BRA 	NXTSRC					;LOOP BACK FOR MORE
+
+
+;----------------------------------------------------------
+;
+;  Call copybig with wordcount in D2 (clobbered)
+;
+COPYBIG BCLR	#0,D2					;is wordcount even ?
+		BEQ.S	@1					;yes, continue
+		MOVE.W	(A4)+,(A5)+ 			;no, make it even
+@1		SUB 	#32,D2					;calc wordcount-32
+		BLE.S	@2					;continue if wordcount <= 32
+		BSR.S	COPY32					;else copy 32 words
+		BRA.S	@1					;and loop for more
+@2		NEG 	D2					;calc 32-wordcount
+		JMP 	COPY32(D2)				;jump into loop
+
+COPY32	MOVE.L	(A4)+,(A5)+ 			;TABLE TO COPY 0..32 WORDS
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 30
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 28
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 26
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 24
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 22
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 20
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 18
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 16
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 14
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 12
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 10
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 8
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 6
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 4
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 2
+COPY0	RTS 					;wordCount = 0
+
+
+COPY31	MOVE.L	(A4)+,(A5)+ 			;TABLE TO COPY 1..31 WORDS
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 29
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 27
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 25
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 23
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 21
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 19
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 17
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 15
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 13
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 11
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 9
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 7
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 5
+		MOVE.L	(A4)+,(A5)+ 			;wordCount = 3
+COPY1	MOVE.W	(A4)+,(A5)+ 			;wordCount = 1
+		RTS
+
+
+
+;-------------------------------------------------------
+;
+;  MODE 1 OR 5: SRC OR DST --> DST
+;
+END1	AND 	D5,D1			;MASK:=MASK AND LASTMASK
+MAIN1	MOVE.L	-2(A4),D0		;GET SRC FROM BITMAP
+		ADD 	A0,A4			;BUMP SRCPTR LEFT OR RIGHT
+		LSR.L	D6,D0			;ALIGN TO DST
+		EOR 	D7,D0			;INVERT SRC IF MODE BIT 2 SET
+		AND 	D1,D0			;MASK SRC
+		OR		D0,(A5) 		;OR SRC INTO DST
+		ADD 	A0,A5			;BUMP DSTPTR LEFT OR RIGHT
+		MOVEQ	#-1,D1			;FLUSH MASK
+		SUB 	#1,D2			;DEC WORD COUNT
+		BGT 	MAIN1			;LOOP TILL LAST WORD
+		BEQ 	END1			;DO LAST WORD WITH LASTMASK
+		BRA 	NXTSRC			;LOOP BACK FOR NEXT ROW
+
+
+;-------------------------------------------------------
+;
+;  MODE 2 OR 6: SRC XOR DST --> DST
+;
+END2	AND 	D5,D1			;MASK:=MASK AND LASTMASK
+MAIN2	MOVE.L	-2(A4),D0		;GET SRC FROM BITMAP
+		ADD 	A0,A4			;BUMP SRCPTR LEFT OR RIGHT
+		LSR.L	D6,D0			;ALIGN TO DST
+		EOR 	D7,D0			;INVERT SRC IF MODE BIT 2 SET
+		AND 	D1,D0			;MASK SRC
+		EOR 	D0,(A5) 		;XOR SRC INTO DST
+		ADD 	A0,A5			;BUMP DSTPTR LEFT OR RIGHT
+		MOVEQ	#-1,D1			;FLUSH MASK
+		SUB 	#1,D2			;DEC WORD COUNT
+		BGT 	MAIN2			;LOOP TILL LAST WORD
+		BEQ 	END2			;DO LAST WORD WITH LASTMASK
+		BRA 	NXTSRC			;LOOP BACK FOR NEXT ROW
+
+
+;-------------------------------------------------------
+;
+;  MODE 3 OR 7: SRC BIC DST --> DST
+;
+END3	AND 	D5,D1			;MASK:=MASK AND LASTMASK
+MAIN3	MOVE.L	-2(A4),D0		;GET SRC FROM BITMAP
+		ADD 	A0,A4			;BUMP SRCPTR LEFT OR RIGHT
+		LSR.L	D6,D0			;ALIGN TO DST
+		EOR 	D7,D0			;INVERT SRC IF MODE BIT 2 SET
+		AND 	D1,D0			;MASK SRC
+		NOT 	D0			;INVERT SRC
+		AND 	D0,(A5) 		;BIT CLEAR SRC INTO DST
+		ADD 	A0,A5			;BUMP DSTPTR LEFT OR RIGHT
+		MOVEQ	#-1,D1			;FLUSH MASK
+		SUB 	#1,D2			;DEC WORD COUNT
+		BGT 	MAIN3			;LOOP TILL LAST WORD
+		BEQ 	END3			;DO LAST WORD WITH LASTMASK
+		BRA 	NXTSRC			;LOOP BACK FOR NEXT ROW
+
+
+;-----------------------------------------------------------
+;
+;  OPTIMIZE MODE 8 OR 12 IF DST FITS IN ONE WORD (VERT LINES ETC)
+;
+WORD8	AND 	D5,D1			;COMBINE LEFT AND RIGHT MASKS
+		MOVE	D1,D5			;COPY COMBINED MASK
+		NOT 	D5			;FORM NOTMASK
+WORD8A	AND 	D1,D6			;MASK EXTRA PATTERN TO ZEROS
+		MOVE	(A5),D0 		;GET DST DATA
+		AND 	D5,D0			;AND WITH NOTMASK
+		OR		D6,D0			;MERGE WITH SRC DATA
+		MOVE	D0,(A5)+		;PUT RESULT TO DST
+		ADD 	A3,A5			;BUMP DSTPTR TO NEXT ROW
+		ADD 	#4,D7			;BUMP PATTERN SELECTOR
+		AND 	#$3F,D7 		;MOD 64 FOR 16 LONG REPEAT
+		MOVE	EXPAT(A6,D7),D6 ;GET PATTERN FOR NEXT ROW
+		DBRA	D3,WORD8A		;LOOP ALL ROWS
+		BRA 	GOHOME
+
+
+;-------------------------------------------------------
+;
+;  MODE 8 OR 12: PATTERN --> DST (FILLING AREAS, DRAWING LINES)
+;
+SETUP8	LEA 	FAST8,A1				;only do setup once
+		LEA 	FILLBIG,A2				;point to big fill
+CALCLP	CMP 	#32,D2					;is wordcnt > 32 ?
+		BGT.S	@2					;yes use fillbig
+
+		ADD 	#COPY0+1-COPYBIG,A2 		;no, point to even table
+		BTST	#0,D2					;will wordcount-1 be even ?
+		BNE.S	@1					;yes, use even table
+		ADD 	#COPY1+1-COPY0,A2		  ;no, point to odd table
+@1		SUB 	D2,A2					;adjust loop jump
+@2		JMP 	(A1)					;re-connect with shared code
+
+
+FAST8	MOVE	D6,D0			;GET PATTERN DATA
+		AND 	D1,D0			;MASK FIRST WORD
+		NOT 	D1			;MAKE NOTMASK
+		AND 	(A5),D1 		;GET DST DATA
+		OR		D1,D0			;MERGE WITH PAT DATA
+		MOVE	D0,(A5)+		;PUT RESULT TO DST
+		SUB 	#1,D2			;DEC WORD COUNT
+		BEQ.S	END8			;BR IF NO UNMASKED WORDS
+
+		JSR 	(A2)			;call unwound loop
+
+END8	MOVE	D5,D1			;MASK:= RIGHTMASK
+		AND 	D1,D6			;MASK PATTERN
+		NOT 	D1			;MAKE NOTMASK
+		AND 	(A5),D1 		;GET DST DATA
+		OR		D1,D6			;MERGE WITH PAT DATA
+		MOVE	D6,(A5)+		;PUT RESULT TO DST
+		BRA 	NXTPAT			;LOOP BACK FOR NEXT ROW
+
+
+;----------------------------------------------------------
+;
+;  Call fillbig with wordcount in D2 (clobbered)
+;
+FILLBIG BCLR	#0,D2					;is wordcount even ?
+		BEQ.S	@1					;yes, continue
+		MOVE.W	D6,(A5)+				;no, make it even
+@1		SUB 	#32,D2					;calc wordcount-32
+		BLE.S	@2					;continue if wordcount <= 32
+		BSR.S	FILL32					;elsae fill 32 words
+		BRA.S	@1					;and loop for more
+@2		NEG 	D2					;calc 32-wordcount
+		JMP 	FILL32(D2)				;jump into loop
+
+FILL32	MOVE.L	D6,(A5)+				;TABLE TO FILL 0..32 WORDS
+		MOVE.L	D6,(A5)+				;wordCount = 30
+		MOVE.L	D6,(A5)+				;wordCount = 28
+		MOVE.L	D6,(A5)+				;wordCount = 26
+		MOVE.L	D6,(A5)+				;wordCount = 24
+		MOVE.L	D6,(A5)+				;wordCount = 22
+		MOVE.L	D6,(A5)+				;wordCount = 20
+		MOVE.L	D6,(A5)+				;wordCount = 18
+		MOVE.L	D6,(A5)+				;wordCount = 16
+		MOVE.L	D6,(A5)+				;wordCount = 14
+		MOVE.L	D6,(A5)+				;wordCount = 12
+		MOVE.L	D6,(A5)+				;wordCount = 10
+		MOVE.L	D6,(A5)+				;wordCount = 8
+		MOVE.L	D6,(A5)+				;wordCount = 6
+		MOVE.L	D6,(A5)+				;wordCount = 4
+		MOVE.L	D6,(A5)+				;wordCount = 2
+		RTS 					;wordCount = 0
+
+FILL31	MOVE.L	D6,(A5)+				;TABLE TO FILL 1..31 WORDS
+		MOVE.L	D6,(A5)+				;wordCount = 29
+		MOVE.L	D6,(A5)+				;wordCount = 27
+		MOVE.L	D6,(A5)+				;wordCount = 25
+		MOVE.L	D6,(A5)+				;wordCount = 23
+		MOVE.L	D6,(A5)+				;wordCount = 21
+		MOVE.L	D6,(A5)+				;wordCount = 19
+		MOVE.L	D6,(A5)+				;wordCount = 17
+		MOVE.L	D6,(A5)+				;wordCount = 15
+		MOVE.L	D6,(A5)+				;wordCount = 13
+		MOVE.L	D6,(A5)+				;wordCount = 11
+		MOVE.L	D6,(A5)+				;wordCount = 9
+		MOVE.L	D6,(A5)+				;wordCount = 7
+		MOVE.L	D6,(A5)+				;wordCount = 5
+		MOVE.L	D6,(A5)+				;wordCount = 3
+		MOVE.W	D6,(A5)+				;wordCount = 1
+		RTS
+
+
+;-------------------------------------------------------
+;
+;  MODE 9 OR 13: PATTERN OR DST --> DST
+;
+END9	AND 	D5,D1			;MASK:=MASK AND LASTMASK
+MAIN9	MOVE	D6,D0			;GET PATTERN DATA
+		AND 	D1,D0			;MASK PATTERN
+		OR		D0,(A5)+		;OR PATTERN INTO DST
+		MOVEQ	#-1,D1			;FLUSH MASK
+		SUB 	#1,D2			;DEC WORD COUNT
+		BGT 	MAIN9			;LOOP TILL LAST WORD
+		BEQ 	END9			;DO LAST WORD WITH LASTMASK
+		BRA 	NXTPAT			;LOOP BACK FOR NEXT ROW
+
+
+;-------------------------------------------------------
+;
+;  MODE 10 OR 14: PATTERN XOR DST --> DST (INVERTING AREAS, XOR LINES)
+;
+SETUP10 LEA 	FAST10,A1		;only do setup once
+		LEA 	XORBIG,A2		;point to big fill
+		BRA 	CALCLP			;share loop calc
+
+FAST10	MOVE	D6,D0			;GET PATTERN DATA
+		AND 	D1,D0			;MASK FIRST WORD
+		EOR 	D0,(A5)+		;XOR PATTERN INTO DST
+		MOVEQ	#-1,D1			;FLUSH MASK FOR END10
+		SUB 	#1,D2			;DEC WORD COUNT
+		BEQ.S	END10			;BR IF NO UNMASKED WORDS
+
+		JSR 	(A2)			;call unwound loop
+		MOVEQ	#-1,D2			;force finish up below
+
+END10	AND 	D5,D1			;MASK:=MASK AND LASTMASK
+		AND 	D1,D6			;MASK PATTERN
+		EOR 	D6,(A5)+		;XOR PATTERN DATA INTO DST
+		BRA 	NXTPAT			;LOOP BACK FOR NEXT ROW
+
+
+;----------------------------------------------------------
+;
+;  Call XORbig with wordcount in D2 (clobbered)
+;
+XORBIG	BCLR	#0,D2					;is wordcount even ?
+		BEQ.S	@1					;yes, continue
+		EOR.W	D6,(A5)+				;no, make it even
+@1		SUB 	#32,D2					;calc wordcount-32
+		BLE.S	@2					;continue if wordcount <= 32
+		BSR.S	XOR32					;else XOR 32 words
+		BRA 	@1					;and loop for more
+@2		NEG 	D2					;calc 32-wordcount
+		JMP 	XOR32(D2)				;jump into loop
+
+XOR32	EOR.L	D6,(A5)+				;TABLE TO XOR 0..32 WORDS
+		EOR.L	D6,(A5)+				;wordCount = 30
+		EOR.L	D6,(A5)+				;wordCount = 28
+		EOR.L	D6,(A5)+				;wordCount = 26
+		EOR.L	D6,(A5)+				;wordCount = 24
+		EOR.L	D6,(A5)+				;wordCount = 22
+		EOR.L	D6,(A5)+				;wordCount = 20
+		EOR.L	D6,(A5)+				;wordCount = 18
+		EOR.L	D6,(A5)+				;wordCount = 16
+		EOR.L	D6,(A5)+				;wordCount = 14
+		EOR.L	D6,(A5)+				;wordCount = 12
+		EOR.L	D6,(A5)+				;wordCount = 10
+		EOR.L	D6,(A5)+				;wordCount = 8
+		EOR.L	D6,(A5)+				;wordCount = 6
+		EOR.L	D6,(A5)+				;wordCount = 4
+		EOR.L	D6,(A5)+				;wordCount = 2
+		RTS 					;wordCount = 0
+
+XOR31	EOR.L	D6,(A5)+				;TABLE TO XOR 1..31 WORDS
+		EOR.L	D6,(A5)+				;wordCount = 29
+		EOR.L	D6,(A5)+				;wordCount = 27
+		EOR.L	D6,(A5)+				;wordCount = 25
+		EOR.L	D6,(A5)+				;wordCount = 23
+		EOR.L	D6,(A5)+				;wordCount = 21
+		EOR.L	D6,(A5)+				;wordCount = 19
+		EOR.L	D6,(A5)+				;wordCount = 17
+		EOR.L	D6,(A5)+				;wordCount = 15
+		EOR.L	D6,(A5)+				;wordCount = 13
+		EOR.L	D6,(A5)+				;wordCount = 11
+		EOR.L	D6,(A5)+				;wordCount = 9
+		EOR.L	D6,(A5)+				;wordCount = 7
+		EOR.L	D6,(A5)+				;wordCount = 5
+		EOR.L	D6,(A5)+				;wordCount = 3
+		EOR.W	D6,(A5)+				;wordCount = 1
+		RTS
+
+
+;-------------------------------------------------------
+;
+;  MODE 11 OR 15: PATTERN BIC DST --> DST
+;
+END11	AND 	D5,D1			;MASK:=MASK AND LASTMASK
+MAIN11	MOVE	D6,D0			;GET PATTERN DATA
+		AND 	D1,D0			;MASK PATTERN
+		NOT 	D0			;INVERT PATTERN
+		AND 	D0,(A5)+		;BIC PATTERN INTO DST
+		MOVEQ	#-1,D1			;FLUSH MASK
+		SUB 	#1,D2			;DEC WORD COUNT
+		BGT 	MAIN11			;LOOP TILL LAST WORD
+		BEQ 	END11			;DO LAST WITH LASTMASK
+		BRA 	NXTPAT			;LOOP BACK FOR NEXT ROW
+
+
+
+		DC.B	'(c) Apple Computer Inc., 1983-1985'
+
+
+		END 
+
+
+
+
+

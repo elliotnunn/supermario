@@ -1,0 +1,2422 @@
+;
+;	File:		Patterns.a
+;
+;	Contains:	More QuickDraw
+;
+;	Written by:	xxx put name of writer here (or delete the whole line) xxx
+;
+;	Copyright:	© 1981-1990, 1992-1993 by Apple Computer, Inc., all rights reserved.
+;
+;
+;	Change History (most recent first):
+;
+;	   <SM8>	 9/12/93	SAM		Changed all instances of _Translate24to32 to _rTranslate24to32
+;									so they can conditionalized out of the build.
+;	   <SM7>	 1/15/93	kc		Change JSR to JMP to fix bug introduced in last checkin.
+;	   <SM6>	 1/13/93	kc		Change BSR ot JSR to appease the Linker gods.
+;	   <SM4>	 8/18/92	CSS		Update from Reality:
+;									<16> 8/18/92 SAH	#1040323 <KON>: Fixed Indexed SeedCFill bug by making
+;														MakeScaleTbl check to see if fg color is black and bg color is
+;														white before it inverts the bg color when drawing to a one bit
+;														destination.
+;	   <SM4>	 7/16/92	CSS		Update from Reality:
+;									<15> 6/10/92 SAH	Fixed problem where code to invert bg color when going to a one
+;														bit dst was not making local copies of the fg and bg colors
+;														before calling Color2Index. Also fixed a problem where register
+;														d2 was getting trashed across the calls to Color2Index.
+;									<14> 6/8/92	SAH		#1031825: Changed MakeScaleTbl so that it checks if the
+;														destination is one bit and the fg and bg colors map to the same
+;														index. If so, and the fg and bg colors are different, invert the
+;														bg color.
+;	   <SM3>	 6/11/92	stb		<sm 6/9/92>stb Synch with QDciPatchROM.a; Added comments to
+;									PatExpand, PatConvert, DirectPixPat, MakeScaleTbl, GETCICON,
+;									COPYPIXPAT.
+;	   <SM2>	 5/21/92	kc		Change the name of QuickDraws wrapper for NewHandle to
+;									NewHandleWrapper to avoid name conflict with the glue.
+;		<13>	 1/15/92	KC		Fix "If last BRA.S to import is to next instruction, BAD CODE
+;									will be generated" assembler warning.
+;		<12>	  3/6/91	KON		CEL: WKSHT B5-MTM-009 Calculation for location of where to begin
+;									search for unused colors was incorrect. This was a problem only
+;									if the value $7FFFFFFF happened to be on the stack since this is
+;									what is used to flag an unused entry.
+;		<11>	10/31/90	SMC		Fixed alpha channel bugs with BAL.
+;		<10>	10/16/90	KON		First time throught PatExpand, LastCTable was getting set to
+;									random value. This is not harmful, but forces the pattern to
+;									expand the second time through when it doesn't have to.  [with
+;									SMC]
+;		 <9>	 9/18/90	BG		Removed <5>. 040s are behaving more reliably now.
+;		 <8>	 7/24/90	KON		Zero pmVersion after getting devices pixmap incase it's a gWorld
+;									and pmVersion was set indicating the baseAddr is a handle.
+;		 <7>	 7/20/90	gbm		Change some identifiers, to avoid assembly errors
+;		 <6>	 7/13/90	DVB		Fix PatDither,
+;		 <5>	 6/26/90	BG		Added EclipseNOPs for flakey 040s.
+;		 <4>	 5/24/90	KON		Setup translation table to handle colorizing for indexed
+;									sources. Also fixed stretch so that indexed things are no longer
+;									colorized.
+;		 <3>	 1/28/90	BAL		Changed MakeScaleTbl to clear QDErr in case ColorThing2Index set
+;									it.
+;		 <2>	 1/15/90	DVB		MakeScaleTbl works when pixelSize disagrees w/clutsize <bal,
+;									too>
+;
+;	To Do:
+;
+
+;EASE$$$ READ ONLY COPY of file “patterns.a”
+; 1.8	BAL 11/01/1989 Fix a bug in getCIcon which would size the data handle pixelSize times too big.
+;•1.7	BAL 07/14/1989 For Aurora: Final CQD
+; 1.6	BAL 07/14/1989  For Aurora:  Incorporated devloop in plotCIcon; Added direct pixpat support.
+; 1.5	GGD 07/06/1989  Changed the JSR GetDevPix to a BSR.L so that it can reach when alignment
+;		is turned on.
+;•1.4	BAL 05/29/1989 Blasting in 32-Bit QuickDraw version 1.0 Final
+;•1.3	BAL 04/12/1989 Blasting in 32-Bit QuickDraw 1.0B1
+
+		BLANKS	ON 
+		STRING	ASIS
+
+		MACHINE MC68020
+
+;------------------------------------------------------------------
+;
+;  -->	PATTERNS.A
+;
+;  Routines for manipulating color Patterns 
+;
+;------------------------------------------------------------------
+;
+; MODIFICATION HISTORY:
+;
+; 3OCT86 EHB	Added routine GetCCursor
+; 3Jan87 CRC	modified makeScaleTbl to take mode param, maps all but arith. modes to b/w
+;
+;----------------------------  Macintosh II ROMs  -----------------------------
+;
+; 26May87 EHB	Rolled in patch to plotCIcon to force fgColor to black
+;
+; 08Nov87 DAF	Fixed DisposPixPat/DisposCCursor to test for NIL handles.
+;
+;  	NOTES:	In the old world, patterns were always drawn using the
+;	foreground and background colors.  New patterns can have more
+; 	colors in them, and need to be created with CSubTables that indicate
+;	the intended colors.  When used in old drawing modes, the fg and bk
+; 	colors must be shoved into the tables (or simply used when the pat
+;	is expanded).  In new drawing modes, the new colors can be used.
+;
+; 09May88 BAL	Altered MakeScaleTbl to build a table of longs instead of words
+; 18Sep88 BAL	Altered PatExpand to use common stack frame file 'Drawing Vars.a'
+
+
+GetCCursor	PROC	EXPORT
+			IMPORT	PATSHARE
+;-------------------------------------------------------------
+;
+; FUNCTION GetCCursor(CRSRID: INTEGER): CCrsrHandle;
+;
+; GetCCursor gets a resource of type 'crsr' with the specified ID, places
+; all the data fields into handles, installs the handles into the CCRSR,
+; resizes it, and then returns the data structure as a CCrsrHandle.
+; It shares common code with GetPixPat to do all of the work.
+
+			MOVE	4(SP),D0				; get the cursor's resource ID
+			MOVE.L	#'crsr',D1				; get the desired resource type
+			MOVEQ	#CRSRRec,D2				; get size of cursor record
+			JMP		PATSHARE
+			NOP								; silence the assembler <13>
+
+
+GETPIXPAT 	PROC	EXPORT
+			EXPORT	PATSHARE
+			IMPORT	NEWPIXPAT,COPYPIXPAT,GetCTSeed,CopyHandle, RSetHSize
+;-------------------------------------------------------------
+;
+; FUNCTION GetPixPat(CPatID: INTEGER): PixPatHandle;
+;
+; GetPixPat gets a resource of type 'ppat' with the specified ID, places
+; all the data fields into handles, installs the handles into the ppat,
+; resizes it, and then returns the data structure as a pixPatHandle.
+;
+; The resource format consists of a pixPat followed by it's pixMap, the
+; pixel data and finally the color table data.  The pixPat field contains
+; an offset to the pixel data from the beginning of the resource data.  The patData
+; field contains the offset to the pixel data from the beginning of the res data. 
+; The pmTable field contains the offset to the color table data from the beginning
+; of the resource data.  The size of the pixel data is calculated by 
+; subtracting the offset to the pixel data from the offset to the color table data.
+;
+PARAMSIZE	EQU		2						; <C464>
+RESULT		EQU		PARAMSIZE+8				; pixPatHandle RESULT
+PPatID		EQU		PARAMSIZE+8-2			; pattern ID
+
+			MOVE	4(SP),D0				; get the pattern's resource ID
+			MOVE.L	#'ppat',D1				; get the desired resource type
+			MOVEQ	#PPRec,D2				; get the size of the pattern
+
+PATSHARE	LINK	A6,#0					; build stack frame
+			MOVEM.L	D3/A2-A4,-(SP)			; preserve a work register
+			MOVE.L	D2,D3					; save record size in D3
+			CLR.L	RESULT(A6) 				; set result to NIL
+
+			SUBQ	#4,SP					; make space for result
+			MOVE.L	D1,-(SP)				; push resource type
+			MOVE	D0,-(SP)				; push resource ID
+			_GetResource 					; get the resource
+			MOVE.L	(SP)+,A0			 	; keep handle in A0						<1.5> BAL
+			MOVE.L	A0,D0				 	; did we get one?						<1.5> BAL
+			BEQ		NoGetNew			 	; if not, don't allocate one
+
+; copy resource data to the main pattern/cursor data structure, keep in A3.
+; use HandToHand since src is purgeable.
+
+			_HandToHand						; and allocate a new handle				<1.5> BAL
+			BNE		NoGetNew				; => couldn't get one
+			move.l	A0,A3					; get new handle into A3				<1.5> BAL
+			_HLock							; and lock it down						<1.5> BAL
+
+; at this point we're done with the resource.  Just leave it lying around
+; (it should be purgeable).
+
+
+; Create the pixMap handle and install it
+
+			MOVE.L	(A3),A2					; point to the resource data
+			MOVE.L	A2,A0					; point to the resource data
+			ADD.L	patMap(A2),A0			; get pointer to data
+			MOVEQ	#PMRec,D0				; get size of pixMap
+			_PtrToHand						; go get a new handle
+			BNE		NoGetNew				; => couldn't get one
+			MOVE.L	A0,A4					; keep pixMap in A4
+			move.l	(A4),A1					; point to the pixMap					<1.5> BAL
+			clr.l	pmTable(A1)				; zero color table in case direct data	<1.5> BAL
+
+; Create the color table and install it
+
+			MOVE.L	A2,A0					; point to the resource data
+			MOVE.L	A2,A1					; spare pointer to the resource data
+			ADD.L	patMap(A2),A1			; point to the pixMap
+			cmp.w	#16,pixelType(a1)		; direct data ?							<1.5> BAL
+			beq.s	@skipCLUT				; yes, no clut to install				<1.5> BAL
+			ADD.L	pmTable(A1),A0			; point to the pixMap's color table data
+			MOVE	CTSize(A0),D0			; get number of entries in table
+			ADDQ	#1,D0					; make it one based
+			MULU	#CTEntrySize,D0			; get size of entries
+			ADD		#CTRec,D0				; add in size of header
+			EXT.L	D0						; long for PtrToHand
+			_PtrToHand						; go get a new handle
+			BNE		NoGetNew				; => couldn't get one
+			MOVE.L	(A4),A1					; point to the pixMap
+			MOVE.L	A0,pmTable(A1)			; install color table into pixMap
+			CLR.L	-(SP)					; make room for function result
+			_GetCTSeed						; go get seed for new color table
+			MOVE.L	(A0),A0					; point to color table
+			MOVE.L	(SP)+,CTSeed(A0)		; and set seed value
+@skipCLUT
+
+; Create the pixel data handle and install it
+
+			MOVE.L	A2,A0					; point to the resource data
+			MOVE.L	A2,A1					; spare pointer to the resource data
+			ADD.L	patMap(A2),A1			; point to the pixMap
+			MOVE.L	pmTable(A1),D0			; get offset to color table data
+			SUB.L	patData(A2),D0			; calc size of pattern data
+			ADD.L	patData(A2),A0			; point to pattern data
+			_PtrToHand						; go get a new handle
+			BNE		NoGetNew				; => couldn't get one
+			MOVE.L	A0,patData(A2)			; install data into pixPat
+
+; Allocate a dummy handle for expanded data and install it
+
+			MOVEQ	#2,D0					; get a dummy size
+			_NewHandle						; go get a handle
+			BNE		NoGetNew				; => couldn't get one
+			MOVE.L	A0,patXData(A2)			; install expand data handle into pixPat
+
+; If pattern, allocate a handle for expanded info and install it
+
+			CMP		#CRSRRec,D3				; is it a cursor?
+			BEQ.S	@Cursor					; => yes, no expanded info
+
+			MOVEQ	#ppXInfo,D0				; get size of info record
+			_NewHandle						; go get a handle
+			BNE		NoGetNew				; => couldn't get one
+			MOVE.L	A0,patXMap(A2)			; install expand data handle into pixPat
+
+@Cursor		MOVE.L	A4,patMap(A2)			; install pixMap into PixPat
+
+			MOVE.L	A3,A0					; get the pixPat handle
+			_HUnlock						; and unlock it
+
+			MOVE.L	D3,D0					; get final size of PixPat/cursor record
+			JSR		RSetHSize				; and set the size
+
+; if it is a cursor, give it a unique identifier
+
+			CMP		#CRSRRec,D3				; is it a cursor?
+			BNE.S	IsPat					; => no, it's a pattern
+			CLR.L	-(SP)					; make room for function result
+			_GetCTSeed						; go get seed for new cursor
+			MOVE.L	(A3),A0					; point to cursor
+			MOVE.L	(SP)+,crsrID(A0)		; and set seed value
+			BRA.S	DONE					; =>jump around pattern stuff
+
+IsPat		MOVE	#-1,patXValid(A2)		; say pattern not expanded
+
+DONE		MOVE.L	 A3,RESULT(A6)			; update function result
+
+NoGetNew	MOVEM.L	(SP)+,D3/A2-A4			; restore working registers
+			UNLINK	PARAMSIZE,'GETPIXPA'	; strip params and return
+
+
+
+NEWPIXPAT	PROC	EXPORT
+			IMPORT	NewHandleWrapper,NEWPIXMAP
+;-------------------------------------------------------------
+;
+;  FUNCTION NewPixPat : PixPatHandle;
+;
+;  Create a new, uninitialized pixel pattern and return a handle to it.
+;  The pixPat's pixMap is initialized to the current depth.
+;
+			CLR.L	-(SP)				; make room for function result
+			MOVE	#PPXINFO,-(SP)		; get size of patXMap handle
+			JSR		NewHandleWrapper		; allocate pixel pattern,leave on stack
+			CLR.L	-(SP)				; make room for function result
+			MOVE	#PPREC,-(SP)		; get size of pixelpat
+			JSR		NewHandleWrapper	; allocate pixel pattern,leave on stack
+			CLR.L	-(SP)				; make room for function result
+			_NEWPIXMAP					; get initialized pixMap, leave on stack
+			MOVE.L	(SP),A0				; get the handle
+			CLR.L	-(SP)				; make room for function result
+			MOVE	#8,-(SP)			; default size for old patterns
+			JSR		NewHandleWrapper	; get handle for pattern data
+			CLR.L	-(SP)				; make room for function result
+			CLR		-(SP)				; size = 0
+			JSR		NewHandleWrapper	; get handle for expanded data
+			MOVE.L	(SP)+,D2			; get expanded data handle
+			MOVE.L	(SP)+,D1			; get pattern data handle
+			MOVE.L	(SP)+,D0			; get pixMap handle
+			MOVE.L	(SP)+,A1			; get pixpat handle
+			MOVE.L	A1,8(SP)			; return result
+			MOVE.L	(A1),A0				; get pixel pat pointer
+			MOVE.L	D0,patMap(A0)		; install pixMap into pixPat
+			MOVE.L	D1,patData(A0)		; install handle for data
+			MOVE.L	D2,patXData(A0)		; install handle for expanded data
+			MOVE.L	(SP)+,patXMap(A0)	; install handle for expanded info
+			MOVE.L	#$AA55AA55,D0		; get 50% gray
+			MOVE.L	D0,pat1Data(A0)		; put as default 1-bit data
+			MOVE.L	D0,pat1Data+4(A0)	; both halves
+			MOVE	#1,patType(A0)		; assume it's a color type
+			MOVE	#-1,patXValid(A0)	; make patXValid invalid
+			RTS							; and return
+
+
+DisposCCursor	PROC	EXPORT
+DisposPixPat	PROC	EXPORT
+				IMPORT	DisposPixMap,OldPatToNew
+;-------------------------------------------------------------
+;
+;  PROCEDURE DisposPixPat (PPH: PixPatHandle);
+;
+;  Dispose of a pixel pattern
+;
+			MOVE.L	4(SP),D0			; get pixPat handle
+			BEQ.S	Done				; if NIL, then do nothing				<C954/08Nov87> DAF
+			MOVE.L	D0,A1				; get in A-reg							<C954/08Nov87> DAF
+			MOVE.L	(A1),D0				; get pixPat pointer					<C954/08Nov87> DAF
+			BEQ.S	Done				; if NIL, then do nothing				<C954/08Nov87> DAF
+			MOVE.L	D0,A1				; get in A-reg							<C954/08Nov87> DAF
+			MOVE	patType(A1),-(SP)	; save type on stack, test for cursor
+			BMI.S	@Cursor				; => yes, don't dispose expanded handle
+			MOVE.L	patXMap(A1),A0		; else get handle to expanded data
+			_DisposHandle				; and dispose it
+@Cursor		MOVE.L	patData(A1),A0		; get handle to data
+			_DisposHandle				; and dispose of them
+		 	MOVE.L	patXData(A1),A0		; get handle to expanded data
+			_DisposHandle				; and Close them too
+			MOVE.L	patMap(A1),-(SP)	; get the pixMap
+			_DisposPixMap				; and dispose of it
+			MOVE.L	6(SP),A0			; get handle to pixPat
+			MOVE.L	A0,D2				; save in D2
+			_DisposHandle				; and dispose of it
+			TST		(SP)+				; was it a cursor
+			BMI.S	DONE				; =>yes, all done
+
+; if the pattern is referenced in any port, clear that reference
+
+			MOVE.L	PORTLIST,A1				; get the portList
+			MOVE.L	(A1),A1					; point to it
+			MOVE	(A1)+,D0				; get the number of ports
+			BRA.S	ChkPort					; => check for ports
+NxtPort		MOVE.L	(A1)+,A0				; get the port
+			TST		PORTBITS+ROWBYTES(A0)	; is it a new port?
+			BPL.S	ChkPort					; => no, check next port
+			CMP.L	pnPixPat(A0),D2			; is it the pen pat?
+			BNE.S	@0						; => no, check the bkpat
+			CLR.L	pnPixPat(A0)			; clear the pen pat
+@0			CMP.L	bkPixPat(A0),D2			; is it the bk Pat?
+			BNE.S	@1						; => no, check the fillPat
+			CLR.L	bkPixPat(A0)			; clear the bk pat
+@1			CMP.L	fillPixPat(A0),D2		; is it the fill pat?
+			BNE.S	ChkPort					; => no, check next port
+			CLR.L	fillPixPat(A0)			; clear the fill pat
+ChkPort		DBRA	D0,NxtPort				; => loop for each port
+
+DONE		MOVE.L	(SP)+,(SP)				; strip parameter
+			RTS								; and return				<C954/08Nov87> DAF
+
+
+SETFILLPAT	PROC	EXPORT
+			IMPORT	PhilPixPat
+;---------------------------------------------------------------
+;
+;  PROCEDURE SETFILLPAT (PAT:PATTERN);
+;
+; Called by: FillRect, FillCRect, FillOval, FillCOval, FillRoundRect, FillCRoundRect
+;			 FillArc, FillCArc, FillRgn, FillCRgn, FillPoly, FillCPoly
+;
+; On Entry: D0 = 0		Called by old fill routine
+;			D0 = 1 		Called by color fill routine
+;
+; If called by old routine, install old-style pattern into FillPat (if old port)
+; or FillPixPat (if new port).  If called by new routine, install new-style pattern
+; into FillPixPat.
+
+			MOVE.L	4(SP),A1				;GET PATTERN POINTER/HANDLE
+			MOVE.L	GRAFGLOBALS(A5),A0		;GET GRAFGLOBALS
+			MOVE.L	THEPORT(A0),A0			;GET THE PORT
+			TST		D0						;OLD PATTERN OR NEW
+			BEQ.S	@OldPat					;=>SET OLD PATTERN
+
+			MOVE.L	A1,-(SP)				;PUSH PIXPAT HANDLE
+			JSR		PhilPixPat				;AND SET IT
+			BRA.S	DONE					;=>AND RETURN
+
+@OldPat		TST		PORTBITS+ROWBYTES(A0)	;IS IT A COLOR GRAFPORT?
+			BPL.S	SETOLD					;=>NO, SET OLD PATTERN
+
+			MOVE.L	A1,-(SP)				;ELSE PUSH PATTERN
+			PEA		FILLPIXPAT(A0)			;AND PIXPAT HANDLE
+			_OLDPATTONEW					;AND CONVERT TO COLOR PATTERN
+			BRA.S	DONE
+
+SETOLD		LEA		FILLPAT(A0),A0			;POINT TO DST
+			MOVE.L	(A1)+,(A0)+ 			;COPY PAT INTO FILLPAT
+			MOVE.L	(A1)+,(A0)+ 			;ALL EIGHT BYTES
+DONE		RTD		#4						;STRIP PARAMS AND RETURN
+
+
+PenPixPat	PROC	EXPORT
+			EXPORT	BackPixPat,PhilPixPat
+			IMPORT	DISPOSPIXPAT,PATCONVERT,PUTGRAY
+;-------------------------------------------------------------
+;
+;  PROCEDURE PenPixPat (PPH: PixPatHandle);
+;
+;  SET THE PNPAT TO THE SPECIFIED PIXEL PATTERN
+
+			MOVEQ	#PNPIXPAT,D0			;GET OFFSET TO NEW PATTERN
+			MOVEQ	#PNPAT,D1				;GET OFFSET TO OLD PATTERN
+			BRA.S	CPATSHARE
+
+PhilPixPat
+;-------------------------------------------------------------
+;
+;  PROCEDURE PhilPixPat (PPH: PixPatHandle);
+;
+;  SET THE PNPAT TO THE SPECIFIED PIXEL PATTERN
+
+			MOVEQ	#FILLPIXPAT,D0			;GET OFFSET TO NEW PATTERN
+			MOVEQ	#FILLPAT,D1				;GET OFFSET TO OLD PATTERN
+			BRA.S	CPATSHARE
+
+BackPixPat
+;-------------------------------------------------------------
+;
+;  PROCEDURE BackPixPat (PPH: PixPatHandle);
+;
+;  SET THE BKPAT TO THE SPECIFIED PIXEL PATTERN
+
+			MOVEQ	#BKPIXPAT,D0			;GET OFFSET TO NEW PATTERN
+			MOVEQ	#BKPAT,D1				;GET OFFSET TO OLD PATTERN
+
+CPATSHARE	MOVE.L	GRAFGLOBALS(A5),A0		;GET GLOBAL POINTER
+			MOVE.L	THEPORT(A0),A0			;GET THE PORT
+			TST		PORTBITS+ROWBYTES(A0)	;IS IT A COLOR PORT?
+			BMI.S	@COLOR					;=>YES, SET COLOR PORT
+
+; IF OLD GRAFPORT, THEN EXTRACT THE ONE-BIT DATA AND PLACE INTO THE PROPER FIELD
+
+			MOVE.L	4(SP),A1				;GET THE NEW PATTERN
+			MOVE.L	(A1),A1					;POINT TO IT
+			CMP		#DITHERPAT,PATTYPE(A1)	;IS IT AN RGB PATTERN?
+			BEQ.S	@DITHER					;=>YES, GO MAKE DITHER
+			LEA		PAT1DATA(A1),A1			;POINT TO ONE-BIT DATA
+			LEA		0(A0,D1),A0				;POINT TO FIELD IN GRAFPORT
+			MOVE.L	(A1)+,(A0)+				;COPY 1ST HALF PATTERN
+			MOVE.L	(A1)+,(A0)+				;COPY 2ND HALF PATTERN
+			BRA.S	DONE					;=>AND RETURN
+
+@DITHER		MOVE.L	PATMAP(A1),A1			;GET HANDLE TO PATTERN'S PIXMAP
+			MOVE.L	(A1),A1					;POINT TO PATTERN'S PIXMAP
+			MOVE.L	PMTABLE(A1),A1			;GET HANDLE TO ITS COLOR TABLE
+			MOVE.L	(A1),A1					;POINT TO THE COLOR TABLE
+			PEA		CTTABLE+RGB+(4*CTENTRYSIZE)(A1) ;PUSH THE RGB
+			PEA		0(A0,D1)						;PUSH PATTERN IN GRAFPORT
+			JSR		PUTGRAY					;PUT PROPER GRAY TO GRAFPORT
+			BRA.S	DONE					;=>AND RETURN
+
+
+; IF NO PATTERN OR NEW PATTERN, JUST INSTALL SPECIFIED PATTERN
+
+@COLOR		MOVE.L	0(A0,D0),D1				;GET WHAT IS CURRENTLY THERE
+			BEQ.S	PUTPAT					;=>NOTHING, JUST PUT NEW ONE
+			MOVE.L	D1,A0					;GET THE PATTERN HANDLE
+			MOVE.L	(A0),A0					;GET THE PATTERN POINTER
+			TST		PATTYPE(A0)				;OLD OR NEW PATTERN?
+			BNE.S	PUTPAT					;=>NEW ONE, JUST PUT NEW ONE
+
+; IF PREVIOUS PNPAT WAS AN OLD PATTERN, THEN DISPOSE OF IT
+
+			MOVE	D0,-(SP)				;SAVE PATTERN OFFSET
+			MOVE.L	D1,-(SP)				;PUSH THE HANDLE
+			_DISPOSPIXPAT					;AND DISPOSE OF THE PIXPAT
+			MOVE	(SP)+,D0				;RESTORE PATTERN OFFSET
+
+; INSTALL SPECIFIED HANDLE AND RETURN
+
+PUTPAT		MOVE.L	GRAFGLOBALS(A5),A0		;GET GLOBAL POINTER
+			MOVE.L	THEPORT(A0),A0			;GET THE PORT
+			MOVE.L	4(SP),0(A0,D0)			;INSTALL HANDLE INTO PORT
+DONE		MOVE.L	(SP)+,(SP)				;STRIP PARAMETER
+			RTS								;AND RETURN
+
+
+COPYPIXPAT	PROC	EXPORT
+			IMPORT	COPYPIXMAP,COPYHANDLE
+;-------------------------------------------------------------
+;
+;  PROCEDURE COPYPIXPAT (SRCPP,DSTPP: PixPatHandle);
+;
+;  COPY THE SRC PIXPAT'S DATA TO THE DST PIXPAT'S HANDLES
+;
+; if you’re looking for the QDciPatchROM.a patch to COPYPIXPAT,					<sm 6/9/92>stb
+; try looking in Pictures.a at PutPicPixPat.  It was a come-from patch.			<sm 6/9/92>stb
+
+PARAMSIZE	EQU		8
+SRCPP		EQU		PARAMSIZE
+DSTPP		EQU		SRCPP-4
+
+			MOVEQ	#(PPREC-PAT1DATA)/2,D0		;NUMBER OF WORDS PAST HANDLES
+			MOVE.L	SRCPP(SP),A0				;GET HANDLE TO SRC PIXPAT
+			MOVE.L	(A0),A0						;GET POINTER TO SRC PIXPAT
+			MOVE.L	DSTPP(SP),A1				;GET HANDLE TO DST PIXPAT
+			MOVE.L	(A1),A1						;GET POINTER TO DST PIXPAT
+
+			MOVE	(A0)+,(A1)+					;COPY PATTYPE
+			MOVE.L	(A0)+,-(SP)					;PUSH SRC PATMAP
+			MOVE.L	(A1)+,-(SP)					;PUSH DST PATMAP
+			MOVE.L	(A0)+,-(SP)					;PUSH SRC PATDATA
+			MOVE.L	(A1)+,-(SP)					;PUSH DST PATDATA
+			MOVE.L	(A0)+,-(SP)					;PUSH SRC PATXDATA
+			MOVE.L	(A1)+,-(SP)					;PUSH DST PATXDATA
+			MOVE	(A0)+,(A1)+					;COPY PATXVALID
+			MOVE.L	(A0)+,-(SP)					;PUSH SRC PATXMAP
+			MOVE.L	(A1)+,-(SP)					;PUSH DST PATXMAP
+			MOVE.L	(A0)+,(A1)+					;COPY PAT1DATA
+			MOVE.L	(A0)+,(A1)+					;BOTH HALVES
+
+			_COPYHANDLE							;COPY PATXMAP
+			_COPYHANDLE							;COPY PATXDATA
+			_COPYHANDLE							;COPY PATDATA
+			_COPYPIXMAP							;COPY PATMAP
+
+			MOVE.L	(SP)+,A0					;GET RETURN ADDRESS
+			ADDQ	#8,SP						;STRIP PARAMS
+			JMP		(A0)						;AND RETURN
+
+
+
+OldPatToNew	PROC	EXPORT
+			IMPORT 	OneBitCTable,COPYPMAP,OneBitData
+;-------------------------------------------------------------
+;
+;  PROCEDURE OldPatToNew (pat: pattern; PPHP: PixPatHandlePtr);
+;
+;  Copy the specified pattern into a pixPat.
+;  If the pixPat handle is NIL, then create a new pixPat.
+;  If the handle contains a new pattern, create a new pixPat and replace it.
+;  If the handle contains an old-style pattern, then re-use it.
+;
+;  NOTE:  This structure is invalid as a pixMap.  There is no BaseAddr
+;		  and the rowBytes is set to one (should be multiple of 2).
+;
+;		  The data will be tweaked to transform it into a valid pixMap before
+;		  drawing takes place.
+;
+;  NOTE:  WE ASSUME THAT THE PAT IS A POINTER THAT WILL NOT MOVE.
+;
+PARAMSIZE	EQU		8							; total bytes of params
+PAT			EQU		PARAMSIZE+8-4				; pattern pointer
+PPHP		EQU		PAT-4						; pixPat handle
+
+			LINK	A6,#0						; no local vars
+			MOVEM.L	A2/A3,-(SP)					; save work registers
+
+			MOVE.L	PPHP(A6),A0					; get handle pointer
+			MOVE.L	(A0),D0						; is there a handle?
+			BEQ.S	GetHandle					; => no, go get one
+
+			MOVE.L	D0,A3						; get the pixpat handle
+			MOVE.L	(A3),A1						; point to pixpat
+			TST		PatType(A1)					; is it an old one?
+			BEQ.S	GotHandle					; =>yes, just reuse it
+
+; IF THERE WAS NO PIXPAT HANDLE, CREATE ONE AND INSTALL IT IN PPHP
+
+GetHandle	CLR.L	-(SP)						; make room for a handle
+			_NewPixPat							; create a new one
+			MOVE.L	PPHP(A6),A0					; get handle pointer
+			MOVE.L	(SP)+,(A0)					; return new handle
+			MOVE.L	(A0),A3						; get the pixpat handle
+			MOVE.L	(A3),A1						; point to pixpat
+
+			CLR		PATTYPE(A1)					; flags that it's an old pattern
+
+			MOVE.L	patMap(A1),A1				; get pixMap handle
+			MOVE.L	(A1),A1						; get pixMap pointer
+			MOVE.L	pmTable(A1),-(SP)			; push color table handle
+			JSR		OneBitCTable				; initialize one-bit color table
+
+			MOVE.L	(A3),A1						; point to pixpat
+
+; INVALIDATE THE CURRENT PATTERN EXPAND AREA BY SETTING patXValid TO -1
+; WE KNOW THAT PATDATA IS 8 BYTES LONG (SET BY NEWPIXPAT)
+
+GotHandle	MOVE	#-1,patXValid(A1)			; INVAL patXValid
+			MOVE.L	patData(A1),A0				; finally get the data handle
+
+			MOVE.L	(A0),A0						; get pointer to data
+			MOVE.L	PAT(A6),A1					; get pattern data
+			MOVE.L	(A1)+,(A0)+					; put one long
+			MOVE.L	(A1)+,(A0)+					; and second long of pattern
+
+			MOVE.L	(A3),A2						; get PixPat pointer
+			MOVE.L	patMap(A2),A2				; get pixMap handle
+			MOVE.L	(A2),A2						; A2 is pixMap pointer
+			MOVE.L	A2,A3						; A3 is pixMap pointer
+
+			MOVE.L	pmTable(A3),-(SP)			; save color table
+			LEA		OneBitData,A1				; point to one bit data
+			JSR		CopyPMap					; and copy into pixMap ptr in A2
+												; clobbers A1, A2
+
+			MOVE.W	#1,pRowBytes(A3)			; 1 byte per row (not a valid pixMap)
+			CLR.L	pBounds+topLeft(A3)			; bounds = (0,0,8,8)
+			MOVE.L	#$00080008,pBounds+botRight(A3)
+
+			MOVE.L	(SP)+,pmTable(A3)			; restore the color table
+												; and leave on stack as param
+			MOVEM.L	(SP)+,A2/A3					; restore work registers
+			UNLINK	PARAMSIZE,'OLDPATTO'		; strip params and return
+
+
+; as seen in QDciPatchROM.a													<sm 6/9/92>stb
+
+PatExpand 	PROC	EXPORT
+			IMPORT 	PATCONVERT, RSetHSize
+;----------------------------------------------------------
+;
+;  EXPAND THE CURRENT PATTERN IF NECESSARY
+;
+;  CALLED ONLY FROM STRETCH,DRAWLINE,DRAWARC.
+;
+;  INPUTS:	LOCMODE(A6)					;THE (ALTERED) DRAWING MODE
+;			DSTPIX+BOUNDS+LEFT(A6)		;THE GLOBAL-LOCAL OFFSET (PIXELS)
+;			FCOLOR(A6)					;THE CURRENT FG COLOR
+;			BCOLOR(A6)					;THE CURRENT BK COLOR
+;			DSTSHIFT(A6)				;THE SHIFT FOR PIXEL DEPTH
+;			LOCPAT(A6)					;THE (ALTERED) PATTERN
+;			NEWPATTERN(A6)				;TRUE IF NEW PATTERN
+;		 	A5: PASCAL GLOBAL PTR
+;			D7: -1 TO INVERT, ELSE 0
+;		 	patStretch AND PATALIGN
+;
+;  OUTPUTS:  POINTER TO EXPANDED PATTERN IN EXPAT(A6)
+;
+;  CLOBBERS: D0,D1,D2,A0,A1
+;
+;  DRAWING WITH COLOR PATTERNS:
+;
+;  IF COPY MODE, COLOR IS ADDED TO THE PATTERN IN THIS ROUTINE AND THEN LATER
+;  BLITTED DIRECTLY TO THE SCREEN (FOR SPEED).  OTHERWISE THE PATTERN IS LEFT AS A 
+;  FOREGROUND/BACKGROUND MASK AND COLOR IS ADDED WITHIN THE BLT ROUTINE IF
+;  NECESSARY.  IF XOR MODE, THE DST IS SIMPLY XOR'D AND THE COLORS ARE IGNORED.  
+;  IF OR MODE, THE FOREGROUND COLOR IS APPLIED TO THE PATTERN AND OR'D INTO THE 
+;  DST.  IF BIC MODE, THE BACKGROUND COLOR IS APPLIED TO THE PATTERN AND OR'D INTO
+;  THE DST.  
+;
+;  A6 OFFSETS OF LOCAL VARIABLES OF CALLER:
+;
+;  STACK FRAME VARS USED BY SEEKMASK (CALLED BY STRETCHBITS, RGNBLT, DRAWARC, DRAWLINE)
+;
+;-------------------------------------------------------------
+&CurFile	SETC	'PATEXPAND'
+
+			INCLUDE	'DrawingVars.a'
+
+
+;-------------------------------------------------------------
+
+PARAMSIZE		EQU 	0
+
+TWOPAT			EQU 	-16 				;ROOM FOR TWO COPIES OF PAT
+SAVESTK			EQU		TWOPAT-4			;ROOM TO SAVE STACK POINTER
+ROTSIZE			EQU		SAVESTK-2			;SCANLINE SIZE FOR ROTATION
+ROTSHIFT		EQU		ROTSIZE-2			;ROTATE AMOUNT
+GGLOBALS		EQU		ROTSHIFT-4			;POINTER TO GRAFGLOBALS
+SAVEA5			EQU		GGLOBALS-4			;PLACE TO SAVE A5
+VARSIZE 		EQU 	SAVEA5				;TOTAL BYTES OF LOCAL VARS
+
+;------------------------------------------------------------------
+;
+;  IF OLD PATTERN, ALLOCATE A BUFFER ON THE STACK AND POINT TO IT.
+;  IF NEW PATTERN, GO EXPAND IF NECESSARY.
+;
+		TST.B	NEWPATTERN(A6)				;IS IT A NEW PATTERN?
+		BNE		NEWPATEXPAND				;=>YES, EXPAND PIXELPAT
+
+; ALLOCATE AN EXPAND BUFFER ON THE STACK FOR USE BY CALLER
+
+DOOLD	MOVE.L	(SP)+,A0					;GET RETURN ADDRESS
+		MOVEQ	#64,D0						;MINIMUM BUFFER IS 64 BYTES
+		MOVE	DSTSHIFT(A6),D1				;GET DEPTH SHIFT
+		subq	#3,D1						;DEPTHS 1-8 OK						@@@@ BAL 10Apr88
+		ble.S	GETBUF						;=>SO GET THE PATTERN BUFFER		@@@@ BAL 10Apr88
+		LSL		D1,D0						;ELSE DOUBLE FOR 16, QUAD FOR 32
+GETBUF	SUB		D0,SP						;MAKE THE BUFFER (LONG ALIGNED)
+		MOVE.L	SP,EXPAT(A6)				;POINT TO PATTERN BUFFER
+		MOVE.L	A0,-(SP)					;REPLACE RETURN ADDRESS
+
+
+PSHARE	LINK	A4,#VARSIZE 				;ALLOCATE STACK FRAME
+		MOVEM.L	D3-D6/A2-A3/A5,-(SP)		;SAVE REGS
+
+		MOVE	LOCMODE(A6),D0				;GET MODE
+		MOVE	DSTPIX+BOUNDS+LEFT(A6),D2	;GET GLOBAL-LOCAL OFFSET (PIXELS)
+		MOVE.L	FCOLOR(A6),D3				;GET CURRENT FG COLOR
+		MOVE.L	BCOLOR(A6),D4				;GET CURRENT BK COLOR
+		MOVE	DSTSHIFT(A6),D5				;GET SHIFT FOR PIXEL DEPTH
+
+		MOVE.L	LOCPAT(A6),A0				;GET PATTERN
+		LEA		PATROW(A6),A1				;AND DATA DST
+
+		AND		#$F3,D0						;TURN OFF PAT, INVERT BITS
+		BEQ.S	GOTCOPY						;=>IT'S COPY MODE
+		BTST	#5,D0						;is it a new mode?
+		BNE.S	GotCopy
+		MOVE.L	alphaMask(A6),D3			;ELSE FGCOLOR = BLACK		<11>
+		MOVEQ	#0,D4						;AND BKCOLOR = WHITE
+
+GOTCOPY	MOVE.L	GRAFGLOBALS(A5),A3			;POINT TO QUICKDRAW GLOBALS
+;
+;  IF PATALIGN VERT NON-ZERO, COPY PAT TWICE AND REPLACE A0
+;
+		MOVEQ	#7,D0
+		AND 	PATALIGN(A3),D0 			;GET PATALIGN MOD 8
+		BEQ.S	VERTOK						;SKIP IF ZERO
+		MOVE.L	(A0),TWOPAT(A4) 			;MAKE TWO COPIES OF PATTERN
+		MOVE.L	(A0)+,TWOPAT+8(A4)
+		MOVE.L	(A0),TWOPAT+4(A4)
+		MOVE.L	(A0),TWOPAT+12(A4)
+		LEA 	TWOPAT(A4),A0
+		ADD 	D0,A0
+
+VERTOK	ADD 	PATALIGN+H(A3),D2			;ADJUST FOR PATALIGN HORIZ
+		MOVEQ	#7,D6						;SOURCE PAT IS 8 BYTES LONG
+		AND 	D6,D2						;TREAT SHIFTCOUNT MOD 8
+		TST		D5							;ONE BIT PER PIXEL?
+		BNE.S	NEWWAY						;=>NO, DO NEW WAY
+
+OLDWAY	MOVE.L	THEPORT(A3),A3				;GET CURRENT GRAFPORT
+		MOVE	patStretch(A3),D0			;GET patStretch
+		CMP 	#-2,D0						;IS PAT STRETCH = -2 ?
+		BEQ.S	THIN						;YES, STRETCH THIN
+		CMP 	#2,D0						;IS patStretch = 2 ?
+		BEQ.S	DOUBLE						;=>YES, DOUBLE THE DATA
+
+;  NEW WAY:		EXPAND DATA TO MINIMUM NEEDED EXPANDED SIZE.
+;  DEPTH = 1-4:	EXPAND 8*8 PATTERN TO 16 ROWS * 1 LONG (USE OLD BLT ROUTINES)
+;  DEPTH = 8:	EXPAND 8*8 PATTERN TO 8 ROWS * 2 LONGS (USE NEW BLT ROUTINES)
+;  DEPTH = 16:	EXPAND 8*8 PATTERN TO 8 ROWS * 4 LONGS
+;  DEPTH = 32:	EXPAND 8*8 PATTERN TO 8 ROWS * 8 LONGS (64 LONGS MAX SIZE)
+
+;  EXPAND ROUTINES IN FILE STRETCH.A TO SHARE COMMON TABLES.
+
+
+NEWWAY	move.l	PatExTblPtr,A2				;POINT TO ROUTINE TABLE
+		add.l	0(A2,D5*4),A2				;USE PIXSHIFT TO SELECT ROUTINE
+		JSR		(A2)						;EXPAND DIRECTLY INTO BUFFER
+		BRA.S	DONE						;=>ALL FINISHED
+
+;-----------------------------------------------------------
+;
+;  STRETCHED BY TWO: DOUBLE EACH BIT HORIZONTALLY AND VERTICALLY
+;
+DOUBLE	CLR.W	(A1)+						;CLEAR PATROW
+		CLR.L	(A1)+						;CLEAR PATHMASK, PATVMASK
+		MOVE.L	(A1),A1						;GET EXPAT POINTER
+		CLR 	D0							;CLEAR OUT HI BYTE
+DLOOP	MOVE.B	(A0)+,D0					;GET A BYTE OF PATTERN
+		EOR.B	D7,D0						;INVERT IT IF MODE BIT 2
+		ROL.B	D2,D0						;ALIGN TO LOCAL COORDS
+		MOVE.B	D0,-(SP)					;STASH FOR A WHILE
+		LSR.B	#4,D0						;GET HI NIBBLE
+		MOVE.B	STRETCH(D0),(A1)+			;PUT ONE BYTE
+		MOVEQ	#$F,D0						;MASK FOR LO NIBBLE
+		AND.B	(SP)+,D0					;GET THE LO NIBBLE
+		MOVE.B	STRETCH(D0),(A1)+			;PUT ANOTHER TO MAKE A WORD
+		MOVE.W	-2(A1),(A1)+				;STRETCH WORD OUT TO LONG
+		MOVE.L	-4(A1),(A1)+				;STRETCH LONG TO TWO LONGS
+		DBRA	D6,DLOOP					;LOOP ALL 8 INPUT BYTES
+		BRA.S	DONE
+
+
+;-----------------------------------------------------------
+;
+;  STRETCH BY TWO AND THIN OUT THE BITS.  ADD EXTRA WHITE DOTS.
+;
+THIN	CLR.W	(A1)+						;CLEAR PATROW
+		CLR.L	(A1)+						;CLEAR PATHMASK, PATVMASK
+		MOVE.L	(A1),A1						;GET EXPAT POINTER
+		CLR 	D0							;CLEAR OUT HI BYTE
+THINLP	MOVE.B	(A0)+,D0					;GET A BYTE OF PATTERN
+		EOR.B	D7,D0						;INVERT IT IF MODE BIT 2
+		ROL.B	D2,D0						;ALIGN TO LOCAL COORDS
+		MOVE.B	D0,-(SP)					;STASH FOR A WHILE
+		LSR.B	#4,D0						;GET HI NIBBLE
+		MOVE.B	THINSTR(D0),(A1)+			;PUT ONE BYTE
+		MOVEQ	#$F,D0						;MASK FOR LO NIBBLE
+		AND.B	(SP)+,D0					;GET THE LO NIBBLE
+		MOVE.B	THINSTR(D0),(A1)+			;PUT ANOTHER TO MAKE A WORD
+		MOVE.W	-2(A1),(A1)+				;STRETCH WORD OUT TO LONG
+		CLR.L	(A1)+						;STRETCH LONG TO TWO LONGS
+		DBRA	D6,THINLP					;LOOP ALL 8 INPUT BYTES
+
+DONE	MOVEM.L	(SP)+,D3-D6/A2-A3/A5		;RESTORE REGS
+		UNLK	A4							;REMOVE STACK FRAME
+		RTS									;JUST RETURN
+
+
+;----------------------------------------------------------------
+;
+;  BIT DOUBLING TABLE FOR 0..15 INPUT --> BYTE OUTPUT
+;
+STRETCH	DC.B  	$00,$03,$0C,$0F,$30,$33,$3C,$3F
+		DC.B  	$C0,$C3,$CC,$CF,$F0,$F3,$FC,$FF
+
+;
+;  TABLE FOR THIN DOUBLING.
+;
+THINSTR DC.B  	$00,$01,$04,$05,$10,$11,$14,$15
+		DC.B  	$40,$41,$44,$45,$50,$51,$54,$55
+
+
+
+NEWPATEXPAND
+;----------------------------------------------------------------
+;
+;  NEWPATEXPAND -- EXPAND A PIXELPAT, IF NECESSARY
+;
+;  NOTE:  STACK FRAME LINKED USING A4 SO NORMAL FRAME STILL IN A6
+;
+		LINK	A4,#VARSIZE 				;ALLOCATE STACK FRAME
+		MOVEM.L	D3-D6/A2-A3/A5,-(SP)		;SAVE REGS
+		MOVE.L	SP,SAVESTK(A4)				;SAVE STACK POINTER
+		MOVE.L	GRAFGLOBALS(A5),A3			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	A3,GGLOBALS(A4)				;SAVE IN STACK FRAME
+		MOVE.L	A5,SAVEA5(A4)				;AND SAVE GLOBAL POINTER
+
+		MOVE.L	LOCPAT(A6),A0				;GET THE PIXPAT HANDLE POINTER
+		MOVE.L	(A0),A0						;GET THE PIXPAT HANDLE
+		MOVE.L	(A0),A0						;GET THE PIXPAT POINTER
+
+		TST		PATTYPE(A0)					;IS IT AN OLD PATTERN?
+		BNE.S	NOTOLD						;=>NO, CHECK FOR EXPANSION OF NEW PAT
+
+;---------------------------------------------------------
+;
+;  IF OLD PATTERN, USE SHARED CODE TO EXPAND IT
+;
+		MOVE.L	PATXDATA(A0),A0				;GET THE EXPANDED DATA HANDLE
+		MOVEQ	#64,D0						;MINIMUM BUFFER IS 64 BYTES
+		MOVE	DSTSHIFT(A6),D1				;GET DEPTH SHIFT
+		subq	#3,D1						;DEPTHS 1-8 OK						@@@@ BAL 10Apr88
+		ble.S	BUFOK						;=>SO GET THE PATTERN BUFFER		@@@@ BAL 10Apr88
+		LSL.L	D1,D0						;ELSE DOUBLE FOR 16, QUAD FOR 32
+BUFOK	JSR		RSetHSize
+
+		MOVE.L	(A0),d0						;get master pointer					@@@@ BAL 10Apr88
+		_rTranslate24To32					;mask off high byte					@@@@ BAL 10Apr88
+		move.l	d0,EXPAT(A6)				;SAVE POINTER TO EXPAND DATA AREA
+											;*** LEAVE IT UNLOCKED
+		MOVE.L	LOCPAT(A6),A0				;GET PIXPAT HANDLE POINTER
+		MOVE.L	A0,-(SP)					;SAVE PIXPAT HANDLE POINTER
+		MOVE.L	(A0),A0						;GET HANDLE TO PIXPAT
+		MOVE.L	(A0),A0						;GET POINTER TO PIXPAT
+		MOVE.L	PATDATA(A0),A0				;GET HANDLE TO DATA
+		MOVE.L	(A0),A0						;GET POINTER TO DATA
+		MOVE.L	A0,LOCPAT(A6)				;SET UP POINTER TO SRC DATA
+
+		JSR		PSHARE						;AND CALL COMMON CODE
+
+		MOVE.L	(SP)+,LOCPAT(A6)			;RESTORE PATTERN HANDLE
+
+NEWDONE	MOVE.L	SAVESTK(A4),SP				;RESTORE STACK POINTER
+		BRA		DONE						;AND RETURN
+
+; IF THE DEPTH OR COLOR TABLE HAS CHANGED, EXPAND PATTERN TO CURRENT DEPTH
+
+NOTOLD	MOVE.L	LOCPAT(A6),A0				;GET THE PIXPAT HANDLE POINTER
+		MOVE.L	(A0),A0						;A0 = PIXPAT HANDLE
+		MOVE.L	(A0),A2						;A2 = PIXPAT POINTER
+		MOVE.L	THEGDEVICE,A1				;GET HANDLE TO CURRENT DEVICE
+		MOVE.L	(A1),A1						;POINT TO CURRENT DEVICE
+		MOVE.L	GDPMAP(A1),A1				;GET HANDLE TO DEVICE'S PIXMAP
+		MOVE.L	(A1),A1						;POINT TO DEVICE'S PIXMAP
+		MOVE	PIXELSIZE(A1),D1			;GET PIXEL DEPTH OF DEVICE
+;
+; Will need current ctSeed value below for updating LastCTable	<KON 11Oct90>
+;
+		MOVE.L	PMTABLE(A1),A1				;GET HANDLE TO COLOR TABLE
+		MOVE.L	(A1),A1						;POINT TO COLOR TABLE
+		MOVE.L	CTSEED(A1),D0				;GET CURRENT COLOR TABLE ID IN D0
+
+		MOVE.L	PATXMAP(A2),A5				;GET HANDLE TO EXPANDED MAP
+		MOVE.L	(A5),A5						;POINT TO IT
+		CMP		patXValid(A2),D1			;HAS DEPTH CHANGED?
+		BNE.S	CONVERT						;=>YES, CONVERT TO CURRENT DEPTH
+
+		cmp.w	#8,d1						;is src=dst > 8 bits/pixel				<1.5> BAL
+		bgt.s	NOCNVRT						;don't check seeds on direct data		<1.5> BAL
+;		MOVE.L	PMTABLE(A1),A1				;GET HANDLE TO COLOR TABLE
+;		MOVE.L	(A1),A1						;POINT TO COLOR TABLE
+;		MOVE.L	CTSEED(A1),D0				;GET CURRENT COLOR TABLE ID IN D0
+		CMP.L	LASTCTABLE(A5),D0			;HAS COLOR TABLE CHANGED?
+		BEQ.S	NOCNVRT						;=>NO, DON'T CONVERT
+
+CONVERT	MOVE.L	D0,LASTCTABLE(A5)			;UPDATE COLOR TABLE SEED
+		MOVE	D1,patXValid(A2)			;UPDATE DEPTH
+		MOVE.L	A0,-(SP)					;PUSH THE PIXPAT HANDLE
+		MOVE.L	SAVEA5(A4),A5				;RESTORE A5
+		_PATCONVERT							;EXPAND PATTERN TO CURRENT DEPTH
+
+; CALC STATE VARIABLES FOR STACK FRAME
+
+NOCNVRT	MOVE.L	LOCPAT(A6),A0				;GET THE PIXPAT HANDLE POINTER
+		MOVE.L	(A0),A0						;GET THE PIXPAT HANDLE
+		MOVE.L	(A0),A0						;A0 = PIXPAT POINTER
+		MOVE.L	PATXMAP(A0),A5				;GET HANDLE TO EXPANDED MAP
+		MOVE.L	(A5),A5						;POINT TO IT
+		MOVE.L	([PATXDATA,A0]),d0			;COPY POINTER TO EXPANDED DATA		@@@@ BAL 10Apr88
+		_rTranslate24To32					;mask off high byte					@@@@ BAL 10Apr88
+		move.l	d0,EXPAT(A6)				;SAVE POINTER TO EXPAND DATA AREA
+		MOVE	PATXROW(A5),PATROW(A6)		;COPY EXPANDED ROWBYTES
+		MOVE	PATXHMASK(A5),PATHMASK(A6)	;COPY HORIZONTAL MASK
+		MOVE	PATXVMASK(A5),PATVMASK(A6)	;COPY VERTICAL MASK
+
+;---------------------------------------------------------
+;
+;  HAS PATTERN'S ENVIRONMENT CHANGED SINCE LAST TIME?
+;
+		LEA		LASTOFST(A5),A2				;POINT TO SAVED GLOBAL-LOCAL OFFSET
+		MOVE.L	THEPORT(A3),A1				;GET CURRENT GRAFPORT
+		MOVE	(A2)+,D0					;GET LASTOFST
+		CMP		DSTPIX+BOUNDS+LEFT(A6),D0	;HAS IT CHANGED?
+		BNE.S	DOPAT						;=>YES, rotate PATTERN
+
+		CMP.L	(A2)+,D7					;HAS LASTINVERT CHANGED?
+		BNE.S	DOPAT						;=>YES, EXPAND PATTERN
+
+		MOVE	PATALIGN+V(A3),D0			;GET ALIGN VERTICAL
+		CMP		(A2)+,D0					;HAS LASTALIGN VERTICAL CHANGED?
+		BNE.S	DOPAT						;=>YES, EXPAND PATTERN
+
+		MOVE	PATALIGN+H(A3),D0			;GET ALIGN HORIZONTAL
+		CMP		(A2)+,D0					;HAS LASTALIGN HORIZONTAL CHANGED?
+		BNE.S	DOPAT						;=>ROTATE WITH ALIGN
+
+		MOVE	PATSTRETCH(A1),D0			;GET STRETCH
+		CMP		(A2)+,D0					;HAS LASTSTRETCH CHANGED?
+		BEQ		DONE						;=>NO, JUST RETURN
+
+
+SAVESTATE									;LASTOFST ALREADY UPDATED
+		LEA		LASTINVERT(A5),A2			;POINT TO START OF SAVE AREA
+		MOVE.L	D7,(A2)+					;SAVE INVERT
+		MOVE.L	GGLOBALS(A4),A3				;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	PATALIGN(A3),(A2)+			;SAVE LASTALIGN
+		MOVE.L	THEPORT(A3),A1				;GET CURRENT GRAFPORT
+		MOVE	PATSTRETCH(A1),(A2)+		;SAVE LASTSTRETCH
+		BRA		NEWDONE						;=>STRIP STACK AND RETURN
+
+
+DOPAT
+; GET WIDTH OF PATTERN AND ALLOCATE SCANLINE BUFFER ON STACK
+
+		MOVE	PATXROW(A5),D0					;GET ROWBYTES OF EXPANDED PATTERN
+		BNE.S	NOSMALL							;=> NOT AN OLD SIZED PATTERN
+		MOVEQ	#4,D0							;ELSE ROWBYTES := 4
+NOSMALL	MOVE.L	PATMAP(A0),A1					;GET THE PATTERN'S PIXMAP HANDLE
+		MOVE.L	(A1),A1							;POINT TO THE PIXMAP
+		MOVE	DSTSHIFT(A6),D1					;GET SHIFT FOR PIXEL DEPTH
+		LSL		#3,D0							;CONVERT BYTES TO BITS
+		MOVE	D0,D3							;D3 = WIDTH IN BITS
+		MOVE	D0,D4							;SAVE WIDTH FOR BELOW
+		LSR		D1,D4							;D4 = WIDTH IN PIXELS
+
+		LSR		#5,D0							;CONVERT BITS TO LONGS
+NXTLNG0 CLR.L	-(SP)							;CLEAR A LONG
+		DBRA	D0,NXTLNG0						;LOOP UNTIL DONE
+
+; SINCE PATTERN MIGHT ALREADY BE SHIFTED, CALC NEW OFFSET - OLD OFFSET
+
+		MOVE	DSTPIX+BOUNDS+LEFT(A6),D2		;GET NEW GLOBAL-LOCAL OFFSET
+		ADD		PATALIGN+H(A3),D2				;ADD HORIZONTAL ALIGNMENT
+		MOVE	D2,D0							;SAVE A COPY
+		SUB		LASTOFST(A5),D2					;SHIFT := NEW OFFSET - OLD OFFSET
+
+		MOVE	D0,LASTOFST(A5)					;SAVE NEW OFFSET
+		SUBQ	#1,D4							;GET WIDTH-1 AS MASK
+		AND		D4,D2							;MASK THE OFFSET
+		BEQ.S	SAVESTATE						;=>SAME ALIGNMENT, RETURN
+		LSL		D1,D2							;DEPTH*OFFSET = SHIFT AMOUNT
+
+; SET UP ROTATE INFO
+
+		MOVE	D2,ROTSHIFT(A4)					;SAVE SHIFT AMOUNT
+		MOVE	D3,ROTSIZE(A4)					;SAVE SCANLINE SIZE
+		MOVE.L	PATXDATA(A0),A3					;GET HANDLE TO EXPANDED DATA
+		MOVE.L	(A3),A3							;POINT AT EXPANDED DATA
+		MOVEQ	#32,D6							;GET A USEFUL NUMBER IN D6
+		MOVEQ	#16,D5							;ASSUME OLD-STYLE PATTERN
+		TST		PATXROW(A5)						;IS IT?
+		BEQ.S	CHKSCAN							;=>YES
+		MOVE	BOUNDS+BOTTOM(A1),D5			;GET BOTTOM
+		SUB		BOUNDS+TOP(A1),D5				;GET NUMBER OF SCANS TO DO
+		MOVEQ	#0,D3							;INIT D3 TO 0
+		BRA.S	CHKSCAN							;CHECK FOR INVALID HEIGHTS AND LOOP
+
+; ROTATE NEXT ROW INTO THE SCANLINE BUFFER STARTING AT OFFSET INTO SRC
+
+NXTSCAN	MOVE.L	SP,A2							;POINT TO SCANLINE BUFFER
+		MOVE	ROTSIZE(A4),D3					;GET SIZE OF SCANLINE
+		MOVE	ROTSHIFT(A4),D2					;GET SHIFT AMOUNT
+		MOVE	D2,D7							;USE AS START OFFSET INTO SRC
+		EXT.L	D7								;LONG FOR BFEXTU
+
+		SUB		D7,D3							;SCANSIZE-START IS # BITS TO DO
+
+; PART 1:  WRITE LONGS UNTIL WE HIT THE END OF THE SRC
+
+NXTLNG1	BFEXTU	(A3){D7:0},D0					;GET 32 BITS OF SRC
+		ADD.L	D6,D7							;BUMP SRC OFFSET
+		SUB		D6,D3							;UPDATE NUMBER OF BITS TO DO
+		BMI.S	NOTLONG							;=>IF PAST END, DON'T DO LONG
+		MOVE.L	D0,(A2)+						;ELSE PUT LONG TO DST
+		BRA.S	NXTLNG1
+
+; PART 2:  WRITE THE FRACTIONAL PARTS FROM THE END AND THE START OF THE SRC
+
+NOTLONG MOVE.L	D6,D1							;GET 32
+		ADD		D3,D1							;GET NUMBER OF LEFTOVER BITS (LONG)
+		ROL.L	D1,D0							;PUT LEFTOVERS INTO LOW PART OF D0
+		BFINS	D0,(A2){0:D1}					;INSERT BITS FROM END OF SRC
+
+		NEG		D3								;GET NUMBER OF BITS TO DO
+		BFEXTU	(A3){0:D3},D0					;GET THAT MANY BITS
+		BFINS	D0,(A2){D1:D3}					;AND PUT TO DST
+		ADD.W	#4,A2							;DONE WITH THAT LONG
+		SUB		D3,D2							;SAY WE'VE DONE THOSE BITS
+		BLE.S	DONESCAN						;=>DONE WITH SCAN (*** NEEDED?)
+
+; PART3:  WRITE LONGS UNTIL WE'VE EXHAUSTED ALL SRC BITS.
+
+NXTLNG2	BFEXTU	(A3){D3:0},D0					;GET 32 BITS OF SRC
+		ADD.L	D6,D3							;GO TO NEXT LONG
+		SUB		D6,D2							;SAY WE'VE DONE THOSE BITS
+		BMI.S 	DONESCAN						;=>COUNT EXHAUSTED, DONE W/SCAN
+		MOVE.L	D0,(A2)+						;ELSE PUT TO DST
+		BRA.S	NXTLNG2							;AND LOOP UNTIL DONE
+
+DONESCAN MOVE.L	SP,A2							;POINT TO SCANLINE BUFFER
+		MOVE	ROTSIZE(A4),D0					;GET NUMBER OF BITS TO DO
+		SUBQ	#1,D0							;FOR LONG ROUNDING
+		LSR		#5,D0							;CONVERT TO LONGS
+NXTLNG3	MOVE.L	(A2)+,(A3)+						;COPY A LONG
+		DBRA	D0,NXTLNG3						;LOOP FOR ALL LONGS
+
+CHKSCAN	DBRA	D5,NXTSCAN						;=>DO NEXT SCANLINE
+		BRA		SAVESTATE						;AND RETURN
+
+
+PATCONVERT	PROC	EXPORT
+			IMPORT	GetDevPix,PatDither,MakeScaleTbl, RSetHSize
+;------------------------------------------------------------------
+;
+;  PROCEDURE PATCONVERT (PAT: PixPatHandle);
+;
+;  Convert the specified pattern to the current depth and color table.
+;  Note: This routine is shared by patterns and cursors, which are parallel
+;  structures.  Expand data for the pattern is kept in the patXMap handle, which 
+;  is carefully unused if the structure is a cursor.
+;
+; This routine reflects the patch code in QDciPatchROM.a which					<sm 6/9/92>stb
+; makes direct pixpats work for offscreen gWorlds.								<sm 6/9/92>stb
+
+PARAMSIZE	EQU		4
+PAT			EQU		PARAMSIZE+8-4				; handle to pattern
+
+SAVESTK		EQU		-4							; save the stack
+WIDCNT		EQU		SAVESTK-2					; width of pattern in pixels
+HTCNT		EQU		WIDCNT-2					; height of pattern in scans
+HREPCNT		EQU		HTCNT-2						; horizontal repetitions of pattern
+VREPCNT		EQU		HREPCNT-2					; vertical repetitions of pattern
+PATROW		EQU		VREPCNT-2					; rowbytes of src pattern
+DstPix		EQU		PATROW-PMREC				; dst pixmap for calling stretch	<1.5> BAL
+VARSIZE		EQU 	DstPix						; local vars						<1.5> BAL
+
+			LINK	A6,#VARSIZE					; allocate stack frame
+			MOVEM.L	D3-D7/A0/A2-A4,-(SP)		; save all registers
+												; A0 saved for SetFillPat
+			MOVE.L	SP,SAVESTK(A6)				; save stack pointer
+
+; get the dst pixel size in D6 and the src pixel size in D7
+
+			bsr.l	GetDevPix					; get pointer to GDevice in A0
+			MOVE	PixelSize(A0),D6			; get dst pixel size
+			EXT.L	D6							; make long for translate loop
+
+			MOVE.L	PAT(A6),A4					; get the PixPat Handle
+			MOVE.L	(A4),A1						; point to the pixPat
+
+			MOVE	patType(A1),D0				; get the type of pattern
+			BMI.S	NoDither					; => it's a cursor, no offset to set
+
+			MOVE.L	patXMap(A1),A0				; get handle to patXMap
+			MOVE.L	(A0),A0						; point to patXMap
+			CLR		LastOfst(A0)				; we're expanding with offset 0
+			CMP		#ditherPat,D0				; does pat need to be dithered?
+			BNE.S	NoDither					; => no, don't adjust
+			MOVE.L	A4,-(SP)					; push pixPat handle
+			_PatDither							; create best-match dither
+			MOVE.L	(A4),A1						; point to the pixPat
+
+NoDither	MOVE.L	PatMap(A1),A3				; get the pixmap handle
+			MOVE.L	(A3),A0						; point to the pixmap
+			MOVE	pixelSize(A0),D7			; get source pixel size
+			EXT.L	D7							; make long for translate loop
+
+; set up patXRow, patXHMask, patXVMask
+
+			MOVE	rowBytes(A0),D0				; get src rowbytes
+			AND		#nuRBMask,D0					; clear flag bits
+			MOVE	D0,patRow(A6)				; save for expand loop
+
+			CLR		HREPCNT(A6)					; assume no horizontal reps
+			CLR		VREPCNT(A6)					; assume no vertical reps
+
+			LEA		bounds+right(A0),A2			; point to end of bounds
+			MOVE	(A2),D4						; get right
+			MOVE	-(A2),D3					; get bottom
+			SUB		-(A2),D4					; get width in pixels in D4
+			SUB		-(A2),D3					; get height in D3
+
+			MOVE	D4,D0						; get src width in pixels
+			SUBQ	#1,D0						; make it 0 based
+			MOVE	D0,WIDCNT(A6)				; save src width in pixels
+
+			MOVE	D3,D0						; get height
+			SUBQ	#1,D0						; make it 0 based
+			MOVE	D0,HTCNT(A6)				; save src height in pixels
+
+; if the pattern is a cursor, skip repeat stuff
+
+			MOVE	patType(A1),D0				; get the type of pattern
+			BPL.S	NoCrsr						; => not a cursor, get reps
+			LSR		#3,D4						; convert dst bits to bytes
+			MULU	D6,D4						; stretch to dst depth
+			BRA.S	GotReps						; => don't replicate cursors
+
+; If the pattern will fit into a long, repeat, if necessary, to fill the whole
+; word.  Also make the pattern 16 scans high.  Set patXRow to 0 to indicate a 32*16 pattern.
+
+NoCrsr		MOVE.L	patXMap(A1),A2				; get handle to expanded info
+			MOVE.L	(A2),A2						; point to expanded info
+
+			MULU	D6,D4						; get dst width in bits
+			MOVEQ	#32,D0						; get number of bits in a long
+			DIVU	D4,D0						; get times to repeat to fit into long
+			SUBQ	#1,D0						; make repeat count 0 based
+			BMI.S	NOREPS						; => no horizontal repetitions
+			MOVE	D0,HREPCNT(A6)				; and set horizontal rep count
+												; pattern fits into a long, so set
+			CLR		PATXROW(A2)					; flag to use the old blt routines
+			MOVEQ	#4,D4						; and set rowbytes to 4
+
+			MOVEQ	#16,D0						; get minimum number of vert lines
+			DIVU	D3,D0						; get 16 DIV height
+			CMP		#1,D0						; is it 1 or less?
+			BLT.S	NOREPS2						; => yes, no repetitions
+			MULU	D0,D3						; multiply height by repcount
+			SUBQ	#1,D0						; make VRepCnt 0 based
+			MOVE	D0,VREPCNT(A6)				; and set vertical rep count
+			BRA.S	REPS						; => patXRow already cleared
+
+NOREPS		LSR		#3,D4						; convert dst bits to bytes
+NOREPS2		MOVE	D4,PATXROW(A2)				; save expanded rowbytes
+REPS		MOVE	D4,D0						; copy expanded rowBytes
+			SUBQ	#1,D0						; HMASK := $FFFC AND (rowbytes-1)
+			AND		#$FFFC,D0					; mask to long boundary
+			MOVE	D0,PatXHMask(A2)			; save HMask
+
+			MOVE	D4,D0						; get (adjusted) rowbytes
+			MULU	D3,D0						; VMASK := rowbytes*height - 1
+			SUBQ	#1,D0						; make it a mask
+			MOVE	D0,PatXVMask(A2)			; save VMask
+
+; Calc total size of the dst and set the size of patXData
+
+GotReps		MOVE	D4,D0						; get (adjusted) width in bytes
+			MULU	D3,D0						; multiply by (adjusted) height
+			MOVE.L	(A4),A0						; point to the pixPat
+			MOVE.L	patXData(A0),A0				; get the handle to expanded bits
+			JSR		RSetHSize					; set to proper size
+
+;  Allocate pixel translate table on top of stack and initialize
+
+			cmp.W	#8,d7						; is src direct data?				<1.5> BAL
+			bgt.s	DirectPixPat				; yes, go call stretchbits			<1.5> BAL
+			MOVE.L	(A3),-(SP)					; push pixMap pointer
+			MOVE    #$20,-(SP)                  ; pass srcAverage as a mode (so colors are used)
+			_MakeScaleTbl						; make translate table
+
+;  For each pixel, translate and write out
+
+			MOVE.L	(A4),A1						; point to the pixPat
+			MOVE.L	([patXData,A1]),A2			; point to the dst
+			MOVEQ	#0,D5						; position to start of dst
+
+NXTPASS		MOVE.L	(A4),A1						; point to the pixPat
+			MOVE.L	([patData,A1]),A3			; point to the src data
+			MOVE	HTCNT(A6),D3				; get number of scans to do
+
+NXTSCAN		MOVE	HREPCNT(A6),D2				; get horizontal repeat count
+NXTREP		MOVEQ	#0,D4						; position to start of src scan
+			MOVE	WIDCNT(A6),D1				; get width of src
+NXTPXL		BFEXTU	(A3){D4:D7},D0				; extract a source pixel
+			move.l	0(SP,D0*4),D0				; translate it					<BAL 09May88> @@@@
+			BFINS	D0,(A2){D5:D6}				; and put to dst
+			ADD.L	D7,D4						; bump to next src pixel
+			ADD.L	D6,D5						; bump to next dst pixel
+			DBRA	D1,NXTPXL					; => repeat for each pixel in src
+			DBRA	D2,NXTREP					; => repeat so expanded pat 32 wide
+			ADD		patRow(A6),A3				; else bump to next scan of src
+			DBRA	D3,NXTSCAN					; => and repeat for each scanline
+			SUBQ	#1,VREPCNT(A6)				; need to repeat vertically?
+			BPL.S	NXTPASS						; => yes, take it from the top
+
+; restore everything and return
+
+Out			MOVE.L	SAVESTK(A6),SP				; restore the stack pointer
+			MOVEM.L	(SP)+,D3-D7/A0/A2-A4		; restore work registers
+			UNLINK	PARAMSIZE,'PATCONVE'		; unlink and return
+ 
+;
+;  Src is 16 or 32 bits/pixel so call stretch to depth convert to dst depth		<1.5> BAL
+;
+;  Enter with pixpat handle in a4 and src pixmap handle in a3.
+;  Dst rowBytes in D4.
+;
+; This routine contains the fix from the patch code in QDciPatchROM.a			<sm 6/9/92>stb
+; It makes direct pixpats work for offscreen gWorlds							<sm 6/9/92>stb
+
+
+DirectPixPat
+			MOVE.L	(A4),A0						; point to the pixPat
+			MOVE.L	patData(A0),A0				; get the src data handle
+			MOVE.L	(a0),a0						; get the src data ptr
+
+			MOVE.L	(A3),A1						; point to the pixmap
+			MOVE.L	a0,baseAddr(a1)				; point the baseAddr to the patData
+
+			bsr.l	GetDevPix					; get pointer to GDevice in A0
+			lea		dstPix(a6),a1				; point to dst pixMap
+			MOVEQ	#PMREC/2-1,D0				; make a local copy of dst gdpmap
+@NXTWORD	MOVE	(A0)+,(A1)+					; 
+			DBRA	D0,@NXTWORD					; 
+
+			lea		dstPix+bounds+top(a6),a0	; set up dstPix for patXData
+			clr.l	(a0)+						; top,left = 0,0
+			move.w	HtCnt(a6),(a0)				;
+			addq.w	#1,(a0)+					; bottom = height
+			move.w	WidCnt(a6),(a0)				;
+			addq.w	#1,(a0)+					; right = width			<24JUL90 KON>
+; the following line is better than clr.w dstPix+pmVersion(a6),			<sm 6/9/92>stb
+; in case you’re wondering where the line went							<sm 6/9/92>stb
+			clr.w	(a0)						; clear pmVersion 		<24JUL90 KON>
+
+			MOVE.L	(A4),A1						; point to the pixPat
+			MOVE.L	patXData(A1),A0				; get the dst data handle
+			MOVE.L	(a0),a0						; get the dst data ptr
+			MOVE.L	a0,dstPix+baseAddr(a6)		; point dstPix to the patXData
+			OR.W	#$8000,d4					; set pixmap flag
+			MOVE.W	d4,dstPix+rowBytes(a6)		; set Dst rowbytes
+
+			; set up parameters to stretchBits
+
+			move.l	(a3),a0						; point at srcPix
+			move.l	(a3),-(sp)					; srcPix
+			clr.l	-(sp)						; maskPix
+			pea		dstPix(a6)					; dstPix
+			pea		bounds(a0)					; srcrect
+			pea		dstPix+bounds(a6)			; maskrect
+			pea		dstPix+bounds(a6)			; dstrect
+			clr.w	-(sp)						; srcCopy mode
+			btst	#1,patType+1(a1)			; use dithering?
+			beq.s	@modeOK						; no, use srcCopy
+			add.w	#64,(sp)					; yes, use ditherCopy mode
+@modeOK		clr.l	-(sp)						; pattern ptr
+			move.l	GRAFGLOBALS(A5),A0			; point to QD globals
+			move.l	WIDEOPEN(A0),-(sp)			; push rgnA = wideOpen
+			move.l	(sp),-(sp)					; push rgnB = wideOpen
+			move.l	(sp),-(sp)					; push rgnC = wideOpen
+			st		-(sp)						; multColor = true
+			_stretchBits						; go for it
+
+;  Now replicate the Xpattern data horizontally and then vertically as needed
+
+			MOVE.L	(A4),A1						; point to the pixPat
+			MOVE.L	([patXData,A1]),A2			; point to the src
+			move.w	WidCnt(a6),d7				; get pixel width-1
+			addq	#1,d7
+			mulu	d6,d7						; get bit offset to right edge in d7
+			and.w	#nuRBMask,dstPix+rowbytes(A6) ; remove pixmap flag
+			MOVE	HTCNT(A6),D3				; get number of scans to do
+
+@NXTSCAN	MOVEQ	#0,D5						; position to start of src
+			move.l	d7,d4						; copy bitwidth to d4
+
+			MOVE	HREPCNT(A6),D2				; get horizontal repeat count
+			bra.s	@nxtH
+@NXTREP		MOVE	WIDCNT(A6),D1				; get width of src
+@NXTPXL		BFEXTU	(A2){D5:D6},D0				; extract a source pixel
+			BFINS	D0,(A2){D4:D6}				; and put to dst
+			ADD.L	D6,D4						; bump to next src pixel
+			ADD.L	D6,D5						; bump to next dst pixel
+			DBRA	D1,@NXTPXL					; => repeat for each pixel in src
+@nxtH		DBRA	D2,@NXTREP					; => repeat so expanded pat 32 wide
+			ADD		dstPix+rowbytes(A6),A2		; else bump to next scan of src/dst
+			DBRA	D3,@NXTSCAN					; => and repeat for each scanline
+
+
+			MOVE.L	([patXData,A1]),A0			; point to the src
+			move	dstPix+rowbytes(a6),d1		;
+			move	HtCnt(a6),d2				;
+			addq	#1,d2						; get height
+			mulu	d2,d1						; get bytes of src
+			lsr.l	#2,d1						; make into count of longs
+			subq	#1,d1						; zero based for dbra
+			move.w	VRepCnt(a6),d2				; # of copies to make
+			bra.s	@nxtV
+
+@NXTPASS	move.w	d1,d0						; bytes to copy
+@nxtLong	move.l	(a0)+,(a2)+
+			dbra	d0,@nxtLong					; make a full copy of the src
+@nxtV		dbra	d2,@NXTPASS					; repeat as needed
+
+			bra		Out
+
+
+; as seen in QDciPatchROM.a verbatim										<sm 6/9/92>stb
+
+MakeScaleTbl	PROC	EXPORT
+;---------------------------------------------------------------
+;
+;  PROCEDURE MakeScaleTbl (PMP: PixMapPtr);
+;
+;  Allocates a translate table on the stack and returns with SP at the
+;  start of the table.  The translate table contains one entry for each 
+;  possible pixel value in the source pixMap (PMP); each entry contains the 
+;  value to be written to the destination pixMap to best approximate that color.
+;  The translation table has 32 bits per entry.								<BAL 09May88> @@@@
+;
+redHigh		EQU		8
+greenHigh	EQU		4
+blueHigh	EQU		0
+
+
+			MOVE.L	(SP)+,A0					; get return address
+			MOVE.w	(SP)+,D2					; should we do colorizing here flag in bit 5
+			MOVE.L	(SP)+,A1					; get pixMap handle
+			MOVE	pixelSize(A1),D1			; get size of pixels
+
+			MOVEQ	#1,D0						; # entries = 2^pixelsize
+			LSL		D1,D0						; # entries = 2^pixelsize
+			MOVE	D0,D1						; save possible # of colors
+
+			SUBQ	#1,D0						; make zero based for DBRA
+NXTWORD
+			move.l	#$7fffffff,-(SP)			; allocate one entry per long			 <BAL 09May88> @@@@
+			DBRA	D0,NXTWORD
+
+; leave table on stack, save work regs, etc., on top of it
+
+TBLOFST		EQU		9*4+12						; ret addr, save regs, RGBSpec, Back and ForeColor
+
+			MOVE.L	A0,-(SP)					; push return address
+			MOVEM.L	A2/D3-D7,-(SP)				; save work registers
+			MOVEQ	#0,D5						; clear high word
+			MOVE	D1,D5						; save # of available colors
+			SUBQ	#6,SP						; allocate VAR ColorSpec on stack
+			clr.w	-(sp)						; force default color space to RGB		<BAL/dvb 23Feb89>
+;
+; Allocate forecolor and back color on stack for colorizing and for use later
+;
+			move.l	a1,a2					;save pixmap handle
+
+			MOVEQ	#-1,D0					;GET WHITE
+			MOVE.L	D0,-(SP)				;PUSH R,G,B FOR WHITE
+			MOVE	D0,-(SP)
+			CLR.L	-(SP)					;PUSH R,G,B FOR BLACK
+			CLR		-(SP)
+
+
+ScaleColorBit	EQU		3
+SwapFGBGBit		EQU		4
+UseStretchBit	EQU		5
+InvertItBit		EQU		7
+ColorizeInModeCaseBit	EQU	8
+ColorizeInSrcBufBit		EQU	9
+
+
+			btst	#ScaleColorBit,d2		;should we colorize?
+			beq		@useDefault				;skip if no.
+
+			moveq	#6,d4
+			btst	#swapfgbgBit,d2			;swap fg/bk colors?
+			beq.s	@dontswap
+			moveq	#0,d4
+@dontswap
+			PEA		(SP,d4)
+			_GetBackColor					;get fg, bg to do colorizing
+			eor.w	#6,d4
+			PEA		(sp,d4)
+			_GetForeColor
+
+;
+; Check to see if destination device is 1 bit deep. If so, we need to see if the fg and bg
+; colors map to the same thing. If they do, then check to see if the colors themselves are
+; the same. If not, then we invert the bg color		<08JUN92 SAH>
+;
+; <16> <18AUG92 SAH>
+; NOTE: This check is not correct. It should check to see if the destination is 1 or 2
+; bits deep and is a new port. There is also a major bug where we colorize with the inverted
+; background color rather than just setting the background index. In particular, this breaks
+; SeedCFill for indexed pixmaps. For the purposes of Cube-E, we will do an explicit check to
+; see if the background color is white and the foreground is black, if so we won't invert.
+;
+			move.l	([theGDevice]),A0			;get a pointer to the device
+			move.l	([gdPMap,a0]),a0			;get a pointer to its pixmap
+			cmp.w	#1,pixelSize(a0)
+			bne.s	@fgBgColorsOK				;not one bit, we don't have to worry
+			move.w	d2,d3						;save d2 here from _Color2Index			<09JUN92 SAH>
+		
+		; now do the check for fg = black, bg = white									<18AUG92 SAH>
+			tst.l	(sp)						;look at fg red and green				<16>
+			bne.s	@doInvertCheck				;not black, so bail						<16>
+			tst.w	4(sp)						;look at fg blue						<16>
+			bne.s	@doInvertCheck				;not black, so bail						<16>
+			moveq	#-1,d0						;get a white long						<16>
+			cmp.l	6(sp),d0					;compare with bg red and green			<16>
+			bne.s	@doInvertCheck				;not white, so bail						<16>
+			cmp.w	10(sp),d0					;compare with bg blue					<16>
+			beq.s	@fgBgColorsOK				;equal, so don't do invert				<16>
+
+@doInvertCheck		
+		; get copies of our colors on the stack											<09JUN92 SAH>
+		; it starts out like this. Make sure we copy things in the right order!
+		;	RRRRGGGG	0
+		;	BBBBrrrr	4
+		;	ggggbbbb	8
+		
+			move.l	8(sp),-(sp)					;do ggggbbbb
+			move.l	8(sp),-(sp)					;do BBBBrrrr
+			move.l	8(sp),-(sp)					;do RRRRGGGG
+		
+		;now we have another copy of the above
+			
+			subq.l	#4,sp						;room for index
+			pea		4(sp)						;ptr to the bg color
+			_Color2Index
+			subq.l	#4,sp						;room for index
+			pea		14(sp)						;ptr to the fg color
+			_Color2Index
+			move.w	d3,d2						;get our d2 back from _Color2Index		<09JUN92 SAH>
+			move.l	(sp)+,d0					;get the fg color
+			cmp.l	(sp)+,d0					;compare against the bg color
+			add.w	#12,sp						;get rid of our private colors
+			bne.s	@fgBgColorsOK				;we're ok
+		
+		;now, the two map to the same thing, so we need to check of the colors themselves
+		;are the same. If so, we don't do anything.
+			
+			move.l	0(sp),d0
+			cmp.l	6(sp),d0
+			bne.s	@invertbg
+			move.w	4(sp),d0
+			cmp.w	10(sp),d0
+			beq.s	@fgBgColorsOK
+@invertbg			
+			pea		6(sp)						;push ptr to bg color
+			_InvertColor						;and invert it
+			
+@fgBgColorsOK
+;
+; if foreground black and background white, don't colorize. 
+;
+			move.l	0(sp),d4					;get long of fg color
+			bne.s	@useDefault					;abort if not black
+			move.w	4(sp),d4					;get high word of fg color
+			bne.s	@useDefault					;abort if not black
+;
+; check fg color
+;
+			move.l	6(sp),d4					;get long of bg color
+			addq	#1,d4						;check for white
+			bne.s	@useDefault
+			move.w	$0A(sp),d4					;check high word
+			add.w	#1,d4
+			bne.s	@useDefault
+			bclr	#ScaleColorBit,d2			;fg black, bk white, don't colorize
+
+@useDefault
+;
+;  Build pixel translation table
+;
+			move.l	a2,a1						;get pm handle back
+			MOVEQ	#-1,D6						; assume no colors in color table
+			MOVE.L	pmTable(A1),D0				; does it exist?
+			BEQ		noPredefinedColors
+
+			MOVE.L	D0,A2						; get color table handle
+			MOVE	([A2],CTSize),D4			; get size of table in entries
+			cmp		D5,D4						; more entries than bits allow?
+			blo.s	@notTooMany					; no, fine
+			move	D5,D4						; yes, pin to depth
+			subq	#1,D4						; make zero-based
+@notTooMany
+			MOVE	([a2],TransIndex),D3		; get ctFlags							<BAL 10Mar89>
+			btst	#14,d3						; are they palette references?			<BAL 10Mar89>
+			bne		brink						; yes call dave							<BAL 10Mar89>
+
+			MOVEQ	#0,D6						; zero high word
+			MOVE	D4,D6						; remember number of colors
+
+			btst	#ScaleColorBit,d2			;should we colorize?
+			beq.s	noColorizeLoop				;skip if no.
+
+@nxtEntry	MOVE.L	(A2),A0								; get color table pointer
+			MOVE	D4,D3								; assume entry = index
+			TST		TransIndex(A0)						; look for flag in transIndex
+			BMI.S	@UseIndex							; => flag set, use index
+			MOVE.w	CTTable+value(A0,D4*8),D3			; get value of current entry	<BAL/dvb 23Feb89>
+@UseIndex	MOVE	CTTable+rgb+red(A0,D4*8),d0			; get red
+
+;
+; colorize the red
+;
+			MOVE.w	D0,d1			;COPY SRC
+			move.w	6(sp),d2		;get red of bk color into low 16 bits
+			AND.w	D2,D0			;ADD FG COLOR TO SRC
+			NOT.w	D1				;GET NOT SRC
+			move	0(sp),d2		;get red of fg color into low 16 bits
+			AND.w	D2,D1			;ADD BK COLOR TO NOT SRC
+			OR.w	D1,D0			;COMBINE FG/BK DATA
+			move.w	d0,rgb+red+12(sp)
+
+
+			MOVE.L	CTTable+rgb+green(A0,D4*8),d0			; copy green,blue
+;
+; colorize the green and blue at the same time
+;
+			MOVE.l	D0,d1			;COPY SRC
+			move.l	8(sp),d2		;get blue and green of bk color
+			AND.l	D2,D0			;ADD FG COLOR TO SRC
+			NOT.l	D1				;GET NOT SRC
+			move.l	2(sp),d2		;get blue and green of fg color
+			AND.l	D2,D1			;ADD BK COLOR TO NOT SRC
+			OR.l	D1,D0			;COMBINE FG/BK DATA
+			move.l	d0,rgb+green+12(SP)
+
+			CLR.L	-(SP)										; make room for function result
+			PEA		rgb+4+12(SP)								; point to VAR RGBColor		<KON 28Apr90>
+			_Color2Index								; convert to index 				<BAL/dvb 23Feb89>
+			MOVE.L	(SP)+,D0							; get result
+			move.l	D0,TBLOFST(SP,D3*4) 				; put returned value in table	<BAL 09May88> @@@@
+			DBRA	D4,@nxtEntry						; => repeat until done
+
+			bra.s	noPredefinedColors
+
+noColorizeLoop
+
+@nxtEntry	MOVE.L	(A2),A0								; get color table pointer
+			MOVE	D4,D3								; assume entry = index
+			TST		TransIndex(A0)						; look for flag in transIndex
+			BMI.S	@UseIndex							; => flag set, use index
+			MOVE.w	CTTable+value(A0,D4*8),D3			; get value of current entry	<BAL/dvb 23Feb89>
+@UseIndex	MOVE	CTTable+rgb+red(A0,D4*8),rgb+red+12(sp)
+			MOVE.L	CTTable+rgb+green(A0,D4*8),rgb+green+12(SP)
+
+			CLR.L	-(SP)										; make room for function result
+			PEA		rgb+4+12(SP)								; point to VAR RGBColor		<KON 28Apr90>
+			_Color2Index								; convert to index 				<BAL/dvb 23Feb89>
+			MOVE.L	(SP)+,D0							; get result
+			move.l	D0,TBLOFST(SP,D3*4) 				; put returned value in table	<BAL 09May88> @@@@
+			DBRA	D4,@nxtEntry						; => repeat until done
+
+			bra.s	noPredefinedColors
+
+brink		MOVEQ	#0,D6						; zero high word
+			MOVE	D4,D6						; remember number of colors
+@nxtPEntry	MOVE.L	(a2),A0								; get color table pointer
+			MOVE	D4,D3								; assume entry = index
+			MOVE.w	CTTable+value(A0,D4*8),12(sp)			; put pmIndex in colorSpec	<KON 28Apr90
+			MOVE	CTTable+rgb+red(A0,D4*8),rgb+red+12(SP)		; copy value, red		<KON 28Apr90
+			MOVE.L	CTTable+rgb+green(A0,D4*8),rgb+green+12(SP)	; copy green,blue		<KON 28Apr90
+			CLR.L	-(SP)										; make room for function result
+			PEA		4+12(SP)								; point to VAR ColorSpec		<KON 28Apr90
+			_ColorThing2Index								; convert to index 			<BAL/dvb 23Feb89>
+			MOVE.L	(SP)+,D0							; get result
+			move.l	D0,TBLOFST(SP,D3*4) 				; put returned value in table	<BAL 09May88> @@@@
+			DBRA	D4,@nxtPEntry						; => repeat until done
+
+			clr.w	QDErr								;remove any lingering error from ColorThing2Index
+														;								<BAL 28Jan90>
+; leave ColorSpec on stack
+
+noPredefinedColors
+			; figure the number of unused colors
+			ADDQ.L	#1,D6					; make the number of colors 1 based
+			SUB.L	D5,D6					; figure difference between bit depth and colors defined
+			NEG.L	D6						; figure number of unused colors (zero based)
+			bgt.s	@continue
+; if negative or zero, strip foreground and background colors off stack:  all done
+			add		#12,sp					;throw away fore and back colors
+
+			bra		@noRelativeColors
+
+
+;
+; At this point forecolor is on top of stack
+;
+
+@continue
+			MOVE.L	SP,A1
+			MOVE.L	A1,A2					; save a copy of where the foreground is
+			MOVEQ	#2,D0					; three colors, two based
+@startColor
+			MOVE	#$8000,-(SP)			; put 1/2 on stack
+			MOVE	(A1)+,-(SP)				; save integer on stack
+			DBRA	D0,@startColor
+
+			MOVE.L	A2,A1					; start back with forecolor
+			LEA		TBLOFST+12(SP,D5*4),A2	; start of stack based table + (6 words of $00008000) <12>
+			SUBQ	#1,D6					; number of new colors, zero based
+			BEQ.S	@skipDivision			; if only 1 color left, no need to interpolate
+
+			LEA		6(A1),A0				; get start of real background color
+			MOVEQ	#2,D0					; three colors, one based
+@nextColor
+			MOVEQ	#0,D1					; clear high word
+			MOVE	(A0)+,D1				; background color component
+			SUB		(A1)+,D1				; change from foreground
+			SLO		D7						; remember if it was negated
+			BHS.S	@orderedOK
+			NEG		D1						; flip if subtraction would overflow
+@orderedOK
+			SWAP	D1						; multiply high word times 65K
+			DIVU.L	D6,D1					; figure fixed point color increment
+			TST.B	D7
+			BEQ.S	@notFlipped
+			NEG.L	D1						; flip it
+@notFlipped
+			MOVE.L	D1,-(SP)				; save it
+			DBRA	D0,@nextColor
+
+			MOVEM.L	(SP)+,D3-D5				; load red, blue, green increments into registers
+
+@skipDivision
+@findUnused
+			cmp.l	#$7fffffff,-(A2)		; is it unused?		<HACK>		<BAL 09May88> @@@@
+			bne.s	@findUnused				; if not, plow onward			<BAL 09May88> @@@@
+			MOVE	redHigh(SP),red+12(SP)		; >> redHigh = 8
+			MOVE	greenHigh(SP),green+12(SP)	; >> greenHigh = 4
+			MOVE	blueHigh(SP),blue+12(SP)	; >> blueHigh = 0
+			CLR.L	-(SP)					; make room for function result
+			PEA		16(SP)					; location of RGBColor
+			_Color2Index
+			MOVE.L	(SP)+,D0				; get long result
+			move.l	D0,(A2)					; save away index				<BAL 09May88> @@@@
+
+			MOVEM.L	(SP)+,D0-D2				; last colors
+			ADD.L	D3,D0
+			ADD.L	D4,D1
+			ADD.L	D5,D2					; increment red, blue green
+			MOVEM.L	D0-D2,-(SP)				; save them for next time
+			DBRA	D6,@findUnused
+			ADD		#24,SP					; throw away 3 long colors
+@noRelativeColors
+			MOVEM.L	(SP)+,A2/D0-D1/D3-D7	; toss 8 on stack (D0,D1) & restore work registers
+			RTS
+
+;----------------------------------------------------------------------------------------
+;
+
+	IF 1 THEN
+
+;
+; Here begins the new, improved patDither code as furnished by Keith McGreggor 	<12Mar89>
+;
+
+
+
+PatDither	PROC	EXPORT
+			IMPORT	Color2Index,Index2Color
+
+;------------------
+;	PROCEDURE PatDither( PPH : PixPatHandle );
+
+PARAMSIZE	EQU		4
+PPH			EQU		PARAMSIZE+8-4
+
+rcolor		EQU		-6
+acolor		EQU		rcolor-6
+ecolor3		EQU		acolor-6
+ecolor2		EQU		ecolor3-6
+ecolor1		EQU		ecolor2-6
+totals		EQU		ecolor1-12			; three longwords for running error value
+VARSIZE		EQU		totals
+
+			LINK	A6,#VARSIZE
+			MOVEM.L	A4,-(SP)
+										; ??? should we preserve A2?
+			MOVE.L	PPH(A6),A0
+			MOVE.L	(A0),A2
+			CMP		#DitherPat,patType(A2)
+			BNE		DONE
+
+			MOVE.L	PatMap(A2),A0
+			MOVE.L	(A0),A0
+			MOVE.L	PMTable(A0),A0
+			MOVE.L	(A0),A0
+			LEA		CTTable+(4*CTEntrySize)(A0),A0
+			LEA		rcolor(A6),A2
+			MOVE.L	rgb+red(A0),(A2)+
+			MOVE.W	rgb+blue(A0),(A2)
+
+  if 0 then  ; keith
+			CLR.L	-(SP)
+			PEA		rcolor(A6)
+			_Color2Index
+			PEA		acolor(A6)
+			_Index2Color
+
+
+
+			MOVE	rcolor+red(A6),D0
+			MOVE	acolor+red(A6),D1
+			BSR.S	hocuspocus
+			MOVE	D0,ecolor1+red(A6)
+			MOVE	rcolor+green(A6),D0
+			MOVE	acolor+green(A6),D1
+			BSR.S	hocuspocus
+			MOVE	D0,ecolor1+green(A6)
+			MOVE	rcolor+blue(A6),D0
+			MOVE	acolor+blue(A6),D1
+			BSR.S	hocuspocus
+			MOVE	D0,ecolor1+blue(A6)
+
+			CLR.L	-(SP)
+			PEA		ecolor1(A6)
+			_Color2Index
+			PEA		ecolor2(A6)
+			_Index2Color
+
+			MOVE	ecolor1+red(A6),D0
+			MOVE	ecolor2+red(A6),D1
+			BSR.S	hocuspocus
+			MOVE	D0,ecolor2+red(A6)
+			MOVE	ecolor1+green(A6),D0
+			MOVE	ecolor2+green(A6),D1
+			BSR.S	hocuspocus
+			MOVE	D0,ecolor2+green(A6)
+			MOVE	ecolor1+blue(A6),D0
+			MOVE	ecolor2+blue(A6),D1
+			BSR.S	hocuspocus
+			MOVE	D0,ecolor2+blue(A6)
+
+			CLR.L	-(SP)
+			PEA		ecolor2(A6)
+			_Color2Index
+			PEA		ecolor3(A6)
+			_Index2Color
+			bra.s	continue
+
+
+hocuspocus	ADD		D0,D0
+			BCS.S	notfine
+			SUB		D1,D0
+			BCC.S	fine
+			MOVEQ	#0,D0
+			RTS
+notfine		SUB		D1,D0
+			BCS.S	fine
+			MOVEQ	#-1,D0
+fine		RTS
+
+continue	MOVE	ecolor2+red(A6),D0
+			MOVE	ecolor3+red(A6),D1
+			BSR.S	hocuspocus
+			MOVE	D0,ecolor3+red(A6)
+			MOVE	ecolor2+green(A6),D0
+			MOVE	ecolor3+green(A6),D1
+			BSR.S	hocuspocus
+			MOVE	D0,ecolor3+green(A6)
+			MOVE	ecolor2+blue(A6),D0
+			MOVE	ecolor3+blue(A6),D1
+			BSR.S	hocuspocus
+			MOVE	D0,ecolor3+blue(A6)
+
+			CLR.L	-(SP)
+			PEA		ecolor3(A6)
+			_Color2Index
+			PEA		ecolor3(A6)
+			_Index2Color
+
+  else ;dvb
+
+			CLR.L	totals(A6)
+			CLR.L	totals+4(A6)
+			CLR.L	totals+8(A6)
+
+			LEA		aColor(A6),A2			; A2 -> where to put best fit
+			BSR.S	@hocus
+			LEA		eColor1(A6),A2
+			BSR.S	@hocus
+			LEA		eColor3(A6),A2
+			BSR.S	@hocus
+			LEA		eColor2(A6),A2
+			BSR.S	@hocus
+			BRA.S	@around
+
+@hocus
+	; Add the desired color (rColor) to the running error
+	; totals (totals) and get the best fit. Then, subtract that from the
+	; totals. Put the answer in color at A2
+
+			LEA		totals(A6),A0			; A0 -> red error component (longs)
+			LEA		rColor(A6),A1			; A1 -> desired color red component (words)
+			MOVEQ	#2,D1					; Loop 3 times for rgb
+@hocLoop	CLR.L	D0
+			MOVE	(A1)+,D0
+			ADD.L	(A0),D0					; D0 = desired component + running error
+			MOVE.L	D0,(A0)+				; keep error, with overflow, in totals
+			SWAP	D0						; Check out the high word
+			TST.W	D0						; If zero, we're in range
+			BEQ.S	@compOK
+			EXT.L	D0						; Pin all - to -1, and all + to 0
+			NOT.L	D0						; And swap, so - -> 0, and + -> ffff
+@compOK		SWAP	D0						; Get low part back
+			MOVE	D0,(A2)+				; Save result component
+			DBRA	D1,@hocLoop				; Got all three pinned components
+
+			SUBQ	#6,A2					; Bump A2 back to beginning of color
+			SUBQ	#4,SP					; result
+			MOVE.L	A2,-(SP)				; rgbColor
+			_Color2Index
+			MOVE.L	A2,-(SP)
+			_Index2Color					; Get actual best fit color
+
+			LEA		totals(A6),A0			; A0 -> component errors (longs)
+			MOVEQ	#2,D1					; Loop thrice for RGB
+@hocLoop2	CLR.L	D0
+			MOVE	(A2)+,D0
+			NEG.L	D0
+			ADD.L	(A0),D0
+			MOVE.L	D0,(A0)+				; and stash back into totals
+			DBRA	D1,@hocLoop2
+			RTS
+@around
+
+  endif
+			MOVE.L	PPH(A6),A2
+			MOVE.L	(A2),A2
+			MOVE.L	PatMap(A2),A2
+			MOVE.L	(A2),A2
+			MOVE.L	PMTable(A2),A2
+			MOVE.L	(A2),A2
+			LEA		CTTable(A2),A2
+
+			MOVE	#0,(A2)+
+			MOVE.L	acolor+red(A6),(A2)+
+			MOVE 	acolor+blue(A6),(A2)+
+			MOVE	#1,(A2)+
+			MOVE.L	ecolor1+red(A6),(A2)+
+			MOVE 	ecolor1+blue(A6),(A2)+
+			MOVE	#2,(A2)+
+			MOVE.L	ecolor2+red(A6),(A2)+
+			MOVE	ecolor2+blue(A6),(A2)+
+			MOVE	#3,(A2)+
+			MOVE.L	ecolor3+red(A6),(A2)+
+			MOVE	ecolor3+blue(A6),(A2)+
+
+DONE		MOVEM.L	(SP)+,A4
+			UNLK	A6
+			RTS
+
+
+	ELSE
+
+;
+; Here begins the old patDither code which originally shipped with the Mac II
+;
+
+
+PatDither	PROC	EXPORT
+			IMPORT	GetDevPix,Color2Index,Index2Color
+;---------------------------------------------------------------
+;
+;  PROCEDURE PatDither (PPH: PixPatHandle);
+;
+;  Called with a pattern of patType = ditherPat (an RGB to be dithered),
+;  which has the desired RGB as the fifth entry in the color table.  The data is already
+;  set up to be an 8*8*2 pattern containing a repeating 2*2 dither.  All
+;  this routine does is decide which four color table values should be
+;  assigned to those pixel values.
+
+;  This routine assumes the data and color table are the right size.
+
+PARAMSIZE	EQU		4
+PPH			EQU		PARAMSIZE+8-4				; handle to pattern
+
+VARSIZE		EQU		0							; no locals
+
+			LINK	A6,#VARSIZE					; allocate stack frame
+			MOVEM.L	D3/A2,-(SP)					; save all registers
+
+			MOVE.L	PPH(A6),A0					; get handle to pixPat
+			MOVE.L	(A0),A2						; point to pixPat
+			CMP		#DitherPat,patType(A2)		; is it a dither pattern?
+			BNE		DONE						; => no, just return
+
+; GET EACH RGB COMPONENT AS A 16.16 FIXED NUMBER
+; THE RGB IS THE FIFTH ENTRY IN THE COLOR TABLE
+
+			MOVE.L	PatMap(A2),A0				; get handle to pixMap
+			MOVE.L	(A0),A0						; point to pixMap
+			MOVE.L	PMTable(A0),A0				; get handle to color table
+			MOVE.L	(A0),A0						; point to color table
+			LEA		CTTable+(4*CTEntrySize)(A0),A0	; point to RGB
+			MOVE.L	rgb+red(A0),D0					; get red, green components
+			MOVE	D0,D1						; copy green component
+			CLR		D0							; clear low word of red
+			SWAP	D1							; get green into high word for fixed
+			CLR		D1							; clear low word of green
+			MOVE	rgb+blue(A0),D2				; get blue component
+			SWAP	D2							; into high word for fixed
+			CLR		D2							; clear low word
+
+; DIVIDE EACH COMPONENT INTO LEVELS OF INTENSITY (13 LEVELS FOR 8 BPP; 5 OTHERWISE)
+
+			LEA		DthrTbl13,A0				; use 13 levels if 8 bit per pixel
+			MOVE.L	#$13B13B13,D3				; $10000/13 = $13B1.3B13 (Fixed)
+			MOVE.L	theGDevice,A1				; get handle to the gDevice
+			MOVE.L	(A1),A1						; point to the gDevice
+			MOVE.L	GDPMap(A1),A1				; get handle to pixMap
+			MOVE.L	(A1),A1						; get pointer to pixMap
+			CMP		#8,pixelSize(A1)			; is depth 8 (or greater)?
+			BGE.S	FullRes						; => yes, use 13 levels
+			LEA		DthrTbl5,A0					; else use 5 levels of color
+			MOVE.L	#$33333333,D3				; $10000/5 = $3333.3333 (Fixed)
+FullRes		DIVU.L	D3,D0						; divide into 5 or 13 levels
+			DIVU.L	D3,D1						; divide into 5 or 13 levels
+			DIVU.L	D3,D2						; divide into 5 or 13 levels
+
+; GET THE COLOR TABLE AND PREPARE TO STUFF ENTRIES
+
+			MOVE.L	patMap(A2),A2				; get handle to pattern's pixMap
+			MOVE.L	(A2),A2						; point to pixMap
+			MOVE.L	PMTable(A2),A2				; get handle to color table
+			MOVE.L	(A2),A2						; point to color table
+			LEA		CTTable(A2),A2				; point to first entry in color table
+
+; levels for first pixel in 2*2 dither are in leftmost column of DthrTbl
+
+			MOVE	#0,(A2)+					; pixel value = 0
+			MOVE	0(A0,D0*8),(A2)+			; write red component
+			MOVE	0(A0,D1*8),(A2)+			; write green component
+			MOVE	0(A0,D2*8),(A2)+			; write blue component
+
+; levels for second pixel in 2*2 dither are in second column of DthrTbl
+
+			MOVE	#1,(A2)+					; pixel value = 1
+			MOVE	2(A0,D0*8),(A2)+			; write red component
+			MOVE	2(A0,D1*8),(A2)+			; write green component
+			MOVE	2(A0,D2*8),(A2)+			; write blue component
+
+; levels for third pixel in 2*2 dither are in third column of DthrTbl
+
+			MOVE	#2,(A2)+					; pixel value = 2
+			MOVE	4(A0,D0*8),(A2)+			; write red component
+			MOVE	4(A0,D1*8),(A2)+			; write green component
+			MOVE	4(A0,D2*8),(A2)+			; write blue component
+
+; levels for last pixel in 2*2 dither are in last column of DthrTbl
+
+			MOVE	#3,(A2)+					; pixel value = 3
+			MOVE	6(A0,D0*8),(A2)+			; write red component
+			MOVE	6(A0,D1*8),(A2)+			; write green component
+			MOVE	6(A0,D2*8),(A2)+			; write blue component
+
+DONE		MOVEM.L	(SP)+,D3/A2					; restore work registers
+			UNLINK	PARAMSIZE,'PATDITHE'		; unlink and return
+
+
+; DthrTbl13 assumes that there are 4 possible levels of a color component
+; ($0000,$5555,$AAAA,$FFFF).  It uses a two-by-two dither of these four 
+; levels to create an effective 13 levels of that component.  This process
+; is repeated for all three components, giving a range of 13*13*13 possible
+; patterns (colors).
+
+DthrTbl13	DC.W	$0000,$0000,$0000,$0000						; level 0
+			DC.W	$5555,$0000,$0000,$0000						; level 1
+			DC.W	$5555,$0000,$0000,$5555						; level 2
+			DC.W	$5555,$5555,$0000,$5555						; level 3
+			DC.W	$5555,$5555,$5555,$5555						; level 4
+			DC.W	$AAAA,$5555,$5555,$5555						; level 5
+			DC.W	$AAAA,$5555,$5555,$AAAA						; level 6
+			DC.W	$AAAA,$AAAA,$5555,$AAAA						; level 7
+			DC.W	$AAAA,$AAAA,$AAAA,$AAAA						; level 8
+			DC.W	$FFFF,$AAAA,$AAAA,$AAAA						; level 9
+			DC.W	$FFFF,$AAAA,$AAAA,$FFFF						; level 10
+			DC.W	$FFFF,$FFFF,$AAAA,$FFFF						; level 11
+			DC.W	$FFFF,$FFFF,$FFFF,$FFFF						; level 12
+
+
+; DthrTbl5 assumes that there are 2 possible levels of a color component
+; ($0000,$FFFF).  It uses a two-by-two dither of these two 
+; levels to create an effective 5 levels of that component.  This process
+; is repeated for all three components, giving a range of 5*5*5 possible
+; patterns (colors).
+
+DthrTbl5	DC.W	$0000,$0000,$0000,$0000						; level 0
+			DC.W	$FFFF,$0000,$0000,$0000						; level 1
+			DC.W	$FFFF,$0000,$0000,$FFFF						; level 2
+			DC.W	$FFFF,$FFFF,$0000,$FFFF						; level 3
+			DC.W	$FFFF,$FFFF,$FFFF,$FFFF						; level 4
+
+
+	ENDIF
+
+
+
+MAKERGBPAT	PROC 	EXPORT 
+			IMPORT  OneBitData,CopyPMap, RSetHSize
+;---------------------------------------------------------------
+;
+;  PROCEDURE MakeRGBPat (PPH: PixPatHandle; myRGB: RGBColor);
+;
+;  Alters specified pattern to be type ditherPat (patType = 2).
+;  A ditherPat is an 8*8*2 pattern (16 bytes of data) with a color
+;  table having 4 entries.  The specified entry is kept in the fifth
+;  entry in the pattern's color table.
+;
+;  Note that the pixel values for the dither are specifed here.  The
+;  color table values for those pixels are determined at patConvert
+;  time (when it calls PatDither).
+;
+PARAMSIZE	EQU		8
+PPH			EQU		PARAMSIZE+8-4				; pixPatHandle
+myRGB		EQU		PPH-4						; RGB
+
+VARSIZE		EQU		0							; no vars
+
+			LINK	A6,#VARSIZE
+			MOVEM.L	A2-A3,-(SP)					; save work register
+
+			MOVE.L	PPH(A6),A1					; get the pix pat handle
+			MOVE.L	(A1),A0						; point at the pix pat
+			MOVE	#ditherPat,patType(A0)		; set type to ditherPat
+			MOVE	#-1,patXValid(A0)			; INVALIDATE PATTERN
+
+			MOVE.L	#$AA55AA55,D0				; set default one bit 
+			MOVE.L	D0,pat1Data(A0)				; pattern to gray
+			MOVE.L	D0,pat1Data+4(A0)
+
+; SET COLOR TABLE TO 5 ENTRIES, INITIALIZE HEADER ONLY
+
+			MOVE.L	patMap(A0),A3				; get the pixMap handle
+			MOVE.L	(A3),A0						; point at the pix map
+			MOVE.L	pmTable(A0),A0				; get the color table handle
+			MOVEQ	#CTRec+(5*CTEntrySize),D0	; size = header + 5 entries
+			JSR		RSetHSize					; set color table size
+			MOVE.L	(A0),A0						; point at the color table
+			CLR.L	-(SP)						; make room for long result
+			_GetCTSeed							; get a new seed
+			MOVE.L	(SP)+,CTSeed(A0)			; and set it to unique value
+			CLR		transIndex(A0)				; clear transIndex
+			MOVE	#4,CTSize(A0)				; say there are 4 entries
+
+; STORE THE REQUESTED RGB IN THE FIFTH ENTRY IN THE COLOR TABLE
+
+			LEA		CTTable+(4*CTEntrySize)(A0),A0	; point to RGB
+			MOVE.L	myRGB(A6),A2				; get pointer to RGB
+			MOVE	#4,(A0)+					; put index field
+			MOVE.L	(A2)+,(A0)+		 			; copy red, green
+			MOVE	(A2)+,(A0) 					; copy blue
+
+; SET PATTERN DATA TO 8*8*2 AND INITIALIZE IT
+
+			MOVE.L	(A1),A0						; point at the pix pat
+			MOVE.L	patData(A0),A0				; get the data handle
+			MOVEQ	#16,D0						; pattern is 16 bytes
+			JSR		RSetHSize					; so set the size
+
+			MOVE.L	(A0),A0						; point to the data
+			MOVE.L	#$1111BBBB,D0				; get repeating pixel pattern
+												; row even = 0,1,0,1,0,1,0,1
+												; row odd  = 2,3,2,3,2,3,2,3
+			MOVE.L	D0,(A0)+					; set two rows of pattern
+			MOVE.L	D0,(A0)+					; set two rows of pattern
+			MOVE.L	D0,(A0)+					; set two rows of pattern
+			MOVE.L	D0,(A0)+					; set two rows of pattern
+
+; SET PATTERN'S PIXMAP FOR 8*8*2 PATTERN DATA
+
+			MOVE.L	(A3),A2						; point at the pix map
+			MOVE.L	pmTable(A2),-(SP)			; save the color table handle
+			LEA		OneBitData,A1				; point to one bit data
+			JSR		CopyPMap					; copy data into pixMap
+												; clobbers A1, A2
+												; also clobbers color table
+			MOVE.L	(A3),A2						; get back pixMap pointer
+			MOVE.L	(SP)+,pmTable(A2)			; restore color table
+			MOVE	#2,pRowBytes(A2)			; 2 bytes per row
+			CLR.L	pBounds+topLeft(A2)			; bounds = (0,0,8,8)
+			MOVE.L	#$00080008,pBounds+botRight(A2)
+			MOVE	#2,pixelsize(A2)			; two bits per pixel
+			MOVE	#2,cmpSize(A2)				; two bits per component
+
+			MOVEM.L	(SP)+,A2-A3					; restore work register
+			UNLINK	PARAMSIZE,'MAKERGBP'		; unlink and return
+
+			ENDPROC
+
+
+; as seen in QDciPatchROM.a													<sm 6/9/92>stb
+
+GETCICON 	PROC	EXPORT
+			IMPORT	GetCTSeed, RSetHSize
+;-------------------------------------------------------------
+;
+; FUNCTION GetCIcon(cIconID: INTEGER): cIconHandle;
+;
+; GetCIcon gets a resource of type 'cicn' with the specified ID, places
+; all the data fields into handles, installs the handles into the cicn,
+; resizes it, and then returns the data structure as a CIconHandle.
+;
+; The image of an icon is an arbitrary pixMap of arbitrary depth and color
+; table.  When it is drawn, it is remapped to the current depth and color table,
+; if necessary.  The bounds fields of the pixMap, bitMap, and mask are expected 
+; to be equal.  The height and width of the icon are defined to be:
+; 		height := IconPMap^^.bounds.bottom-IconPMap^^.bounds.top
+;		width  := IconPMap^^.bounds.right-IconPMap^^.bounds.left.
+;
+; When the icon is drawn, the bounds rect is used as the image's source rect.
+; The icon and mask will both be stretched to the destination rect.
+; At the time the icon is drawn, the icon is locked down, and the baseAddr fields
+; of the PMap, BMap, and Mask fields are set.
+;
+; The resource format is:
+;
+;		field name	structure	size
+;
+;		IconPMap	pixMap		(pmrec bytes)
+;		IconMask	bitMap		(bitMapRec bytes)
+;		IconBMap	bitMap		(bitMapRec bytes)
+;       IconData	handle		(4 bytes)
+;		MaskData	data		(IconMask.rowbytes*height bytes)
+;		BMapData	data		(IconBMap.rowbytes*height bytes)
+;		PMapCTab	data		(ctRec+(ctSize+1)*CTEntrySize bytes)
+;		PMapData	data		(IconPMap.rowbytes*height bytes)
+;
+; The icon's bitMap is defined to be NIL if its rowbytes field = 0
+;
+PARAMSIZE	EQU		2
+result		EQU		PARAMSIZE+8				; cIconHandle RESULT
+cIconID		EQU		PARAMSIZE+8-2			; icon ID
+
+			LINK	A6,#0					; build stack frame
+			MOVEM.L	D3-D4/A2-A4,-(SP)		; preserve work registers
+			CLR.L	RESULT(A6) 				; set result to NIL
+
+; Load the data, detach from resource manager and lock it down
+
+			SUBQ	#4,SP					; make space for result
+			MOVE.L	#'cicn',-(SP)			; push resource type
+			MOVE	cIconID(A6),-(SP)		; push resource ID
+			_GetResource 					; get the resource
+			MOVE.L	(SP)+,A0			 	; keep handle in A0						<1.5> BAL
+			MOVE.L	A0,D0				 	; did we get one?						<1.5> BAL
+			BEQ		NoGetNew			 	; if not, don't allocate one
+
+; copy resource data to the main pattern/cursor data structure, keep in A4
+; The resource should be purgeable.  Just leave it lying around.
+
+			_HandToHand						; create a copy without purgeing src	<1.5> BAL
+			move.l	A0,A4					; get new handle into A4				<1.5> BAL
+			_HLock							; and lock it down
+
+; Point to the color table
+
+			MOVE.L	(A4),A3							; keep pointer in A3
+			MOVE	iconPMap+bounds+bottom(A3),D4	; get bottom
+			SUB		iconPMap+bounds+top(A3),D4		; calc height, keep in D4
+
+			LEA		iconRec(A3),A2				; point to the mask data
+			MOVE	iconMask+rowbytes(A3),D0 	; get mask's rowbytes
+			MULU	D4,D0						; get size of mask data
+			ADD		D0,A2						; point to bitmap table
+			MOVE	iconBMap+rowbytes(A3),D0 	; get bitMap's rowbytes
+			MULU	D4,D0						; get size of bitmap data
+			ADD		D0,A2						; point to color table
+
+; Install the color table
+
+			CLR.L	-(SP)					; make room for function result
+			_GetCTSeed						; go get seed for new color table
+			MOVE.L	(SP)+,CTSeed(A2)		; and set seed value
+
+			MOVE.L	A2,A0					; point to the color table data
+			MOVE	CTSize(A2),D0			; get number of entries in table
+			ADDQ	#1,D0					; make it one based
+			MULU	#CTEntrySize,D0			; get size of entries
+			ADD		#CTRec,D0				; add in size of header
+			EXT.L	D0						; long for PtrToHand
+			MOVE.L	D0,D3					; save size in D4
+			_PtrToHand						; get a new handle into A0
+			BNE		NoGetNew				; =>exit if no memory
+			MOVE.L	A0,iconPMap+pmTable(A3)	; install color table into pixMap
+
+; Create the pixMap's data handle and install it
+
+			MOVE.L	A2,A0						; point to the color table
+			ADD.L	D3,A0						; bump to beginning of pixel data
+			MOVE	iconPMap+rowBytes(A3),D0 	; get the pixMap rowbytes
+			AND		#nuRBMask,D0					; clear flag bits
+			MULU	D4,D0						; multiply rowbytes * height
+		;	MULU	iconPMap+pixelSize(A3),D0	; and multiply by depth for size (silly mistake!!)
+			_PtrToHand							; go get a new handle
+			BNE		NoGetNew				; =>exit if no memory
+			MOVE.L	A0,iconData(A3)				; install data into pixPat
+
+			MOVE.L	A4,A0					; get the handle
+			_HUnlock						; and unlock it
+
+; resize the icon record to the proper size
+
+			MOVE.L	A2,D0					; get size of record
+			SUB.L	A3,D0					; (everything before color table)
+			MOVE.L	A4,A0					; get handle to record
+			JSR		RSetHSize				; and strip off the extra data
+
+			MOVE.L	 A4,RESULT(A6)			; update function result
+
+NoGetNew	MOVEM.L	(SP)+,D3-D4/A2-A4		; restore working registers
+			UNLINK	PARAMSIZE,'GETCICON'	; strip params and return
+
+			ENDPROC
+
+
+PlotCIcon	PROC	EXPORT
+			IMPORT	PortToMap,copyCIcon
+;-------------------------------------------------------------
+;
+;  PROCEDURE PlotCIcon(theRect: Rect; cIcon: cIconHandle);
+;
+PARAMSIZE	EQU		8
+theRect		EQU		PARAMSIZE+8-4					; rectangle
+cIcon		EQU		theRect-4
+
+saveFore	EQU		-6								; saved fgColor			<27May87 EHB>
+saveBack	EQU		saveFore-6						; saved bkColor			<27May87 EHB>
+DSTPIX		EQU		saveBack-(PMREC+CTREC+20)		;PIXMAP+COLOR TABLE		<27May87 EHB>
+globalRect	EQU		DSTPIX-8						;global version of theRect
+DstRectRgn	EQU		globalRect-10					;data for rect region
+DstRgnPtr	EQU		DstRectRgn-4					;pointer to above
+VARSIZE		EQU		DstRgnPtr
+
+			LINK	A6,#VARSIZE						; build stack frame
+			MOVEM.L	D3/A2-A4,-(SP)					; preserve work registers
+
+			PEA		saveFore(A6)					; save it here			<27May87 EHB>
+			_GetForeColor							; save fgColor			<27May87 EHB>
+			PEA		saveBack(A6)					; save it here			<27May87 EHB>
+			_GetBackColor							; save bkColor			<27May87 EHB>
+			MOVEQ	#BlackColor,D0					; get black				<27May87 EHB>
+			MOVE.L	D0,-(SP)						; push black			<27May87 EHB>
+			_ForeColor								; set fg to black		<27May87 EHB>
+			MOVEQ	#WhiteColor,D0					; get white				<27May87 EHB>
+			MOVE.L	D0,-(SP)						; push white			<27May87 EHB>
+			_BackColor								; set bk to white		<27May87 EHB>
+
+			MOVE.L	cIcon(A6),A4					; get the icon handle
+			MOVE.L	A4,A0							; get handle in A0
+			_HLock									; and lock it down
+
+			MOVE.L	(A4),A3							; keep pointer in A3
+			MOVE	iconPMap+bounds+bottom(A3),D3	; get bottom
+			SUB		iconPMap+bounds+top(A3),D3		; calc height, keep in D3
+
+; set the base addresses of the pixMap, the mask, and the bitMap
+
+			LEA		iconRec(A3),A0			 		; point to the mask data
+			MOVE.L	A0,iconMask+baseAddr(A3)		; and set the mask's base address
+			MOVE	iconMask+rowBytes(A3),D0		; get mask's rowbytes
+			MULU	D3,D0							; get size of mask
+			ADD.L	D0,A0							; point to BitMap data
+			MOVE.L	A0,iconBMap+baseAddr(A3)		; and set the b/w icon's base address
+
+			MOVE.L	iconData(A3),A0					; get the pixmap data handle
+			_HLock
+			MOVE.L	(A0),A0							; point at the data
+			MOVE.L	A0,iconPMap+baseAddr(A3)		; and set the color icon's base address
+
+			MOVE.L	grafGlobals(A5),A0				; get quickDraw globals
+			MOVE.L	thePort(A0),A0					; point to the grafport
+			LEA		PortBits(A0),A1					; point to port's bit/pixMap
+			LEA		dstPix(A6),A2					; point to local copy of pixMap
+			_BitsToPix								; get dstBits/dstPix in dstPix,d2=screen flag
+			move.w	dstPix+pixelSize(A6),d0			; preload dst depth in case not screen
+			sub.l	a0,a0							; clear maskrgn in case not screen
+			move.w	d2,d3							; remember screen flag in d3
+			beq.s	NotScreen1
+
+			MOVE.L	DEVICELIST,A2					; GET FIRST ELEMENT IN DEVICE LIST
+			MOVE.L	(A2),A1							; POINT TO DEVICE
+			TST.L	GDNEXTGD(A1)					; CHECK NEXT DEVICE
+			beq.s	NotScreen1						; only 1 device so skip devloop
+
+		; Copy dst rect and convert to global coordinates
+
+			move.l	theRect(a6),a0					; point at local rect
+			lea		globalRect(a6),a1				; point at our copy
+			move.l	(a0)+,(a1)+						; copy topleft
+			move.l	(a0),(a1)+						; copy botRight
+			move.l	dstPix+bounds+top(a6),d0		; get topleft
+			move.w	d0,d1							; get left
+			swap 	d0								; get top
+			sub.w	d1,-(a1)						; convert right to global
+			sub.w	d0,-(a1)						; convert bottom to global
+			sub.w	d1,-(a1)						; convert left to global
+			sub.w	d0,-(a1)						; convert top to global
+
+			lea		DstRectRgn(a6),A0
+			move.l	a0,DstRgnPtr(a6)				; build master pointer
+			move.w	#10,(a0)						; set region size
+
+NEXTGD		MOVE.L	(A2),A0							; POINT TO DEVICE
+			TST		GDFLAGS(A0)						; IS IT ACTIVE?
+			BPL.S	SKIPGD							; =>NO, SKIP IT
+
+			CLR.B	-(SP)							; MAKE ROOM FOR BOOLEAN RESULT
+			PEA		globalRect(A6)					; PUSH SPECIFIED RECTANGLE
+			PEA		gdRect(A0)						; PUSH DEVICE'S RECTANGLE
+			PEA		dstRectRgn+rgnBBox(A6)			; PUSH DESTINATION RECT
+			_SECTRECT								; IS THE RECT IN THE DEVICE
+			TST.B	(SP)+							; TEST RESULT
+			BEQ.S	SKIPGD							; => NO INTERSECTION
+
+			move.l	dstPix+bounds+top(a6),d0		; get topleft
+			move.w	d0,d1							; get left
+			swap 	d0								; get top
+			lea		dstRectRgn+rgnBBox(a6),a0 		; point to rect
+			add.w	d0,(a0)+						; convert top to local coords
+			add.w	d1,(a0)+						; convert left to local coords
+			add.w	d0,(a0)+						; convert bottom to local coords
+			add.w	d1,(a0)							; convert right to local coords
+			MOVE.L	(A2),A0							; POINT TO DEVICE
+			MOVE.L	GDPMAP(A0),A0					; GET PIXMAP
+			MOVE.L	(A0),A0							; POINT TO PIXMAP
+			MOVE	PIXELSIZE(A0),D0				; GET PIXEL DEPTH
+			lea		DstRgnPtr(a6),a0				; clip to intersection with this device
+
+NotScreen1	LEA		iconBMap(A3),A1					; assume we're using one-bit icon
+			TST		rowBytes(A1)					; is there a one bit icon?
+			BEQ.S	noOneBit						; => no, use color one
+			CMP		#2,d0							; two bits per pixel or less?
+			BLE.S	OneBit							; => yes, use one-bit icon
+noOneBit	MOVE.L	A3,A1							; else get icon's pixMap
+
+OneBit		MOVE.L	A1,-(SP)						; push srcBits
+			PEA		iconMask(A3)					; push maskBits
+			PEA		dstPix(A6)						; push dstBits
+			PEA		bounds(A1)						; push srcRect
+			PEA		iconMask+bounds(A3)				; push maskRect
+			MOVE.L	theRect(A6),-(SP)				; push dstRect
+			bsr		CopyCIcon						; call copyMask clipped to rgn in A0
+			tst.w	d3								; check screen flag in d3
+			beq.s	NotScreen2						; break out of devloop if not screen
+
+SKIPGD		MOVE.L	(A2),A0							; GET DEVICE
+			MOVE.L	GDNEXTGD(A0),D0					; GET NEXT DEVICE
+			MOVE.L	D0,A2							; SAVE IT
+			BNE.S	NEXTGD
+
+NotScreen2	MOVE.L	iconData(A3),A0					; get handle to color icon data
+			_HUnlock								; and unlock it
+			MOVE.L	A4,A0							; get handle in A0
+			_HUnLock								; and unlock it
+
+			PEA		saveFore(A6)					; point to saved fg			<27May87 EHB>
+			_RGBForeColor							; and restore it			<27May87 EHB>
+			PEA		saveBack(A6)					; point to saved bk			<27May87 EHB>
+			_RGBBackColor							; and restore it			<27May87 EHB>
+
+			MOVEM.L	(SP)+,D3/A2-A4					; restore working registers
+			UNLINK	PARAMSIZE,'PLOTCICO'			; strip params and return
+
+
+
+DisposCIcon	PROC	EXPORT
+;-------------------------------------------------------------
+;
+; FUNCTION DisposCIcon(cIcon: cIconHandle);
+;
+; DisposCIcon disposes of a color icon
+;
+			MOVE.L	(SP)+,A1					; get return address
+			MOVE.L	(SP),A0						; get icon handle
+			MOVE.L	(A0),A0						; point to icon
+			MOVE.L	IconPMap+pmTable(A0),-(SP)	; save color table handle
+			MOVE.L	IconData(A0),A0				; get data handle
+			_DisposHandle						; dispose data handle
+			MOVE.L	(SP)+,A0					; get color table handle
+			_DisposHandle						; dispose color table handle
+			MOVE.L	(SP)+,A0					; get icon
+			_DisposHandle						; dispose icon
+			JMP		(A1)						; and return
+
+
+
+		ENDPROC 
+
+

@@ -1,0 +1,1011 @@
+;
+;	File:		Elems68K2.a
+;
+;	Contains:	xxx put contents here (or delete the whole line) xxx
+;
+;	Written by:	xxx put name of writer here (or delete the whole line) xxx
+;
+;	Copyright:	© 1983-1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:   Mac32
+;
+;	Change History (most recent first):
+;
+;		 <3>	 9/15/90	BG		Removed <2>. 040s are behaving more reliably now.
+;		 <2>	  7/4/90	BG		Added temporary EclipseNOPs to deal with flakey 040s.
+;	   <1.1>	11/11/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	   <1.1>	 5/16/88	BBM		FBcc -> FBccL (new macros that don’t conflict w/ 881) <1.1>
+;	   <1.0>	 2/12/88	BBM		Adding file for the first time into EASE…
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: Elems68K2.a
+;; Implementation of Elems68K for machines using the Motorola MC68881
+;; Copyright Apple Computer, Inc. 1983,1984,1985,1986,1987
+;; All Rights Reserved
+;; Confidential and Proprietary to Apple Computer,Inc.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ ;
+ ; EXP(x) and EXP2(x) share the same exception code.  To compute
+ ; numerical results, express result as  2^K * ((2^frac - 1) + 1),
+ ; and use EXPAPPROX to figure (2^frac - 1).
+ ;
+EXPTOP
+
+			BLANKS		ON
+			STRING		ASIS
+
+			SUBQ.B	#1,D1				; HAVE SUB #CLINF ALREADY
+			BEQ 	P1STUFF 			; EXP(+-0) IS +1
+			BGT.S	EXPNONZERO
+
+			TST.W	D1
+			BMI 	P0STUFF 			; EXP(-INF) IS +0
+			BRA 	RESULTDELIVERED 	; ALREADY HAVE +INF
+EXPNONZERO
+			BTST	#BTLOGBASE2,D3		; NONZERO IF EXP2X
+			BEQ.S	EXPR
+
+
+ ;
+ ; 2^T is easy, for general T.
+ ; Set cell W to integer part of T.
+ ; Set T to fraction part of itself.
+ ; Use root computation to evaluate 2^T - 1 with LOGAPPROX;
+ ; add 1 to T, and scale by W.
+ ;
+EXP2R
+			BSR.S	SPLIT2
+			BRA.S	EXPROOT
+
+ ;
+ ; EXP(T) is just slightly more complicated than EXP2(T) above.
+ ; Let T  =  K * LN(2) + F
+ ; Then EXP(T) is 2^K + ((2^(F/LN(2)) - 1) + 1).
+ ; So use EXP2ROOT with W set to K and T set to F/LN(2).
+ ; Find F with REM modulo LN(2); then subtract from T and divide by LN(2)
+ ; to get K.
+ ;
+EXPR
+			BSR 	SPLIT
+			BSR 	TESTOFLOW
+			BEQ.S	EXPROOT
+
+			BSR 	FORCEINEXACT		; EITHER O/UFLOW
+			TST.W	D1					; OPERAND SIGN
+			BPL.S	PINFSTUFF			; OFLOW TO +INF
+
+			BSR 	CLEAROFLOW
+			BSR 	FORCEUFLOW
+			BRA 	P0STUFF
+
+ ;
+ ; This is the root of V^X where V is 2 or E.
+ ; Compute	 ((2^T - 1) + 1) * 2*W.  EXPAPPROX gives the innermost
+ ; expression.	W is presumed to be an integer, possibly huge.
+ ;
+EXPROOT
+			BSR 	EXPAPPROX			; 2^T - 1
+
+			PEA 	FPK1				; (2^T - 1) + 1
+			PEA 	(A4)
+			FADDX
+
+			MOVEA.L A4,A0				; RESULT PTR
+			LEA 	STW(A6),A1			; INTEGER PART
+			BSR 	SCALBXX
+			BRA 	RESULTDELIVERED
+;ne 100
+ ;
+ ; Given general number in T, split into integer part in W
+ ; and fraction in T, rounding.
+ ;
+SPLIT2
+			MOVEA.L A4,A0
+			LEA 	STW(A6),A1
+			BSR 	A0TOA1				; COPY T
+
+			PEA 	(A1)				; CELL W
+			FRINTX						; INTEGER PART OF T, ROUNDED
+
+			BSR 	CLEARINEXACT		; DON'T RECORD ROUNDING ERROR
+
+			PEA 	(A1)				; INTEGER PART
+			PEA 	(A4)				; ALL OF NUMBER
+			FSUBX
+			RTS
+
+
+ ;
+ ; Split T for EXP(x) and EXP(x)-1.
+ ; Let T  =  K * LN(2) + F.  Want W=K and T=F/LN(2).
+ ; Find F with REM modulo LN(2); then subtract from T and divide by LN(2)
+ ; to get K.
+ ;
+SPLIT
+			MOVEA.L A4,A0				; T POINTER
+			LEA 	STW(A6),A1			; COPY T INTO CELL W
+			BSR 	A0TOA1
+
+			PEA 	FPKLOGE2			; NEED 3 COPIES OF LN(2)
+			MOVE.L	(SP),-(SP)
+			MOVE.L	(SP),-(SP)
+			PEA 	(A4)
+			FREMX						; T REM LN(2) IN T
+
+			PEA 	(A4)
+			PEA 	(A1)
+			FSUBX						; T - (T REM LN(2)) IN W
+
+			PEA 	(A1)
+			FDIVX						; T - (T REM...)  /  LN(2)
+			PEA 	(A1)
+			FRINTX						; MAKE SURE IT'S AN INT
+
+			PEA 	(A4)
+			FDIVX						; (T REM LN(2)) / LN(2)
+
+			BRA 	CLEARINEXACT		; ...AND EXIT
+;ne 100
+ ;
+ ; EXP(x)-1 and EXP2(x)-1 share the same exception code.  Then both exploit
+ ; EXPAPPROX for the root computation  2^frac - 1.
+ ;
+EXP1TOP
+			SUBQ.B	#1,D1				; SUBTRACTED #CLINF BEFORE
+			BGT.S	EXP1FINITE			; FINITE, NONZERO
+			BEQ 	EXPEASY 			; Y^+-0 - 1 IS +-0
+
+			TST.W	D1					; TEST SIGN OF INF
+			BMI 	M1STUFF 			; Y^-INF - 1 IS -1
+EXPEASY
+			BRA 	RESULTDELIVERED 	; Y^+INF - 1 IS +INF
+EXP1FINITE
+ ;
+ ; If the number is denormalized, have easy case whether EXP1 or EXP21.
+ ; Have subtracted #CLZERO so far.	Subtracting 1 more from D1.B leaves
+ ; 0 if normalized, 1 if denormalized.
+ ;
+			SUBQ.B	#1,D1				; 0-NORM  1-DENORM
+			BTST	#BTLOGBASE2,D3		; NONZERO IF EXP2X
+			BEQ.S	EXP1R
+
+
+ ;
+ ; As above, for 2^T-1 split T into fraction part in T and integer
+ ; in W, and go to root computation.
+ ;
+EXP21R
+			TST.B	D1
+			BEQ.S	EXP21RNORM
+
+			PEA 	FPKLOGE2			; 2^T-1 IS T*LN(2) FOR TINY T
+			PEA 	(A4)
+			FMULX
+EXP1OUT
+			BSR 	FORCEUFLOW
+			BSR 	FORCEINEXACT
+			BRA.S	EXP1RDONE
+EXP21RNORM
+			BSR 	SPLIT2				; ???? WAS BSR.S
+			BRA.S	EXP1ROOT
+
+ ;
+ ; For E^T-1, split T into K and F/LN(2), where  T = K*LN(2) + F.
+ ; If overflow, then force INF or -1...
+ ;
+EXP1R
+			TST.B	D1
+			BNE.S	EXP1OUT 			; E^T-1 IS T, WITH UFLOW FOR NOW
+
+			BSR.S	SPLIT
+			BSR 	TESTOFLOW
+			BEQ.S	EXP1ROOT
+
+			BSR 	FORCEINEXACT		; EITHER O/UFLOW
+			TST.W	D1					; OPERAND SIGN
+			BPL 	PINFSTUFF			; OFLOW TO +INF
+
+			BSR 	CLEAROFLOW			; LEAVE INEXACT SET
+			BRA 	M1STUFF 			; FORCE -1
+
+ ;
+ ; This is the root of V^X-1 where V is 2 or E.
+ ; Compute	 (2^T - 1)	for fraction T.  Then if (integer) W is
+ ; nonzero, finish off with  (((2^T - 1) + 1) * 2^W) - 1.
+ ;
+EXP1ROOT
+			BSR 	EXPAPPROX			; 2^T - 1
+
+			PEA 	FPK0
+			PEA 	STW(A6)
+			FCMPX
+			FBEQS	EXP1RDONE
+
+			PEA 	FPK1				; (2^T - 1) + 1
+			PEA 	(A4)
+			FADDX
+
+			MOVEA.L A4,A0				; RESULT PTR
+			LEA 	STW(A6),A1			; INTEGER PART
+			BSR 	SCALBXX 			; ((2^T - 1) + 1) * 2^W
+
+			PEA 	FPK1				; FINALLY, SUBTRACT 1
+			PEA 	(A4)
+			FSUBX
+
+ ;
+ ; Reset underflow, which cannot occur if W (as in 2^W) is nonzero.
+ ;
+			BSR 	CLEARUFLOW
+
+EXP1RDONE
+			BRA 	RESULTDELIVERED
+ ; ne 100
+ ;
+ ; Compute approximate	(2^T - 1) for T in (A4).
+ ; Uses cells X and Y, regs D0-D2/A0-A2.
+ ; Expression has the form
+ ;	( 2 * T * P(T*T) ) / ( Q(T*T) - (T * P(T*T)) )
+ ; One special case: if T is 0, just return 0, and don't set
+ ; the inexact flag.
+ ;
+EXPAPPROX
+			PEA 	FPK0				; COMPARE INPUT WITH 0
+			PEA 	(A4)
+			FCMPX
+			FBNES	EXPHARD
+			RTS 						; EASY IF 0
+EXPHARD
+			LEA 	STY(A6),A1			; CELL Y
+			MOVEA.L A4,A0
+			BSR 	A0TOA1				; COPY INPUT T
+
+			PEA 	(A1)
+			PEA 	(A1)
+			FMULX						; T^2 INTO CELL Y
+
+			LEA 	STX(A6),A0			; PLACE P(Y) INTO X
+			LEA 	EXP21P,A1			; EXPONENT P COEFS
+			LEA 	STY(A6),A2			; VAR IS T^2 IN Y
+			BSR 	POLYEVAL
+
+			PEA 	STX(A6)
+			PEA 	(A4)
+			FMULX						; T * P(T^2) IN RESULT
+
+			LEA 	STX(A6),A0			; PLACE Q(Y) INTO X
+			LEA 	EXP21Q,A1
+			LEA 	STY(A6),A2
+			BSR 	POLYEVAL
+
+			PEA 	(A4)
+			PEA 	STX(A6)
+			FSUBX						; Q(Y) - T*P(Y)
+
+			PEA 	FPK2				; 2.0
+			PEA 	(A4)				; Y*P(Y)
+			FMULX
+
+			PEA 	STX(A6)
+			PEA 	(A4)
+			FDIVX
+
+ ;
+ ; Finally, set inexact and clear any underflow messages.
+ ;
+			BSR 	FORCEINEXACT
+			BRA 	CLEARUFLOW			; AND EXIT...
+
+ ;
+ ;
+;ne 100
+ ;
+ ; Raise extended dst to integer src power.
+ ;
+XPWRITOP
+			MOVEA.L D4,A0				; SRC PTR
+			MOVE.W	(A0),D2 			; I OVERWRITES BOGUS CLASS
+			BEQ 	P1STUFF 			; ANY^0 IS 1
+
+			SUBQ.B	#1,D1				; #CLINF ALREADY SUBTRACTED
+			BGT.S	FINPWRI 			; GT MEANS NONZERO^I
+
+ ;
+ ; Get here if INF^I or 0^I.  If I is negative, must reciprocate
+ ; (signaling div by 0 in case of 0^-N).  If I is even, must clear
+ ; sign.
+ ;
+			ASR.W	#1,D2				; GET ODD BIT OF I INTO C,X
+			BCS.S	@1					; CARRY SET IF ODD
+			BCLR	#7,(A4) 			; ABS OF DST (LEAVES X BIT ALONE)
+@1
+			ADDX.W	D2,D2				; REGAIN ORIGINAL VALUE I
+			BPL 	RESULTDELIVERED 	; (INF OR ZERO)^POS ???? WAS BPL.S
+
+			TST.B	D1					; INF OR ZERO?
+			BPL.S	ZPWRNEG
+
+			TST.B	(A4)
+			BPL 	P0STUFF 			; +INF^NEG IS +0
+			BRA 	M0STUFF 			; -INF^NEG IS -0
+ZPWRNEG
+			TST.B	(A4)
+			BPL 	DIVP0STUFF			; +0^NEG IS +INF
+			BRA 	DIVM0STUFF			; -0^NEG IS -INF
+
+
+ ;
+ ; NONZERO^I is broken into two cases:
+ ;	 If I is small, then just multiply out.  Note that sign perseveres if
+ ;	 I is odd.
+ ;	 Otherwise, convert I to extended and evaluate with exponentials.
+ ;
+FINPWRI
+			MOVE.W	D2,D0				; ABS(D2) --> D0
+			BPL.S	@1
+			NEG.W	D0
+@1
+			CMPI.W	#SMALLEXP,D0
+			BHI.S	XPWRBIG 			; USE LOG AND EXP
+
+			BSR.S	XPWRK				; MULTIPLY OUT
+			BRA 	RESULTDELIVERED
+
+ ;
+ ; Integer power is too large to multiply out, so convert to extended
+ ; and use general x^y routine.  Make copy of integer in cell W.
+ ;
+XPWRBIG
+			MOVE.W	(A4),-(SP)			; SAVE SIGN OF INPUT
+			BCLR	#7,(A4) 			; ABS(DST) IN T
+
+			MOVE.L	D4,-(SP)			; ADRS OF INT
+			PEA 	STW(A6) 			; ADRS OF CELL W
+			MOVE.L	(SP),D4 			; PRETEND IT'S SRC
+			FI2X						; CONVERT INT TO EXT IN W
+
+			BSR 	XPWRY				; COMPUTE (A4)^(D4)
+ ;
+ ; Note that XPWRY must preserve the integer value in D2.
+ ;
+			MOVE.W	(SP)+,D0			; RETRIEVE SIGN OF INPUT
+			BPL.S	@3					; IF POSITIVE, DON'T CARE
+
+			ASR.W	#1,D2				; LOW BIT TO CARRY
+			BCC.S	@3
+
+			BSET	#7,(A4) 			; NEGATE OUTPUT
+@3
+			BRA 	RESULTDELIVERED
+;ne 100
+ ;
+ ; Raise T to the power D2, leaving the result in (A4).  D0 = abs(D2).
+ ; If D2 is negative, evaluate the positive power and reciprocate at
+ ; the end.  Know D2 is nonzero.  Sign of (A4) is propagated correctly.
+ ; Trash A0, A1, D0, and cells I, W and X.
+ ;
+XPWRK
+			MOVEA.L A4,A0				; COPY T
+			LEA 	STX(A6),A1			; INTO CELL W
+			BSR 	A0TOA1
+
+			BSR.S	XPWRKLOOP
+
+ ;
+ ; Now that loop is finished, produce 1 * T^|I| or 1 / T^|I|, depending
+ ; on sign of I.  If overflow or underflow has occurred and I is negative,
+ ; redo computation with pre-reciprocated T.
+ ;
+			TST.W	D2					; IS I NEGATIVE?
+			BMI.S	XPWRKDIV
+XPWRKSTORE
+			MOVEA.L A1,A0				; T^|I|
+			MOVEA.L A4,A1				; RESULT ADRS
+			BRA 	A0TOA1				; T <-- T^|I|, AND EXIT
+
+XPWRKDIV
+			LEA 	FPK1,A0
+			LEA 	(A4),A1 			; LOSE ADRS OF CELL X FROM LOOP
+			BSR 	A0TOA1				; T <-- 1
+
+			BSR 	TESTUFLOW
+			BNE.S	XPWRKCLEAR
+			BSR 	TESTOFLOW
+			BNE.S	XPWRKCLEAR
+
+			PEA 	STW(A6) 			; W = T^|I| FROM XPWRKLOOP
+			PEA 	(A4)				; RES=1
+			FDIVX
+			RTS
+XPWRKCLEAR
+			BSR 	CLEAROFLOW
+			BSR 	CLEARUFLOW
+			PEA 	STX(A6) 			; SAVED INPUT T ATOP T^|I|
+			PEA 	(A4)
+			FDIVX
+
+			MOVE.W	D2,D0				; GET K AGAIN
+			BPL.S	@11
+			NEG.W	D0
+@11
+			BSR.S	XPWRKLOOP
+			BRA.S	XPWRKSTORE
+
+
+ ;
+ ; Input:  D0 = positive integer K
+ ;	   A4 = X
+ ; Output: A1 = W = X^K
+ ; Uses: cell W, A0
+ ; Trashes: D0
+XPWRKLOOP
+			LEA 	FPK1,A0
+			LEA 	STW(A6),A1
+			BSR 	A0TOA1				; SEED RESULT WITH 1.0
+			BRA.S	XKLPENTRY
+XKLPTOP
+			PEA 	(A4)
+			PEA 	(A4)
+			FMULX						; T^(2^(I+1))
+XKLPENTRY
+			LSR.W	#1,D0				; GET LOW BIT INTO C
+			BCC.S	XKLPSKIP
+
+			PEA 	(A4)				; T^(2^I)
+			PEA 	(A1)				; RESULT SO FAR
+			FMULX
+XKLPSKIP
+			TST.W	D0					; ANY MORE BITS?
+			BNE.S	XKLPTOP
+			RTS
+
+;ne 100
+ ;
+ ; Simple routine to compute (A4)^(D4) into (A4).
+ ; Know that (A4) is positive.	Know that the FMULX will never
+ ; encounter 0 * INF, so extreme cases, like INF^3, will be handled
+ ; correctly.  Fixed to use temp X while computing, in case sources and
+ ; dest are the same.
+ ;
+XPWRY
+			MOVEA.L A4,A0				; COPY DST ARG
+			LEA 	STX(A6),A1
+			BSR 	A0TOA1				; CELL X <-- INPUT X
+
+			PEA 	(A1)				; X = INPUT
+			MOVE.W	#FOLOG2X,-(SP)
+			IF		 FPFORMAC+FPFORDEBUG THEN
+			BSR 	ELEMS68K			; LOG2((A1))
+			ENDIF
+			IF		 FPFORLISA THEN
+			BSR 	elems68k
+			ENDIF
+
+			MOVE.L	D4,-(SP)
+			PEA 	(A1)
+			FMULX						; (D4) * LOG2((A1))
+
+			PEA 	(A1)
+			MOVE.W	#FOEXP2X,-(SP)
+			IF		 FPFORMAC+FPFORDEBUG THEN
+			BSR 	ELEMS68K			; (A1) ^ (D4)
+			ENDIF
+			IF		 FPFORLISA THEN
+			BSR 	elems68k
+			ENDIF
+
+			MOVEA.L A1,A0
+			MOVEA.L A4,A1
+			BRA 	A0TOA1
+;ne 100
+ ;
+ ; General function x^y is beset by exceptional cases.
+ ;
+XPWRYTOP
+			TST.W	D1					; IS X=DST NEG?
+			BMI.S	NEGPWRY
+
+			BSR 	XPWRYCOM
+			BRA 	RESULTDELIVERED
+
+ ;
+ ; Signal X^Y error and stuff a NAN.  Special entry accommodates branches from
+ ; within subroutines, in which case a return address must be popped.
+ ;
+XPWRY9ERR
+			ADDQ.L	#4,SP				; KILL RETURN ADDRESS
+XPWRYERR
+			BSR 	CLEARINEXACT		; SIGNAL INVALID ONLY
+			MOVEQ	#NANPOWER,D0
+			BRA 	ERRORNAN
+
+ ;
+ ; If X is negative, check that Y is integral; otherwise error.
+ ; Save parity of Y to fix sign at end of XPWRYCOM.
+ ;
+NEGPWRY
+			TST.B	D2					; Y CLASS - INF
+			BEQ.S	XPWRYERR
+
+			MOVEA.L D4,A0				; Y=SRC
+			LEA 	STW(A6),A1			; CELL W TEMP
+			BSR 	A0TOA1
+
+			PEA 	(A1)				; Y=SRC
+			FRINTX						; ROUND TO INTEGER
+			BSR 	TESTINEXACT
+			BNE 	XPWRYERR
+
+ ;
+ ; NEG ^ INT  requires that parity of Y be saved in cell J for later
+ ; setting of sign.  To find low bit of floating integer, divide by
+ ; 2 and test inexact.
+ ;
+			PEA 	FPK2				; 2.0
+			PEA 	(A1)				; CELL W
+			FDIVX						; W/2
+
+			PEA 	(A1)
+			FRINTX						; STRIP OFF ODD BIT OF W
+
+			PEA 	STJ(A6)
+			FGETENV 					; SAVE FLAGS
+
+			BSR 	CLEARINEXACT
+
+			BCLR	#7,(A4) 			; ABS((A4))
+
+			BSR 	XPWRYCOM			; ABS((A4))^(D4)
+
+ ;
+ ; Fix sign of power, according to parity of Y.  The parity is stored in
+ ; the inexact flag, saved in cell J.  It's in the high byte so just to
+ ; a bit test.
+ ;
+			BTST	#FBINEXACT,STJ(A6)
+			BEQ.S	@1
+			BCHG	#7,(A4) 			; NEGATE IF ODD (INEXACT)
+@1
+			BRA 	RESULTDELIVERED
+;ne 100
+ ;
+ ; Common routine to raise (A4) to (D4) power.
+ ; Know (A4) >= 0 and (D4) is not a NAN.
+ ; Have class codes, less CLINF, in D1 and D2, respectively.
+ ; Can run through	2 ^ Y*LOG2(X)  code so long as won't multiply
+ ; INF and 0 to compute exponent.  As a minor detail, if Y is 0 or INF,
+ ; clear any inexact that may have been set by LOG2(X).
+ ;
+ ; Since this is called as a subroutine, exits to XPWRYERR must have a special
+ ; pop for the return address.
+ ;
+XPWRYCOM
+			SUBQ.B	#1,D1				; CLINF ALREADY SUBTRACTED
+			BNE.S	NONPWRY
+
+ ;
+ ; 0 ^ some
+ ;
+			SUBQ.B	#1,D2				; CLINF ALREADY SUBTRACTED
+			BEQ 	XPWRY9ERR			; 0^0, 0^INF ERRORS, WITH RTS POP
+			TST.W	D2					; SIGN OF Y
+			BPL.S	@1
+
+ ;
+ ; 0 ^ nonzero
+ ;
+			BSR 	FORCEDIVZER 		; SIGNAL DIV BY ZERO
+			LEA 	FPKINF,A0
+			BRA.S	@2
+@1
+			LEA 	FPK0,A0
+@2
+			MOVEA.L A4,A1				; RESULT PTR
+			BRA 	A0TOA1				; STUFF RESULT AND EXIT
+
+ ;
+ ; nonzero ^ some
+ ;
+NONPWRY
+			BPL.S	FINPWRY 			; EXIT IF X FINITE
+
+
+ ;
+ ; inf ^ some
+ ;
+			SUBQ.B	#1,D2				; CLINF ALREADY SUBTRACTED
+			BNE.S	XPWRYOK
+			BRA 	XPWRY9ERR			; INF^O IS AN ERROR
+
+ ;
+ ; finite ^ some
+ ;
+FINPWRY
+			SUBQ.B	#1,D2
+			BPL.S	XPWRYOK 			; FIN ^ FIN IS OK
+
+ ;
+ ; finite ^ inf has the special case 1^INF which is an error.
+ ;
+			PEA 	FPK1
+			PEA 	(A4)
+			FCMPX
+			FBEQL	XPWRY9ERR			; 								<1.1>
+
+ ;
+ ; Finally, compute finite^reasonable and return.
+ ; Two cases: if exponent is a small integer, then just multiply;
+ ; else use log and exp.  To check for an integer, try converting to
+ ; 16 bits.  Overflow is Invalid, rounding error is Inexact.
+ ; Must reset Invalid, but if Inexact the result will be anyway.
+ ; Save D2=YClass in D6 across possible call to XPWRK.
+ ;
+XPWRYOK
+			MOVE.W	D2,D6				; COPY OF Y'S CLASS LESS CLNORM
+			MOVE.L	D4,-(SP)			; EXPONENT ADDRESS
+			PEA 	STI(A6) 			; INTEGER CELL I
+			FX2I						; CONVERT TO INTEGER
+
+			BSR 	TESTINVALID 		; X2I OFLOW IS INVALID
+			SNE 	D7
+			BSR 	CLEARINVALID		; CLEAR UNDESERVED ERROR
+			BSR 	TESTINEXACT 		; MAY HAVE JUST ROUNDED OFF
+			SNE 	D1
+			OR.B	D1,D7				; EITHER ERROR?
+			BNE.S	XPWRYHARD
+
+			MOVE.W	STI(A6),D2			; GET INTEGER TO REG.
+			MOVE.W	D2,D0
+			BPL.S	@1
+			NEG.W	D0
+@1
+			CMPI.W	#SMALLEXP,D0
+			BLE 	XPWRK				; DO IT AS INTEGER AND EXIT
+XPWRYHARD
+			BSR 	CLEARINEXACT
+
+			BSR 	XPWRY
+
+			TST.B	D6					; CHECK FOR Y 0 OR INF
+			BMI 	CLEARINEXACT		; AND RETURN FROM THERE
+			RTS
+;ne 100
+ ;
+ ; Compute	dst  <--  (1 + src2)^src	 r = src2	n = src
+ ; Watch for special cases:
+ ;	 src2 < -1	is invalid
+ ;	 else  src = 0	yields 1
+ ;	 else  src2 = 0 and src = INF is invalid
+ ;	 else  src = INF yields 0 or INF according to src2
+ ;	 else  src2 = -1 yields 0, 1, or INF according to src
+ ;	 else  actually compute (1 + r)^n !!
+ ;
+COMPOUNDTOP
+			PEA 	FPKM1				; -1
+			MOVE.L	D5,-(SP)			; SRC2
+			FCMPX
+			FBULTL	ERRFINAN			; UNORDERED OR LESS THAN -1			<1.1>
+			FBGTL	CMPGTM1				;									<1.1>
+
+ ;
+ ; Get here if SRC2 is -1.	Check SRC (D2) for 0 or nonzero.
+ ;
+			SUBQ.B	#1,D2				; CLINF ALREADY SUBTRACTED
+			BNE.S	CMPM1N
+CMPTOZERO
+			BRA 	P1STUFF 			; (1 + SOME)^0 IS +1
+CMPM1N
+			MOVEA.L D4,A0				; CHECK SIGN OF SRC
+			TST.B	(A0)
+			BMI 	DIVP0STUFF			; (1 - 1)^NEG IS +INF
+CMPZERO
+			BRA 	P0STUFF 			; (1 - 1)^POS IS +0
+
+ ;
+ ; Get here if SRC2 (r) is > -1.
+ ;
+CMPGTM1
+			SUBQ.B	#1,D2				; CLINF ALREADY SUBTRACTED
+			BEQ.S	CMPTOZERO			; (1 + SOME)^0 IS +1
+			BGT.S	CMPTOFIN			; GO DO (1 + SOME)^FINITE
+
+ ;
+ ; Get here if (1 + SOME)^INF.	Check for 1^INF, an error, else have
+ ; INF or 0 according to SRC and SRC2.
+ ;
+			SUBQ.B	#1,D1				; CLINF ALREADY SUBTRACTED
+			BEQ.S	ERRFINAN
+
+			EOR.W	D2,D1				; GET XOR OF SRC, SRC2 SIGNS
+			BMI.S	CMPZERO 			; SIGNS DIFFER --> ZERO
+			BRA 	PINFSTUFF			; SIGNS SAME --> +INF
+
+ ;
+ ; Finally, compute (1 + reasonable)^finite with the usual...
+ ;
+CMPTOFIN
+			LEA 	STX(A6),A1			; CELL X
+			MOVEA.L D5,A0				; R = SRC2
+			BSR 	A0TOA1				; COPY R TO X
+
+			MOVE	(a1),d0 			; D0 gets sign/exponent of R.
+			BCLR	#15,d0				; Clear sign.
+			CMP 	#$3f7f,d0			; Exponent -64.
+			BLT.S	cmpbasee			; Natural log/exp for tiny
+ ; exponents.
+
+ ; COMPOUND BASE	2.
+
+			PEA 	(A1)
+			MOVE.W	#FOLOG21X,-(SP)
+			IF		 FPFORMAC+FPFORDEBUG THEN
+			BSR 	ELEMS68K			; LOG2(1 + (A1))
+			ENDIF
+			IF		 FPFORLISA THEN
+			BSR 	elems68k
+			ENDIF
+
+			MOVE.L	D4,-(SP)			; N = SRC ADDRESS
+			PEA 	(A1)				; LOG2(1+R)
+			FMULX						; N * LOG2(1+R)
+
+			PEA 	(A1)
+			MOVE.W	#FOEXP2X,-(SP)
+			BRA.S	cmpresult
+
+cmpbasee								; COMPOUND BASE E.
+			MOVE.L	D4,-(SP)			; N = SRC ADDRESS
+			PEA 	(A1)				; LOG2(1+R)
+			FMULX						; N * LOG2(1+R)
+
+			PEA 	(A1)
+			MOVE.W	#FOEXPX,-(SP)
+
+cmpresult
+			BSR 	clearuflow			; Irrelevant!
+			IF		 FPFORMAC+FPFORDEBUG THEN
+			BSR 	ELEMS68K			; EXP2 OR EXPE((A1))
+			ENDIF
+			IF		 FPFORLISA THEN
+			BSR 	elems68k
+			ENDIF
+			MOVEA.L A1,A0				; CELL X
+			MOVEA.L A4,A1
+			BSR 	A0TOA1
+
+			BRA 	RESULTDELIVERED
+
+
+ ;
+ ; Routine to stuff the financial NAN and go.
+ ;
+ERRFINAN
+			MOVEQ	#NANFINAN,D0
+			BRA 	ERRORNAN
+;ne 100
+ ;
+ ; Compute annuity factor:
+ ;	( 1  -	(1 + r)^-n ) / r
+ ; for	 r = SRC2	and   n = SRC.
+ ; Multitudinous special cases handled piece by piece.
+ ;
+ANNUITYTOP
+			PEA 	FPKM1				; -1
+			MOVE.L	D5,-(SP)			; R = SRC2
+			FCMPX						; R VS. -1
+			FBULTL	ERRFINAN			; R < -1 IS AN ERROR		<1.1>
+			FBNES	ANNOK
+
+ ;
+ ; Get here if have (1 - 1)^ANY.  Just check n = SRC.
+ ;
+			SUBQ.B	#1,D2				; CLINF ALREADY SUBTRACTED
+			BEQ.S	ANN0				; ANN(-1, 0) IS +0
+			TST.W	D2					; CHECK SIGN OF NONZERO N
+			BPL 	DIVP0STUFF
+ANNM1
+			BRA 	M1STUFF
+
+ ;
+ ; Know that R=SRC2 exceeds -1.  Check first for N=SRC=0.
+ ;
+ANNOK
+			SUBQ.B	#1,D2				; CLINF ALREADY SUBTRACTED
+			BNE.S	ANNXN
+ANN0
+			BRA 	P0STUFF
+
+ ;
+ ; Now check for unusual, 0 or INF, R=SRC2.
+ ;
+ANNXN
+			SUBQ.B	#1,D1				; CLINF ALREADY SUBTRACTED
+			BGT.S	ANNROK
+			BLT.S	ANNRINF
+
+ ;
+ ; R=SRC2=0.  Limit gives result of N=SRC.
+ ;
+ANNSRC
+			MOVEA.L A4,A1				; DST PTR
+			MOVEA.L D4,A0				; SRC=N PTR
+			BSR 	A0TOA1
+			BRA 	RESULTDELIVERED
+
+ ;
+ ; R=SRC2=+INF.  If N=SRC is nonnegative have 0, else test N=SRC versus -1.
+ ;
+ANNRINF
+			TST.W	D2					; IT'S NONZERO, JUST TEST SIGN
+			BPL.S	ANN0				; FORCE +0
+
+			PEA 	FPKM1				; -1
+			MOVE.L	D4,-(SP)			; SRC
+			FCMPX
+			FBEQL	ANNM1				; N = -1, STUFF -1					<1.1>
+			FBGTL	M0STUFF				;									<1.1>
+			BRA 	MINFSTUFF
+
+ ;
+ ; Way down here, we have R=SRC2 a normal or denormal number.
+ ; Last check is for N=SRC=INF.
+ ;
+ANNROK
+			TST.B	D2					; (CLINF + 1) ALREADY SUB
+			BPL.S	ANNDOIT
+
+			EOR.W	D2,D1				; DO R AND N SIGNS MATCH
+			BMI 	ANNSRC
+
+			MOVEA.L D5,A0				; ADDRESS OF 4=SRC2, DIVISOR
+			LEA 	STX(A6),A1
+			BSR 	A0TOA1
+			PEA 	(A1)				; FOR DIVIDE BELOW
+
+			MOVEA.L A4,A1
+			LEA 	FPK1,A0
+			BSR 	A0TOA1				; DST <-- +1
+			PEA 	(A1)				; ADDRESS OF DST
+			FDIVX						; RESULT IS 1/R
+			BRA 	RESULTDELIVERED
+
+ ;
+ ; Finally, compute  ( 1  -  (1 + r)^-n ) / r.
+ ; Distinguish two cases:
+ ;	r normal:
+ ;		log2(1 + r)
+ ;		n * log2(1 + r)
+ ;		-n * log2(1 + r)
+ ;		2^(...) - 1
+ ;		1 - 2^(...)
+ ;		(1 - 2^(...)) / r
+ ;
+ ;	r denormal:
+ ;		log(1 + r) is about r
+ ;		n * r
+ ;		-n * r
+ ;		e^(...) - 1
+ ;		1 - e^(...)
+ ;		(1 - e^(...)) / r
+ ; Use D1.B, from which CLZERO has already been subtracted.
+ ; Subtracting one more (CLNORMAL) leaves D1.B 0 for normal, 1 for denormal.
+ ;
+ANNDOIT
+			LEA 	STX(A6),A1			; CELL X FOR TEMP
+			MOVEA.L D5,A0				; SRC2 PTR
+			BSR 	A0TOA1
+
+			MOVE	(a1),d0 			; D0 gets sign/exponent of R.
+			BCLR	#15,d0				; Clear sign.
+			CMP 	#$3f7f,d0			; Exponent -64.
+			BLT.S	annbasee			; Natural log/exp for tiny
+ ; exponents.
+
+ ; Annuity base two.
+
+			PEA 	(A1)				; X
+			MOVE.W	#FOLOG21X,-(SP)
+			IF		 FPFORMAC+FPFORDEBUG THEN
+			BSR 	ELEMS68K			; LOG2(1 + R)
+			ENDIF
+			IF		 FPFORLISA THEN
+			BSR 	elems68k
+			ENDIF
+			MOVE.L	D4,-(SP)			; N=SRC PTR
+			PEA 	(A1)
+			FMULX						; N * LOG2(1 + R)
+
+			BCHG	#7,(A1) 			; -(N * LOG2(1 + R))
+			CMP 	#$4007,(a1)
+			BLT.S	@1					; Branch if exp(-n*log(1+r)) not huge.
+			MOVE.L	d5,a0
+			CMP 	#$407f,(a0)
+			BGE.S	annspecial			; Branch if r huge.
+@1
+			PEA 	(A1)
+			MOVE.W	#FOEXP21X,-(SP)
+			BRA.S	annresult
+
+annbasee								; Annuity base e.
+			MOVE.L	D4,-(SP)			; N=SRC PTR
+			PEA 	(A1)
+			FMULX						; N * LOG2(1 + R)
+
+			BCHG	#7,(A1) 			; -(N * LOG2(1 + R))
+
+			PEA 	(A1)
+			MOVE.W	#FOEXP1X,-(SP)
+
+annresult
+			IF		 FPFORMAC+FPFORDEBUG THEN
+			BSR 	ELEMS68K			; (1 + R)^-N  -  1
+			ENDIF
+			IF		 FPFORLISA THEN
+			BSR 	elems68k
+			ENDIF
+
+			BCHG	#7,(A1) 			; 1  -	(1 + R)^-N
+
+			MOVE.L	D5,-(SP)			; R=SRC2
+			PEA 	(A1)
+			FDIVX						; ( 1  -  (1 + R)^-N ) / R
+
+annclear
+			BSR 	CLEARUFLOW
+			BSR 	CLEAROFLOW
+			MOVEA.L A1,A0				; SET UP REGS FOR CLASS
+			BSR 	CLASSIFY
+
+			SUBQ.B	#FCINF,D0			; IS IT INF?
+			BNE.S	@1
+			BSR 	FORCEOFLOW
+			BRA.S	ANNDOUT
+@1
+			SUBQ.B	#2,D0				; IS IT NORMAL?
+			BEQ.S	ANNDOUT
+
+			BSR 	FORCEUFLOW
+ANNDOUT
+			LEA 	STX(A6),A0			; STORE TO DESTINATION
+			MOVEA.L A4,A1
+			BSR 	A0TOA1
+
+			BRA 	RESULTDELIVERED
+
+annspecial
+			MOVEA.L D5,A0				; SRC2 PTR
+			BSR 	A0TOA1
+			PEA 	(A1)				; X := r
+			MOVE.W	#FOLOG2X,-(SP)
+			IF		 FPFORMAC+FPFORDEBUG THEN
+			BSR 	ELEMS68K			; x := LOG2( R)
+			ENDIF
+			IF		 FPFORLISA THEN
+			BSR 	elems68k
+			ENDIF
+			LEA 	sty(a6),a1
+			MOVE.L	d4,a0
+			BSR 	a0toa1				; Y gets N.
+			PEA 	fpk1
+			PEA 	(a1)
+			FADDX						; Y gets N+1.
+			PEA 	(A1)
+			LEA 	stx(a6),a1			; A1 gets X again.
+			PEA 	(a1)
+			FMULX						; x gets (n+1) * LOG2( R)
+			BCHG	#7,(A1) 			; -(N+1) * LOG2( R)
+			PEA 	(A1)
+			MOVE.W	#FOEXP2X,-(SP)
+			IF		 FPFORMAC+FPFORDEBUG THEN
+			BSR 	ELEMS68K			; ( R)^-(n+1)
+			ENDIF
+			IF		 FPFORLISA THEN
+			BSR 	elems68k
+			ENDIF
+
+			BCHG	#7,(A1) 			; -  (R)^-(N+1)
+			BRA.S	annclear
+
+;ne 100
+

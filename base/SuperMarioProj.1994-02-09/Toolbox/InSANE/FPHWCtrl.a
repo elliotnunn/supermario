@@ -1,0 +1,891 @@
+;
+;	File:		FPHWCtrl.a
+;
+;	Contains:	Code to control Floating Point SANE operations
+;
+;	Written by:	Apple Numerics Group, DSG
+;
+;	Copyright:	© 1985-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<SM3>	  2/4/93	CSS		Remove VMCalls.a as it is obsolete.
+;		<SM2>	  2/3/93	CSS		Update from Horror:
+;		<H4>	 9/29/92	BG		Rolling in Jon Okada's latest fixes.
+;		<H3>	 6/15/92	JC		Move IF BACKPATCH THEN so that VMCalls is always included.
+;									Necessary for file to build when backpatching is turned off.
+;		<H2>	11/14/91	jmp		(CCH) Flush entire cache on 020/030 machines after a backpatch.
+;		  <1>	10/24/91	SAM/KSM	Rolled in Regatta file.
+;		
+;	Regatta Change History:
+;
+;		 <2>	 8/29/91	SAM		Changed the non040 section of FlushItDeluxe™ 2.0 to flush both
+;									caches instead of just the instruction cache.
+;		 <1>	 5/15/91	SAM		Split off from TERROR Proj.
+;
+;	Terror Change History:
+;
+;		 <5>	 5/10/91	SAM		(with Robert and Carl) rewrote FlushIt™ Deluxe 2.0 (the routine
+;									that flushes the backpatched user code) so that it doesn’t
+;									assume the two lines that it pushes are in the same page.  It
+;									now disables IRQs for the duration of the routine and does the
+;									right thing in 8 or 4k page modes.  Oh yeah, now it doesn’t call
+;									EnterSupervisorMode if VM is off (cuz its not implemented if it
+;									is off).  Whew.
+;		 <4>	 3/15/91	BG		(with SAM) Modified the conditionalized code to correctly flush
+;									the cache in the backpatching case.  Completed the SystemDisk
+;									version of the code.
+;		 <3>	 1/17/91	BG		Added the correct OPERRHANDLER installation for 040/050s.
+;		 <2>	  1/9/91	BG		Modified the code to handle at run-time the differences between
+;									the 881/882 and the 040 FPUs.
+;		 <1>	01/06/90	BG		Added to TERROR/BBS for the time.
+;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: FP881ctrl.a
+;; Implementation of FP68K for machines using the Motorola MC68881
+;; Copyright Apple Computer, Inc. 1985,1986,1987,1989,1990
+;; All Rights Reserved
+;; Confidential and Proprietary to Apple Computer,Inc.
+;;
+;; Written by Clayton Lewis, begun 7 Feb 85.
+;; Debugged by Stuart McDonald.
+;;
+;; Modification history:
+;;    Rev5: 27 May 85
+;;    Rev6: 19 Dec 85	fix CVTz2x bug
+;;    Rev7: 16 Jun 86 CRL moved to MPW
+;;    Rev8: 11 Oct 86 -S.McD. changed version number from 3 to 4 .
+;;          21 Nov 86 -S.McD. set chips IEEE status defaults, too.
+;;    Rev9: 06 Jan 87 -S.McD. changed version number from 4 to 5 .
+;;          15 Jan 87 -S.McD. changed status and copyright notice.
+;;          16 Jan 87 -S.McD. Arith and IntOp tables combinded; _SYSERROR call added.
+;;          23 Jan 87 -S.McD. MC68881 directive moved to file fp881.a .
+;;    RevA: 24 Jan 87 -S.McD. changed version number from 5 to 6 .
+;;    RevB: 14 Dec 89 -S.McD. Complete rewrite begins.
+;;			22 May 90 -S.McD. Goes alpha for Waimea.  Copyright and version updated.
+;;			 7 Sep 90 -S.McD. Goes beta for Tim.  Updated version number.
+;;			30 Sep 90 -S.McD. Made fp exception handlers A-trap aware.
+;;		  	30 Sep 90 -S.McD. Goes final for Terror alpha.
+;;			 6 Dec 90 -JPO	  Modified for MC68040 cache flushing and vectoring
+;;								to OPERROR handler.
+;;			24 Oct 91 -CCH	  Flush entire cache on 020/030 machine after backpatch.
+;;			 6 Apr 92 -JPO	  Updated version number (to $0009) and copyright dates.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;This is the sole entry point of the package.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	BRA.S	 OMEGA881BASE
+
+	DC.W	$00
+        STRING  ASIS
+	DC.B	'PACK'
+	DC.W	$4
+	DC.W	$0009	; version 9					<4/6/92, JPO>
+
+
+;-----------------------------------------------------------
+; THIS IS THE OLD-STYLE ENTRY POINT OF THE PACKAGE.
+; THE STACK HAS THE FORM:
+;	<RET> <OPWORD> <ADRS1> <ADRS2> <ADRS3>
+; WHERE THE NUMBER OF ADDRESSES DEPENDS ON THE OPERATION.
+; MOST USE 2, SOME 1, ONLY BIN->DEC USES 3.
+;-----------------------------------------------------------
+OMEGA881BASE:
+		IF BACKPATCH THEN				; ••••• IF Using BackPatching THEN •••••			<T2>
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; THIS CODE FILTERS THE INCOMING OPWORD.  IF IT MATCHES ONE
+; OF THE FAST CASES WE ATTEMPT TO REPLACE THE TRAP WITH A JSR.
+; IF THE INCOMING OPWORD CORRESPONDS TO A FAST ROUTINE, WHETHER
+; OR NOT THE TRAP CAN BE BACKPATCHED WITH A JSR, PROCESSING
+; CONTINUES WITH THE APPROPRIATE FAST ROUTINE CODE.
+;-----------------------------------------------------------
+			SUBQ	#2,SP				; RESERVE 2 BYTES FOR HALF OF ADDR
+			MOVEM.L D0/A0-A1,-(SP)		; SAVE FEWER REGS
+
+			LEA		QADDX,A0			; ALWAYS STORE &QADDX INTO ITS JUMP ISLAND
+			MOVE.L	A0,$0B6E			; HOME SO TRAPS HAVE A POINT OF REFERENCE
+
+;-----------------------------------------------------------
+; GET OPWORD INTO D0.
+; COMPUTE INDEX = (8 * OPCODE) + FORMAT
+; INTO TABLE OF HANDLERS FOR THE DIFFERENT POSSIBILITIES.
+; WEED OUT FORMATS BEYOND 0-EXT, 1-DOUB, 2-SING.
+; OPCODE BITS ARE 0X001F
+; FORMAT BITS ARE 0X3800
+; X96BIT BIT  IS  0X0020
+;
+; NOWADAYS, WE SEEK TO PATCH THE COMMONEST CASES OF
+;		MOVE.W	#XXXX,-(SP)
+;		_FP68K
+; WITH A JSR TO THE CORRECT ABSOLUTE ADDRESS.  SO WE BACK
+; UP FROM THE USER'S PC TO SEE IF A TRAP WAS PRECEDED BY THE
+; APPROPRIATE MOVE.  ONE SPECIAL CASE IS ADD EXTENDED, WHOSE
+; OPCODE IS ZERO.  MOST SYSTEMS WILL EMIT A CLR.W -(SP),
+; FOILING OUR PLAN.  THE TRICK HERE IS TO USE A TWO-WORD JSR
+; THROUGH THE LOW MEMORY LOCATION $0B6C.
+;-----------------------------------------------------------
+			MOVE.W	18(SP),D0			; OPCODE 0, ADD EXT
+			BNE.S	OBASENOTADD			; IS SPECIAL CASE
+			
+			MOVEA.L	14(SP),A1			; JUST BEYOND USER'S CODE
+			SUBQ.L	#2,A1				; BACK UP TO TRAP
+			CMP		#$A9EB,(A1)			; IS IT THE TRAP?
+			BNE.S	VECTOROFF			; NO. DO FAST ADD ANYWAY.
+			SUBQ.L	#2,A1				; BACK UP TO CLR.W
+			CMP		#$4267,(A1)			; IS IT CLR.W -(SP)?
+			BEQ.S	FOUNDADD
+			SUBQ.L	#2,A1
+			BRA.S	TRYLONGADD
+			
+FOUNDADD:
+			MOVE.W	#$4EB8,(A1)+		; JSR ABS.W OPCODE
+			MOVE.W	#$0B6C,(A1)			; STATE AREA ADDRESS
+
+			BSR.S	FlushIt				; Flush cache line at A1 (User code)			<T4>			
+			
+			MOVE.W	#$4EF9,$0B6C		; Construct JMP island at $0B6C
+
+			MOVE.L	#$0B6C,A1			; Flush Jump Island at $B6C						<T4>
+			BRA.S	PullTheHandle		;												<T4>
+					
+OBASENOTADD:
+			ROL.W	#8,D0				; XXXX383F --> XXXX3F38  ... SWAP BYTES
+			LSL.B	#2,D0				; XXXX3F38 --> XXXX3FE0  ... SCRUNCH TOGETHER
+			BFEXTS	D0{18:10},D0		; D0 ::= INDEX := 8 * OPCODE + FORMAT
+			MOVE	(FP881CASE,PC,D0),D0; D0 = OFFSET
+		
+OBFASTADR:
+			LEA		OMEGA881BASE(D0),A0	; ADDRESS OF FAST ROUTINE
+			MOVEA.L	14(SP),A1			; PT BEYOND USER'S CODE
+			SUBQ.L	#2,A1				; PT TO TRAP?
+			CMP		#$A9EB,(A1)			; DID THEY TRAP?
+			BNE.S	VECTOROFF			; NO. DO FAST ROUTINE ANYWAY.
+			SUBQ.L	#4,A1				; A MOVE.W IMMEDIATE TOO?
+		
+TRYLONGADD:
+			CMP		#$3F3C,(A1)
+			BNE.S	VECTOROFF			; NO. DO FAST ROUTINE ANYWAY.
+			MOVE.W	#$4EB9,(A1)+		; STUFF JSR OPCODE
+			MOVE.L	A0,(A1)				; ADDRESS OF ROUTINE
+			
+PullTheHandle							;												<T4>
+			BSR.S	FlushIt				; Flush cache line at A1 (User code)			<T4>
+;			BRA.S	VECTOROFF			; and continue on								<T4>
+;																						<T4>
+;	-- Fall into Vector Off	--															<T4>
+			
+VECTOROFF:
+;-----------------------------------------------------------
+; HAVE STACK = D0/A0/A1 < WORD SPACE < RET < OP CODE < ARGS
+; WANT TO SET UP  FAST ADRS < RET < ARGS,
+; WIPING OUT OPCODE, SO WE CAN RTS TO ROUTINE.
+;-----------------------------------------------------------
+			MOVE.L	14(SP),16(SP)		; COPY RETURN ADDR ATOP OPCODE
+			MOVE.L	A0,12(SP)			; ADDRESS OF ROUTINE
+
+			LEA		OPERRHANDLER,A0		; INSTALL OPERR TRAP HANDLER INTO
+
+			cmpi.b	#cpu68040,CPUFlag	; are we an 040?								<T2>
+			blt.s	@notAn040			; brif we're NOT								<T2><T4>
+			LEA		OPERRHANDLER040,A0	; INSTALL OPERR TRAP HANDLER INTO				<T3>
+
+			MOVE.L	A0,$1FD4			; SPECIAL 040 OPERROR VECTOR <12/06/90, JPO>
+			bra.s	@getOnWithIt		;												<T2>
+
+@notAn040								;												<T2>
+			MOVE.L	A0,$0D0				; LOW-MEM VECTOR (SEE TABLE 7-6 882 MAN)
+@getOnWithIt							;												<T2>
+			
+			FMOVE.L	FPCR,D0				; ENABLE OPERAND ERROR TRAPPING
+			BSET	#13,D0
+			FMOVE.L	D0,FPCR
+			
+; STACK = D0...A1 <  FAST ADRS < RET < ARGS
+			MOVEM.L	(SP)+,D0/A0-A1		; RESTORE REGS
+			RTS							; OFF TO ROUTINE WITH PRISTINE STACK
+
+		ELSE							; ••••• NOT using BackPatching •••••			<T2>
+			
+			SUBQ	#2,SP				; MAKE A HOLE
+			MOVEM.L	D0/A0,-(SP)			; SAVE 2 REGISTERS
+
+			LEA		QADDX,A0			; ALWAYS STORE &QADDX INTO ITS JUMP ISLAND
+			MOVE.L	A0,$0B6E			; HOME SO TRAPS HAVE A POINT OF REFERENCE
+
+			MOVE.W	14(SP),D0			; GET OPWORD INTO D0
+			ROL.W	#8,D0				; XXXX383F --> XXXX3F38  ... SWAP BYTES
+			LSL.B	#2,D0				; XXXX3F38 --> XXXX3FE0  ... SCRUNCH TOGETHER
+			BFEXTS	D0{18:9},D0			; D0 ::= INDEX := 8 * OPCODE + FORMAT
+			MOVE	(FP881CASE,PC,D0*2),D0	; DO := OFFSET AT INDEX IN TABLE
+			LEA		OMEGA881BASE(D0),A0	; GO DO IT
+			MOVE.L	10(SP),12(SP)		; SLIDE RETURN ADDRESS ON TOP OF OPWORD
+			MOVE.L	A0,8(SP)			; FILL RTS HOLE PROVIDED ABOVE
+
+			LEA		OPERRHANDLER,A0		; INSTALL OPERR TRAP HANDLER INTO
+
+			cmpi.b	#cpu68040,CPUFlag	; are we an 040?								<T2>
+			blt.s	@notAn040			; brif we're NOT								<T2>
+			LEA		OPERRHANDLER040,A0	; INSTALL OPERR TRAP HANDLER INTO				<T3>
+
+			MOVE.L	A0,$1FD4			; SPECIAL 040 OPERROR VECTOR <12/06/90, JPO>
+			bra.s	@getOnWithIt		;												<T2>
+
+@notAn040								;												<T2>
+			MOVE.L	A0,$0D0				; LOW-MEM VECTOR (SEE TABLE 7-6 882 MAN)
+@getOnWithIt							;												<T2>
+			
+			FMOVE.L	FPCR,D0				; ENABLE OPERAND ERROR TRAPPING
+			BSET	#13,D0
+			FMOVE.L	D0,FPCR
+			
+			MOVEM.L	(SP)+,D0/A0			; RESTORE 2 REGISTERS
+			RTS							; DISPATCH
+
+		ENDIF							; {BACKPATCH}
+
+*-----------------------------------------------------------------------------------	<T4>
+*--- FLushIt™ Deluxe 2.0 -----------------------------------------------------------	<T5> ReWritten in T5
+*-----------------------------------------------------------------------------------
+
+FlushIt		CMPI.B	#cpu68040,CPUFlag	; are we an 040
+			BLT.S	@non040Flush		; CPU < 040?  flush only the instruction cache
+
+			MOVEM.L	D0-D4/A1/A2,-(SP)	; Save Regs
+			MOVE	SR,D0				; Get the SR
+			BTST	#13,D0				; Are we in Supervisor mode?
+			BNE.S	@InSuper			; -> Yes, dont call _EnterSupervisorMode
+			_EnterSupervisorMode		; Switch modes
+@InSuper	MOVEQ	#5,D1				; Set the DFC value
+			MOVEC	D1,DFC				; Set the Destination Function Code to 5
+			
+			MOVEQ	#1,D4				; Setup loop count		
+			SUBQ.L	#2,A1				; Push 2 data lines around A1
+	
+			MOVE.L	A1,A2				; Copy the logical address
+			ORI		#$0700,SR			; Disable IRQs till we exit
+			
+			MOVE.W	#$D000,D3			; Build a mask based on the page size from bit #14 of TC
+			MOVEC	TC,D2				; Get Translation Control
+			LSR.W	#2,D2				; Move the TC bits (enable/page size) over 2
+			EOR.W	D2,D3				; Make the mask (for extracting the phys addr from MMUSR)
+
+@FlusherRoo	
+			PTESTR	(A1)				; Get translated physical address
+			MOVEC	MMUSR,D1			; The address is in the high 20 bits of MMUSR
+			
+			AND.W	D3,D1				; Mask off the unwanted bits (based on the MMU page size)
+			MOVE.W	A1,D2				; Get the logical address in D2
+			NOT		D3					; Flip the mask
+			AND.W	D3,D2				; Get the low bits of the logical address
+			OR.W	D2,D1				; Smack them on top of the high (physical addr) bits
+			MOVE.L	D1,A1				; Now A1 has the whole physical address (now wasn't that easy?)	
+			CPUSHL	BC,(A1)				; Invalidate the Cache Line
+			
+			NOT		D3					; Flip the mask back for the next iteration
+			MOVE.L	A2,A1				; Restore the original logical address
+			ADD.W	#$10,A1				; Bump A1 to the next line
+			DBRA	D4,@FlusherRoo		; Loop 1 more time
+
+			MOVE	D0,SR				; Restore the SR (turning IRQs back on & switching to User mode)
+			MOVEM.L	(SP)+,D0-D4/A1/A2	; Restore the registers
+			RTS
+			
+;	Flush the 020/030 I-Cache
+;	This REALLY should be a:
+;			_FlushInstructionCache
+
+@non040Flush
+			MOVEC	CACR,D0
+			ORI.W	#$0808,D0			; FOR 881/882, FLUSH _BOTH_ CACHES!!	<Z7><H2>
+			MOVEC	D0,CACR
+			RTS
+
+*-----------------------------------------------------------------------------------	<T4><T5>
+
+
+
+
+			DC.W	QADDX96	- OMEGA881BASE	; ... 96BIT SANE DISPATCH TABLE.
+			DC.W	QADDD96	- OMEGA881BASE
+			DC.W	QADDS96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QADDI96	- OMEGA881BASE
+			DC.W	QADDL96	- OMEGA881BASE
+			DC.W	QADDC96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSETENV	- OMEGA881BASE ; 1
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSUBX96	- OMEGA881BASE
+			DC.W	QSUBD96	- OMEGA881BASE
+			DC.W	QSUBS96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QSUBI96	- OMEGA881BASE
+			DC.W	QSUBL96	- OMEGA881BASE
+			DC.W	QSUBC96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QGETENV	- OMEGA881BASE	; 3
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QMULX96	- OMEGA881BASE
+			DC.W	QMULD96	- OMEGA881BASE
+			DC.W	QMULS96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QMULI96	- OMEGA881BASE
+			DC.W	QMULL96	- OMEGA881BASE
+			DC.W	QMULC96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSETHV	- OMEGA881BASE ; 5
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QDIVX96	- OMEGA881BASE
+			DC.W	QDIVD96	- OMEGA881BASE
+			DC.W	QDIVS96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QDIVI96	- OMEGA881BASE
+			DC.W	QDIVL96	- OMEGA881BASE
+			DC.W	QDIVC96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QGETHV	- OMEGA881BASE	; 7
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QCMPX96	- OMEGA881BASE
+			DC.W	QCMPD96	- OMEGA881BASE
+			DC.W	QCMPS96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QCMPI96	- OMEGA881BASE
+			DC.W	QCMPL96	- OMEGA881BASE
+			DC.W	QCMPC96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QDEC2X96- OMEGA881BASE ; 9
+			DC.W	QDEC2D	- OMEGA881BASE
+			DC.W	QDEC2S	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QDEC2I	- OMEGA881BASE
+			DC.W	QDEC2L	- OMEGA881BASE
+			DC.W	QDEC2C	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QCPXX96	- OMEGA881BASE
+			DC.W	QCPXD96	- OMEGA881BASE
+			DC.W	QCPXS96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QCPXI96	- OMEGA881BASE
+			DC.W	QCPXL96	- OMEGA881BASE
+			DC.W	QCPXC96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QX2DEC96	- OMEGA881BASE ; B
+			DC.W	QD2DEC	- OMEGA881BASE
+			DC.W	QS2DEC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QI2DEC	- OMEGA881BASE
+			DC.W	QL2DEC	- OMEGA881BASE
+			DC.W	QC2DEC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QREMX96	- OMEGA881BASE
+			DC.W	QREMD96	- OMEGA881BASE
+			DC.W	QREMS96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QREMI96	- OMEGA881BASE
+			DC.W	QREML96	- OMEGA881BASE
+			DC.W	QREMC96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QNEG	- OMEGA881BASE ; D ??? S.McD.
+			DC.W	QNEG	- OMEGA881BASE
+			DC.W	QNEG	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QX2X96	- OMEGA881BASE
+			DC.W	QD2X96	- OMEGA881BASE
+			DC.W	QS2X96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QI2X96	- OMEGA881BASE
+			DC.W	QL2X96	- OMEGA881BASE
+			DC.W	QC2X96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QABS	- OMEGA881BASE	; F
+			DC.W	QABS	- OMEGA881BASE	; F
+			DC.W	QABS	- OMEGA881BASE	; F
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QX2X96	- OMEGA881BASE
+			DC.W	QX2D96	- OMEGA881BASE
+			DC.W	QX2S96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QX2I96	- OMEGA881BASE
+			DC.W	QX2L96	- OMEGA881BASE
+			DC.W	QX2C96	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QCPYSGN	- OMEGA881BASE ; 11
+			DC.W	QCPYSGN	- OMEGA881BASE
+			DC.W	QCPYSGN	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSQRTX96 -OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QNEXTX96 -OMEGA881BASE ; 13
+			DC.W	QNEXTD   -OMEGA881BASE
+			DC.W	QNEXTS   -OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QRINTX96 -OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSETXCP	 -OMEGA881BASE ; 15
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QTINTX96 -OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QPROCENTRY	- OMEGA881BASE	; 17
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSCALBX96-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QSCALBX96-OMEGA881BASE	; .W Added for Lisa's benefit
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QPROCEXIT	- OMEGA881BASE ; 19
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QLOGBX96 -OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QTESTXCP	- OMEGA881BASE	; 1B
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QCLASSX96-OMEGA881BASE
+			DC.W	QCLASSD	 -OMEGA881BASE
+			DC.W	QCLASSS	 -OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QCLASSC	 -OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+FP881CASE:
+			DC.W	QADDX	- OMEGA881BASE	; ... 80BIT SANE DISPATCH TABLE.
+			DC.W	QADDD	- OMEGA881BASE
+			DC.W	QADDS	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QADDI	- OMEGA881BASE
+			DC.W	QADDL	- OMEGA881BASE
+			DC.W	QADDC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSETENV	- OMEGA881BASE ; 1
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSUBX	- OMEGA881BASE
+			DC.W	QSUBD	- OMEGA881BASE
+			DC.W	QSUBS	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QSUBI	- OMEGA881BASE
+			DC.W	QSUBL	- OMEGA881BASE
+			DC.W	QSUBC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QGETENV	- OMEGA881BASE	; 3
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QMULX	- OMEGA881BASE
+			DC.W	QMULD	- OMEGA881BASE
+			DC.W	QMULS	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QMULI	- OMEGA881BASE
+			DC.W	QMULL	- OMEGA881BASE
+			DC.W	QMULC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSETHV	- OMEGA881BASE ; 5
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QDIVX	- OMEGA881BASE
+			DC.W	QDIVD	- OMEGA881BASE
+			DC.W	QDIVS	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QDIVI	- OMEGA881BASE
+			DC.W	QDIVL	- OMEGA881BASE
+			DC.W	QDIVC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QGETHV	- OMEGA881BASE	; 7
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QCMPX	- OMEGA881BASE
+			DC.W	QCMPD	- OMEGA881BASE
+			DC.W	QCMPS	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QCMPI	- OMEGA881BASE
+			DC.W	QCMPL	- OMEGA881BASE
+			DC.W	QCMPC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QDEC2X	- OMEGA881BASE ; 9
+			DC.W	QDEC2D	- OMEGA881BASE
+			DC.W	QDEC2S	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QDEC2I	- OMEGA881BASE
+			DC.W	QDEC2L	- OMEGA881BASE
+			DC.W	QDEC2C	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QCPXX	- OMEGA881BASE
+			DC.W	QCPXD	- OMEGA881BASE
+			DC.W	QCPXS	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QCPXI	- OMEGA881BASE
+			DC.W	QCPXL	- OMEGA881BASE
+			DC.W	QCPXC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QX2DEC	- OMEGA881BASE ; B
+			DC.W	QD2DEC	- OMEGA881BASE
+			DC.W	QS2DEC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QI2DEC	- OMEGA881BASE
+			DC.W	QL2DEC	- OMEGA881BASE
+			DC.W	QC2DEC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QREMX	- OMEGA881BASE
+			DC.W	QREMD	- OMEGA881BASE
+			DC.W	QREMS	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QREMI	- OMEGA881BASE
+			DC.W	QREML	- OMEGA881BASE
+			DC.W	QREMC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QNEG	- OMEGA881BASE ; D ??? S.McD.
+			DC.W	QNEG	- OMEGA881BASE
+			DC.W	QNEG	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QX2X	- OMEGA881BASE
+			DC.W	QD2X	- OMEGA881BASE
+			DC.W	QS2X	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QI2X	- OMEGA881BASE
+			DC.W	QL2X	- OMEGA881BASE
+			DC.W	QC2X	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QABS	- OMEGA881BASE	; F
+			DC.W	QABS	- OMEGA881BASE	; F
+			DC.W	QABS	- OMEGA881BASE	; F
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QX2X	- OMEGA881BASE
+			DC.W	QX2D	- OMEGA881BASE
+			DC.W	QX2S	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QX2I	- OMEGA881BASE
+			DC.W	QX2L	- OMEGA881BASE
+			DC.W	QX2C	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QCPYSGN	- OMEGA881BASE ; 11
+			DC.W	QCPYSGN	- OMEGA881BASE
+			DC.W	QCPYSGN	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSQRTX	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QNEXTX  - OMEGA881BASE ; 13
+			DC.W	QNEXTD  - OMEGA881BASE
+			DC.W	QNEXTS  - OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QRINTX  - OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSETXCP	- OMEGA881BASE ; 15
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QTINTX  - OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QPROCENTRY	- OMEGA881BASE	; 17
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QSCALBX	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QSCALBX - OMEGA881BASE	; .W Added for Lisa's benefit
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QPROCEXIT	- OMEGA881BASE ; 19
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QLOGBX	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QTESTXCP	- OMEGA881BASE	; 1B
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	QCLASSX	- OMEGA881BASE
+			DC.W	QCLASSD	- OMEGA881BASE
+			DC.W	QCLASSS	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	QCLASSC	- OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+			DC.W	UnknownOp-OMEGA881BASE
+
+UnknownOp
+	MOVEQ	#81,D0	; Error exit for unknown Op code. -S.McD.
+	_SysError

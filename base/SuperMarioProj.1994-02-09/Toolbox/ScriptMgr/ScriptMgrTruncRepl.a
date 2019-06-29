@@ -1,0 +1,775 @@
+;
+;	File:		ScriptMgrTruncRepl.a
+;
+;	Contains:	New routines for text truncation and replacement.
+;
+;	Written by:	PKE	Peter Edberg
+;
+;	Copyright:	© 1989-1992 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM3>	 11/6/92	SWC		Changed PackMacs.a->Packages.a.
+;		 <3>	 4/30/92	FM		Get rid of conditional smgrSys7Extensions
+;		 <2>	 5/18/90	PKE		Adapt to new changes in 'itl4' resource: get truncation marker
+;									for TruncText from unToken table instead of special truncMarker
+;									table.
+;		 <1>	 4/10/90	PKE		New today - extracted from ScriptMgrExtTail.a and
+;									conditionalized so it can be used with ROM builds too.
+;
+;	Relevant recent comments from ScriptMgrExtTail.a below
+;		<x7>	  3/5/90	PKE		In TruncString/TruncText, changed NTruncX selectors to TruncX.
+;		<x6>	  3/2/90	PKE		Use new name nItl4Rec for 7.0 extended version of Itl4Rec.
+;	   <1.7>	 11/8/89	PKE		Modify TruncString and TruncText to support both new and old
+;									calling conventions (with and without truncWhere parameter).
+;									Implement handling of center truncation (in TruncText).
+;	   <1.4>	 9/17/89	PKE		Better error reporting in TruncText, ReplaceText.
+;	   <1.3>	 9/15/89	PKE		Add and install framework code for TruncString, TruncText,
+;									ReplaceText. Stuff correct version number in SMgrRecord.
+;
+
+			LOAD	'StandardEqu.d'
+			include 'ScriptPriv.a'
+			include 'Packages.a'
+
+			blanks	on
+			string	asis
+
+; ----------------------------------------------------------------------- <1.3>
+; TruncString and TruncText routines.
+;
+;	TruncCode = Integer;
+;
+;	FUNCTION TruncString(width: Integer; VAR theString: Str255;
+;		truncWhere: TruncCode): Integer;
+;
+;	FUNCTION TruncText(width: Integer; textPtr: Ptr; VAR length: Integer;
+;		truncWhere: TruncCode): Integer;
+;
+; These routines will ensure that a text string fits into the pixel length
+; specified by width, truncating the string if necessary in a way that depends
+; on the script associated with the font of the current grafPort. This includes
+; proper handling of double-byte characters and insertion of a truncation
+; indicator (such as an ellipsis in English). The truncation indicator is 
+; obtained from a string in the current script's 'itl4' resource. In the first
+; form (TruncString), the string is supplied as a Str255. In the second form
+; of the call (TruncText), the string is defined by a pointer and byte length;
+; the length will be updated if necessary. In either form, the length will 
+; not increase. The truncWhere argument is a constant specifying where
+; where truncation should occur. At present, only two values are defined:
+; smTruncEnd (0) and smTruncMiddle ($4000, although any non-zero value will
+; currently work).
+;
+; Result codes:
+; 0				No truncation was necessary.
+; 1				Truncation was performed.
+; (negative=>error:)
+; -1			General error: truncation is necessary, but the truncation
+;				indicator is too big - longer than the length parameter or
+;				wider than the width parameter. In this case, the returned
+;				length will be 0.
+; resNotFound	Can't get itl4 resource, or it's not in current format
+;
+; Note that TruncString is basically just glue that converts a Str255 to
+; pointer and length, calls TruncText, and then converts back again.
+;
+; Also note that we are still supporting an older form of each call, without
+; the truncWhere parameter. We can tell from the selector which form we were
+; called with. For the old form, we truncate at the end.
+; -----------------------------------------------------------------------------
+
+			proc
+			import	StdUnlink
+			export	TruncString,TruncText	;								<1>
+			
+; --------------------------------------
+; TruncString
+
+; stack setup at entry for old-style call:
+;
+; (high address)
+; result	 ds.w	1					; result code
+; width		 ds.w	1					; width for truncated text.
+; theString	 ds.l	1					; pointer to Str255 to be truncated
+; selector	 ds.l	1					; selector
+; return	 ds.l	1					; return address.
+; (low address)
+;
+; stack frame for new-style call:
+
+ntsRecord	record	{a6link},decr		;									<1.7>
+result		ds.w	1					; result code
+ntsArgs		equ		*-8					; size of arguments.
+width		ds.w	1					; width for truncated text.
+theString	ds.l	1					; pointer to Str255 to be truncated
+truncWhere	ds.w	1					; truncation location code			<1.7>
+selector	ds.l	1					; selector
+return		ds.l	1					; return address.
+a6link		ds.l	1					; old a6 register.
+lenWord		ds.w	1					; word-size length to modify
+ntsLocals	equ	*						; size of local variables.
+			endr
+
+TruncString								;									<1>
+; If this is an old-style TruncString call, fake a new-style call with the
+; truncWhere parameter set up to truncate at the end, which is what the		<1.7>
+; old call did.
+
+			move.l	4(sp),d0				; get selector
+			cmp.l	#smSelTruncString,d0	; is it the new form?
+			beq.s	nTruncString			; if yes, no stack tweaking
+
+			move.l	(sp)+,d1			; pop return addr
+			addq.l	#4,sp				; kill selector on stack; it's in d0
+			move.w	#smTruncEnd,-(sp)	; add TruncWhere parameter
+			move.l	d0,-(sp)			; push selector again
+			move.l	d1,-(sp)			; push return address again
+			
+; now we are set up like a call to  the new TruncString
+			
+nTruncString							;									<1.7>
+			with	ntsRecord			;									<1.7>
+			link	a6,#ntsLocals		; link the stack.					<1.7>
+
+			move.l	theString(a6),a0	; get theString
+			clr.w	d0					; for wordizing
+			move.b	(a0)+,d0			; get length, make text pointer
+			move.w	d0,lenWord(a6)		; word-size length to modify
+
+			subq	#2,sp				; allocate space for TruncText result
+			move.w	width(a6),-(sp)		; push width
+			move.l	a0,-(sp)			; push textPtr
+			pea		lenWord(a6)			; push addr of length
+			move.w	truncWhere(a6),-(sp)	; push truncWhere				<1.7>
+			move.l	#smSelTruncText,-(sp)	; now it's a new TruncText call	<1.7>
+			bsr.s	nTruncText			;									<1.7>
+			move.w	(sp)+,result(a6)	; result code
+
+			move.w	lenWord(a6),d0		; new length
+			move.l	theString(a6),a0	; get addr of Str255
+			move.b	d0,(a0)				; update length
+			
+			move.w	#ntsArgs,d0			; set up for StdUnlink				<1.7>
+			bra		StdUnlink
+			endwith
+
+; --------------------------------------
+; TruncText
+
+; stack setup at entry for old-style call:
+;
+; (high address)
+; result	 ds.w	1					; result code
+; width		 ds.w	1					; width for truncated text.
+; textPtr	 ds.l	1					; pointer to text to be truncated
+; lengthPtr	 ds.l	1					; pointer to length of text (VAR)
+; selector	 ds.l	1					; selector
+; return	 ds.l	1					; return address.
+; (low address)
+;
+; stack frame for new-style call:
+
+nttRecord	record	{a6link},decr		;									<1.7>
+result		ds.w	1					; result code
+nttArgs		equ		*-8					; size of arguments.
+width		ds.w	1					; width for truncated text.
+textPtr		ds.l	1					; pointer to text to be truncated
+lengthPtr	ds.l	1					; pointer to length of text (VAR)
+truncWhere	ds.w	1					; truncation location code			<1.7>
+selector	ds.l	1					; selector
+return		ds.l	1					; return address.
+a6link		ds.l	1					; old a6 register.
+headWidth	ds.w	1					; current width for head string		<1.7>
+tailWidth	ds.w	1					; current width for tail string		<1.7>
+nttLocals	equ	*						; size of local variables.
+			endr
+
+; register usage:
+;	a4		length ptr
+;	a3		SMgrRecord ptr/trunc marker ptr
+;	a2		textPtr
+;	d7		length of trunc marker (bytes)
+;	d6		current length of truncated string without marker (bytes)
+;	d5		desired width less trunc marker width
+;	d4		size of space for trunc marker on stack							<1.7>
+;	d3		length of text (bytes)
+;
+
+TruncText								;									<1>
+; If this is an old-style TruncText call, fake a new-style call with the
+; truncWhere parameter set up to truncate at the end, which is what the		<1.7>
+; old call did.
+
+			move.l	4(sp),d0			; get selector
+			cmp.l	#smSelTruncText,d0	; is it the new form?
+			beq.s	nTruncText			; if yes, no stack tweaking
+
+			move.l	(sp)+,d1			; pop return addr
+			addq.l	#4,sp				; kill selector on stack; it's in d0
+			move.w	#smTruncEnd,-(sp)	; add TruncWhere parameter
+			move.l	d0,-(sp)			; push selector again
+			move.l	d1,-(sp)			; push return address again
+			
+; now we are set up like a call to  the new TruncString
+			
+nTruncText								;									<1.7>
+			with	nttRecord			;									<1.7>
+			link	a6,#nttLocals		; link the stack.
+			movem.l	a2-a4/d3-d7,-(sp)	; save registers
+			clr.w	result(a6)			; initially assume no truncation, no err
+
+; Get text, see if it already fits in width
+			move.l	textPtr(a6),a2		; save textPtr in a2
+			move.l	lengthPtr(a6),a4	; pointer to length
+			move.w	(a4),d3				; save length of text
+			subq	#2,sp				; allocate space for TextWidth return
+			move.l	a2,-(sp)			; push pointer to text
+			clr.w	-(sp)				; first byte is 0
+			move.w	d3,-(sp)			; push length of text
+			_TextWidth
+			move.w	(sp)+,d0			; get text width
+			cmp.w	width(a6),d0		;
+			ble		ttExit				; if already ok, we're done
+			
+; Get truncMarker from itl4
+			with	SMgrRecord,nItl4Rec	;									<x6>
+			move.w	#resNotFound,result(a6)	; now assume bad itl4
+			GetSMgrCore a3				; get pointer to SMgrRecord
+			move.b	smgrIntlForce(a3),-(sp)	; save IntlForce
+			clr.b	smgrIntlForce(a3)	; now clear it for GetIntl
+			clr.l	-(sp)				; space for returned handle
+			move.w	#4,-(sp)			; select itl4
+			_IUGetIntl					; may trash a0,a1,d0-d2
+			move.l	(sp)+,a0			; store itl4 handle
+			move.b	(sp)+,smgrIntlForce(a3)	; restore IntlForce
+			move.l	a0,d0				; nil handle?
+			beq		ttExit				; bail if so
+			move.l	(a0),a0				; dereference
+			move.l	unTokenOffset(a0),d0		; check offset				<2>
+			beq		ttExit						; if 0, bail				<2>
+			add.l	d0,a0						; point to unToken table	<2>
+			cmp.w	#tokenEllipsis,2(a0)		; does it include ellipsis?	<2>
+			blt		ttExit						; if not, bail				<2>
+			add.w	4+(2*tokenEllipsis)(a0),a0	; point to ellipsis string	<2>
+			endwith	;SMgrRecord,nItl4Rec		;
+
+; check truncation marker length			
+			move.w	#-1,result(a6)		; now assume general error
+			clr.w	(a4)				; and set length to 0				<1.7>
+			moveq	#0,d7				; for word/longizing
+			move.b	(a0)+,d7			; get byte length of trunc marker
+			move.w	d3,d6				; copy string length
+			sub.w	d7,d6				; subtract trunc marker length
+			blt		ttExit				; bail if trunc marker longer than string
+
+; copy trunc marker to stack (instead of to end of string as before)		<1.7>
+			move.w	d7,d4				; copy marker length
+			addq.w	#1,d4				;
+			andi.w	#$FFFE,d4			; length is rounded up to even number
+			sub.w	d4,sp				; allocate space on stack for marker
+			move.l	sp,a3				; save trunc marker pointer
+			move.l	a3,a1				; copy dest ptr (a0 is src ptr)
+			move.w	d7,d0				; copy trunc marker length
+			beq.s	@noCopy				; skip copy if 0					<1.7>
+			subq.w	#1,d0				; for dbra
+@1			move.b	(a0)+,(a1)+			; copy
+			dbra	d0,@1				;
+@noCopy									;									<1.7>
+			
+; subtract width of trunc marker from desired width; moved up here			<1.7>
+			move.w	width(a6),d5		; get desired width
+			subq	#2,sp				; allocate space for return value
+			move.l	a3,-(sp)			; push pointer to trunc marker
+			clr.w	-(sp)				; first byte is 0
+			move.w	d7,-(sp)			; push length of trunc marker
+			_TextWidth
+			sub.w	(sp)+,d5			; subtract width of trunc marker
+			bmi		ttCleanUp			; bail if trunc marker too wide -
+										; should we trunc without marker instead?
+; select type of truncation
+			tst.w	truncWhere(a6)		; where do we truncate?				<1.7>
+			bne.s	ttDoMiddle			; if not end, assume middle			<1.7>
+
+; --------------------------------------
+; Truncate at end: while width of remaining text too big, subtract a char
+; (NOT necessarily a byte!!).
+
+;;			bra.s	@doTextWidth		; (no longer want this)				<1.7>
+			addq.w	#1,d6				; compensate for initial decrement	<1.7>
+@loop
+			subq.w	#1,d6				; decrement current string count
+			bsr		DoCharByteHead		; adjust d6 to char boundary		<1.7>
+			bsr		DoTextWidthHead		; put head width in d0.w			<1.7>
+			cmp.w	d0,d5				; compare desired width to current
+			blt.s	@loop
+
+; move trunc marker to end of truncated string
+			lea		0(a2,d6.w),a1		; dest ptr for trunc marker
+			move.w	d7,d0				; copy trunc marker length
+			beq.s	@noMarker			; skip if 0							<1.7>
+			subq.w	#1,d0				; for dbra
+@2			move.b	(a3)+,(a1)+			; copy
+			dbra	d0,@2				;
+@noMarker								;									<1.7>
+
+; set length & result (eventually, do fancier stuff here like check to see
+; if string + marker is too long and continue reducing length if so)
+			add.w	d7,d6				; total truncated length with marker
+			move.w	d6,(a4)				; set new length
+			bra.s	ttTruncOk			; all done, go clean up and exit	<1.7>
+
+; --------------------------------------
+; Truncate in middle. Basically, we take the bytes remaining in the string
+; after subtracting those needed for the truncMarker, divide them by two,
+; and start with head and tail strings of this roughly this length (adjusted
+; for character boundaries, etc.). While the sum of the widths of the head
+; and tail strings is too big, we remove characters from one or the other of
+; the strings (the head string if it is longer, otherwise the tail string).
+
+ttDoMiddle
+			lsr.w	#1,d6				; half of remaining length for head
+			bsr		DoCharByteHead		; adjust d6 to char boundary
+
+			move.l	a2,a3				; now make pointer to back half:
+			add.w	d6,a3				; advance past first half…
+			add.w	d7,a3				; …and trunc marker.
+			sub.w	d6,d3				; get length: subtract first half…
+			sub.w	d7,d3				; and trunc marker.
+			bsr		DoCharByteTail		; adjust a3/d3 for char boundary
+
+; Registers at this point:
+;	a4		length ptr
+;	a3		pointer to back string
+;	a2		pointer to front string
+;	d7		length of trunc marker (bytes)
+;	d6		current length of front string
+;	d5		desired width less trunc marker width
+;	d4		size of space for trunc marker on stack
+;	d3		current length of back string
+
+			bsr		DoTextWidthHead		; put head width in d0.w
+			move.w	d0,headWidth(a6)	; save head width
+			bsr		DoTextWidthTail		; put tail width in d0.w
+			move.w	d0,tailWidth(a6)	; save tail width
+			bra.s	@loopTest
+
+@loop
+			cmp.w	d6,d3				; who has more bytes: head or tail?
+			bge.s	@shortenTail		; shorten tail if longer or same
+
+@shortenHead			
+			subq.w	#1,d6
+			bsr		DoCharByteHead		; adjust d6 to char boundary
+			bsr		DoTextWidthHead		; put head width in d0.w
+			move.w	d0,headWidth(a6)	; save head width
+			bra.s	@loopTest
+
+@shortenTail
+			subq.w	#1,d3
+			addq	#1,a3
+			bsr		DoCharByteTail		; adjust a3/d3 for char boundary
+			bsr		DoTextWidthTail		; put tail width in d0.w
+			move.w	d0,tailWidth(a6)	; save tail width
+			
+@loopTest
+			move.w	headWidth(a6),d0
+			add.w	tailWidth(a6),d0
+			cmp.w	d0,d5				; compare desired width to current
+			blt.s	@loop
+
+; assemble string (note that sp points to trunc marker)
+			move.l	sp,a0				; reset trunc marker pointer
+			lea		0(a2,d6.w),a1		; dest ptr for trunc marker
+
+			move.w	d7,d0				; copy trunc marker length
+			beq.s	@noMarker			;
+			subq.w	#1,d0				; for dbra
+@1			move.b	(a0)+,(a1)+			; copy
+			dbra	d0,@1				;
+@noMarker
+
+			move.w	d3,d0				; copy tail string length
+			beq.s	@noTail				;
+			subq.w	#1,d0				; for dbra
+@2			move.b	(a3)+,(a1)+			; copy
+			dbra	d0,@2				;
+@noTail
+
+; set length & result (eventually, do fancier stuff here like check to see
+; if string + marker is too long and continue reducing length if so)
+			add.w	d7,d6				; add trunc marker length to head length
+			add.w	d3,d6				; now add in tail length
+			move.w	d6,(a4)				; set new length
+
+; --------------------------------------
+; clean up and return
+ttTruncOk								;									<1.7>
+			move.w	#1,result(a6)		; we truncated it
+ttCleanUp								;									<1.7>
+			add.w	d4,sp				; kill trunc marker space on stack	<1.7>
+ttExit
+			movem.l	(sp)+,a2-a4/d3-d7	; restore registers
+			move.w	#nttArgs,d0			; set up for StdUnlink				<1.7>
+			bra		StdUnlink
+			endwith
+			
+; --------------------------------------
+; little subroutines for code savings:
+
+; DoCharByteHead: a2 is pointer to text, d6.w is length; will decrement
+; d6.w by one character (one or two bytes).
+
+DoCharByteHead
+			subq	#2,sp				; allocate space for CharByte return
+			move.l	a2,-(sp)			; push text ptr
+			move.w	d6,-(sp)			; push offset
+			_CharByte
+			tst.w	(sp)+				; are we at 2nd byte of 2-byte char?
+			ble.s	@1					; skip decrement if not
+			subq.w	#1,d6				; decrement length to char boundary
+@1			rts
+
+; DoCharByteTail: a3 is pointer to text, d3.w is length; will increment
+; a3, and decrement d3.w, by one character (one or two bytes).
+
+DoCharByteTail
+			subq	#2,sp				; allocate space for CharByte return
+			move.l	a3,-(sp)			; push text ptr
+			move.w	d3,-(sp)			; push offset
+			_CharByte
+			tst.w	(sp)+				; are we at 2nd byte of 2-byte char?
+			ble.s	@1					; skip increment if not
+			addq	#1,a3				; advance to beginning of next char…
+			addq.w	#1,d3				; and update length.
+@1			rts
+
+; DoTextWidthHead: a2 is pointer to text, d6.w is length; will return
+; TextWidth value in d0.w.
+
+DoTextWidthHead
+			subq	#2,sp				; allocate space for return value
+			move.l	a2,-(sp)			; push pointer to text
+			clr.w	-(sp)				; first byte is 0
+			move.w	d6,-(sp)			; push remaining length of text
+			_TextWidth
+			move.w	(sp)+,d0			; save width
+			rts
+
+; DoTextWidthTail: a3 is pointer to text, d3.w is length; will return
+; TextWidth value in d0.w.
+
+DoTextWidthTail
+			subq	#2,sp				; allocate space for return value
+			move.l	a3,-(sp)			; push pointer to text
+			clr.w	-(sp)				; first byte is 0
+			move.w	d3,-(sp)			; push remaining length of text
+			_TextWidth
+			move.w	(sp)+,d0			; save width
+			rts
+
+			endproc
+
+
+; ----------------------------------------------------------------------- <1.3>
+; ReplaceText routine.
+;
+;	FUNCTION ReplaceText(baseText: Handle; substitutionText: Handle;
+;		key: Str15): Integer;
+;
+; The key parameter contains a string to be used as the substitution marker.
+; The routine will search through the text indicated by baseText for instances
+; of this string, and replace each instance with the text indicated by
+; substitutionText. The contents of substitutionText will not affect the
+; substitution process: the substitution text may contain the key string,
+; which will be inserted verbatim into the base text.
+;
+; Result codes:
+; 0 or positive		Number of substitutions performed.
+; (negative=>error:)
+; nilHandleErr		GetHandleSize fails on baseText or substitutionText
+; memWZErr			GetHandleSize fails on baseText or substitutionText
+; memFullErr		SetHandleSize fails on baseText
+; -----------------------------------------------------------------------------
+
+			proc
+			import	StdUnlink
+			export	ReplaceText			;								<1>
+			
+rtRecord	record	{a6link},decr
+result		ds.w	1					; integer result
+rtArgs		equ		*-8					; size of arguments.
+baseText	ds.l	1					; Handle for base text.
+subsText	ds.l	1					; Handle for substitution text
+key			ds.l	1					; pointer to Str15, substitution key
+selector	ds.l	1					; selector
+return		ds.l	1					; return address.
+a6link		ds.l	1					; old a6 register.
+rtLocals	equ	*						; size of local variables.
+			endr
+
+; register usage:
+;	a4		baseText pointer
+;	a3		subsText pointer
+;	a2		key pointer
+;	d7		baseText length
+;	d6		subsText length - key length
+;	d5		key length
+;	d4		substitution count * (subsText length - key length)
+;	d3		substitution count
+;
+
+ReplaceText								;								<1>
+			with	SMgrRecord,rtRecord
+			link	a6,#rtLocals		; link the stack.
+			movem.l	a2-a4/d3-d7,-(sp)	; save registers
+			
+; get pointers and sizes
+			clr.w	d0					; assume no substitution
+
+			move.l	key(a6),a2			; pointer to Pascal string
+			moveq	#0,d5				; for longizing
+			move.b	(a2)+,d5			; key length, now a2 pts to key text
+			beq		rtBail				; bail if no key
+			
+			move.l	baseText(a6),a4		; baseText handle
+			move.l	a4,a0				; copy
+			_GetHandleSize
+			tst.l	d0					; need tst.l, not dispatcher's tst.w
+			bmi		rtBail
+			move.l	d0,d7				; save baseText length
+			move.l	(a4),a4				; baseText ptr
+
+			move.l	subsText(a6),a3		; subsText handle
+			move.l	a3,a0				; copy
+			_GetHandleSize
+			tst.l	d0					; need tst.l, not dispatcher's tst.w
+			bmi		rtBail
+			move.l	d0,d6				; subsText length
+			move.l	(a3),a3				; subsText ptr
+
+			sub.w	d5,d6				; subsText length - key length
+
+; set up for search loop. Additional register usage:
+;	a1		working key pointer
+;	a0		working baseText pointer
+;	d2		last basetext offset at which to try match
+;	d1		working baseText offset
+;	d0		working key length count for dbne
+;
+
+			moveq	#0,d4				; init accumulator
+			moveq	#0,d3				; init substitution count
+			moveq	#0,d1				; working offset in baseText
+			move.w	d7,d2				;
+			sub.w	d5,d2				; last start offset for key search
+			subq.w	#1,d5				; temporary fix for dbne
+			bra.s	@loopProcess		; skip first increment
+
+; outer loop, which increments position in baseText
+@loopAdvance
+			addq.w	#1,d1				; next baseText offset
+
+; make sure we're at beginning of 2-byte char (need to optimize this!!)
+			movem.w	d1-d2,-(sp)			; save important regs
+			subq	#2,sp				; allocate space for CharByte return
+			move.l	a4,-(sp)			; push text ptr
+			move.w	d1,-(sp)			; push offset
+			_CharByte
+			tst.w	(sp)+				; are we at 2nd byte of 2-byte char?
+			movem.w	(sp)+,d1-d2			; restore important regs
+			ble.s	@loopProcess		; skip increment if not
+			addq.w	#1,d1				; now we're at beginning of char
+
+; test for exit, set up for inner loop
+@loopProcess
+			cmp.w	d2,d1				; past last start offset?
+			bgt.s	@doneSearch			; if so, we're done
+			lea		0(a4,d1.w),a0		; working pointer in baseText
+			move.l	a2,a1				; key pointer
+			move.w	d5,d0				; key length fixed for dbne
+
+; inner loop does comparison with key
+@loopMatch
+			cmpm.b	(a0)+,(a1)+			; do baseText bytes match key?
+			dbne	d0,@loopMatch		; break out if no match or end of key
+
+; after inner loop - check for match
+			tst.w	d0					; did we go negative?
+			bpl.s	@loopAdvance		; if not, there was no match
+
+; We found a match: save location on stack, increment count, and advance
+; baseText offset after key. Note that key length in d5 has been decremented
+; by one, so after adding it here we still need to do an addq.w #1 to get to
+; the right position.
+			move.w	d1,-(sp)			; add offset to list
+			addq.w	#1,d3				; increment match count
+			add.w	d6,d4				; accumulate length difference
+			add.w	d5,d1				; skip matched key
+			addq.w	#1,d1				; finish skipping matched key
+			bra.s	@loopProcess		; continue with next baseText position
+
+; When we finish the search, we have pushed a word on the stack for each match.
+; A match count is in d3; we need this later for fixing the stack. Also note
+; that we no longer need a2 as a key pointer.
+@doneSearch
+			addq.w	#1,d5				; restore real key length
+			
+; Now we go through and do substitutions in place. The order in which we do
+; this depends on the difference in length between the key and the substitution
+; text: if the substitution text is longer, we do it from the end, otherwise
+; we do it from the beginning.
+
+			tst.w	d3					; any substitutions?
+			beq		rtSetResult			; if no, quit.
+			tst.w	d6					; check subsText length - key length
+			bgt.s	rtFromEnd			; if >0, substitute from end.
+
+; Substitute from beginning
+; register usage after setup
+;	a4		baseText source pointer
+;	a3		subsText base pointer
+;	a2		temp stack pointer for traversing marker location list
+;	a1		baseText dest pointer
+;	a0		marker pointer / subsText source pointer
+;	d7.l	orig baseText length
+;	d6		subsText length
+;	d5		key length
+;	d4		substitution count * (subsText length - key length)
+;	d3		substitution count
+;	d2.l	baseText base pointer
+;	d1.l	last baseText addr
+;	d0		subsText count for dbra
+;
+			move.l	sp,a2				; copy stack ptr
+			add.w	d3,a2				; only halfway there…
+			add.w	d3,a2				; point of beginning of marker list
+			move.l	a4,d1				; copy baseText pointer
+			add.l	d7,d1				; addr past end of baseText
+			add.w	d5,d6				; make subsText length again
+			move.l	a4,d2				; save baseText address
+			add.w	-(a2),a4			; starting baseText source pointer
+			move.l	a4,a1				; starting baseText dest pointer
+			bra.s	@copySubs
+
+@copyBase
+			cmp.l	a4,d1				; end of text?
+			bls.s	@copyDone			; quit if so
+			cmp.l	a4,a0				; next marker location?
+			beq.s	@copySubs			; if so, go copy substitution text
+			move.b	(a4)+,(a1)+			; copy the byte
+			bra.s	@copyBase
+
+@copySubs
+			move.l	a3,a0				; source pointer
+			move.w	d6,d0				; length for dbra
+			bra.s	@copySubsEnter		; handle case of subsText len=0
+@copySubsLoop
+			move.b	(a0)+,(a1)+			; copy the substitution byte
+@copySubsEnter
+			dbra	d0,@copySubsLoop	; until done
+
+			add.w	d5,a4				; move baseText source pointer after key
+			cmp.l	sp,a2				; are we after last sub?
+			bls.s	@copyBase			; if so, don't get an invalid marker
+			move.l	d2,a0				; copy baseText addr
+			add.w	-(a2),a0			; make next marker pointer
+			bra.s	@copyBase
+			
+@copyDone
+
+; Now reduce handle size if necessary.
+
+			tst.w	d4					; is it 0?
+			beq.s	rtSetResult			; if so, no resizing necessary
+			
+			move.l	baseText(a6),a0		; reload baseText handle
+			move.w	d4,d0				; length reduction (d4 is < 0)
+			ext.l	d0
+			add.l	d7,d0				; add original length, get new length
+			_SetHandleSize
+			bmi.s	rtFixStack
+			bra.s	rtSetResult
+			
+; Substitute from end. First we need to allocate more space.
+rtFromEnd
+			move.l	baseText(a6),a4		; reload baseText handle
+			move.l	a4,a0				; copy
+			move.w	d4,d0				; extra length needed
+			ext.l	d0
+			add.l	d7,d0				; add original length, get new length
+			_SetHandleSize
+			bmi.s	rtFixStack
+			move.l	(a4),a4				; baseText ptr
+
+			move.l	subsText(a6),a3		; reload subsText handle
+			move.l	(a3),a3				; subsText ptr
+
+; Now do substitution…
+; register usage after setup
+;	a4		baseText source pointer
+;	a3		subsText end pointer
+;	a2		temp stack pointer for traversing marker location list
+;	a1		baseText dest pointer
+;	a0		marker pointer / subsText source pointer
+;	d7.l	-(baseText length)
+;	d6		subsText length
+;	d5		key length
+;	d4		substitution count * (subsText length - key length)
+;	d3		substitution count
+;	d2.l	baseText base pointer + key length
+;	d1		remaining subs
+;	d0		subsText count for dbra
+;
+			move.l	sp,a2				; copy stack ptr
+			move.l	a4,a0				; copy baseText addr
+			add.w	d7,a4				; point after end of baseText (source ptr)
+			add.w	d5,d6				; make subsText length again
+			move.l	a4,a1				; copy pointer after end of baseText
+			add.w	d4,a1				; move past end of expanded space
+			add.w	d6,a3				; point after end of subsText
+			add.w	d5,a0				; adjust so we point to end of marker
+			move.l	a0,d2				; save adjusted base pointer
+			add.w	(a2)+,a0			; make first marker pointer
+			move.w	d3,d1				; remaining subs
+
+@copyBase
+;			cmp.l	a4,d2				; end of text?
+;			bhi.s	@copyDone			; quit if so
+			cmp.l	a4,a0				; next marker location?
+			beq.s	@copySubs			; if so, go copy substitution text
+			move.b	-(a4),-(a1)			; copy the byte
+			bra.s	@copyBase
+
+@copySubs
+			move.l	a3,a0				; source pointer
+			move.w	d6,d0				; length for dbra
+			bra.s	@copySubsEnter		; handle case of subsText len=0
+@copySubsLoop
+			move.b	-(a0),-(a1)			; copy the substitution byte
+@copySubsEnter
+			dbra	d0,@copySubsLoop	; until done
+
+			subq.w	#1,d1				; used up a sub
+			ble.s	@copyDone			; quit if last sub
+			move.l	d2,a0				; copy baseText addr
+			add.w	(a2)+,a0			; make next marker pointer
+			sub.w	d5,a4				; move baseText source pointer after key
+			bra.s	@copyBase
+			
+@copyDone
+
+; clean up and return
+rtSetResult
+			move.w	d3,d0				; set up result
+rtFixStack
+			add.w	d3,d3				; turn count into word offset
+			add.w	d3,sp				; kill temp storage
+rtBail
+			move.w	d0,result(a6)
+			movem.l	(sp)+,a2-a4/d3-d7	; restore registers
+			move.w	#rtArgs,d0			; set up for StdUnlink
+			bra		StdUnlink
+			endwith
+			
+			endproc
+			end

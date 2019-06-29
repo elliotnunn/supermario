@@ -1,0 +1,486 @@
+;
+;	File:		FPHWArith96.a
+;
+;	Contains:	HW Floating Point 96-bit routines for arithmetic functions of FP68K
+;
+;	Written by:	Apple Numerics Group, DSG
+;
+;	Copyright:	© 1985-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<SM2>	 2/3/93		CSS		Update from Horror:
+;		<H2>	 9/29/92	BG		Rolling in Jon Okada's latest fixes.
+;		 <1>	10/24/91	SAM/KSM	Rolled in Regatta file.
+;		
+;	Regatta Change History:
+;
+;		 <2>	 5/28/91	SAM		Merged from TERROR. [<2> Added Stuart McDonald's latest fixes
+;									(see below for details)]
+;		 <1>	 5/15/91	SAM		Split off from TERROR Proj.
+;
+;	Terror Change History:
+;
+;		 <1>	01/06/90	BG		Added to TERROR/BBS for the time.
+;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: FP881arith.a
+;; Implementation of FP68K arithmetic functions calling MC68881.
+;; Copyright Apple Computer, Inc. 1985,1986,1987,1989,1990
+;; All Rights Reserved
+;; Confidential and Proprietary to Apple Computer,Inc.
+;;
+;; Written by Clayton Lewis, begun 8 Feb 85.
+;; Debugged by Stuart McDonald.
+;;
+;; Modification history:
+;;   Rev2: 16 May 85
+;;   Rev3: 17 May 85
+;;   Rev5: 27 May 85
+;;   Rev9: 17 Jun 85
+;;   Rev10:19 Dec 85  streamline convert and scalb in concert with FPCtrl
+;;   Rev11:16 Jun 86 CRL moved to MPW
+;;   Rev12:29 Sep 86 Made E2{int,long} handle {NaN,Inf,Out-of-range} ala SANE. -S.McD.
+;;         29 Sep 86 Fixed spurious inexact in X2C's NanCreated. -S.McD.
+;;         26 Dec 86 Comp2X no longer stomps on its input. -S.McD.
+;;         27 Dec 86 Changes to ExitArgs routines:  -S.McD.
+;;		1) Added entry ExitProcExit for ProcExit finale;
+;;		2) Now restore FPSR/FPCR before halt check.
+;;		3) CompareCtnd now returns CCR in A1 instead of D1.
+;;         05 Jan 87 Fixed Classify; now handles DENORMALNUMs properly. -S.McD.
+;;         05 Jan 87 Scalb doesn't truncate subnormals to zero anymore. -S.McD.
+;;         05 Jan 87 Logb now handles zero and INF properly. -S.McD.
+;;         07 Jan 87 Scalb two days ago was buggy.  Fixed now. -S.McD.
+;;         11 Jan 87 Scalb doesn't truncate huge numbers to INF anymore. -S.McD.
+;;         15 Jan 87 Changed status and copyright information. -S.McD.
+;;         21 Jan 87 Cleaned up CompareCtnd code. -S.McD.
+;;         21 Jan 87 Cleaned up CPXxxx entries. -S.McD.
+;;         21 Jan 87 Cleaned up MoveQuot. -S.McD.
+;;         21 Jan 87 Cleaned up NaNInput. -S.McD.
+;;         23 Jan 87 Sqrt,Add,Div,Mul,Rem now return Apple's NaN codes. -S.McD.
+;;         29 Jan 87 Apple NaN logic speeded up. -S.McD.
+;;         29 Jan 87 Tossed FSCALE.  It prematurely UNFLs/OVFLs on A93N mask. -S.McD.
+;;   Rev13:18 Dec 89 Complete rewrite begins. -S.McD.
+;;		   22 May 90 Goes alpha for waimea.  Copyrights updated. -S.McD.
+;;		    7 Sep 90 Goes beta for Tim.  Updated version number.	-S.McD.
+;;		   30 Sep 90 Goes final for Terror alpha.	-S.McD. 
+;;		   19 May 91 Fixed spurious flag errors for FMOVEs in trap enabled cases.-S.McD.
+;;		   21 May 91 After first trap, futher traps MUST be disabled fix.  -S.McD.
+;;		   30 Mar 92 Modified LOGB96 front-end code for new algorithm.	-JPO
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+			MACRO
+			FOPSRC96.&SZ	&FOP
+			IF &SZ = 'C' THEN
+			&FOP..X	FP1,FP0
+.*			
+			ELSE
+.*			All others (.W, .L, .S, .D, .X):  operate directly into FP0.
+			&FOP..&SZ	([LKSRC,A6]),FP0
+			ENDIF
+			ENDM
+
+			
+			MACRO
+			QOP96.&SZ	&FOP,&OPCODE
+.*  		Link required by trap handler to determine arguments.
+			LINK	A6,#-LK2SIZE
+.*			
+.*			Popsize and opcode required by trap handler.
+			MOVE.L	#LK2POP+&OPCODE,LKOP(A6)
+.*
+			MOVE.L	A0,-(SP)
+
+			IF &SZ = 'C' THEN
+.*			Convert comp sources into FP1.
+			COMP2FP1
+			ENDIF
+
+			MOVEA.L	LKDST(A6),A0
+
+			IF &FOP <> 'FMOVE' THEN
+.*			Skip picking up DST if doing a conversion (FMOVE).
+			FMOVEM.X	(A0),FP0								;<5/19/91-S.McD.>				<T2>
+			ENDIF
+			
+			FOPSRC96.&SZ	&FOP
+			
+			FMOVE.X	FP0,(A0)
+
+			MOVE.L	(SP)+,A0
+			UNLK	A6
+			RTD		#8
+			ENDM
+
+			
+			MACRO
+			QCPX96.&SZ	&FOP,&OPCODE
+.*
+.*  		Link required by trap handler to determine arguments.
+			LINK	A6,#-LK2SIZE
+.*			
+.*			Popsize and opcode required by trap handler.
+			MOVE.L	#LK2POP+&OPCODE,LKOP(A6)
+.*
+			MOVEM.L	D0/A0,-(SP)	; MOVEM USED BECAUSE CCR IS UNAFFECTED
+
+			IF &SZ = 'C' THEN
+.*			Convert comp sources into FP1.
+			COMP2FP1
+			ENDIF
+
+			MOVEA.L	LKDST(A6),A0
+			FMOVEM.X	(A0),FP0								;<5/19/91-S.McD.>				<T2>
+			
+			FOPSRC96.&SZ	&FOP
+			
+			FPSR2CCX
+
+			MOVEM.L	(SP)+,D0/A0	; MOVEM USED BECAUSE CCR IS UNAFFECTED
+			UNLK	A6
+			RTD		#8
+			ENDM
+
+			
+			MACRO
+			QCMP96.&SZ	&FOP,&OPCODE
+.*
+.*  		Link required by trap handler to determine arguments.
+			LINK	A6,#-LK2SIZE
+.*			
+.*			Popsize and opcode required by trap handler.
+			MOVE.L	#LK2POP+&OPCODE,LKOP(A6)
+.*
+			MOVEM.L	D0/A0,-(SP)	; MOVEM USED BECAUSE CCR IS UNAFFECTED
+
+			IF &SZ = 'C' THEN
+.*			Convert comp sources into FP1.
+			COMP2FP1
+			ENDIF
+
+			MOVEA.L	LKDST(A6),A0
+			FMOVEM.X	(A0),FP0								;<5/19/91-S.McD.>				<T2>
+			
+			FOPSRC96.&SZ	&FOP
+			
+			FPSR2CC
+
+			MOVEM.L	(SP)+,D0/A0	; MOVEM USED BECAUSE CCR IS UNAFFECTED
+			UNLK	A6
+			RTD		#8
+			ENDM
+
+			
+			MACRO
+			QREM96.&SZ	&FOP,&OPCODE
+.*
+.*  		Link required by trap handler to determine arguments.
+			LINK	A6,#-LK2SIZE
+.*			
+.*			Popsize and opcode by trap handler.
+			MOVE.L	#LK2POP+&OPCODE,LKOP(A6)
+.*
+			MOVE.L	A0,-(SP)
+
+			IF &SZ = 'C' THEN
+.*			Convert comp sources into FP1.
+			COMP2FP1
+			ENDIF
+
+			MOVEA.L	LKDST(A6),A0
+			FMOVEM.X	(A0),FP0								;<5/19/91-S.McD.>				<T2>
+
+			FOPSRC96.&SZ	&FOP
+			
+			FMOVE.X	FP0,(A0)
+			
+			BSR		MOVEQUOT
+
+			MOVE.L	(SP)+,A0
+			UNLK	A6
+			RTD		#8
+			ENDM
+
+			
+			MACRO
+			QX2Z96.&SZ	&FOP,&OPCODE
+.*
+.*  		Link required by trap handler to determine arguments.
+			LINK	A6,#-LK2SIZE
+.*			
+.*			Popsize and opcode required by trap handler.
+			MOVE.L	#LK2POP+&OPCODE,LKOP(A6)
+.*
+			MOVE.L	A0,-(SP)
+			
+			MOVEA.L	LKSRC(A6),A0
+			FMOVEM.X	(A0),FP0		; FP0 := SRC			<5/19/91-S.McD.>				<T2>
+			
+			IF &SZ = 'C' THEN
+			FMOVEM.X	FP0,-(SP)								;<5/19/91-S.McD.>				<T2>
+			BRA		QX2CENTRY
+.*
+			ELSEIF (&SZ = 'W') OR (&SZ = 'L') THEN
+.*										; X-TO-{W OR L}; AVOIDS (INV,INX) RTN
+			FMOVEM.L	FPCR/FPSR,-(SP)	; SAVE ENV. TO AVOID SPURIOUS INX
+			MOVE.L	(SP),-(SP)			; REPLICATE FPCR
+			CLR.B	2(SP)				; CLEAR ALL TRAP ENABLES			<5/21/91-S.McD.>	<T2>
+			FMOVE.L	(SP)+,FPCR			; DISABLE TRAPPING FOR NEXT FOP
+			MOVEA.L		LKDST(A6),A0	; A0 := ADDRESS OF DST
+			FMOVE.&SZ	FP0,(A0)		; SPURIOUS INEXACT DISABLED!
+
+			FMOVE.L	FPSR,-(SP)			; PICK UP PREVIOUS OP FLAGS
+			BTST.B	#5,2(SP)			; DID IT SIGNAL INVALID?
+			ADDQ	#4,SP				; POP IT (CC NOT EFFECTED)
+			FMOVEM.L	(SP)+,FPCR/FPSR	; RESTORE OLD ENV (CC NOT EFFECTED)
+			BEQ.S	@0					; IF NOT, BRANCH: TYPICAL CASE
+			
+										; INVALID CASE:
+			FMOVE.S	#"$7FBFFFFF",FP1	; SIGNAL INVALID USING FLOAT SNAN
+			BRA.S	@1
+@0:										; TYPICAL CASE:
+			FMOVE.&SZ	FP0,(A0)		; RE-EXECUTE TO PICK UP INX SIG.
+@1:
+			FNOP						; (FNOP CATCHES SIG. BEFORE RTS)	
+			ELSE
+.*
+.*			All others {.S OR .D}:  move directly into memory.
+			MOVEA.L	LKDST(A6),A0
+			&FOP..&SZ	FP0,(A0)
+			FNOP						; (FNOP CATCHES SIG. BEFORE RTS)	
+			ENDIF
+
+			MOVE.L	(SP)+,A0
+			UNLK	A6
+			RTD		#8
+			ENDM
+	
+			
+			MACRO
+			QOP196.&SZ	&FOP,&OPCODE
+.*			This macro is used by the one argument functions: FSQRT, FINT, FINTRZ.
+.*
+.*  		Link required by trap handler to determine arguments.
+			LINK	A6,#-LK1SIZE
+.*			
+.*			Popsize and opcode required by trap handler.
+			MOVE.L	#LK1POP+&OPCODE,LKOP(A6)
+.*
+			MOVE.L	A0,-(SP)
+			
+			MOVEA.L	LKDST(A6),A0
+			&FOP..X	(A0),FP0
+
+			FMOVE.X	FP0,(A0)
+			
+			MOVE.L	(SP)+,A0
+			UNLK	A6
+			RTD		#4
+			ENDM
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ADDITION96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QADDX96:
+			QOP96.X	FADD, FFEXT+FOADD+FFEXT96
+QADDS96:
+			QOP96.S	FADD, FFSGL+FOADD+FFEXT96
+QADDD96:
+			QOP96.D	FADD, FFDBL+FOADD+FFEXT96
+QADDI96:
+			QOP96.W	FADD, FFINT+FOADD+FFEXT96
+QADDL96:
+			QOP96.L	FADD, FFLNG+FOADD+FFEXT96
+QADDC96:
+			QOP96.C	FADD, FFCOMP+FOADD+FFEXT96
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SUBTRACTION96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QSUBX96:
+			QOP96.X	FSUB, FFEXT+FOSUB+FFEXT96
+QSUBS96:
+			QOP96.S	FSUB, FFSGL+FOSUB+FFEXT96
+QSUBD96:
+			QOP96.D	FSUB, FFDBL+FOSUB+FFEXT96
+QSUBI96:
+			QOP96.W	FSUB, FFINT+FOSUB+FFEXT96
+QSUBL96:
+			QOP96.L	FSUB, FFLNG+FOSUB+FFEXT96
+QSUBC96:
+			QOP96.C	FSUB, FFCOMP+FOSUB+FFEXT96
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; MULTIPLICATION96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QMULX96:
+			QOP96.X	FMUL, FFEXT+FOMUL+FFEXT96
+QMULS96:
+			QOP96.S	FMUL, FFSGL+FOMUL+FFEXT96
+QMULD96:
+			QOP96.D	FMUL, FFDBL+FOMUL+FFEXT96
+QMULI96:
+			QOP96.W	FMUL, FFINT+FOMUL+FFEXT96
+QMULL96:
+			QOP96.L	FMUL, FFLNG+FOMUL+FFEXT96
+QMULC96:
+			QOP96.C	FMUL, FFCOMP+FOMUL+FFEXT96
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; DIVISION96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QDIVX96:
+			QOP96.X	FDIV, FFEXT+FODIV+FFEXT96
+QDIVS96:
+			QOP96.S	FDIV, FFSGL+FODIV+FFEXT96
+QDIVD96:
+			QOP96.D	FDIV, FFDBL+FODIV+FFEXT96
+QDIVI96:
+			QOP96.W	FDIV, FFINT+FODIV+FFEXT96
+QDIVL96:
+			QOP96.L	FDIV, FFLNG+FODIV+FFEXT96
+QDIVC96:
+			QOP96.C	FDIV, FFCOMP+FODIV+FFEXT96
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; COMPARISON96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QCPXX96:
+			QCPX96.X	FCMP, FFEXT+FOCPX+FFEXT96
+QCPXS96:
+			QCPX96.S	FCMP, FFSGL+FOCPX+FFEXT96
+QCPXD96:
+			QCPX96.D	FCMP, FFDBL+FOCPX+FFEXT96
+QCPXI96:
+			QCPX96.W	FCMP, FFINT+FOCPX+FFEXT96
+QCPXL96:
+			QCPX96.L	FCMP, FFLNG+FOCPX+FFEXT96
+QCPXC96:
+			QCPX96.C	FCMP, FFCOMP+FOCPX+FFEXT96
+QCMPX96:
+			QCMP96.X	FCMP, FFEXT+FOCMP+FFEXT96
+QCMPS96:
+			QCMP96.S	FCMP, FFSGL+FOCMP+FFEXT96
+QCMPD96:
+			QCMP96.D	FCMP, FFDBL+FOCMP+FFEXT96
+QCMPI96:
+			QCMP96.W	FCMP, FFINT+FOCMP+FFEXT96
+QCMPL96:
+			QCMP96.L	FCMP, FFLNG+FOCMP+FFEXT96
+QCMPC96:
+			QCMP96.C	FCMP, FFCOMP+FOCMP+FFEXT96
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; REMAINDER96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QREMX96:
+			QREM96.X	FREM, FFEXT+FOREM+FFEXT96
+QREMS96:
+			QREM96.S	FREM, FFSGL+FOREM+FFEXT96
+QREMD96:
+			QREM96.D	FREM, FFDBL+FOREM+FFEXT96
+QREMI96:
+			QREM96.W	FREM, FFINT+FOREM+FFEXT96
+QREML96:
+			QREM96.L	FREM, FFLNG+FOREM+FFEXT96
+QREMC96:
+			QREM96.C	FREM, FFCOMP+FOREM+FFEXT96
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; CONVERSIONS96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QX2X96:
+			QOP96.X	FMOVE, FFEXT+FOZ2X+FFEXT96
+QS2X96:
+			QOP96.S	FMOVE, FFSGL+FOZ2X+FFEXT96
+QD2X96:
+			QOP96.D	FMOVE, FFDBL+FOZ2X+FFEXT96
+QI2X96:
+			QOP96.W	FMOVE, FFINT+FOZ2X+FFEXT96
+QL2X96:
+			QOP96.L	FMOVE, FFLNG+FOZ2X+FFEXT96
+QC2X96:
+			QOP96.C	FMOVE, FFCOMP+FOZ2X+FFEXT96
+
+QX2S96:
+			QX2Z96.S	FMOVE, FFSGL+FOX2Z+FFEXT96
+QX2D96:
+			QX2Z96.D	FMOVE, FFDBL+FOX2Z+FFEXT96
+QX2I96:
+			QX2Z96.W	FMOVE, FFINT+FOX2Z+FFEXT96
+QX2L96:
+			QX2Z96.L	FMOVE, FFLNG+FOX2Z+FFEXT96
+QX2C96:
+			QX2Z96.C	FMOVE, FFCOMP+FOX2Z+FFEXT96
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SQUARE ROOT96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QSQRTX96:
+			QOP196.X	FSQRT,	FOSQRT+FFEXT96
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ROUND TO INTEGRAL VALUE96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QRINTX96:
+			QOP196.X	FINT,	FORTI+FFEXT96
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; TRUNCATE TO INTEGRAL VALUE96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QTINTX96:
+			QOP196.X	FINTRZ,	FOTTI+FFEXT96
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SCALB96	...THIS CODE WILL FLUSH SUBNORMS TO ZERO ON OLD MASK A93N 881s!
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QSCALBX96:								; NOTE: FSCALE.W REQUIRES |D0| < 2^14.
+			LINK	A6,#-LK2SIZE
+			MOVE.L	#LK2POP+FFINT+FOSCALB+FFEXT96,LKOP(A6)
+			MOVEM.L	 D0/A0,-(SP)
+
+			MOVEA.L	LKDST(A6),A0
+			FMOVEM.X	(A0),FP0								;<5/19/91-S.McD.>		<T2>
+
+			BRA		QSCALBENTRY
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; LOGB96
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QLOGBX96:
+			LINK	A6,#-LK1SIZE
+			MOVE.L	#LK1POP+FOLOGB+FFEXT96,LKOP(A6)
+;			MOVE.L	 A0,-(SP)							; DELETED <3/30/92, JPO>
+			movem.l	a0/d0,-(sp)							; new routine uses A0/D0 <3/30/92, JPO>
+		
+			MOVEA.L	LKDST(A6),A0
+;			FABS.X	(A0),FP0							; DELETED <3/30/92, JPO>
+	
+			BRA		QLOGBXENTRY
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; CLASSIFY96
+;; CLASS PLACES INTEGER CODE AT DST ADDRESS.  THE CODE TIES
+;; IN USEFULLY WITH THE PASCAL ENUMERATED TYPES IN SANE.
+;; IT IS THE SANE VALUE PLUS ONE, WITH THE SIGN OF THE INPUT
+;; OPERAND.	IN SANE, THE SIGN IS PLACED IN A SEPARATE INT.
+;; THE VALUES ARE THUS:
+;;	SNAN	1					...GADZOOKS!  WHY ALL THIS CODE FOR CLASSIFY?!!?
+;;	QNAN	2					...WELL, WE NOW NORMALIZE UNNORMAL NUMS BEFORE
+;;	INF		3					...CLASSIFICATION.  ALSO, THIS CODE AVOIDS USING
+;;	ZERO	4					...THE FPU AND IS OPTIMIZED FOR THE TYPICAL CASE.
+;;	NORMAL	5					...IT'S STILL GROSS, IN RETROSPECT.
+;;	DENORM	6
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+QCLASSX96:
+			FMOVEM.X	([8,SP]),FP0; REGISTERLESSLY PUSH SRC 96 ARGUMENT
+			FMOVEM.X	FP0,-(SP)
+			MOVE.W	(SP)+,(SP)		; POP EXPONENT WORD INTO JUNK WORD LEAVING 80BIT TMP
+			PEA		(SP)			; PUSH NEW TMP SRC ADDRESS
+			MOVE.L	4+10+4(SP),-(SP); PUSH USER'S DST ADDRESS
+			BSR		QCLASSX			; CLASSIFY IT
+			LEA		10(SP),SP		; POP 80 BIT TMP
+			RTD		#8				; RETURN

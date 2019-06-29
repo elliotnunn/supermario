@@ -1,0 +1,238 @@
+;
+;	File:		RRects.a
+;
+;	Contains:	procedures for operating on RoundRects
+;
+;	Written by:	EHB & BAL
+;
+;	Copyright:	© 1981-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM2>	 6/11/92	stb		<sm 6/9/92>stb Synch with QDciPatchROM.a; added comments to
+;									StdRRect
+;	  <•1.4>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;	  <•1.3>	 4/12/89	BAL		Blasting in 32-Bit QuickDraw 1.0B1
+;				  1/8/89	BAL		Vectorized CheckPic
+;				 8/16/86	EHB		In FillRoundRect, call setFillPat for color pattern support
+;				  8/5/86	EHB		Added FillCRoundRect
+
+		BLANKS	ON
+		STRING	ASIS
+
+;-----------------------------------------------------------
+;
+;
+;	  ****	 ****	*****	***   *****   ***
+;	  *   *  *	 *	*	   *   *	*	 *	 *
+;	  *   *  *	 *	*	   *		*	 *
+;	  ****	 ****	***    *		*	  ***
+;	  * *	 * *	*	   *		*		 *
+;	  *  *	 *	*	*	   *   *	*	 *	 *
+;	  *   *  *	 *	*****	*** 	*	  ***
+;
+;
+
+StdRRect PROC  EXPORT	
+		IMPORT CheckPic,DPutPicOp,PutPicVerb,PutPicLong,PutPicRect
+		IMPORT PutOval,PushVerb,DrawArc
+;---------------------------------------------------------------
+;
+;  PROCEDURE StdRRect(verb: GrafVerb; r: Rect; ovWd,ovHt: INTEGER);
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+; added CheckPic from QDciPatchROM.a										<sm 6/9/92>stb
+
+PARAMSIZE		EQU 	10
+VERB			EQU 	PARAMSIZE+8-2		;GRAFVERB
+RECT			EQU 	VERB-4				;LONG, ADDR OF RECT
+OVWD			EQU 	RECT-2				;WORD
+OVHT			EQU 	OVWD-2				;WORD
+
+		LINK	A6,#0						;NO LOCALS
+		MOVEM.L D7/A3-A4,-(SP)				;SAVE REGS
+		MOVE.B	VERB(A6),D7 				;GET VERB
+		_CheckPic							;SET UP A4,A3 AND CHECK PICSAVE
+		BLE.S	NOTPIC						;BRANCH IF NOT PICSAVE
+
+		MOVE.B	D7,-(SP)					;PUSH VERB
+		JSR		PutPicVerb					;PUT ADDIONAL PARAMS TO THEPIC
+;
+;  CHECK FOR NEW OVAL SIZE
+;
+		MOVE.L	PICSAVE(A3),A0				;GET PICSAVE HANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE PICSAVE
+		MOVE.L	OVHT(A6),D0 				;GET OVWD AND OVHT
+		CMP.L	PICOVSIZE(A0),D0			;SAME AS CURRENT OVAL SIZE ?
+		BEQ.S	OVALOK						;YES, CONTINUE
+		MOVE.L	D0,PICOVSIZE(A0)			;NO, UPDATE STATE VARIABLE
+		MOVE.L	D0,-(SP)					;PUSH OVSIZE FOR PutPicLong CALL
+		MOVEQ	#opOVSize,D0				;GET OVSIZE OPCODE
+		JSR		DPutPicOp	 				;PUT OVSIZE OPCODE
+		JSR		PutPicLong					;PUT NEW OVAL SIZE DATA
+
+OVALOK	MOVEQ	#$40,D0 					;PUT RRECT NOUN IN HI NIBBLE
+		ADD 	D7,D0						;PUT VERB IN LO NIBBLE
+		MOVE.B	D0,-(SP)					;PUSH OPCODE
+		MOVE.L	RECT(A6),-(SP)				;PUSH ADDR OF RECT
+		JSR 	PutPicRect					;PUT OPCODE AND RECTANGLE
+
+;  CALL STANDARD LOOP TO DRAW TO ALL DEVICES
+
+NOTPIC	PEA		StdDraw						;PUSH ADDRESS OF DRAW ROUTINE
+		PEA		GetRect						;PUSH ADDRESS OF RECT ROUTINE
+		_StdDevLoop							;DRAW TO ALL DEVICES
+
+		MOVEM.L (SP)+,D7/A3-A4				;RESTORE REGS
+		UNLINK	PARAMSIZE,'STDRRECT'
+
+		
+;---------------------------------------------------------------
+;
+;	PROCEDURE GetRect(VAR theRect: rect); 
+;
+;	RETURN THE OBJECT'S RECTANGLE
+;
+GetRect	MOVE.L	(SP)+,D0					;GET RETURN ADDRESS
+		MOVE.L	(SP)+,A1					;GET DST RECT
+		MOVE.L	RECT(A6),A0					;GET SRC RECT
+		MOVE.L	(A0)+,(A1)+					;SET TOPLEFT
+		MOVE.L	(A0),(A1)					;SET BOTRIGHT
+		MOVE.L	D0,A0						;GET RETURN ADDRESS
+		JMP		(A0)						;AND RETURN
+
+
+;---------------------------------------------------------------
+;
+;	PROCEDURE StdDraw; 
+;
+;	DRAW THE OBJECT
+;
+StdDraw	MOVE.L	RECT(A6),-(SP)				;PUSH ADDR OF RECT
+		CLR.B	-(SP)						;PUSH HOLLOW = FALSE
+		TST.B	D7							;IS VERB FRAME ?
+		BNE.S	DOIT						;NO, CONTINUE
+		TST.L	RGNSAVE(A3) 				;YES, IS RGNSAVE TRUE ?
+		BEQ.S	NOTRGN						;NO, CONTINUE
+
+		MOVE.L	RECT(A6),-(SP)				;YES, PUSH ADDR OF RECT
+		MOVE.L	OVHT(A6),-(SP)				;PUSH OVWD, OVHT
+		MOVE.L	RGNBUF(A4),-(SP)			;PUSH RGNBUF
+		PEA 	RGNINDEX(A4)				;PUSH VAR RGNINDEX
+		PEA 	RGNMAX(A4)					;PUSH VAR RGNMAX
+		_PutOval 							;ADD AN OVAL TO THERGN
+
+NOTRGN	MOVE.B	#1,(SP) 					;REPLACE, PUSH HOLLOW = TRUE
+DOIT	MOVE.L	OVHT(A6),-(SP)				;PUSH OVWD,OVHT
+		_PushVerb							;PUSH MODE AND PATTERN
+		CLR 	-(SP)						;PUSH STARTANGLE = 0
+		MOVE	#360,-(SP)					;PUSH ARCANGLE = 360
+
+;  DrawArc(r,hollow,ovWd,ovHt,mode,pat,startAng,arcAng);
+
+		_DrawArc
+		RTS
+		
+
+
+FrameRoundRect	PROC	EXPORT 		
+				EXPORT	CallRRect,PaintRoundRect,EraseRoundRect
+				EXPORT	InvertRoundRect,FillRoundRect,FillCRoundRect
+				IMPORT	SETFILLPAT
+;--------------------------------------------------------
+;
+;  PROCEDURE FrameRoundRect(* r: Rect; ovWd,ovHt: INTEGER *);
+;
+		MOVEQ	#FRAME,D0					;VERB = FRAME
+		BRA.S	CallRRect					;SHARE COMMON CODE
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE PaintRoundRect(* r: Rect; ovWd,ovHt: INTEGER *);
+;
+PaintRoundRect
+		MOVEQ	#PAINT,D0					;VERB = PAINT
+		BRA.S	CallRRect					;SHARE COMMON CODE
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE EraseRoundRect(* r: Rect; ovWd,ovHt: INTEGER *);
+;
+EraseRoundRect
+		MOVEQ	#ERASE,D0					;VERB = ERASE
+		BRA.S	CallRRect					;SHARE COMMON CODE
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE InvertRoundRect(* r: Rect; ovWd,ovHt: INTEGER *);
+;
+InvertRoundRect
+		MOVEQ	#INVERT,D0					;VERB = INVERT
+		BRA.S	CallRRect					;SHARE COMMON CODE
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE FillRoundRect(r: Rect; ovWd,ovHt: INTEGER; pat: Pattern);
+;
+FillRoundRect
+		MOVEQ	#0,D0						;FLAG = FillRoundRect
+		BRA.S	SHARE						; => USE COMMON CODE
+		
+		
+;----------------------------------------------------------
+;
+;  PROCEDURE FillCRoundRect(r: Rect; ovWd,ovHt: INTEGER; PPH: PixPatHandle);
+;
+FillCRoundRect
+		MOVEQ	#1,D0						;FLAG = FillCRoundRect
+
+SHARE	MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,A1					;POP ADDR OF PATTERN
+		MOVE.L	A0,-(SP)					;PUT RETURN ADDR BACK
+		MOVE.L	A1,-(SP)					;PUSH ADDR OF PATTERN
+		_SETFILLPAT							;FILLPAT := PAT
+		MOVEQ	#FILL,D0					;VERB = FILL
+;		BRA.S	CallRRect					;SHARE COMMON CODE
+
+
+
+;---------------------------------------------------------------
+;
+;  PROCEDURE CallRRect(r: Rect; ovWd,ovHt: INTEGER);
+;
+;  code shared by FrameRoundRect, PaintRoundRect, EraseRoundRect,
+;		  InvertRoundRect, and FillRoundRect.
+;  enter with verb in D0.
+;
+CallRRect
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,D1					;POP ovWd and ovHt
+		MOVE.L	(SP)+,A1					;POP ADDR OF RECT
+		MOVE.B	D0,-(SP)					;PUSH VERB
+		MOVE.L	A1,-(SP)					;PUSH ADDR OF RECT
+		MOVE.L	D1,-(SP)					;PUSH ovWd and ovHt
+		MOVE.L	A0,-(SP)					;RESTORE RETURN ADDR
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE.L	GRAFPROCS(A0),D0			;IS GRAFPROCS NIL ?
+		MOVE.L	JStdRRect,A0				;get piece of trap table
+		BEQ.S	USESTD						;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	RRECTPROC(A0),A0			;NO, GET PROC PTR
+USESTD	JMP 	(A0)						;GO TO IT
+
+
+
+
+
+		ENDPROC 
+
+
+
+
+

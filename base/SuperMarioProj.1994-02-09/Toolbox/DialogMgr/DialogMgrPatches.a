@@ -1,0 +1,751 @@
+;
+;	File:		DialogMgrPatches.a
+;
+;	Contains:	Various fixes to the Dialog Manager
+;
+;	Written by:	Scott Boyd and Kevin MacDonell
+;
+;	Copyright:	© 1990-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<29>	12/17/92	JSM		Fix bug in DialogSelectFixes patch where item hit was not being
+;									set to -1 (just putting it in D3 isn’t enough, since we jump
+;									back into ROM after the point where D3 is stuffed into
+;									DSItemHit).  This code path appears to be rarely taken, so the
+;									bug probably doesn't show up much (I discovered it just looking
+;									at the code).
+;		<28>	 6/11/92	JSM		Add comments about IIci patches that have been rolled into
+;									DialogMgr.a: IsDialogEventFixes, DialogSelectFixes, DSEditPatch,
+;									FixDoAlertToDisposeCIconHandles, FixDoStaticSub, and
+;									DontPurgeDialogColorTables.
+;		<27>	 6/10/92	JSM		Move some routines common to both ROM and System to
+;									DialogMgrExtensions.a from this file, don’t define kOSEvent
+;									here, use osEvt from SysEqu.a instead, change DSEditPatch to
+;									just jump to the common routine DSEdit in DialogMgrExtensions.a.
+;		<26>	 2/13/92	KSM		xxx: #1019549: Fix ROM bind "AfterH2HinDoStatic" re: <23> for
+;									Plus and SE - off by 4!
+;		<25>	 9/20/91	JSM		Fix screwed up and missing comments from revisions past, move
+;									all ROM binds closer to where they're used.
+;		<24>	 9/19/91	JSM		Nuke come-from on _GetCIcon that fixed bug in
+;									[Could|Free][Alert|Dialog], since these traps are completely
+;									patched out by this file already. (However, I also rolled the
+;									patch into DialogMgr.a for no good reason.)
+;		<23>	 8/22/91	KSM		DCC,#Bruges: New citation substitution algorithm that fixes both
+;									the 2-byte problem and the recursive crash.
+;		<22>	  4/5/91	dba		gbm, KSM: enable fix to 'actb' and 'dctb' purging
+;		<21>	 3/31/91	dba		gbm, #85902: patch the Dialog Manager so actb and dctb resources
+;									don’t get purged
+;		<20>	 3/27/91	DC		KSM, #85626:  Rewrite patches to TEDelete and TEPaste (revision
+;									15)
+;		<19>	  3/4/91	dba		dty: get rid of SysVers conditionals
+;		<18>	 2/25/91	dba		KSM, #dba022505: remove 12 bytes of parameters from
+;									DialogSelect, instead of 4 (which was wrong)
+;		<17>	 1/14/91	KSM		<ddc> Call StdEntry/StdExit around patches to TEPaste/Delete.
+;		<16>	  1/5/91	fjs		(KSM) do not allow non-printing function keys
+;		<15>	 12/7/90	DC		<dba> Fixed bug in DlgCut, DlgPaste and DlgClear that cuased the
+;									wrong color and style of text to be drawn into an editText item
+;		<14>	 12/7/90	JSM		<dba> Move patch on _DisposDialog and come-from patches on
+;									_GetAuxWin, _DetachResource, and _SetWinColor here from
+;									PatchIIROM.a; make CouldDialog, FreeDialog, CouldAlert, and
+;									FreeAlert do nothing for 7.0 and beyond.
+;		<13>	11/27/90	JSM		<gbm> Move come-from patch on _SetPort inside DrawItem here from
+;									PatchIIROM.a.
+;		<12>	11/26/90	JSM		<bbm> Enable come-from patch on _DisposeHandle inside
+;									CloseDialog for the SE and II (it was already here for the
+;									Plus), move come-from patch on _ValidRect inside SetIText here
+;									from Patch[PlusSEII]ROM.a.
+;		<11>	11/16/90	KSM		<dba>Fix bug where Stop/Note/Caution Alert call GetCIcon but
+;									never calls DisposeCIcon.  Also fix bug in CouldAD and FreeAD
+;									where it calls GetCIcon rather than GetResource('cicn') and
+;									H[No]Purge that handle.
+;		<10>	11/14/90	JSM		<bbm> Move come-from patch on _TEAutoView to fix destRect here
+;									from Patch[PlusPortableSE]ROM.a.
+;		 <9>	11/12/90	dba		& KSM; get rid of a warning by removing the equate for the
+;									high-level event number
+;		 <8>	 9/24/90	KSM		<dba>Let’s return thru the right address in the TEKey patch.
+;		 <7>	 8/28/90	DFH		Correct capitialiazion of highLongOfPSN and lowLongOfPSN
+;		 <6>	 8/17/90	dba		move Plus patch to CloseDialog here (come-from on DisposeHandle)
+;		 <5>	  8/7/90	KSM		Fix bug in DialogSelect patch. Add Cut/Copy/Paste to
+;									DialogSelect via comefrom on TEKey.
+;		 <4>	 7/16/90	stb		resynch with process manager, which now uses FSSpec’s rather
+;									than filename for GetProcessInfo
+;		 <3>	 7/10/90	stb		bug fix
+;		 <2>	 6/26/90	stb		Add patches for IsDialogEvent and DialogSelect to deal with nil
+;									windows. Also patches to deal with kOSEvents as suspend/resume
+;									for those apps which don't otherwise get [de]activate events.
+;									Also patches to ignore high-level events.
+;		 <1>	  6/5/90	stb		first checked in
+;
+
+		load	'StandardEqu.d'
+		include	'LinkedPatchMacros.a'
+		include 'LayerEqu.a'
+
+; ROM binds used in several patches
+
+DialogStdEntry					ROMBind	(Plus, $14C50), (SE, $0F272), (II, $13CC0), (Portable, $12F78), (IIci, $19D76)
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	The ROM default sound routine for the dialog manager doen’t preserve a1/d2.
+;	The fix is to duplicate the code in initDialog till the sound routine is
+;	set up and then jump to rom to continue with the rest of InitDialog.
+;
+;	This patch has been rolled into DialogMgr.a.
+;
+
+ROMInitDialogContinue			ROMBind	(Plus, $148CC), (SE, $0EEEE), (II, $13852), (Portable, $12BEA), (IIci, $198E4)
+
+FixSoundInDialog PatchProc _InitDialogs,(Plus,SE,II,Portable,IIci)
+
+				jsrrom		DialogStdEntry			; duplicate the rom code.
+				MOVE.L		8(A6), ResumeProc 		; Get restartProc pointer to save
+				CLR.W		ACount					; Say starting with 0 for count
+				ST			ANumber 				; some bogus ANumber
+				LEA 		DABeeper,A0 			; clear the string handles
+				LEA 		myZounds,A1				; point to default sound routine
+				jmprom		ROMInitDialogContinue	; finish the rest of this routine in rom.
+
+;--------------
+; myZounds:	Default sound proc
+;
+;	0(sp)	(long) return address
+;	4(sp)	(word) number of beeps
+
+myZounds
+				tst.w		4(sp)					; check parameter passed in
+				beq.s		@exit					; see if number of beeps is zero
+@Loop
+				move		#3,-(sp)				; decent beep tone
+				_SysBeep							;
+				move		#6,A0					; delay 1/10 second
+				_Delay								;
+				sub.w		#1,4(sp)				; any more beeps?
+				bne.s		@Loop					;
+@exit
+				move.l		(sp)+,A0				; get return address
+				add.w		#2,sp					; ... pop off parameter
+				jmp			(A0)					; ... and return
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	IsDialogEvent no-windows fix.
+;		With this patch, IsDialogEvent returns FALSE rather than looking at low memory if there is no
+;		window (FrontWindow returns NIL).
+;
+;	kHighLevelEvent fix.
+;		High-level events are not dialog events.  They will be ignored.
+;
+;	app4 (osEvt) fix.
+;		Return false if the event is an app4 event and not a suspend or resume event.
+;
+;	IsDialogEvent suspend/resume for doOwnActivate process fix.
+;		This will treat a suspend/resume as an activate/deactivate if the process
+;		is set for for doOwnActivate.
+;
+; Registers Used
+; --------------
+; a2 gets and holds the address of the event record
+; a4 gets the dialog window (if any) from ClaimEvent
+; d3 trashed
+;
+; This patch has been rolled into DialogMgr.a.
+;
+
+ROMIsDiaClaimEvent				ROMBind	(Plus, $14B48), (SE, $0F16A), (II, $13B98), (Portable, $12E6C), (IIci, $19C4E)
+IsDiaNotDlgExit					ROMBind	(Plus, $14B96), (SE, $0F1B8), (II, $13BE6), (Portable, $12EBA), (IIci, $19C9C)
+IsDiaAfterClaimEvent			ROMBind	(Plus, $14B6E), (SE, $0F190), (II, $13BBE), (Portable, $12E92), (IIci, $19C74)
+
+IsDialogEventFixes PatchProc _IsDialogEvent,(Plus,SE,II,Portable,IIci)
+
+IsDiaRtnAddress	EQU 		4						; EventDialog return address
+IsDiaEvent 		EQU 		IsDiaRtnAddress+4 		; in event
+IsDiaResult		EQU 		IsDiaEvent+4			; function result
+
+				IMPORT		NotOwnActivator
+				IMPORT		FakeUpEvent
+
+				jsrrom		DialogStdEntry			; duplicate the rom code, preserve a2-a4/d3-d7
+
+				; check if this is a dialog event
+
+				clr.w		IsDiaResult(a6)			; assume failure
+
+				move.l		IsDiaEvent(a6),a2 		; get the event pointer
+				jsrrom		ROMIsDiaClaimEvent		; now A4 points to dialog window
+				move.l		a4,d3					; test result
+				beq.s		@NotValid				; no window; not a dialog event exit through ROM
+
+; Is this a kHighLevelEvent?
+				move.w		EvtNum(a2),d3
+				cmpi.w		#kHighLevelEvent,d3		; is this a high-level event?
+				beq.s		@NotValid				; if so, it's not a dialog event!
+
+; Is this a osEvt?
+				cmpi.w		#osEvt,d3				; is this a suspend/resume/mouse-moved/app-died event?
+				bne.s		@Valid					; we're still here?  must be ok (unless we forgot something).
+
+; Is this a suspend or resume?
+				cmpi.b		#1,evtMessage(a2)		; high-order byte holds type of event, 1 => suspend/resume
+				bne.s		@NotValid				; it's not, so it's some other osEvt, return FALSE
+
+; Check to see if this process requires its own activate event.
+; If it is, fake [de]activate event on the stack.
+
+				jsr			NotOwnActivator
+				beq.s		@NotValid				; Doesn't require own activate event, so get out
+
+				jsr			FakeUpEvent				; Build a fake event on the stack, make room for a short
+													;	result, and push the event record address
+
+				_IsDialogEvent						; Find out whether this one qualifies as a dialog event
+				move.w		(sp)+,IsDiaResult(a6)	; pop the result
+
+				add.w		#evtBlkSize,sp			; pop the event record
+
+; Unlink A6, restore regs, pop D0 byte for parameters.
+				movem.l 	(sp)+,a2-a4/d3-d7		; Restore regs
+				unlk		a6
+				move.l		(sp)+,(sp)				; Pop off 4 bytes of parameters (wierd idiom)
+				rts									; return
+
+@Valid
+				jmprom		IsDiaAfterClaimEvent	; rejoin the ROM
+@NotValid
+				jmprom		IsDiaNotDlgExit			; not a dialog event; exit through ROM
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	DialogSelect no-windows fix.
+;		With this patch, DialogSelect returns FALSE rather than looking at low memory
+;		when FrontWindow returns NIL.
+;
+;	DialogSelect suspend/resume for doOwnActivate process fix.
+;		This will treat a suspend/resume as an activate/deactivate if the process is set for
+;		for doOwnActivate.  It clones the event onto the stack and calls DialogSelect again.
+;		Everyone in the patch chain gets a crack at the new event.
+;
+; Registers Used
+; --------------
+; a2 gets and holds the address of the event record
+; a4 gets the dialog window (if any)
+; d3 trashed
+;
+; This patch has been rolled into DialogMgr.a.
+;
+
+DSAfterClaimEvent				ROMBind	(Plus, $14BAE), (SE, $0F1D0), (II, $13C00), (Portable, $12ED4), (IIci, $19CB6)
+DSNotMineExit					ROMBind	(Plus, $14BD6), (SE, $0F1F8), (II, $13C28), (Portable, $12EFC), (IIci, $19CDE)
+
+DialogSelectFixes PatchProc _DialogSelect,(Plus,SE,II,Portable,IIci)
+
+DSRetAddr		EQU 		4						; EventDialog return address
+DSItemHit		EQU 		DSRetAddr+4 			; item clicked on
+DSWindow		EQU 		DSItemHit+4 			; returned dialog wondow VAR
+DSEvent 		EQU 		DSWindow+4				; in/out event
+DSResult		EQU 		DSEvent+4				; function result
+
+				IMPORT		NotOwnActivator
+				IMPORT		FakeUpEvent
+
+				jsrrom		DialogStdEntry			; duplicate the rom code, preserve a2-a4/d3-d7
+
+; check if this is a dialog event
+
+				clr.w		DSResult(a6)			; Set return boolean, assume failure
+				movea.l		DSWindow(a6), a3		; Get VAR address of dialog pointer
+				clr.l		(a3)					; Set to NIL, assuming failure
+
+				movea.l		DSEvent(A6), a2 		; Check event classification and get dialog ptr
+
+				jsrrom		ROMIsDiaClaimEvent		; now A4 points to dialog window
+				move.l		a4,d3					; test result
+				beq.s		@NotValid				; no window; not a dialog event exit through ROM
+
+; Is this a osEvt?
+				move.w		EvtNum(a2),d3
+				cmpi.w		#osEvt,d3				; is this a suspend/resume/mouse-moved/app-died event?
+				bne.s		@Valid					; we're still here?  must be ok (unless we forgot something).
+
+; Is this a suspend or resume?
+				cmpi.b		#1,evtMessage(a2)		; high-order byte holds type of event, 1 => suspend/resume
+				bne.s		@NotValid				; it's not, so it's some other osEvt, return FALSE
+
+; Check to see if this process requires its own activate event.
+; If it is, fake [de]activate event on the stack.
+
+				jsr			NotOwnActivator
+				beq.s		@NotValid				; Doesn't require own activate event, so get out
+
+				jsr			FakeUpEvent				; Build a fake event on the stack, make room for a short
+													;	result, and push the event record address
+				move.l		DSWindow(a6),-(sp)		; VAR dialogPtr
+				move.l		DSItemHit(a6),-(sp)		; VAR itemHit
+
+				_DialogSelect						; Try again with new event record
+				move.w		(sp)+,DSResult(a6)		; pop the result
+
+				add.w		#evtBlkSize,sp			; pop the event record
+
+; Unlink A6, restore regs, pop D0 byte for parameters.
+				movem.l 	(sp)+,a2-a4/d3-d7		; Restore regs
+				unlk		a6
+				move.l		(sp)+,a0				; get the return address				<18>
+				lea			12(sp),sp				; deallocate 12 bytes of parameters		<18>
+				jmp			(a0)					; return								<18>
+
+@Valid
+				jmprom		DSAfterClaimEvent		; rejoin the ROM
+@NotValid
+				moveq		#-1,d3
+				move.l		DSItemHit(a6), a0		; get VAR address of user’s item		<29>
+				move.w		d3, (a0)				; Save item number hit					<29>
+				jmprom		DSNotMineExit			; not a dialog event; exit through ROM
+
+				EndProc
+				
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _TEKey inside DBKeyDown
+;
+; This patch adds support for cut/copy/paste to _DialogSelect.  Calls DSEdit in DialogMgrExtensions.a.
+;
+; This patch has been rolled into DialogMgr.a.
+;
+
+TEKeyFromEventAD				ROMBind	(Plus, $1537A), (SE, $0F9A8), (II, $1454A), (Portable, $136DA), (IIci, $1A656)
+
+DSEditPatch		ComeFromPatchProc	_TEKey,TEKeyFromEventAD,(Plus,SE,II,Portable,IIci)
+
+				import		DSEdit
+				jmp			DSEdit
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _DisposeHandle inside CloseDialog
+;
+; What used to happen:
+;	GetNewDialog and NewDialog did a TENew to create a "floating" TextEdit record to share
+;	amongst all editable text items.  It threw away the created hText handle and shuttled
+;	handles to the various text items cloned from the item list.  When CloseDialog came
+;	around, because hText would be disposed, it was decided to directly dispose the TEHandle
+;	rather than call TEDispose.  This was fine when the only handle TENew created aside from
+;	the TERecord itself was for text.
+; What happens now:
+;	TextEdit creates at least one additional record now.  Set up a NIL for hText, then
+;	call TEDispose to do the right thing.
+
+AfterDisposeHandleInCloseDialog ROMBind (Plus, $14CC0), (SE, $0F2E2), (II, $13D46)
+
+CloseDialogTextEditPatch ComeFromPatchProc _DisposeHandle,AfterDisposeHandleInCloseDialog,(Plus,SE,II)		; <12>
+
+				Move.L	A0,-(SP)			; pass TEHandle to TEDispose
+				Move.L	(A0),A0				; Dereference TEHandle
+				Clr.L	teTextH(A0)			; Stuff fake text handle
+				_TEDispose					; (TEHandle is still on stack!)
+				Rts							; back to caller
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _TEAutoView inside SetNewEdit												<10>
+;
+; This patch fixes a bug in the Dialog Manager that occurs with right
+; justified text.  The destRect allocated for TextEdit items in dialogs
+; is made twice as wide as the dialog item bounding rectangle.  This puts
+; right justified text outside the bounding rectangle, where the user just
+; can't see it.  (No matter how hard he tries.)
+; <lms 10/12/88>
+
+AfterTEAutoViewInSetNewEdit		ROMBind (Plus, $154D2), (SE, $0FB00), (Portable, $1383C)
+
+SetNewEditTEAutoView	ComeFromPatchProc _TEAutoView,AfterTEAutoViewInSetNewEdit,(Plus,SE,Portable)
+
+; d0, d1 & a0 are set upon entry here by the Dialog Manager
+
+; Turn the autoscroll off always!
+				tst.w	teSysJust			; teSysJust set? <21Nov86  jdt>
+				beqOld						; no -> bail out. <21Nov86  jdt>
+
+; We want to detect when the box is doubled in width, and reverse it.
+; 	(a0) is teDestRect.right.
+; 	a0 is the teRect.
+; 	d0 is the adjusted top (for comparison with the bottom).
+
+				cmp.w	-2(a0),d0			; repeat rom test.
+				bltOld						; no fix necessary.
+				add.w	d1,(a0)				; fix right (d1 is negative).
+
+				jmpOld						; continue
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; FixDoAlertToDisposeCIconHandles
+; Note/Caution/Stop ALERT all call GetCIcon, then PlotCIcon, but never do they dispose the handle.
+; This patches that PlotCIcon to follow with a DisposeCIcon.
+;
+; This patch has been rolled into DialogMgr.a.
+;
+
+AfterPlotCIconInDoAlert			ROMBind	(II, $139B2), (IIci, $19A48)
+
+FixDoAlertToDisposeCIconHandles ComeFromPatchProc _PlotCIcon,AfterPlotCIconInDoAlert,(II,IIci)
+
+				move.l	8(SP),4(SP)		; Move the rect over the CIconHandle
+				move.l	D0,(SP)			; Put the CIconHandle over the return addr
+				move.l	D0,8(SP)		; Put a CIconHandle under these for Dispose call
+				jsrOld					; Go do the PlotCIcon
+				_DisposeCIcon			; Nuke the CIconHandle
+				jmpROM	AfterPlotCIconInDoAlert
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _ValidRect inside SetIText													<12>
+;
+; SetIText calls a utility routine, DrawItem, which clobbers D6 even though D6 has a
+; handle which will be referenced later.  This patch restores the register.
+
+AfterValidRectInSetIText		ROMBind (Plus, $14F26), (SE, $0F556), (II, $14034)
+
+SetITextValidRect	ComeFromPatchProc	_ValidRect,AfterValidRectInSetIText,(Plus,SE,II)
+
+				move.l	12(A6),D6		; set up clobbered register
+				jmpOld					; continue
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _SetPort inside DrawItem													<13>
+;
+; The port, text attributes and colors are only restored if the color item list exists.
+; This patch preceeds the GNEFilter SetPort patch.
+
+AfterRestoreSetPortInDrawItem	ROMBind	(II, $1438A)
+
+DrawItemSetPort	ComeFromPatchProc	_SetPort,AfterRestoreSetPortInDrawItem,(II)
+
+				SUBQ	#2+4,SP				; make room for boolean result and color table handle
+				MOVE.L	A4,-(SP)			; pointer to dialog window
+				PEA		4+2(SP)				; point to room for color table
+				_GetAuxWin
+				ADDQ	#2,SP				; ignore boolean result
+				MOVE.L	(SP)+,D0			; is there an AuxWinRecord?
+				BEQ.S	SkipIt				; if not, do nothing
+				MOVE.L	D0,A0				; get the handle
+				MOVE.L	(A0),A0				; point to the data
+				TST.L	dialogCItem(A0)		; is there a color ditl?
+				bneOld						; make the SetPort call
+SkipIt
+				addq	#8,sp				; get rid of port parameter, and SetPort return address
+				rts							; return, but not to the caller! skip the restore stuff
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Dispose 'ictb' in DisposDialog, not CloseDialog, on Mac II									<14>
+;
+; Originally patch PB195 written on 09jul87.
+;
+; This pair of patches to _DisposDialog and _GetAuxWin causes the 'ictb' to be thrown away
+; in response to DisposDialog instead of CloseDialog on a Mac II.
+
+DisposDialogFix		PatchProc		_DisposDialog,(II)
+
+				SUBQ		#6,SP				; boolean result from GetAuxWin, handle
+				MOVE.L		10(SP),-(SP)		; window for GetAuxWin
+				PEA			6(SP)				; handle for GetAuxWin
+				_GetAuxWin
+				ADDQ		#2,SP				; don’t care if it is the default
+				MOVE.L		(SP)+,A0			; get the aux handle
+				MOVE.L		(A0),A0				; dereference
+				MOVE.L		dialogCItem(A0),D0	; use the reserved field for ditl
+				BEQ.S		@noDitl
+				MOVE.L		D0,A0
+				_DisposHandle
+@noDitl
+				jmpOld							; do old DisposDialog
+
+				EndProc
+
+AfterGetAuxWinInCloseDialog		ROMBind	(II, $13D30)
+AtNoDITLInCloseDialog			ROMBind	(II, $13D40)
+
+NoIctbDisposeInCloseDialog	ComeFromPatchProc	_GetAuxWin,AfterGetAuxWinInCloseDialog,(II)
+
+				ADD			#18,SP					; remove parameters, return addr, and boolean and handle
+				jmpROM		AtNoDITLInCloseDialog	; and go around ROM code that disposes 'ictb'
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Duplicate 'dctb' and 'actb' on Mac II															<15>
+;
+; Originally patch PB195 written on 09jul87.
+;
+; This pair of come-from patches to _DetachResource and _SetWinColor causes the 'actb' or 'dctb'
+; to be duplicated if called by GetNewDialog or an alert call; it is never detached.  SetWinColor
+; allows color tables to specify that the window should use the default color table if ctSize is
+; -1.  In this case, it doesn't use the handle passed in at all, so we don't need to copy it.  If
+; we did copy it, it would never be thrown away later on.
+
+AfterDetachResourceInDoColor	ROMBind	(II, $13E6E)
+
+NoDetachResourceInDoColor	ComeFromPatchProc	_DetachResource,AfterDetachResourceInDoColor,(II)
+
+				MOVE.L		(SP)+,(SP)			; don't detach 'actb' or 'dctb'
+				RTS
+
+				EndProc
+
+AfterSetWinColorInGotStorage	ROMBind	(II, $13B26)
+
+DuplicateColorTableInNewDialog	ComeFromPatchProc	_SetWinColor,AfterSetWinColorInGotStorage,(II)
+
+				MOVE.L		4(SP),A0			; get the window color table
+				MOVE.L		(A0),A1				; dereference
+				CMP.W		#-1,ctSize(A1)		; use default window colors?
+				beqOld							; if so, no need to duplicate
+				_HandToHand						; make copy for window manager
+				MOVE.L		A0,4(SP)			; and save for call to SetWinColor
+				jmpOld
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Patch out CouldDialog, FreeDialog, CouldAlert, and FreeAlert									<14>
+;
+; Under 7.0, these calls work even more poorly than they do under 6.0.  So, with the goal of
+; making them completely obsolete in the future, we'll make them do nothing.
+
+
+				MakePatch	CleanupTwoBytes,_CouldDialog,(Plus,SE,II,Portable,IIci)
+				MakePatch	CleanupTwoBytes,_FreeDialog,(Plus,SE,II,Portable,IIci)
+				MakePatch	CleanupTwoBytes,_CouldAlert,(Plus,SE,II,Portable,IIci)
+				MakePatch	CleanupTwoBytes,_FreeAlert,(Plus,SE,II,Portable,IIci)
+
+CleanupTwoBytes	Proc		Export
+
+				move.l		(sp)+,a0			; get return address
+				addq		#2,sp				; remove dialogID parameter
+				jmp			(a0)				; and return
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; patches on TEDelete and TEPaste 																<20>
+;
+; When any text operation is performed on a color dialog with an 'ictb', it sets up the dialog’s
+; grafPort with the appropriate font and color information before and restores after. Since DlgPaste,
+; DlgClear and DlgCut are glue, and were not revised for System 4, they do not do the appropriate set up
+; and restore required for changing an EditText item.  Even if they were rewritten, existing applications
+; would not be fixed. Since DlgClear, DlgCut and DlgPaste call only TEPaste and TEClear, we patch these
+; to routines to decide whether the TEHandle passed to them is the TEHandle used by a color dialog for
+; its EditText items, and if so perform the necessary dialog manager operations to support any
+; ictb entries associated with these items.
+
+FixTEPaste		PatchProc	_TEPaste,(II,IIci)
+				Import		IsDialogEdit
+				Import		SetUpDialog
+				Import		RestoreDialog
+
+				MOVEA.L		4(SP), A0		;	Get TEHandle into A0 for call to IsDialogEdit
+				JSR			IsDialogEdit	;	decide whether to call setup and restore TE
+				beqOld						;	do the inherited behavior, Otherwise…
+
+				jsrrom		DialogStdEntry	;	Set up standard Dialog Manager stack frame for SetUpDialog
+				JSR			SetUpDialog		;	Performs set up for TextEdit operations on Color Dialogs
+				MOVE.L		8(A6), -(SP)	;	repush the TEHandle
+				jsrold						;	call the old routine
+				JMP			RestoreDialog	;	execute clean-up code and jump to return code
+
+				EndProc
+
+; This patch fixes TECut as well because TECut calls TECopy and then TEDelete
+
+FixTEDelete		PatchProc	_TEDelete,(II,IIci)
+				Import		IsDialogEdit
+				Import		SetUpDialog
+				Import		RestoreDialog
+
+				MOVEA.L		4(SP), A0		;	Get TEHandle into A0 for call to IsDialogEdit
+				JSR			IsDialogEdit	;	decide whether to call setup and restore TE
+				beqOld						;	do the inherited behavior, Otherwise…
+
+				jsrrom		DialogStdEntry	;	Set up standard Dialog Manager stack frame for SetUpDialog
+				JSR			SetUpDialog		;	Performs set up for TextEdit operations on Color Dialogs
+				MOVE.L		8(A6), -(SP)	;	repush the TEHandle
+				jsrold						;	call the old routine
+				JMP			RestoreDialog	;	execute clean-up code and jump to return code
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; SetUpDialog 																					<20>
+;
+; Calls Dialog Manager ROM routines BeginInWind and SetUpText which set thePort to the color dialog and
+; sets the font and color of thePort to whatever is specified in the ictb (if there is any ictb).
+
+SetUpText						ROMBind (II, $146F8), (IIci, $1A804)
+BeginInWind						ROMBind (II, $13D62), (IIci, $19E14)
+
+SetUpDialog		Proc		Export
+				MOVEA.L		8(A6), A0				;	Get the TEHandle (frame set up by DialogStdEntry)
+				MOVEA.L		(A0), A0				;	get the TEPtr
+				MOVEA.L		teGrafPort(A0), A4		;	get the grafPtr/DialogPtr
+				jsrrom		BeginInWind		;	set thePort appropriately and put the editField value in D3
+				jsrrom		SetUpText		;	set up the dialog's pen color and text font for the ictb entry
+				RTS
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; RestoreDialog																					<20>
+;
+; Calls Dialog Manager ROM routines RestoreTE and EndInWind to restore the dialog to its previous
+; font and color state and to restore thePort to its previous value.  We then call DialogStdExit
+; to clear up the standard frame, pop off our parameters and return
+
+RestoreTE						ROMBind (II, $14810), (IIci, $1A91C)
+EndInWind						ROMBind (II, $13DA0), (IIci, $19DC2)
+DialogStdExit					ROMBind	(II, $13CCC), (IIci, $19D82)
+
+RestoreDialog	Proc		Export
+				jsrrom		RestoreTE		;	call the dialog manager "cleanup-after-text-update" routine
+				jsrrom		EndInWind		;	restore thePort
+				MOVEQ		#4, D0			;	Set D0 to size of the handle passed to TEDelete/TEPaste (for DialogStdExt)
+				jmprom		DialogStdExit	;	clean up after RomStdEntry
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	IsDialogEdit																				<20>
+;
+; Takes a TEHandle in A0 and decides whether it is the TEHandle used by a Color Dialog for its EditText
+; items.
+
+IsDialogEdit	Proc		Export
+				Import		IsColorDialog
+
+				MOVE.L		A0, D0					;	Test the TEHandle
+				BEQ.S		NotADialogWindow		;	If it's NULL, it isn't any kind of window
+				MOVEA.L		(A0), A0				;	Get the TEPtr
+				MOVE.L		D0, -(SP)				;	save the TEHandle for after IsColorDialog
+				SUBQ		#2, SP					;	Set up for return value from IsDialogWindow
+				MOVE.L		teGrafPort(A0), -(SP)	;	Push the TEHandle grafPtr
+				JSR			IsColorDialog			;	Check the TEHandle's grafport to see if is a dialogptr
+				MOVE.B		(SP)+, D0				;	Store result in D0
+				MOVEA.L		(SP)+, A1				;	recover TEHandle
+				BEQ.S		NotADialogWindow		;	if this is not a color dialog, we're done checking
+				MOVE.L		(A1), A0				;	Get the TEPtr
+				MOVE.L		teGrafPort(A0), A0		;	Get the TEHandle's grafPtr (a DialogPeek)
+				CMPA.L		teHandle(A0), A1		;	Is our TEHandle the same as the Dialog's?
+				SEQ			D0						;	Set to ones if equal, clears otherwise
+NotADialogWindow
+				TST.B		D0						;	Set condition codes
+				RTS
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	pascal Boolean IsColorDialog(GrafPtr thePort);													<15>
+;	FUNCTION IsColorDialog(thePort: GrafPtr): BOOLEAN;
+;
+;	IsColorDialog returns whether thePort is a COLOR window of dialogKind.
+
+IsColorDialog	Proc		Export
+
+				MOVE.L		4(SP), A0			;	get the TEHandle's GrafPtr
+				SUBQ		#2, SP				;	make room for call to EachWindow
+				MOVEQ		#firstWindow, D0	;	start our iteration at the first window in the layer
+				MOVE.L		D0, -(SP)
+				CLR.L		-(SP)				;	finish after the last window in the layer
+				CLR.L		-(SP)				;	use the current layer for the iteration
+				PEA			FindOurPort			;	push the action proc
+				MOVE.L		A0, -(SP)			;	Push the current port
+				_EachWindow						;	call the iterator
+				CLR.W		D1					;	clear D1 to use as a boolean return value
+				TST.W		(SP)+				;	check the return value, 0 or -1 - not a dialog
+				SGT			D1					;	set the low byte to be true or false appropriately
+				MOVEA.L		(SP)+, A0			;	Get the return address
+				ADDQ		#4, SP				;	Pop the parameters
+				MOVE.B		D1, (SP)			;	put the return result on the stack
+				JMP			(A0)				;	return
+
+FindOurPort		MOVE.L		4(SP), A0			;	Get the port to be tested
+				MOVE.L		12(SP), A1			;	Get the window to test against
+				CMPA.L		A0, A1				;	Have we found ourselves yet?
+				BNE.S		KeepGoing			;	No, keep looking
+
+				TST.W		portBits+rowBytes(A0)		;	Check to see if this is a color window
+				BGT.S		NotADialog			;	No, we're done checking and our window isn't color
+				MOVE.W		windowKind(A0), D0	;	Yes, lets see if we're a dialog, shall we?
+				CMPI.W		#dialogKind, D0		;	Is it a dialog…
+				BNE.S		NotADialog			;	No, we're done checking and we don't hava a dialog
+
+				MOVEQ		#1, D1				;	set the return value and leave
+				BRA.S		Leave
+
+NotADialog		MOVEQ		#-1, D1				;	Set the return value to a number to stop iterating…
+				BRA.S		Leave				;	make it a negative number to indicate not a dialog
+
+KeepGoing		CLR.W		D1					;	indicate no result and continue
+Leave			MOVE.L		(SP)+, A0
+				LEA			12(SP), SP			;	pop the parameters
+				MOVE.W		D1, (SP)			;	leave the return value
+				JMP			(A0)				;	return
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; FixDoStaticSub <23>
+;
+; DoStatic scans the static text string looking for carets to decide if it needs to do any ParamText
+; string substitutions.  If the font is a double-byte font, this will not work since the caret can
+; be the second byte of a double-byte character.  Hence, the wrong substitution is made.
+;
+; NOTE: This patch was put onto _HandToHand rather than the closer _GetHandleSize as a
+;		performance consideration.  GetHandleSize is called significantly more often thus
+;		patching it is suboptimal versus adding the few extra lines of code to patch _H2H.
+;
+; This patch has been rolled into DialogMgr.a.
+;
+
+AfterH2HinDoStatic	ROMBind	(Plus,$15268),(SE,$0F898),(II,$14400),(IIci,$1A4FC),(Portable,$135B6)
+ROMskipParam		ROMBind	(Plus,$15286),(SE,$0F8B6),(II,$14422),(IIci,$1A51E),(Portable,$135D8)
+
+FixDoStaticSub ComeFromAfterPatchProc _HandToHand,AfterH2HinDoStatic,(Plus,SE,II,IIci,Portable)
+
+		MOVE.L	A0,A2					; save handle in A2
+		TST.B	D6						; is it an edit text item?
+		beqROM	ROMskipParam			; if so, don’t substitute carets
+
+		MOVE.L	A2,-(SP)				; Push the string handle
+		IMPORT	ReplaceCitations
+		JSR		ReplaceCitations		; Use the new, cool citation replacement algorithm
+		jmpROM	ROMskipParam			; And rejoin the ROM as if no citations need to be done
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _GetResource inside doColorStuff	
+;
+; Don’t purge 'actb' and 'dctb' color tables for alerts and dialogs.
+;
+; This patch has been rolled into DialogMgr.a.
+;
+
+AfterGetResourceInDoColor ROMBind (II,$13E60),(IIci,$19F2E)
+
+DontPurgeDialogColorTables ComeFromAfterPatchProc _GetResource,AfterGetResourceInDoColor,(II,IIci)
+
+				move.l	(sp),a0		; get the result handle
+				_HNoPurge			; call HNoPurge on it (even if it is NIL)
+				RejoinROM
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+				END

@@ -1,0 +1,304 @@
+;
+;	File:		FPPrivTrap.a
+;
+;	Contains:	Floating point privileged functions
+;
+;	Written by:	Apple Numerics Group, DSG
+;
+;	Copyright:	© 1985-1992 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:  
+;	Change History (most recent first):
+;
+;		 <2>	 1/24/92	KC		Add conditional to _SysBreak Macro.
+;	Terror Change History:
+;
+;		 <2>	 3/18/91	BG		Modified the check for whether or not PrivTrap gets installed to
+;									be more general regarding which CPUs have FPUs.
+;		 <1>	 1/21/91	BG		first checked in
+
+				LOAD		'StandardEqu.d'				; needed for HWCfgFlags check
+				INCLUDE		'HardwarePrivateEqu.a'		; needed for 'UniversalEqu.a'
+
+;	This is not a standard definition in the System Equates, so it is included here
+		
+			If &TYPE('_SysBreak') = 'UNDEFINED' Then
+				MACRO								
+				_SysBreak							
+				MOVE.W  	#-490, D0				
+				_SysError							
+				ENDM								
+			ENDIF									
+
+				MACHINE		MC68040
+
+*
+*  THE FOLLOWING CODE IS DIRECTLY LIFTED FROM MPW3.2'S CSANELIBRT881.A SOURCE CODE,
+*  WRITTEN BY PAUL FINLAYSON, BRIAN MCGHIE, JON OKADA AND STUART MCDONALD.
+*
+*  IF THIS CODE IS ROMMED, tFPPriv TRAP ($A097) SHOULD BE ROMMED, TOO!  THEN WE
+*  WON'T BE CONTINUALLY INSTALLING IT ON THE FLY.  A/UX & VM PEOPLE, ARE YOU LISTENING???
+*  THIS ISOLATION OF PRIVILEGED INSTRUCTIONS TO A SINGLE TRAP WAS FOR YOUR BENEFIT.
+*  WHY, AS OF THE MAC IICI, HAS NO ONE BURNT tFPPriv TRAP INTO ROM?  INSTALLING IT
+*  ON THE FLY IS SURELY A NO-NO IN THE A/UX WORLD AND I BET THE A/UX FOLKS AREN'T
+*  OVERRIDDING IT... HOW COULD THEY IF INSTALLING IT IS A NO-NO?
+
+; ***************************************
+; *		"Ask and ye shall receive ... " *
+; ***************************************
+
+tFPPriv			EQU		$A097				; privileged instruction trap number
+
+; _________________________________________________________________________________________
+;
+;	InstallPrivTrap  -  Set up the _FPPriv trap for use, if required
+;
+;	Expects:	-None-
+;	Trashes:	A0, D0
+;
+; _________________________________________________________________________________________
+
+InstallPrivTrap	PROC	EXPORT
+				btst.b	#hwCbFPU-8,HWCfgFlags; FPU installed on board?							<T2>
+				beq.s	@exit				; exit if we don't have a HW FPU					<T2>
+
+				lea		PrivTrap881,A0		; A0 = PrivTrap881()
+				cmp.b	#cpu68040,CPUFlag	; are we running on an 040 or 050?
+				blt.s	@goForIt			; IF CPU >= 040 THEN
+				lea		PrivTrap040,A0		;   A0 = PrivTrap040()
+@goForIt									; ENDIF
+				MOVE.W	#tFPPriv,D0			; D0 = $A097
+				_SetTrapAddress ,NEWOS		; Install A-Trap
+@exit			rts							; return to caller
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;
+;; privileged instruction trap
+;;		This routine calls trap code containing privileged instructions.  If the trap
+;;		has not been installed it installs it.  The purpose of this routine is to provide
+;;		compatability with future architectures which will not allow user-mode library
+;;		code to execute privileged instructions.  TO BE ADDED: FSAVE/FRESTORE ENTRIES?
+;;
+;; Trap conventions:
+;;		Registers D1,D2,A0,A1,A2 are restored to their pre-call values after the
+;;		trap call.  Registers D0,A0,A1 are visible to the trap code and provide the
+;;		mechanism for input values to the trap code.  D0 is the only register that
+;;		can be changed by the trap code (after return to the caller).  TST.W D0 is
+;;		the last instruction before return to the program calling the trap.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;		888888888888    888888888888        1111
+;		88        88    88        88      11  11
+;		88        88    88        88     11   11
+;		88        88    88        88          11
+;		888888888888    888888888888          11
+;		88        88    88        88          11
+;		88        88    88        88          11
+;		88        88    88        88          11
+;		888888888888    888888888888     1111111111
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+		ALIGN	16				; align on nearest cache line boundary
+
+		EXPORT	PrivTrap881		; needed for SANE / Startup code
+PrivTrap881
+
+
+		CMP.W	#0,D0
+		BEQ.S	SetExcept881	; Set the exceptions contained in A0
+		CMP.W	#1,D0
+		BEQ.S	GetTrapVec881	; GetTrapVector code
+		CMP.W	#2,D0
+		BEQ.S	SetTrapVec881	; SetTrapVector code
+			 
+		_SysBreak				; Error in selector code
+		rts						; .. exit												<T2>
+
+; SkipMarkRel	dc.w SkipMark-QADDX	; offset to SkipMark from QADDX <9/30/90-S.McD.>
+
+SetExcept881
+		FNOP					; Ensure 881 is idle
+		MOVE.L	A0,D1			; Copy exceptions into D1
+		    
+		FSAVE	-(SP)			; Save 881 environment
+		FMOVE.L	FPSR,D0			; D0 <- FPSR
+		AND.W	#$00FF,D0		; Clear previous op flags	<5/12/90-S.McD.>
+		OR.W	D1,D0			; Set proper exceptions
+		FMOVE.L	D0,FPSR			; Move results back to FPSR
+		    
+		FMOVE.L	FPCR,D0			; D0 <- FPCR
+		AND.W	D1,D0			; Find exception intersection
+		ANDI.L	#$FF00,D0		; Mask off low byte and high word
+		BEQ.S	SkipMark		; If no intersection, then don't
+		    					;   mark exception pending bit
+
+		LEA		SkipMark,A0		; A0 := @FRESTORE			<8/31/90-S.McD.>
+		FMOVEM.L	A0,FPIAR	; FPIAR := A0				<8/31/90-S.McD.>
+;*
+;*  Alas, once tFPPriv trap has installed itself, SkipMark is no longer in PACK4!  
+;*  Since we want FPIAR to always point to something inside PACK4, we must be more
+;*  careful how we set it up.  Here's how using QADDX's JMP island at $0B6C:
+;*
+;	--- Actually, with this code installed in ROM, you DO know where SkipMark
+;	--- is, so you can use the address as before.  B. Galcher (1/16/91)
+;
+;		MOVEA.L	$0B6E,A0		; A0 := &QADDX				<9/30/90-S.McD.>
+;		ADDA.W	SkipMarkRel,A0	; A0 := &SkipMark in PACK4	<9/30/90-S.McD.>
+		
+		CLR.L	D0
+		MOVE.B	1(SP),D0		; Load state frame size
+		BCLR	#3,(SP,D0)		; Clear bit 27 of BIU
+SkipMark
+		FRESTORE	(SP)+		; Restore 881 environment
+		RTS
+
+GetTrapVec881
+		MOVE.L	#$0C0,A1		; A1 <- &Unordered vector in table
+		MOVE.L	(A1)+,(A0)+		; Traps.Unordered <- &Unordered vector
+		MOVE.L	(A1)+,(A0)+		; Traps.Inexact <- &Inexact vector
+		MOVE.L	(A1)+,(A0)+		; Traps.DivByZero <- &DivByZero vector
+		MOVE.L	(A1)+,(A0)+		; Traps.Underflow <- &Underflow vector
+		MOVE.L	(A1)+,(A0)+		; Traps.OpError <- &OpError vector
+		MOVE.L	(A1)+,(A0)+		; Traps.Overflow <- &Overflow vector
+		MOVE.L	(A1)+,(A0)+		; Traps.SigNaN <- &SigNaN vector
+		RTS
+
+SetTrapVec881
+		MOVE.L	#$0C0,A1		; A1 <- &Unordered vector in table
+		MOVE.L	(A0)+,(A1)+		; &Unordered vector <- Traps.Unordered
+		MOVE.L	(A0)+,(A1)+		; &Inexact vector <- Traps.Inexact
+		MOVE.L	(A0)+,(A1)+		; &DivByZero vector <- Traps.DivByZero
+		MOVE.L	(A0)+,(A1)+		; &Underflow vector <- Traps.Underflow
+		MOVE.L	(A0)+,(A1)+		; &OpError vector <- Traps.OpError
+		MOVE.L	(A0)+,(A1)+		; &Overflow vector <- Traps.Overflow
+		MOVE.L	(A0)+,(A1)+		; &SigNaN vector <- Traps.SigNaN
+		RTS
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;		000000000000          444444      000000000000
+;		00        00         44   44      00        00
+;		00        00       44     44      00        00
+;		00        00     44       44      00        00
+;		00        00    44        44      00        00
+;		00        00    444444444444444   00        00
+;		00        00              44      00        00
+;		00        00              44      00        00
+;		000000000000              44      000000000000
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FPBSUN_VEC040	EQU		$1FCC			; special FP exception vector addresses <12/03/90, JPO>
+FPUNFL_VEC040	EQU		$1FD0
+FPOPERR_VEC040	EQU		$1FD4
+FPOVFL_VEC040	EQU		$1FD8
+FPSNAN_VEC040	EQU		$1FDC
+
+
+		ALIGN	16						; align on nearest cache line boundary
+
+		EXPORT	PrivTrap040				; needed by SANE / Startup code
+PrivTrap040
+
+		CMP.W	#0,D0
+		BEQ.S	SetExcept040			; Set the exceptions contained in A0
+		CMP.W	#1,D0
+		BEQ.S	GetTrapVec040			; GetTrapVector code
+		CMP.W	#2,D0
+		BEQ.S	SetTrapVec040			; SetTrapVector code
+			 
+		_SysBreak						; Error in selector code
+		rts								; .. exit											<T2>
+
+GetTrapVec040							; 040-style
+		MOVE.L	#$0C4,A1				; A1 <- &Inexact vector in table
+		MOVE.L	(FPBSUN_VEC040).W,(A0)+	; Traps.Unordered <- &Unordered vector
+		MOVE.L	(A1)+,(A0)+				; Traps.Inexact <- &Inexact vector
+		MOVE.L	(A1),(A0)+				; Traps.DivByZero <- &DivByZero vector
+		MOVE.L	(FPUNFL_VEC040).W,(A0)+	; Traps.Underflow <- &Underflow vector
+		MOVE.L	(FPOPERR_VEC040).W,(A0)+; Traps.OpError <- &OpError vector
+		MOVE.L	(FPOVFL_VEC040).W,(A0)+	; Traps.Overflow <- &Overflow vector
+		MOVE.L	(FPSNAN_VEC040).W,(A0)+	; Traps.SigNaN <- &SigNaN vector
+		RTS
+
+SetTrapVec040
+		MOVE.L	#$0C4,A1				; A1 <- &Inexact vector in table
+		MOVE.L	(A0)+,(FPBSUN_VEC040).W	; &Unordered vector <- Traps.Unordered
+		MOVE.L	(A0)+,(A1)+				; &Inexact vector <- Traps.Inexact
+		MOVE.L	(A0)+,(A1)				; &DivByZero vector <- Traps.DivByZero
+		MOVE.L	(A0)+,(FPUNFL_VEC040).W	; &Underflow vector <- Traps.Underflow
+		MOVE.L	(A0)+,(FPOPERR_VEC040).W; &OpError vector <- Traps.OpError
+		MOVE.L	(A0)+,(FPOVFL_VEC040).W	; &Overflow vector <- Traps.Overflow
+		MOVE.L	(A0)+,(FPSNAN_VEC040).W	; &SigNaN vector <- Traps.SigNaN
+		RTS
+
+SetExcept040 
+		FNOP							; Ensure the 040 FP is idle
+		MOVE.L	A0,D1					; Copy exceptions into D1
+		    
+		FMOVE.L	FPSR,D0					; D0 <- FPSR
+		AND.W	#$00FF,D0				; Clear previous op flags  <5/12/90-S.McD.>
+		OR.W	D1,D0					; Set proper exceptions
+		FMOVE.L	D0,FPSR					; Move results back to FPSR
+		    
+		FMOVE.L	FPCR,D0					; D0 <- FPCR
+		AND.W	D0,D1					; Find exception intersection
+		ANDI.L	#$FF00,D1				; Mask off low byte and high word
+		BNE.S	@1						; Force vectoring to highest priority exception handler
+
+		RTS								; Return if none enabled
+
+@1:
+		BTST	#15,D1					; BSUN handler?
+		BEQ.S	@2						; No
+
+		FMOVE.S	#"$7FFFFFFF",FP1		; Yes; set NaN condition code
+		FBGT.W	@done					; BSUN set on unordered branch condition
+		FNOP
+		RTS
+@2:
+		BTST	#14,D1					; SNaN?
+		BEQ.S	@3						; No
+
+		FCMP.S	#"$7FBFFFFF",FP1		; Yes; compare FP1 with signaling NaN
+		BRA.S	@done
+@3:
+		BTST	#13,D1					; Operror?
+		BEQ.S	@4						; No
+
+		FMOVE.S	#"$7F800000",FP1		; Yes; do INF - INF
+		FSUB.X	FP1,FP1
+		BRA.S	@done
+@4:
+		BTST	#12,D1					; Overflow?
+		BEQ.S	@5						; No
+
+		FMOVE.S	#"$7F000000",FP1		; Yes; load large single-precision value
+		FSMUL.X	FP1,FP1					;      and square it
+@done:
+		FNOP							; Flush pending exceptions
+		RTS								; Return
+@5:
+		BTST	#11,D1					; Underflow?
+		BEQ.S	@6						; No
+
+		FMOVE.S	#"$1F000000",FP1		; Yes; load small single-precision value
+		FSMUL.X	FP1,FP1					;      and square it (result is subnormal/exact)
+		BRA.S	@done
+@6:
+		BTST	#10,D1					; Divide-by-zero?
+		BEQ.S	@7						; No.  Inexact
+
+		FMOVE.B	#1,FP1					; Yes; divide 1.0 by 0.0
+		FDIV.B	#0,FP1
+		BRA.S	@done
+@7:
+		FMOVE.B	#1,FP1					; 040 can trap only on INEX2 condition
+		FADD.S	#"$00800000",FP1		; add 1.0 to 2.0**-126
+		BRA.S	@done
+
+
+		END

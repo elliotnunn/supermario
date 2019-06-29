@@ -1,0 +1,341 @@
+;
+;	File:			Error.a
+;
+;	Contains:		Routines which support the process error manager that could not be
+;					coded in C.  Handles hardware exceptions and system errors.
+;
+;	Written by:		Erich Ringewald
+;
+;	Copyright:		© 1986-1991 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <4>	  1/8/91	DFH		(rdd) Calls to debugExitRoutine no longer dump params
+;									afterwards, since this is now a Pascal routine.
+;		 <3>	  1/8/91	DFH		(rdd) Debug entry and exit routines are now Pascal style.
+;		 <0>	 x/xx/86	ELR		New Today.
+;
+;--------------------------------------------------------------------
+
+				CASE	OBJECT
+				LOAD	'ProcessMgrIncludes.D'
+				INCLUDE	'data.a'
+
+;-------------------------------------------------------------------------------
+; Hardware exception handling.  CPU exception vectors are routed through us.
+;-------------------------------------------------------------------------------
+								
+				PROC
+
+				EXPORT	(buserr, addrerr, ilglerr, zeroerr):CODE
+				EXPORT	(chkerr, trapverr):CODE
+				EXPORT	(priverr, traceerr, line1111err):CODE
+				EXPORT	(coprocerr, fmterr, uniniterr, spurint):CODE
+				EXPORT	(unass,trap5err,trap6err): CODE
+
+				IMPORT	(oldExceptionVectors, pCurrentProcess, dont_switch):DATA
+				IMPORT	(IsOldDebugger, pDebugProcess, debugEntryRoutine, debugExitRoutine):DATA
+				IMPORT	(patchtraps, ROMALLPATCHTABLE):DATA
+				IMPORT 	(SysErrRecover, CallDebugger):CODE
+
+; ExceptionFunnel.  Bottleneck for all exceptions we patch.  Exception number is
+; divinable from offset of beginning of our re-routing table to the return address atop
+; the stack. 
+ExceptionFunnel
+ExceptionRegs	REG		d0-d1/a0/a5
+ExceptionRegsSize	EQU	16								; bytes in saved regs
+
+; Calculate the error number
+				movem.l	ExceptionRegs,-(sp)				; save work regs
+				lea		ErrorCatchTab,a5				; get start of re-routing table
+				move.l	ExceptionRegsSize(sp),d0		; get return address of bsr.s
+				sub.l	a5,d0							; subtract base to get 1-based offset * sizeof(bsr.s)
+				lsr		#1,d0							; normalize to get sys error number
+				move.w	d0,DSErrCode					; save exception number in low memory
+				move.l	ProcessMgrGlobals,a5			; get Process Mgr a5
+				tst.l	pDebugProcess					; is a debugger registered?
+				bne.s	HandleForDebugger				; yes, go call it
+
+TryMacsBug
+				cmp.w	#dsTraceErr,d0					; is it a trace exception?
+				beq.s	LetMacsbugDoIt					; if so, always fall thru to MacsBug
+				move.b	MacJmpFlag,d1					; get possible debugger flag word
+				cmp.b	#UNIMP,d1						; is this an implemented flag byte?
+				bne.s	haveFlags						; if so, use it
+				move.b	MacJmp,d1						; else, use traditional flag
+haveFlags
+				btst	#6,d1							; is there a real debugger?
+				bne.s	LetMacsbugDoIt					; if so, go to it
+				tst.b	IsOldDebugger					; is MacsBug installed?
+				bne.s	LetMacsbugDoIt					; if so, go to it
+
+; This is the standard Process Mgr exception error handling.  Call SysError!  Takes
+; advantage of the fact that our SysError patch will decide whether it's OK to
+; ExitToShell, and, if not, just call the ROM to put up the bomb box.  It will redo
+; some of the checks we just made, but who cares about speed here!
+; d0 == DSErrCode == exception code, a5 == ProcessMgrGlobals
+				_SysError								; ExitToShell or ROM bomb box
+		
+; Pass the call on to Macsbug, by returning through the saved vector for this
+; error type.  Note that many vectors map onto the same error number.
+LetMacsbugDoIt
+				lea		oldExceptionVectors,a5			; get base of table (biased by 1)
+				asl.w	#2,d0							; vector size is 4
+				move.l	-4(a5,d0.w),ExceptionRegsSize(sp)	; push vector for return (w/ 1-based table)
+				movem.l	(sp)+,ExceptionRegs				; restore work regs
+				rts										; and jump there
+		
+;-------------------------------------------------------------------------------
+;
+;			Table of entry points for the exceptions we handle
+;
+;-------------------------------------------------------------------------------
+
+ErrorCatchTab
+buserr			bsr.s	ExceptionFunnel 				; exception type 1
+addrerr			bsr.s	ExceptionFunnel					; exception type 2
+ilglerr			bsr.s	ExceptionFunnel					; exception type 3
+zeroerr			bsr.s	ExceptionFunnel					; exception type 4
+
+chkerr			bsr.s	ExceptionFunnel					; exception type 5
+trapverr		bsr.s	ExceptionFunnel					; exception type 6
+priverr			bsr.s	ExceptionFunnel					; exception type 7
+traceerr		bsr.s	ExceptionFunnel					; exception type 8
+line1010err		bsr.s	ExceptionFunnel					; exception type 9
+line1111err		bsr.s	ExceptionFunnel					; exception type 10
+fmterr
+uniniterr
+spurint
+unass			bsr.s	ExceptionFunnel					; exception type 11
+coprocerr		bsr.s 	ExceptionFunnel					; exception type 12
+interr1			bsr.s	ExceptionFunnel					; exception type 13
+trap5err		bsr.s	ExceptionFunnel					; exception type 14
+trap6err		bsr.s	ExceptionFunnel					; exception type 15
+
+;-------------------------------------------------------------------------------
+; A high-level debugger exists.  Pass the error to him unless context switches are
+; disabled, or the debugger itself is the errant process.
+; There are three calls here, allowing the debugger to filter unwanted errors without
+; our having to switch him in.
+;	1) The onentry (filter) routine.  It expects the the exception frame on the stack
+;		bottom, and all other registers preserved.  It might not return.
+;	2) If it does, call CallDebugger(), which will do a foreground switch into the debugger.
+;	3) On return, call the onexit routine registered by the debugger.  It restarts the
+;		process, not returning here.
+
+; Stack is:
+;	sp	->	d0
+;			d1
+;			a0
+;			a5
+;			bsr.s return address
+;			exception frame.
+; and A5 == ProcessMgrGlobals
+;
+
+HandleForDebugger
+				tst.w	dont_switch						; are we unswitchable?
+				bne.s	TryMacsBug						; we can't switch -- call old standby
+				move.l	pCurrentProcess,a0				; get the current guy
+				cmp.l	pDebugProcess,a0				; is it the debugger?
+				beq.s	TryMacsBug						; don't let debugger handle its own errors
+		
+; OK to call debugger filter procedure
+				movem.l	d2/a1,-(sp)						; save more registers
+				subq.l	#2,sp							; room for return value
+				pea		SaveCurrPSN						; push ptr to serial number storage
+				_GetCurrentProcess						; call OS
+				addq.l	#2,sp							; dump return code
+				movem.l	(sp)+,d2/a1						; restore registers
+		
+				lea		SaveArea,a0						; get address of variables
+				move.l	a5,(a0)+						; set saveA5
+				move.l	ExceptionRegsSize(sp),(a0)+		; set saveBSRAddr
+				move.l	debugEntryRoutine,(a0)+			; set saveDBEntry
+				movem.l	(sp)+,ExceptionRegs				; restore some regs
+				addq.w	#4,sp							; get rid of bsr ret addr
+		
+; build parameter block on top of exception frame
+				pea		DBWantsIt						; push ptr to boolean
+				move.l	4+SaveCurrPSN,-(sp)				; push low half of PSN
+				move.l	SaveCurrPSN,-(sp)				; push high half of PSN
+				pea		ReturnFromEntryRoutine			; make it look like a jsr
+				move.l	saveDBEntry,-(sp)				; push the routine addr
+				rts										; and call it (stack has exception on bottom)
+				
+; if he wants this one, switch him in
+ReturnFromEntryRoutine
+				move.l	saveBSRAddr,-(sp)				; push this on again
+				movem.l	ExceptionRegs,-(sp)				; re-save work regs
+				move.l	saveA5,a5						; restore a5
+				move.b	DBWantsIt,d0					; does it want it?
+				beq.s	FromDebuggerToMacsBug			; if not, branch
+		
+; Do major switch to the system debugger.  This suspends the current application
+; (the debuggee), so CallDebugger does not return until the debuggee has been resumed.
+				jsr		CallDebugger					; major switch to the debugger
+		
+; now that debuggee is running again, call the debugger's exit routine
+				lea		-10(sp),sp						; room for serial number + return value (on bottom)
+				pea		2(sp)							; push ptr to serial number storage
+				_GetCurrentProcess						; call OS
+				addq.l	#2,sp							; dump return code
+				move.l	debugExitRoutine,a0				; address of routine to call (PSN on stack!)
+				jsr		(a0)							; and call it (might not return here)
+				
+; NOTE:  We should never fall through to here, because the debugExitRoutine should
+; clean up and reset the PC.  But just in case...
+FromDebuggerToMacsBug
+				move.w	DSErrCode,d0					; retrieve err val into d0 (need it in mainstream)
+				bra		TryMacsBug						; let it fall thru to the rest
+
+; yucky embedded variables
+SaveArea
+saveA5			DC.L	0
+saveBSRAddr		DC.L	0
+saveDBEntry		DC.L	0
+SaveCurrPSN		DC.L	0
+				DC.L	0
+DBWantsIt		DC.W	0
+
+				ENDPROC
+
+;-------------------------------------------------------------------------------------------------------
+; System error handling.  A patch to _SysError.
+;-------------------------------------------------------------------------------------------------------
+
+; a_syserror.  Our patch to SysError.  Dole out the error to the appropriate debugger.
+; If none, ExitToShell if we think that can help.  Otherwise, call system handler.  For
+; errors in the benign range, flush accumulated events after calling through.
+SOFT_SYSERRID_FIRST		EQU		16384					; beginning of softy syserr range
+SE_saveregs		REG		d1-d2/a0-a1
+a_syserror		PROC	EXPORT
+				IMPORT	(NonStopSysErr, SysErrRecover, CallDebugger):CODE
+				IMPORT	(pDebugProcess, dont_switch, debugEntryRoutine, debugExitRoutine):DATA
+
+				move.w	d0,DSErrCode					; save error in low memory
+				ext.l	d0								; make err id a longword for C
+				movem.l	d0/a5,-(sp)						; save on stack (d0 on top for NonStopSysErr)
+				move.l	ProcessMgrGlobals,a5			; and set up our a5
+
+; if the error is benign, we can skip the high-level debugger altogether.  Also, these
+; are the errors that we should flush events for.  Unsigned check to eliminate negatives.
+				cmpi.w	#SOFT_SYSERRID_FIRST,d0			; range reserved for benignity
+				bge.s	CallSysErrFlush					; if so, don't bother with high-level debugger
+
+; see if we should call high-level debugger filter procedure
+				move.l	pDebugProcess,d0				; is the debugger running?
+				beq.s	CallSysErr						; if not, branch to old (d0 already on stack)		
+				move.w	dont_switch,d0					; are we in a safe place?
+				beq.s	TrySysDebugger					; if so, go through the debugger hoops
+
+; NOTE:  Clearing DSErrCode below assumes no application ever uses DSErrCode to change
+; the program flow, since the system will not normally clear it.  A potential problem
+; could arise where someone hits the resume button and then the app tries to figure
+; out from which error it is resuming.
+CallSysErr
+				jsr		SysErrRecover					; (error code already on top of stack)
+				clr.w	DsErrCode						; if SysErrRecover returns, error is not real
+				move.l	d0,a0							; get real routine addr into addr register
+				tst.l	d0								; just set condition codes for the moment
+				movem.l	(sp)+,d0/a5						; get errid back into d0
+				beq.s	ReturnNow						; jump if there was no special address
+				move.l	a0,-(sp)						; push for rts
+ReturnNow
+				rts										; good luck...
+
+; Error is one to be ignored by debuggers.  Some of these (like dsForcedQuit) put up a
+; dialog.  Unfortunately, the event (like mousedown) used to dismiss this dialog can not
+; be flushed by the handler.  We set up a new return address to take care of the flush.
+CallSysErrFlush
+				movem.l	(sp)+,d0/a5						; restore stack and d0/a5
+				pea		FlushEm							; so we return from system handler to flush
+				movem.l	d0/a5,-(sp)						; re-push d0 and a5
+				bra.s	CallSysErr						; go look for system handler
+	
+FlushEm
+				move.l	#$0000FFFF,d0					; events to flush (all of 'em!)
+				_FlushEvents							; call the OS
+				rts										; return to SysError caller
+
+; There is a registered system debugger, and it is safe and sane to call it.  First
+; part of the protocol is to call the debugger's entry (filter) routine.  After the RTS
+; the stack looks like we just entered _SysErr and have preserved all of the registers
+; except sp.  The PC will be at the start of debugEntryRoutine.
+TrySysDebugger
+				movem.l	SE_saveregs,-(sp)				; save regs
+				subq.l	#2,sp							; room for return value
+				pea		SysErrorPSN						; push ptr to serial number storage
+				_GetCurrentProcess						; call OS
+				addq.l	#2,sp							; dump return code
+				movem.l	(sp)+,SE_saveregs				; restore regs
+		
+				move.l	debugEntryRoutine,d0			; hold global in register
+				addq	#4,sp							; forget the d0 on the stack
+				move.l	(sp)+,a5						; and restore a5
+				pea		DBWantsIt						; push ptr to boolean
+				move.l	SysErrorPSN+4,-(sp)				; push low long of PSN
+				move.l	SysErrorPSN,-(sp)				; push high long of PSN
+				pea		SysRetFromCall					; push return address
+				move.l	d0,-(sp)						; push address of entry routine
+				move.w	DSErrCode,d0					; restore d0 from low memory		
+				rts										; return to debug filter routine
+
+; check result of filter 
+SysRetFromCall
+				moveq	#0,d0							; clear d0 so high-word will be 0
+				move.w	DSErrCode,d0					; re-get the err (caller's d0)
+				movem.l	d0/a5,-(sp)						; push d0 and a5 (d0 on top!)
+				move.l	ProcessMgrGlobals,a5			; and set up ours
+				move.b	DBWantsIt,d0					; does the debugger want control?
+				beq.s	CallSysErr						; if not, branch
+		
+; debugger filter proc said "yes", suspend debuggee to do a full switch into debugger
+				jsr		CallDebugger					; suspend current process, call the debugger
+
+; debuggee has been resumed, call debugger's debugExitRoutine	
+; NOTE: We reget the current PSN so that this is re-entrant while debugger is working
+				lea		-10(sp),sp						; room for serial number + return value (on bottom)
+				pea		2(sp)							; push ptr to serial number storage
+				_GetCurrentProcess						; call OS
+				lea		2(sp),sp						; dump return code
+				move.l	debugExitRoutine,a5				; get addr of routine
+				jsr		(a5)							; and go do it (PSN itself on the stack)
+				movem.l	(sp)+,d0/a5						; restore stack and d0/a5
+				rts										; good luck...
+
+; yucky embedded variables
+SysErrorPSN		DC.L	0
+				DC.L	0
+DBWantsIt		DC.W	0
+
+				ENDPROC
+
+; IsNonFatalSysErr.  Determine whether appropriate handler for specified error is the
+; old SysError routine, rather than an ExitToShell.
+; NOTE: Have to return "true" for old menu mgr errors so that sys patch can either
+; handle them (popups for MacII) or at least change them to the correct (i.e. positive
+; ID) errors by recalling _SysError.
+IsNonFatalSysErr	PROC	EXPORT
+				move.w	6(sp),d1						; get error code
+				move.w	#-1,d0							; assume "true"
+				beq.s	itsAOK							; noErr is fine by me!
+				cmp.w	#dsReinsert,d1					; well, OK, the user can insert a disk…
+				beq.s	itsAOK
+				cmp.w	#shutDownAlert,d1				; and we'll even let him shut down!
+				beq.s	itsAOK
+				cmp.w	#hMenuFindErr,d1				; deal with archaic error (I)
+				beq.s	itsAOK
+				cmp.w	#mBarNFnd,d1					; deal with archaic error (II)
+				beq.s	itsAOK
+				cmp.w	#dsFinderErr,d1					; ExitToShell here would be no good
+				beq.s	itsAOK
+				cmp.w	#SOFT_SYSERRID_FIRST,d1			; range reserved for benignity
+				bge.s	itsAOK
+				clr.w	d0								; return "false"
+itsAOK	
+				rts
+
+				ENDPROC
+						
+				END

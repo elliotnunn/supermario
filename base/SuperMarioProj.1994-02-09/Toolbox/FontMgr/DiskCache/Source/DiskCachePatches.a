@@ -1,0 +1,164 @@
+;
+;	File:		DiskCachePatches.a
+;
+;	Contains:	InitZone patch that installs our disk cache purge procedure after
+;				calling the normal InitZone routine.
+;
+;				SetResPurge patch that saves the purge procedure installed by the
+;				original SetResPurge routine (if any) and installs our disk cache
+;				purge procedure instead.
+;
+;				The following items should be remembered:
+;
+;					1. Most applications don't use purge procedures.
+;
+;					2. Applications that do use purge procedures should
+;			   			be chaining their purge procedures calls.
+;
+;					3. Applications that don't chain their purge procedures
+;			   			will, in the worst case, not have TrueType caches resident
+;			   			in their heap saved to disk.
+;
+;					4. This is much safer than patching out all of the memory manager
+;			  			routines that may purge memory.
+;
+;	Written by:	John Farmer
+;
+;	Copyright:	© 1991-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM2>	  5/6/92	stb		roll the InitZone and SetResPurge patches into MemoryMgr.a and
+;									ResourceMgr.a, respectively.
+;		 <3>	 12/3/91	DTY		DiskCacheResPurgePatch is leaving the parameter on the stack
+;									when it’s exiting. Fix this by popping the return address into
+;									A0. (This trashes A0, but A0 doesn’t need to be preserved for
+;									_SetResPurge.)
+;		 <2>	10/18/91	DTY		Fixed DiskCacheSetResPurgePatch: the parameter needs to be
+;									pushed on the stack again if a jsrOld is being used, since
+;									there’s a return address on the stack.
+;
+;    System 6.1.0 Changes:
+;
+;		<1>		07/04/91	John Farmer - Created this file.
+;														
+; -------------------------------------------------------------------------------------
+
+
+; Update the proper make file if you add, remove, or change any file inclusion statements.
+
+
+		Include	'FontPrivate.a'
+		Include	'SysEqu.a'
+		Include	'SysPrivateEqu.a'
+		Include	'LinkedPatchMacros.a'
+		
+		
+		Blanks	On
+		String	Asis
+			
+		
+		Import	DiskCachePurgeProcedure
+		Import	DiskCacheResourceManagerPurgeProcedure
+	
+	
+; -------------------------------------------------------------------------------------
+;
+;    Routine:	DiskCacheInitZonePatch;
+;
+;    Input:	a0.l		InitZone parameter block
+;
+;    Output:	d0.w		result code
+;
+;    Purpose:	To install our purge procedure after calling the normal InitZone routine.
+;
+;    Warning:	none
+;
+;    Frame:	none
+;
+;	 Rolled into MemoryMgr.a at the end of InitZone 5/6/92 <sm1>stb
+;
+; -------------------------------------------------------------------------------------
+
+
+DiskCacheInitZonePatch PatchProc $A019,(Plus,SE,II,Portable,IIci)
+		
+			jsrOld							; call the old routine
+			bne	@SomeUnknownError			; bail if there was an error
+	
+			move.l	a0,-(sp)				; save registers
+	
+			move.l	TheZone,a0				; get the current zone pointer
+			pea	DiskCachePurgeProcedure		; get address of our purge procedure
+			move.l	(sp)+,purgeProc(a0)		; install our purge procedure
+			
+			move.l	(sp)+,a0				; restore registers
+			tst.w	d0						; set the condition codes
+		
+@SomeUnknownError
+			rts								; return to caller
+			
+			EndProc
+
+; -------------------------------------------------------------------------------------
+;
+;    Routine:	Procedure DiskCacheSetResPurgePatch( install: Boolean );
+;
+;    Input:		sp.b	true if installing purge proc; false if not
+;
+;    Output:	none
+;
+;    Purpose:	To save the purge procedure installed by SetResPurge (if any) and
+;				install our disk cache purge procedure instead. If the install parameter
+;				is false we install the default DiskCachePurgeProcedure after calling
+;				the original SetResPurge routine.
+;
+;    Warnings:	none
+;
+;    Frame:		none
+;
+;	 Rolled into ResourceMgr.a, effectively rewriting SetResPurge 5/6/92 <sm1>stb
+;
+; -------------------------------------------------------------------------------------
+
+
+DiskCacheSetResPurgePatch PatchProc $A993,(Plus,SE,II,Portable,IIci)
+	
+			With	ExpandMemRec,SplineKeyRec
+			
+			move.b	4(sp),-(sp)											; <2> Push the parameter again
+			tst.b	(sp)												; is the purge proc being removed?
+			beq		@RemovingPurgeProcedure								; yes, just call old routine
+
+@InstallingPurgeProcedure
+			jsrOld														; call the old routine
+			move.l	a1,-(sp)											; save registers
+			
+			move.l	ExpandMem,a0										; get address of expandmem
+			move.l	emSplineKey(a0),a0									; get splineKey handle
+			move.l	(a0),a0												; get splineKey pointer
+			move.l	TheZone,a1											; get current zone pointer
+			move.l	purgeProc(a1),fResourceManagerPurgeProcedure(a0)	; save resource manager purge procedure
+			lea		DiskCacheResourceManagerPurgeProcedure,a0			; get address of our substitute purge procedure
+			move.l	a0,purgeProc(a1)									; install our purge procedure
+				
+			move.l	(sp)+,a1											; restore registers
+			move.l	(sp)+,a0											; <3> Get the return address
+			addq	#2,sp												; <3> Nail the parameter
+			jmp		(a0)												; <3> return to caller
+	
+@RemovingPurgeProcedure
+	
+			jsrOld														; call the old routine
+		
+			move.l	TheZone,a0											; get current zone pointer
+			pea		DiskCachePurgeProcedure								; get address of our purge procedure
+			move.l	(sp)+,purgeProc(a0)									; <3> install our purge procedure
+			
+			move.l	(sp)+,a0											; <3> Get return address
+			addq	#2,sp												; <3> Nail the parameter
+			jmp		(a0)												; <3> Return to caller
+			EndWith
+			EndProc
+				
+			End

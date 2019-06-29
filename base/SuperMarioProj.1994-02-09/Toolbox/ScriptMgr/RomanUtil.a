@@ -1,0 +1,912 @@
+;
+;	File:		RomanUtil.a
+;
+;	Contains:	Character drawing and measurement routines for the Roman script.  These routines
+;				support the Roman script through the ScriptUtil trap.
+;
+;	Written by:	JDT	Joe Ternasky
+;				KWK	Ken Krugler
+;				MED	Mark Davis
+;				LDC	Lee Collins
+;				PKE	Peter Edberg
+;				SMB	Sue Bartalo
+;
+;	Copyright:	© 1986-1992 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM4>	 11/6/92	SWC		Changed PackMacs.a->Packages.a.
+;		<20>	 5/31/92	FM		Deleted ParseTable and CharType from this file. They were
+;									conditionalized forRom. They are no longer needed now that the
+;									rom build includes ScriptMgrExtensions.a.
+;		<19>	 4/29/92	FM		Get rid of conditionals: romanDoSimpleScripts,
+;									smgrSys7Extensions, smgrROMVers
+;		<18>	 4/22/92	PKE		#1027368,<FM>: Make Roman CharType handle the direction bit too
+;									(so one-byte extension can just call the Roman one, and we will
+;									use the same format for all one-byte tables). For System builds,
+;									move it to ptch 27 since we patch it out completely.
+;		<17>	 4/14/92	PKE		#1026778,<yds>: To make FindWord not depend on having script
+;									code passed in d2 (script code will not be in d2 when it is
+;									called from one-byte extension), change Roman dispatcher to
+;									replace selector on stack with ScriptRecord pointer, and get
+;									script code from new scriptID field of ScriptRecord instead of
+;									from d2. Do this for CharType & Transliterate too. Remove some
+;									code conditionalized for pre-7.0.
+;		<16>	  4/8/92	PKE		#1026515,<cv>: Roman FindWord should not require that itl2 be in
+;									new format in order to handle custom break tables (passed by
+;									pointer). Thanks to Hani Abdelazim for noticing this and
+;									supplying fix.
+;		<15>	 2/13/92	PKE		#1021419, Cube-E: Make Roman dispatcher handle nil entries in
+;									dispatcher table.
+;		<14>	12/17/91	PKE		#1018346: Fix bug introduced in <13>. Call IUGetScriptItl with
+;									script code passed from ScriptMgr dispatcher, so it works for
+;									simple scripts too (don't assume script is smRoman).
+;		<13>	 10/8/91	PKE		For Cube-E (and Bruges): When getting tables from 'itl2', use
+;									IUGetScriptItl instead of using IUGetIntl with IntlForce off.
+;									Part of fix for bug #1013149. Include IntlUtilsPriv.a. Clean up
+;									some conditionals and remove code that is conditionalized out.
+;		<12>	 7/23/90	PKE		For 7.0, move romanDispTable (table of offsets used to
+;									initialize dispatch table) to end of ScriptMgrInit.a, so it gets
+;									cut back. Use smgrSixPack instead of $606.
+;		<11>	 5/29/90	PKE		NEEDED FOR SIXPACK DISK: Moved ParseTable to ptch 27 so we can
+;									fix an old unbalanced stack bug in both RAM and ROM versions.
+;									Stuff a dummy ParseTable vector here; it will be updated by ptch
+;									27. All these changes are flagged with <11>.
+;		<10>	 4/10/90	PKE		Used smgrSysVers, smgrROMVers, smgrSys7Extensions symbols
+;									instead of SysVers, buildLevel, and some forRom symbols. Deleted
+;									conditionalized definitions of SysVers and Scripts604. Started
+;									organizing for ROMification of 7.0 extensions. Included
+;									VisibleLength in main proc and exported label; included
+;									FindScriptRun if it’s here. Renamed Roman versions of GetScript
+;									and SetScript to rGetScript, rSetScript.
+;		 <9>	 3/27/90	PKE		Missed a couple of places where I should use romanKeepSelector
+;									conditional.
+;		 <8>	 3/26/90	PKE		Needed more complicated conditionals around BitBucket and
+;									BitBucketReg in romanTable.
+;		 <7>	 3/21/90	EMT		Removed unnecessary ROM85 references and oldMacTweek code.
+;		 <6>	 3/21/90	SMB		For 7.0, we moved FindScriptRun to ptch 27.
+;		 <5>	 3/19/90	PKE		Use new feature conditionals smgrUseStdExit,
+;									smgrUseDispTablePtr, and romanKeepSelector. Rearranged
+;									RomanScript dispatcher so we can use these conditionals. Deleted
+;									obsolete definition: if forRom undefined, then forRom equ 0.
+;		 <4>	 2/22/90	PKE		For 7.0, move Char2Pixel, DrawJust, MeasureJust, and FixSpExtra
+;									code to ptch 27 (ScriptMgrExtTail.a) so we can make changes in
+;									ROM too. Used dummy vector for Char2Pixel, DrawJust, MeasureJust
+;									in RomanUtil table here; ptch 27 will stuff real vector.
+;		 <3>	 1/30/90	PKE		NEEDED FOR 6.0.5: Changed conditionals so some ROM and System 7
+;									bug fixes also go in System 6.0.5. (1) Fix for VisibleLength
+;									when called with a null string. (2) Fix divide by zero problem
+;									in FixSpExtra.
+;		 <2>	 1/11/90	PKE		For 7.0, moved PortionText, Pixel2Char to ptch 27 because we
+;									completely patch out the ROM versions of these routines. Used a
+;									dummy vector for these routines in RomanUtil table here - ptch
+;									27 will stuff the real vector. Also use dummy vectors for Kanji
+;									private routines and new 7.0 routines - ptch 27 will update the
+;									vectors for the new routines. Updated header to BBS format and
+;									fixed up tabs throughout.
+;		 <1>	12/18/89	CCH		Adding for the first time into BBS. Changed include 'inc.sum.a'
+;									to load 'StandardEqu.d'. Updated file name references.
+;	(BBS versions above, EASE versions below)
+;	   <2.4>	 8/26/89	PKE		Cleaned up conditionals, changing newItl2Tables to buildLevel >=
+;									1. Deleted obsolete itlr stuff (never got built).
+;	   <2.3>	 8/24/89	PKE		NEEDED FOR 6.0.4 SCRIPTS BUILD, 6.0.5: Conditionalize (2.1).
+;									Remove some gratuitous conditionals. NOTE: May have to add back
+;									load 'nEqu.d' when we roll this over to Fiction for SS-6.0.4
+;									(Scripts) build.
+;	   <2.2>	 8/22/89	SES		Removed references to nFiles.
+;	   <2.1>	 8/21/89	PKE		NEEDED FOR 6.0.4 SCRIPTS BUILD, 6.0.5: Change CharType/
+;									Transliterate/ FindWord to save IntlForce flag then clear it
+;									before IUGetIntl call, restoring it afterward. This is so we get
+;									the itl2 tables for the correct script (instead of the tables
+;									for the system script).
+;	   <2.0>	 8/21/89	PKE		NEEDED FOR 6.0.4!!: Fix me-too problem with pointer to unlocked
+;									handle in Transliterate; affects Roman system (this problem
+;									looks familiar; did I dream that I already fixed this one?).
+;	   <1.9>	 6/30/89	PKE		NEEDED FOR AURORA AND 6.0.4: Clean up register usage in
+;									CharType; add some comments (stuff from code review).
+;	   <1.8>	 6/23/89	PKE		Skip definition of buildLevel (done in ScriptPriv.a).
+;	   <1.7>	  6/5/89	PKE		Add more error checking after IUGetIntl calls and set related
+;									error return values (for CharType, Transliterate, FindWord).
+;	   <1.6>	 5/30/89	PKE		(ROM & 7.0 only) Fix bug in which VisibleLength returns 1 for
+;									null string (BRC #44640).
+;	   <1.5>	 4/26/89	PKE		(ROM & 7.0 only) Change RomanUtil to use dispatch tables in RAM,
+;									accessed through pointer/limits in ScriptRecord.
+;	   <1.4>	 3/13/89	PKE		Fixed CharType trashing of a2/a3, Transliterate trashing of a4
+;									(a consequence of the itl2 changes). Oops.
+;	   <1.3>	 2/21/89	PKE		Replaced with RomProj version, which already had system and Rom
+;									sources merged.
+;	(EASE ROMproj history below)
+;	   <1.6>	 2/21/89	PKE		Get CharType/Transliterate/FindWord tables from itl2, not itlR;
+;									do this for all new Systems and ROMs. Get rid of itlR. Use
+;									include 'inc.sum.a' (not inc.sum.src.a), not load 'inc.sum.d'.
+;	   <1.5>	 2/14/89	PKE		Updated to use MPW 3.0 final ScriptEqu.a equate names
+;	   <1.4>	  2/3/89	PKE		Merged with current system sources (CCH's 01/16/1989 merge of
+;									6.0.3 and 7.0 sources, done in RES.sys:smgr)
+;	   <1.3>	 12/1/88	PKE		MED fixed divide by zero in FixSpExtra.
+;	   <1.2>	11/14/88	PKE		Synchronize EASE and Projector
+;	   <1.1>	11/11/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	(old EASE ROMproj history below)
+;	   <1.6>	10/27/88	LDC		Mods by Carl Hewitt and Brian McGhie in the process of putting
+;									Script Manager in ROM
+;	(EASE Sysproj history below)
+;	   <1.2>	 2/14/89	PKE		Updated to use MPW 3.0 final ScriptEqu.a equate names
+;	   <1.1>	 1/16/89	CCH		Merged 6.0.3 final sources into 7.0.
+;	   <1.0>	11/16/88	CCH		Added to EASE.
+;	(pre-EASE history below)
+;				 4/26/89	pke		Export romanTable…
+;				 2/21/89	pke		For ROM and all systems, get CharType/Transliterate/FindWord
+;									tables from itl2, not itlR or code. Include MED's FixSpExtra fix
+;									in Sys $700 as well as ROM (it was previously left out of Sys
+;									$700 for testing source merge). Also change conditionals so that
+;									if we don't do the new itl2 stuff, we will get the FindWord
+;									tables from itlR in Sys $700 as well as in the ROM version. Use
+;									include 'inc.sum.a' (not inc.sum.src.a), not load 'inc.sum.d'.
+;				  2/2/89	pke		Merged system sources and ROM sources
+;				 11/7/88	med		Fixed FixSpExtra divide by zero.
+;				10/18/88	ldc		Moved word wrap and break tables to itlr.a
+;				10/12/88	ldc		Removed check for old roms, use inc.sum.src.a
+;				 7/18/88	ldc		Fixed word table to handle character extensions
+;				 6/15/88	ldc		Moved tables for CharType and upper/lower casing to itlr.a.
+;									Added GetItlr routine to get pointer to itlr.a
+;				  6/7/88	ldc		Added BRA's to StdUnlink and StdExit for romification
+;	changes above are for ROM or buildLevel >= 2
+;				  6/6/88	med		fixed Ä bug
+;				 3/21/88	med		Minor fix in PortionText intercharacter spacing.
+;				 3/21/88	med		Moved VisibleLength in here
+;				  1/7/88	med		Moved PortionText, FindScriptRun in
+;				 8/20/87	med		Added <letter><number> to words
+;				 8/20/87	med		Removed $a0 from list of blanks
+;				  8/2/87	med		Fixed bug with non-breaking space in FindWord
+;				 7/31/87	med		Fixed CR in middle of blanks in FindWord
+;				 7/24/87	med		Changed CharType table so blank characters have smPunctBlank
+;				  6/8/87	med		Fixed FixSpExtra: add small value to compensate for QD bug, make
+;									the spExtra value additive.
+;				  3/6/87	med		Added smScriptFlags field and dispatch
+;				12/28/86	jdt		Removed bug in FixSpExtra where dbra count was trashed.
+;				12/25/86	jdt		Modified the FixSpExtra routine for performance. It now assumes
+;									that space characters will outnumber non-space characters, and
+;									checks for the case where slop is zero.
+;				12/22/86	jdt		Changed stack frames to include argument sizes. Moved several
+;									magic numbers into equates. Space improvements in RomanScript,
+;									CharType, Translit, FindWord, GetScript/SetScript, and
+;									HiliteText. Speed improvements in Pixel2Char. Added constant for
+;									last script verb.
+;				 12/8/86	jdt		Modified the dispatch so the ParseTable call is not faked. Added
+;									Mark's speedup for dispatch (-smGetScript).
+;				 12/5/86	jdt		Cleaned up stack frames and comments. Now use SpaceExtra trap in
+;									FixSpExtra.
+;				11/20/86	jdt		Replaced standard equates load.
+;				11/16/86	KWK		Added ParseTable routine.
+;				10/24/86	jdt		New ironsides dispatcher can fake falls for unimplemented
+;									selectors. Yanked extra storage argument from Pixel2Char.
+;				10/23/86	jdt		Added new storage argument to Pixel2Char.
+;				 10/7/86	JDT		Error check after GetHandleSize should be a long test.
+;				 9/14/86	JDT		Frenzied reorganization to cover up an embarassing assumption
+;									concerning spExtra. Don't believe anything you hear about it.
+;				  9/6/86	JDT		New GetScript/SetScript interfaces. Added Font2Script stub.
+;									Installed smScriptMunged verb in table and incremented it in
+;									SetScript.
+;				  9/4/86	JDT		Added nil FontScript, IntlScript, and KeyScript routines.
+;				  9/1/86	JDT		Fixed bug in simple GetScript routine.
+;				 8/28/86	JDT		Removed Roman KeyHook routine.
+;				 8/21/86	JDT		Broke into script manager and roman utilities files.
+;___________________________________________________________________________________________________
+;	To Do (old):
+;		Fix bug in Pixel2Char when checking for stack space.
+;		Speed improvements to FixSpExtra.
+;		Packing of character type and transliteration tables.
+;___________________________________________________________________________________________________
+
+ 		load	'standardequ.d'
+		include	'ScriptPriv.a'
+		include	'IntlUtilsPriv.a'					; for IUGetScriptItl		<13>
+
+		include	'Packages.a'						; To get _IUGetIntl	<02/21/89 pke><08/26/89 pke>
+
+		import	StdUnlink, StdExit					;					<6/7/88ldc> for rom
+
+		proc
+		blanks	on
+		string	asis
+
+		import	BitBucket							;					<6/7/88ldc> for rom
+	
+		export	RomanPrint
+		export	RomanName
+		export	RomanScript
+		export	rGetScript, rSetScript, CharByte	;			<10>
+		export	Translit, FindWord
+		export	HiliteText
+		export	VisibleLength						;					<10>
+	
+; ----------------------------------------------------------------------------
+; function:	RomanPrint
+; input:	d0.l	Printer GrafPort.
+;			d1.w	Printer number.
+; warning:	This routine is register based.
+;			This routine preserves all registers.
+;
+; The print action routine for Roman does absolutely nothing, as you might
+; expect.
+; ----------------------------------------------------------------------------
+
+RomanPrint
+		rts											; return to the caller.
+
+RomanName	
+		string	Pascal
+		dc.b	'Roman'
+		align	2
+		string	asis
+	
+; ----------------------------------------------------------------------------
+; function:	RomanScript
+; input:	(sp).l	Routine selector, arguments length, result length.
+; warning:	This routine is a dispatcher and does not return directly.
+;			This routine follows Pascal register conventions.
+;
+; This is the ScriptUtil entry for the Roman Script.  The entry uses a
+; dispatch table to find the routine offset for this selector.  If the
+; call is not implemented, we remove the arguments, clear the result, and
+; return directly.
+;
+; Now we assume that the ScriptRecord pointer is in A0 when this is called.		<17>
+; We will replace the selector on the stack with this value, so that routines
+; have access to script-specific information (since they may be called for
+; non-Roman scripts). Till now, no  Roman routines have depended on having
+; any particular value in the selector space.
+; Note 1: starting in Bruges, some routines assumed that the script code was in
+; the high word of d2; changing to depend on having a ScriptRecord pointer in
+; A0 makes an easier interface when Roman routines are called directly by the
+; one-byte extension. In both cases, we hope that RomanScript is only called
+; by the ScriptMgr or the one-byte extension.
+; Note 2: We still want to use the Roman ScriptRecord for dispatching, NOT
+; the ScriptRecord whose pointer is in A0.
+; ----------------------------------------------------------------------------
+
+RomanScript
+		with	SMgrRecord,ScriptRecord
+		move.l	4(sp),d0						; get selector
+		GetSMgrCore a1							; set up ptr to SMgrRecord					<17>
+		move.l	smgrEntry+(smRoman*4)(a1),a1	; now set up ptr to Roman ScriptRecord		<17>
+		cmp.w	scriptDispHigh(a1),d0			; selector past max script sys call?		<17>
+		bhi		BitBucket						; clean up stack and fake the call	<6/7/88ldc>	
+		sub.w	scriptDispLow(a1),d0			; make word offset from table start			<17>
+		add.w	d0,d0							; make a long offset
+		move.l	scriptDispTable(a1),a1			; get table ptr								<17>
+		move.l	0(a1,d0.w),d0					; get routine vector from table			<15><17>
+		beq		BitBucket						; if nil, bail							<15>
+		move.l	a0,4(sp)						; replace selector with ScriptRecord ptr	<17>
+		move.l	d0,a0							; copy vector							<15>
+		jmp		(a0)							; now jump to it
+		endwith	;SMgrRecord,ScriptRecord
+
+; ----------------------------------------------------------------------------
+; function:	GetScript(script, verb: Integer): LongInt;
+; input:	(sp).w	Script code.
+;			(sp).w	Verb value.
+; 			(sp).l	Param pointer.
+; output:	(sp).l	Result, OSErr.
+; warning:	This routine follows Pascal register conventions.
+;
+; GetScript reads values from the script entry and returns them.
+; ----------------------------------------------------------------------------
+
+; now handled in ScriptUtil
+rGetScript										;							<10>
+rSetScript										;							<10>
+;<6/7/88ldc>	BitBucket removes the return address and selector
+		bra		BitBucket						; clean stack and return
+
+; ----------------------------------------------------------------------------
+; function:	CharByte(textBuf: Ptr; textOffset: Integer): Integer;
+; input:	(sp).l	Text pointer.
+;			(sp).w	Text offset.
+; output:	(sp).w	Result, character type.
+; warning:	This routine follows Pascal register conventions.
+;
+; Return the single byte character result for all characters.  Since RIS
+; only supports single byte characters, this routine is trivial.
+; ----------------------------------------------------------------------------
+
+;<6/7/88ldc> cbArgs equ *-4 = only discount the size of the return, not the
+; obsolete a6link
+; Cleaned up the conditionalized structure <5>
+
+cbRecord		record	{return},decr	; used to be {a6link}
+result			ds.w	1				; result.
+cbArgs			equ		*-4				; size of arguments.
+textBuf			ds.l	1				; text buffer pointer.
+textOffset		ds.w	1				; text buffer offset.
+scriptRecPtr	ds.l	1				; Scriptrecord ptr					<5><17>
+return			ds.l	1				; return address.
+;;a6link		ds.l    1				; old a6 register.
+;;cbLocals		equ		*				; size of local variables.
+				endr
+
+CharByte
+		with	cbRecord
+	
+		move.w	#0,result(sp)			; clear result (stack based!!!)
+		move.w	#cbArgs,d0				; args to clear
+		bra		StdExit					; exit without unlink
+	
+		endWith
+
+; ----------------------------------------------------------------------------
+; function:	Translit(srcHandle,dstHandle: Handle;
+;					target: Integer; srcMask: Longint): OSErr;
+; input:	(sp).l	Source handle.
+;			(sp).l	Destination handle.
+;			(sp).w	Target.
+;			(sp).l	Source mask.
+; output:	(sp).w	Result, OSErr.
+; warning:	This routine follows Pascal register conventions.
+;
+; Transliterate is used only to uppercase or lowercase text under RIS.  If
+; the target and source masks are legal, the destination handle is sized to
+; match the source handle.
+; ----------------------------------------------------------------------------
+
+
+tlRecord		record	{a6link},decr
+result			ds.w	1			; function result.
+tlArgs			equ		*-8			; size of arguments.
+srcHandle		ds.l	1			; srcHandle.
+dstHandle		ds.l	1			; dstHandle.
+target			ds.w	1			; target.
+srcMask			ds.l	1			; srcMask.
+scriptRecPtr	ds.l	1			; ScriptRecord pointer							<5><17>
+return			ds.l	1			; return address.
+a6link			ds.l	1			; old a6 register.
+tlLocals		equ		*			; size of local variables.
+				endr
+
+sourceOn		equ	$0003		; source bits on.
+modifierMask	equ	$C000		; case modifiers
+
+transRegs	reg	d3/a2-a4		; save regs						<03/13/89 pke><08/26/89 pke><10>
+
+; Link the stack and save the registers.
+; Note: d2 hi word has a value passed from dispatcher; save it till IUGetScriptItl call		<14>
+
+Translit
+		with	tlRecord
+		link	a6,#tlLocals			; link the stack.
+		movem.l	transRegs,-(sp)			; save the registers.
+
+; Assume the error result and check the target, modifiers,  and source mask.
+; If any of them is wrong, return immediately.
+
+		move.l	#-1,d0					; assume error result.
+		move.l	srcMask(a6),d1			; get the source mask.
+		and.w	#sourceOn,d1			; isolate ascii and native.
+
+		beq		transDone				; transliteration not available.	<02/21/89 pke><08/26/89 pke><10>
+
+		move.w	target(a6),d1			; get the target and modifiers.
+		move.w	d1,d2					; copy the target and modifiers.
+		sub.b	#1,d1					; if target not native or ascii,
+
+		bgt		transDone				; transliteration not available.	<02/21/89 pke><08/26/89 pke><10>
+
+		sub.b	#-2-1,d1				; check also for general target, -2,-1
+
+		blt		transDone				; bail if not			<02/21/89 pke><08/26/89 pke><10>
+
+		move.w	#modifierMask,d3		; now case modifiers
+		and.w	d3,d2					; remove the target.
+		cmp.w	d3,d2					; if both modifiers are on,
+
+		beq		transDone				; transliteration not available.	<02/21/89 pke><08/26/89 pke><10>
+
+; Change the size of the destination handle to be the same as the source
+; handle.  If an error occurs, return immediately.
+
+		move.l	srcHandle(a6),a1		; get source handle.
+		move.l	dstHandle(a6),a2		; get destination handle.
+		move.l	a1,a0					; get source handle.
+		_GetHandleSize					; find out how large it is.
+		tst.l	d0						; if an error occurred,
+		blt	transDone					; return the error code.
+		move.l	d0,d1					; save the length.
+		move.l	a2,a0					; get destination handle.
+		_SetHandleSize					; make it the same length.
+		tst.w	d0						; if an error occurred,
+		blt		transDone				; return the error code.
+
+; Convert the handles into pointers and determine which of the translation
+; tables to use from the target modifiers.  If the modifier is to upper
+; case, use the upperCase table.  If the modifier is to lower case, use
+; the lowerCase table.  If the modifiers specify neither upper nor lower
+; case, so a block move from the source to the destination.
+
+											;						<02/21/89 pke><08/26/89 pke><10>
+
+		movem.l	a1/d1-d2,-(sp)				;*save around IUGetIntl		<skip a0/d0, 06/05/89 pke>
+
+											; skip save/clear of IntlForce			<13>
+		clr.l	-(sp)						; space for returned handle
+		move.w	#2,-(sp)					; select itl2
+
+;;		clr.w	d2							; sysFlag=0; script code in hi word		<14>
+;;		swap	d2							; put where they belong					<14>
+		move.l	scriptRecPtr(a6),a0			; ScriptRecord ptr (maybe nonRoman)		<17>
+		moveq	#0,d2						; sysFlag=0 in hi word					<17>
+		move.b	ScriptRecord.scriptID(a0),d2 ; script code in low word				<17>
+
+		move.l	d2,-(sp)					; two arguments: script code, sysFlag=0	<13><14>
+		_IUGetScriptItl						; may trash a0,a1,d0-d2					<13>
+		move.l	(sp)+,a4					; store itl2 handle
+											; skip restore of IntlForce				<13>
+
+		movem.l	(sp)+,a1/d1-d2				;*
+; move following two dereferences here, after IUGetIntl						<2.0> <08/20/89 pke>
+		move.l	(a1),a1						; get source pointer.
+		move.l	(a2),a2						; get destination pointer.
+		moveq	#-1,d0						; assume error result			<06/05/89 pke>
+		move.l	a4,d3						; nil handle?					<06/05/89 pke>
+		beq		transDone					; bail if so					<06/05/89 pke>
+		move.l	(a4),a4						; dereference
+		btst.b	#0,itl2FlagsOffset+1(a4)	; extended itl2 tables?
+		beq.s	transDone					; no, bail (special return code?)
+		clr.l	d3							; wordize  				<12/16/87med>  <move here 06/05/89 pke>
+		move.l	a4,a0						; copy
+		clr.l	d0							;						<move here 06/05/89 pke>
+		move.w	classArrayOffset(a4),d0		; longize
+		add.l	d0,a0						;
+		move.l	a4,a3						;
+		move.w	upperListOffset(a4),d0		;
+		add.l	d0,a3						;
+		clr.l	d0							; quick fix: do this in case we branch
+		cmp.w	#smTransUpper,d2			; if mask is transUpper,
+		beq.s	@TransNext					; transliterate to upper case.
+		move.l	a4, a3						; start from itlr ptr			<6/16/88ldc>
+		move.w	lowerListOffset(a4),d0		;
+		add.l	d0,a3						;
+		clr.l	d0							;
+
+		cmp.w	#smTransLower,d2			; if mask is transLower,
+		beq.s	@TransNext					; transliterate to lower case.
+		move.l	a1,a0						; copy the source to the
+		move.l	a2,a1						; destination without changing
+		move.l	d1,d0						; the characters.
+		_BlockMove							;
+		bra.s	transNoErr					; return error code.
+@TransLoop
+		move.b	(a1)+,d0					; get the character.
+		move.b	0(a0,d0.w),d3				; get class						<12/16/87med>
+		add.b	0(a3,d3.w),d0				; delta							<12/16/87med>
+		move.b	d0,(a2)+					; get the transliteration.		<12/16/87med>
+@TransNext
+		dbra	d1,@TransLoop				; do the next character.
+
+; Return the noErr code.
+
+transNoErr
+		move.l	#noErr,d0					; return noErr.
+
+; We're all through translating.  Store the result code, clean up the
+; stack and return to the caller.
+
+transDone
+		move.w	d0,result(a6)				; store the result.
+		movem.l	(sp)+,transRegs				; restore the registers.
+	
+; Unlink the stack and return to the caller.
+
+		move.w	#tlArgs,d0					; for std exit
+		bra		StdUnlink					; StdUnlink
+
+		endwith
+		
+; ----------------------------------------------------------------------------
+; function:	FindWord(textPtr: Ptr; textLength, offset: Integer;
+;					leftSide: Boolean; breaks: BreakTable;
+;					Var offsets: OffsetTable);
+; input:	(sp).l	Text pointer.
+;			(sp).w	Text length.
+;			(sp).w	Text offset.
+;			(sp).w	LeftSide flag.
+;			(sp).l	Table of types and tuples.
+;			(sp).l	Table of offsets.
+; warning:	This routine follows Pascal register conventions.
+;
+; Mark decided what he wants to do with this routine, and it is impressive.
+; The basic idea is that we are passed a text selection (pointer, length,
+; offset, and leftSide flag) and are to find the word selected.
+; We return the offsets that mark the endpoints of the word.  The return
+; offsets are given in an offset table.
+; The break table pointer allows the user to override the standard table
+; used by the routine.  If this parameter is 0, the standard table is used.
+; If it is -1, a second table is used for word-wrap type selections.  Any
+; other value is interpreted as a pointer to new table, which is then used
+; by the routine.  This table has a specific format, as detailed below.
+; ----------------------------------------------------------------------------
+
+fwRecord		record	{a6link},decr
+fwArgs			equ		*-8			; size of arguments.
+pointer			ds.l	1			; Text pointer.
+length			ds.w	1			; Text length.
+offset			ds.w	1			; First offset.
+left			ds.w	1			; LeftSide flag.
+option			ds.l	1			; Optional tuple table.
+table			ds.l	1			; array of offsets.
+scriptRecPtr	ds.l	1			; ScriptRecord pointer							<5><17>
+return			ds.l	1			; return address.
+a6link			ds.l	1			; old a6 register.
+fwLocals		equ		*			; size of local variables.
+				endr
+
+tupleOffset		equ		256			; breakTable offset to tuples.
+
+; Link the stack and save the registers.
+;
+; register usage:
+;	d3.w	Left offset.
+;	d4.w	Center offset.
+;	d5.w	Right offset.
+;	d6.w	Current tuple under consideration.
+;	d7.w	Text length.
+;	a0.l	Tuple table copy.
+;	a1.l	Type table pointer.
+;	a2.l	Block record pointer.
+;	a3.l	Text pointer.
+;	a4.l	Tuple table pointer.
+; Note: d2 hi word has a value passed from dispatcher; save it till IUGetScriptItl call		<14>
+
+FindWord
+		with	fwRecord
+		link	a6,#fwLocals			; link the stack.
+		movem.l	d3-d7/a2-a4,-(sp)		; save the registers.
+
+; Load the registers with the basic parameters.
+
+		move.l	table(a6),a2			; get offset array.
+		move.l	pointer(a6),a3			; get text pointer.
+		move.w	offset(a6),d4			; get first offset.
+		move.w	length(a6),d7			; get text length.
+
+; Find the word that has the offset in it and return its limits. First,
+; determine the starting offset based on the text offset, length, and
+; leftSide flag.
+
+		tst.b	left(a6)				; if leftSide is false,
+		bne.s	@1						; subtract one from
+		sub.w	#1,d4					; the offset.
+@1		move.l	#0,d3					; left is zero.
+		move.l	d3,d5					; right is zero.
+		tst.w	d4						; if offset < 0,
+		blt		storeOffsets			; return to caller.
+		move.l	d7,d3					; left is length.
+		move.l	d7,d5					; right is length.
+		cmp.w	d7,d4					; if offset >= length,
+		bge		storeOffsets			; return to caller.
+
+; Next, prime all of the registers for the search in both directions. We
+; determine here which god-forsaken table the user wants.
+
+FoundOffset
+		MOVE.L	option(A6),D0			; check for 0								<16>
+		BEQ.S	@UseDefault				; if default word select table, go get it	<16>
+		CMP.L	#-1,D0					; check for -1								<16>
+		BEQ.S	@UseDefault				; if default word wrap table, go get it		<16>
+		MOVE.L	D0,A1					; have pointer to custom table				<16>
+		BRA.S	@LoadOffsets			; continue with it							<16>
+	
+@UseDefault
+;;		clr.w	d2							; sysFlag=0; script code in hi word		<14>
+;;		swap	d2							; put where they belong					<14>
+		move.l	scriptRecPtr(a6),a0			; ScriptRecord ptr (maybe nonRoman)		<17>
+		moveq	#0,d2						; sysFlag=0 in hi word					<17>
+		move.b	ScriptRecord.scriptID(a0),d2 ; script code in low word				<17>
+
+		clr.l	-(sp)						; space for returned handle
+		move.w	#2,-(sp)					; select itl2
+
+		move.l	d2,-(sp)					; two arguments: script code, sysFlag=0	<13><14>
+		_IUGetScriptItl						; may trash a0,a1,d0-d2					<13>
+		move.l	(sp)+,a0					; store itl2 handle
+
+		move.l	a0,d0						; nil handle?
+		beq.s	storeOffsets				; bail if so
+		move.l	(a0),a0						; dereference
+		btst.b	#0,itl2FlagsOffset+1(a0)	; extended itl2 tables?
+		beq.s	storeOffsets				; no, bail (what should we return?)
+		move.l	a0,a1						; copy
+		clr.l	d0							; for longizing
+		move.w	wordTableOffset(a0),d0		; longize
+		add.l	d0,a1						; get offset
+		move.l	option(a6),d0				; optional table = 0?
+		beq.s	@LoadOffsets				; yes -> use standard table.
+		move.l	a0,a1						; copy again
+		clr.l	d0							; clear again for longizing
+		move.w	wrapTableOffset(a0),d0		; longize
+		add.l	d0,a1						;
+		; we now check for breaks ≠ 0 or -1 above,									<16>
+		;	don't need to do it here anymore
+
+@LoadOffsets
+		lea		tupleOffset(a1),a4			; tuples follow char types.
+		move.w	d4,d3						; start left at center.
+		move.w	d4,d5						; start right at center - 2.
+		sub.w	#2,d5						;
+
+; First, check the center tuple to see if we have a word at all.  Second,
+; search to the right until we come to the end of a word.  Third, search
+; to the left until we come to the beginning of a word.
+
+FindOffsets
+		clr.l	d6							; clear the tuple.
+		bsr.s	FindRight					; get left character.
+		bsr.s	FindRight					; get center character.
+		bsr.s	FindRight					; get right character.
+		bsr.s	TupleCenter					; legal center tuple?
+		bne.s	StoreOffsets				; no -> return center.
+		move.w	d6,-(sp)					; save center tuple.
+@1		bsr.s	FindRight					; get the next character.
+		bsr.s	TupleRight					; if the tuple is good,
+		beq.s	@1							; continue to the right.
+		move.w	(sp)+,d6					; fetch center tuple.
+		sub.w	#1,d3						; left is center - 1.
+@2		bsr.s	FindLeft					; get the next character.
+		bsr.s	TupleLeft					; if the tuple is good,
+		beq.s	@2							; continue on the left.
+
+; Adjust the offsets to return the correct string.  The right is one past
+; its break, and the left is two before its break.
+
+		sub.w	#1,d5						; bring right back one.
+		add.w	#2,d3						; bring left forward two.
+		
+; Save the offsets in the offset table.  Be sure to clear the two extra
+; offset pairs.  Restore the registers and return to the caller.
+
+StoreOffsets
+		move.w	d3,(a2)+					; store the left offset.
+		move.w	d5,(a2)+					; store the right offset.
+		clr.l	(a2)+						; clear the second pair.
+		clr.l	(a2)						; clear the third pair.
+		movem.l	(sp)+,d3-d7/a2-a4			; restore the registers.
+
+; Unlink the stack and return to the caller.
+
+		move.w	#fwArgs,d0					; for std exit
+		bra		StdUnlink					; StdUnlink
+
+; The following routines are used by the FindWord routine to build and
+; categorize the character tuples.
+
+highMask	equ		$7fff					; mask off high bit.
+rightMask	equ		$ffe0					; clear right character.
+leftMask	equ		$03ff					; clear left character.
+bothMask	equ		$03e0					; clear right and left.
+nonBreak	equ		$0020					; non-breaking center.
+
+; ----------------------------------------------------------------------------
+; Increment the right offset and get the next character.  Shift its type
+; into the current tuple on the right side.
+; Note that a right offset which is less than zero or greater than the
+; length shifts a wildcard character into the tuple.
+
+FindRight
+		move.l	#0,d0						; type is wildcard.
+		add.w	#1,d5						; offset < 0?
+		blt.s	@0							; yes -> enter a wildcard.
+		cmp.w	d7,d5						; offset >= length?
+		bge.s	@0							; yes -> enter a invalid.
+		move.b	0(a3,d5.w),d0				; get the character.
+		move.b	0(a1,d0.w),d0				; get the character type.
+@0		lsl.w	#5,d6						; shift the tuple left.
+		and.w	#highMask,d6				; clear high bit.
+		or.b	d0,d6						; or in the character.
+		rts									; return to the caller.
+	
+; Decrement the left offset and get the next character.  Shift its type
+; into the current tuple on the left side.
+; Note that a left offset which is less than zero or greater than the
+; length shifts a wildcard character into the tuple.
+
+FindLeft
+		move.l	#0,d0						; type is wildcard.
+		sub.w	#1,d3						; left offset < 0?
+		blt.s	@0							; yes -> enter a wildcard.
+		cmp.w	d7,d3						; left offset >= length?
+		bge.s	@0							; yes -> enter a wildcard.
+		move.b	0(a3,d3.w),d0				; get the character.
+		move.b	0(a1,d0),d0					; get the character type.
+@0		and.w	#rightMask,d6				; clear the bottom five bits.
+		add.w	d6,d6						; place a zero at bit 5.
+		or.w	d0,d6						; insert new type.
+		ror.w	#6,d6						; rotate right 6 bits.
+		rts									; return to the caller.
+
+; ----------------------------------------------------------------------------
+; Determine whether a tuple exists or not in the tuple table.  The current
+; tuple is in d6, and registers d0-d2 and a0 are free for our use.  We
+; return 'eq' in the cc's if the tuple was found, 'ne' otherwise.
+
+rightAlone	equ		$001F					; right character
+leftAlone	equ		$7C00					; left character
+rightNB		equ		$0001					; non-breaking on right
+leftNB		equ		$0400					; ditto on left
+
+TupleCenter
+		bsr.s	TupleRight					; try right side				<8/2/87med>
+		beq.s	VanillaReturn				; done?							<8/2/87med>
+		move.w	d6,d1						; copy the tuple.
+		bra.s	CommonLeft					; join into left
+		
+TupleRight
+		move.w	d6,d1						; copy the tuple.
+		bsr.s	TupleExacting				; legal tuple?
+		beq.s	VanillaReturn				; yes -> accept immediatly.
+		andi.w	#rightMask,d1				; right character is wild.
+		bsr.s	TupleExacting				; legal tuple?
+		beq.s	VanillaReturn				; yes -> accept					<8/2/87med>
+		and.w	#leftAlone,d1				; get left char					<8/2/87med>
+		cmp.w	#leftNB,d1					; = non-break?					<8/2/87med>
+		bra.s	TestCenter					; check center=wild
+
+TupleLeft
+		move.w	d6,d1						; copy the tuple.
+		bsr.s	TupleExacting				; legal tuple?
+		beq.s	VanillaReturn				; yes -> accept immediatly.
+
+CommonLeft
+		andi.w	#leftMask,d1				; left character is wild.
+		bsr.s	TupleExacting				; legal tuple?
+		beq.s	VanillaReturn				; yes -> return immediately.	<8/2/87med>
+		and.w	#rightAlone,d1				; get left char					<8/2/87med>
+		cmp.w	#rightNB,d1					; = non-break?					<8/2/87med>
+
+TestCenter
+		bne.s	NonBreaking					; not R or L break, skip center test
+		move.w	d6,d1						; refresh tuple					<8/2/87med>
+		and.w	#bothMask,d1				; wild center?					<8/2/87med>
+		seq	d1								; reverse CCR					<8/2/87med>
+		tst.b	d1							; cause EQ = center ≠ 0			<8/2/87med>
+		rts									; return to the caller.			<8/2/87med>
+
+NonBreaking
+		move.w	d6,d1						; refresh tuple					<8/2/87med>
+		andi.w	#bothMask,d1				; non-breaking?
+		cmp.w	#nonBreak,d1				; yes -> accept.
+
+VanillaReturn								; branched Return				<8/2/87med>
+		rts									; return to the caller.
+
+; ----------------------------------------------------------------------------
+TupleExacting
+		move.l	a4,a0						; copy tuple table address.
+		move.w	(a0)+,d0					; get tuple table length.
+@1		cmp.w	(a0)+,d1					; if this is the tuple,
+		dbeq	d0,@1						; exit the loop.
+		rts									; return to caller.
+		endwith
+
+; ----------------------------------------------------------------------------
+; function:	HiliteText(textPtr: Ptr; textLength, firstOffset,
+;					secondOffset: Integer; Var offsets: OffsetTable);
+; input:	(sp).l	Text pointer.
+;			(sp).w	Text length.
+;			(sp).w	First offset.
+;			(sp).w	Second offset.
+;			(sp).l	Table of offsets].
+; warning:	This routine follows Pascal register conventions.
+;
+; Given two offsets into a text string, this routine returns the part of
+; the string that is to be highlighted.  For RIS, this is just the original
+; offsets.
+; ----------------------------------------------------------------------------
+
+htRecord		record	{a6link},decr
+htArgs			equ		*-8			; size of arguments.
+pointer			ds.l	1			; Text pointer.
+length			ds.w	1			; Text length.
+first			ds.w	1			; First offset.
+second			ds.w	1			; Second offset.
+table			ds.l	1			; array of offsets.
+scriptRecPtr	ds.l	1			; ScriptRecord pointer							<5><17>
+return			ds.l	1			; return address.
+a6link			ds.l	1			; old a6 register.
+htLocals		equ		*			; size of local variables.
+				endr
+	
+HiliteText
+		with	htRecord
+		link	a6,#htLocals				; link the stack.
+
+; Store the default values into the offset table.  The first pair is
+; the first and second offsets pinned between 0 and the length of the
+; string.  Note that the following relationship should hold true:
+;
+;	0 <= firstOffset <= secondOffset <= length
+
+		move.l	table(a6),a0				; load table pointer.
+		move.w	length(a6),d1				; load length.
+		move.w	first(a6),d0				; load first offset.
+		bsr.s	Normalize					; 0 <= offset <= length.
+		move.w	second(a6),d0				; load second offset.
+		bsr.s	Normalize					; 0 <= offset <= length.
+		move.l	#0,(a0)+					; clear second pair.
+		move.l	#0,(a0)+					; clear third pair.
+	
+; Unlink the stack and return to the caller.
+
+		move.w	#htArgs,d0					; for std exit
+		bra		StdUnlink					; StdUnlink
+
+; Force the offset to be between 0 and the length of the text.
+
+Normalize
+		bge.s	@1							; >0 -> skip this.
+		move.l	#0,d0						; set it to zero.
+@1		cmp.w	d1,d0						; offset <= length?
+		ble.s	@2							; yes -> skip this.
+		move.w	d1,d0						; set it to length.
+@2		move.w	d0,(a0)+					; store normal offset.
+		rts									; return to the caller.
+		endWith
+
+;____________________________________________________________
+;	PROCEDURE VisibleLength (
+;					textPtr : Ptr;
+;					textLen : Longint
+;				): Longint;
+;____________________________________________________________
+VisibleLengthFrame	record	{oldA6},decrement
+resultSize		equ		4
+result			ds.l	1
+argSize			equ		*-8
+textPtr			ds.l	1
+textLen			ds.l	1
+scriptRecPtr	ds.l	1					; ScriptRecord pointer				<5><17>
+return			ds.l	1
+oldA6			ds.l	1
+localFrame		equ		*
+				endR
+
+VisibleLength								;								<10>
+		with	VisibleLengthFrame
+		link	a6,#localFrame
+; init
+		move.l	textPtr(a6),a0				; ptr to text
+		move.l	a0,d2						; save for comparison
+		move.l	textLen(a6),d0				; len
+		ble.s	@StripDone0					; exit					<05/30/89 pke><3><10>
+		add.l	d0,a0						; get to end
+@StripLoop
+		move.b	-(a0),d1					; get character
+		beq.s	@StripContinue				; null?: continue
+		cmp.b	#32,d1						; space?
+		bhi.s	@StripDone					; no, and cant be white
+		beq.s	@StripContinue				; white, keep looping
+		cmp.b	#$0D,d1						; CR?
+		beq.s	@StripContinue				; white, keep looping
+		cmp.b	#$09,d1						; HT?
+		bne.s	@StripDone					; no, and cant be white
+@StripContinue
+		cmp.w	a0,d2						; at start?
+		bne.s	@StripLoop					; no, continue
+		clr.l	d2							; no visible text
+		bra.s	@StripExit					; finished
+@StripDone
+		addq.l	#1,a0						; retract one
+@StripDone0
+		sub.l	a0,d2						; subtract current position
+		neg.l	d2							; fix sign
+@StripExit
+		move.l	d2,result(a6)				; return result
+		CheckA6
+
+; Unlink the stack and return to the caller.
+
+		move.w	#argSize,d0					; for std exit
+		bra		StdUnlink					; StdUnlink
+
+		endProc
+;____________________________________________________________
+		end
+

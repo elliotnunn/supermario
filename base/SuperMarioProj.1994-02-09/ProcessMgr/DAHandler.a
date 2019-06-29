@@ -1,0 +1,175 @@
+;
+;	File:			DAHandler.a
+;
+;	Contains:		The System Desk Accessory Handler application
+;
+;	Written by:		Phil Goldman
+;
+;	Copyright:		© 1986-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <5>	 9/29/92	DRF		Put back the END that got deleted in <4>
+;		 <4>	 9/25/92	DRF		Get rid of MyGestalt
+;		 <2>	  1/3/91	fjs		(DFH) pass edit function keys to DAHandler
+;		 <0>	 x/xx/86	PYG		New Today.
+;
+;--------------------------------------------------------------------
+
+				CASE	OBJECT
+				LOAD	'ProcessMgrIncludes.D'
+						
+; CloseFrontDeskWindow.  A utility function that calls the DA to close the front
+; window.  Uses a little-known hook which exists for this very purpose.
+; NOTE: This code was ripped off from the desk manager.  The hook is not documented,
+; so I tried to keep the register usage the same (e.g. a1 points to the DCE, d0 and a0
+; point to the hook).
+;
+;		void CloseFrontDeskWindow(void);
+;
+CloseFrontDeskWindow	PROC	EXPORT
+				subq.l	#$4,sp							; make room for function value
+				_FrontWindow							; get pointer to frontmost window
+				movea.l	(sp)+,a0						; pop the window pointer
+				move.l	a0,d0							; nil?
+				beq.s	CFDWExit						; jump if so
+				
+				move.w	windowKind(a0),d1				; get the unit number from window
+				bpl.s	CFDWExit						; if not sys. kind, ignore it
+				move.w	d1,-(sp)						; push refnum for CloseDeskAcc
+				not 	d1								; flip it (bitwise)
+				asl 	#2,d1							; * 4
+				move.l	UTableBase,a0					; point to the driver table
+				move.l	0(a0,d1),a0 					; get the handle
+				move.l	(a0),a1 						; dereference
+
+				move.l	CloseOrnHook,d0 				; is there a hook installed?
+				bne.s	DoCloseHook 					; if so, use it
+				_CloseDeskAcc							; close the DA
+
+CFDWExit
+				rts										; bye now!
+
+; DA seems to have a hook installed
+; Make sure that a1 == DCE pointer, a0 == d0 == hook address
+DoCloseHook
+				addq.l	#2,sp							; restore stack pointer
+				move.l	d0,a0							; hook address in both a0 and d0
+				jsr 	(a0)							; invoke it
+				bra.s	CFDWExit						; all done
+				
+				ENDPROC
+
+; Patch to Close so that we kill the DA when its resource file is closed.
+ClosePatch		PROC	EXPORT
+				IMPORT	oldCloseAddress:DATA
+				IMPORT	HandleCloseDA:CODE
+
+				; push parameter for (potential) call to HandleCloseDA()
+				move.l	a5,-(sp)						; save a5
+				move.l	CurrentA5,a5					; set up with application a5
+				
+				subq.w	#4,sp							; d0 result of old call will go here
+				move.w	ioRefNum(a0),-(sp)				; put refnum in lo word
+				move.w	#0,-(sp)						; clear hi word on stack
+
+				pea		CPBackFromOldRoutine			; push local return address
+				move.l	oldCloseAddress,-(sp)			; push old routine on stack
+				rts										; do it (w/ a-regs untouched!)
+CPBackFromOldRoutine
+				move.l	d0,4(sp)						; save d0 across the call
+				bmi.s	CPDone							; if errors, done
+				
+				jsr		HandleCloseDA					; remove from refnum list
+				move.l	4(sp),d0						; restore d0 trashed by the call
+CPDone
+				addq.w	#8,sp							; skip param, saved d0
+				move.l	(sp)+,a5						; restore a5
+				rts										; and return
+				
+				ENDPROC
+
+; Patch to SystemEvent so that we intercept cmd-Q and cmd-W from DA.
+AlphaCaseMask	EQU		$DF
+cmdKeyMeta		EQU		(cmdKey - 8)
+FunctionKey		EQU		$10
+UndoKey			EQU 	$7A
+CutKey			EQU 	$78
+CopyKey			EQU 	$63
+PasteKey		EQU 	$76
+SystemEventPatch		PROC	EXPORT
+				IMPORT	oldSystemEventAddress:DATA
+
+				subq	#4,sp							; save room for old call
+				movem.l	d0/a0/a5,-(sp)					; preserve a work register
+				move.l	20(sp),a0						; get pointer to event record
+				cmpi.w	#keyDwnEvt,EvtNum(a0)			; is it key down?
+				bne.s	SEPDoCall						; jump if not
+				
+				move.l	evtMessage(a0),d0				; get key
+				cmp.b	#FunctionKey,d0					; is it the function key ?				
+				bne.s	@cmdkey							; if not, check for cmd key
+				and.l	#keyCodeMask,d0					; get key code
+				lsr.l	#8,d0							; into byte of d0
+				cmp.b	#UndoKey,d0
+				beq.s	SEPReturnFalse					; jump if so
+				cmp.b	#CutKey,d0
+				beq.s	SEPReturnFalse					; jump if so
+				cmp.b	#CopyKey,d0
+				beq.s	SEPReturnFalse					; jump if so
+				cmp.b	#PasteKey,d0
+				beq.s	SEPReturnFalse					; jump if so
+				bra.s	SEPDoCall						; pass it through
+
+@cmdkey			btst.b	#cmdKeyMeta,evtMeta(a0)			; is cmd-key down?
+				beq.s	SEPDoCall						; jump if not
+				move.l	evtMessage(a0),d0				; get key
+				and.b	#AlphaCaseMask,d0				; make it uppercase
+				cmp.b	#'Q',d0							; is it Q?
+				beq.s	SEPReturnFalse					; jump if so
+				cmp.b	#'W',d0							; is it W?
+				beq.s	SEPReturnFalse					; jump if so
+SEPDoCall
+				move.l	CurrentA5,a5					; set up application a5
+				move.l	oldSystemEventAddress,12(sp)	; old routine address
+				movem.l (sp)+,d0/a0/a5					; restore registers
+SEPReturn
+				rts
+
+; the event is a cmd-Q, return false so we'll see the event later
+SEPReturnFalse
+				move.l	16(sp),a0						; get return address
+				move.l	a0,20(sp)						; move it down
+				movem.l (sp)+,d0/a0/a5					; restore registers
+				addq	#8,sp							; dump param, space
+				clr.w	4(sp)							; say its not for us (return FALSE)
+				bra.s	SEPReturn						; and return
+				
+				ENDPROC
+						
+; A utility routine to copy a string into the system heap.
+; Function prototype as seen from C --					
+;
+; 			StringPtr GetSysHeapString(StringPtr pStr);
+;
+GetSysHeapString		PROC		EXPORT
+
+				clr.l	-(sp)							; assume retval is failure
+				move.l	8(sp),a0						; param is src
+				moveq.l	#1,d0							; add 1 to...
+				add.b	(a0),d0							; ...string length to get block len
+				move.l	d0,d1							; save length
+				move.l	a0,a1							; save ptr
+				_NewPtr sys								; get space in system heap
+				bne.s	GSHSDone						; if failure, branch
+				exg.l	a0,a1							; switch src/dest
+				move.l	a1,(sp)							; and do the return value
+				move.l	d1,d0							; save length
+				_BlockMove
+GSHSDone
+				move.l	(sp)+,d0						; pop retval into d0
+				rts
+				
+				ENDPROC
+
+				END

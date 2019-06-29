@@ -1,0 +1,228 @@
+;
+;   File:       HWElemsTg.a
+;
+;   Contains:   Routines to calculate TAN(x)
+;
+;   Written by: Apple Numerics Group, DSG
+;
+;   Copyright:   © 1985-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<SM2>	 2/3/93		CSS		Update from Horror:
+;		<H2>	 9/29/92	BG		Adding Jon Okada's latest fixes.
+;		  <1>	10/24/91	SAM/KSM	Rolled in Regatta file.
+;		
+;	Terror Change History:
+;
+;         <1>   01/06/91    BG      Added to TERROR/BBS for the time.
+;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;																			  ;;
+;;	File 881ELEMStg.a,														  ;;
+;;	Function tg(x),															  ;;
+;;	Implementation of tg for ΩSANE.											  ;;
+;;	For machines with MC68881/68882 FPU.									  ;;
+;;																			  ;;
+;;	Copyright Apple Computer, Inc. 1985-7, 1989, 1990, 1992, 1993.			  ;;
+;;																			  ;;
+;;	Written by Ali Sazegari, started on July 13 1989,						  ;;
+;;																			  ;;
+;;	Started testing on december 11, 1989.  All flags are set correctly,		  ;;
+;;	except for small normalized numbers.  One intersting fact:  in the		  ;;
+;;	denormal case the underflow flag is automatically raised.  The mystery	  ;;
+;;	about the 1/tg(x) when tg(x) = 0 still remains!  It does not seem to ever ;;
+;;	happen.																	  ;;
+;;																			  ;;
+;;	December 12, 1989.  Fixed all the flags for denormals, small numbers and  ;;
+;;	edge cases.  tg now passes a bag full of test vectors with the correct	  ;;
+;;	flags.																	  ;;
+;;																			  ;;
+;;	January 29, 1990. C. McMaster found the 1-ulp error which was occuring	  ;;
+;;	on a small portion of the test cases.  The order of operation of the	  ;;
+;;	statment: t^5 * P(t*t)/Q(t*t) was not right.							  ;;
+;;																			  ;;
+;;	September 17, 1990. The mystery about 1/tg(x) is solved ( refer to the 	  ;;
+;;	section below ).  ±π/2 arguments now give ±∞. All the rest of the hex	  ;;
+;;	inputs for tg in the test file which were commented out work fine.		  ;;
+;;																			  ;;
+;;	Based on Elems881, package code for Macintosh by J. Coonen,				  ;;
+;;	who wrote it from pascal programs by D. Hough, C. McMaster and K. Hanson. ;;
+;;																			  ;;
+;;  Further Modification History:											  ;;
+;;	23 Apr 92	Performance tuning done (better register usage, faster FPU    ;;
+;;				ops used, front-end check for small operands eliminates		  ;;
+;;				spurious underflowing.					... JPO				  ;;
+;;																			  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+Rtan
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Classification of the argument with a neat trick.						  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			FMOVE.L	FPSR,D0				; what kind of arg? fpsr has the key
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Here is the strategy  ( commonly known as the scoop ) by C. R. Lewis:	  ;;
+;;	Register D0 has N, Z, I, NaN burried in it.  Mask off unwanted bits to 	  ;;
+;;	get them. Then, left shift NZINaN to have Z at MSB position.  If D0 = 0	  ;;
+;;	then arg is finite.														  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+;			MOVE.L	#ExcMask,D1			; mask it kid				DELETED <4/23/92, JPO>
+;			AND.L	D1,D0				; we now have the meat		DELETED <4/23/92, JPO>
+			ANDI.L	#ExcMask,D0
+			LSL.L	#ShiftIt,D0			; N->C, Z->MSB, I->30th & NaN->29th bit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	If arg is a non zero finite number, great!  let's fall through, otherwise ;;
+;;	take the problem cases.													  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	
+			BNE.W		BadBoys			; take care of the bad guys (Z bar set)
+			
+;			MOVEM.L	A1,-(SP)			; use a1 for denormal flag use			DELETED <4/23/92, JPO>
+;			MOVEA.L	A0,A1				; keep a copy of the pointer to argument  DELETED <4/23/92, JPO>
+
+			BFEXTU	(A0){1:15},D0		; |arg| < 2^(-32)?			<4/23/92, JPO>
+			CMPI.W	#$3FDF,D0			;							<4/23/92, JPO>
+			BGE.B	@tanred				; too big, reduce argument	<4/23/92, JPO>
+			
+			MOVE.L	#SetInexact,D0		; small, signal INEXACT		<4/23/92, JPO>
+			BFTST	(A0){1:16}			; denorm signals UNDERFLOW	<4/23/92, JPO>
+			BNE.B	@tinydone			;							<4/23/92, JPO>
+			OR.L	#SetUFlow,D0		;							<4/23/92, JPO>
+@tinydone:								;							label ADDED <4/23/92, JPO>
+			JMP		(A4)				; return arg as result		<4/23/92, JPO>
+			
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	About the argument reduction:  t is reduced REM approximate Pi/2, leaving ;;
+;;	its magnitude no bigger than approximate Pi/4.							  ;;
+;;																			  ;;
+;;	Recall that:															  ;;
+;;																			  ;;
+;;	tg(pi/2 + t) = -1/tg(t)													  ;;
+;;	tg(pi + t)   =  tg(t)													  ;;
+;;																			  ;;
+;;	Then if input t = q*(Pi/2) + r,											  ;;
+;;	q MOD 2 determines whether to negate and reciprocate tg(t).				  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+@tanred:								; 								label ADDED <4/23/92, JPO>
+;			FMOVE.X	FPKPI2,FP1			; get the approximate Pi/2				DELETED <4/23/92, JPO>
+;			FREM.X	FP1,FP0				; t = arg REM Pi/2, quotient q in fpsr	DELETED <4/23/92, JPO>
+			FREM.X	FPKPI2,FP0			; t = arg REM π/2, quo q in FPSR		<4/23/92, JPO>
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Evaluate tg(t) for |t| <= pi/4.											  ;;
+;;																			  ;;
+;;	Use the change of variable  s = t*t										  ;;
+;;																			  ;;
+;;	if ( s <= 1/4 ) then tg(t) = t + ( t^3/3 + t^5 * P(s)/Q(s) )			  ;;
+;;					else t' = (t - 3/4)/3									  ;;
+;;						 tg(t) = t + s/4 + s * t' + s * ( t^3 * P(s)/Q(s) )	  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			FMOVE.X	FP0,FP3				; fp0 = t, fp1 = Pi/2, fp3 = t
+			FMUL.X	FP0,FP0				; fp0 = t*t, fp1 = Pi/2, fp3 = t
+			
+			LEA		TANP,A0				; A0 = coeff table ptr for PolyEval
+			BSR		PolyEval			; fp1 = PolyEval(P, t*t)
+			
+			FMOVE.X	FP1,FP2				; save P(arg)
+			
+			LEA		TANQ,A0				; A0 = coeff table ptr for PolyEval
+			BSR		PolyEval			; fp1 = PolyEval(Q, t*t)
+			
+			FDIV.X	FP1,FP2				; form fp2 = P(t*t)/Q(t*t)
+			FMUL.X	FP0,FP2				; form fp2 = (t*t) * P(t*t)/Q(t*t)
+			FMOVE.X	FP0,FP1				; fp1 = fp0 = t*t
+			FMUL.X	FP3,FP1				; form fp1 = t^3
+			FMUL.X	FP1,FP2				; form fp2 = t^5 * P(t*t)/Q(t*t)
+			
+			FCMP.S	#"0.25",FP0			; decide which formula to continue
+			FBGT.W	BigBabe				; well, we decided to use the big babe
+			
+			FMUL.X	FP3,FP0				; compute fp0 = t^3
+;			FDIV.W	#3,FP0				; we have fp0 = t^3/3					DELETED <4/23/92, JPO>
+			FDIV.S	#"$40400000",FP0	; FP0 <- t^3/3.0						<4/23/92, JPO>
+			FADD.X	FP2,FP0				; almost got it fp0 = t^3/3 + t^5 * P/Q
+			FADD.X	FP3,FP0				; fp0 = t + t^3/3 + t^5 * P(t*t)/Q(t*t)
+			BRA.B	LastCheck			; see if it needs more massaging			
+
+BigBabe	
+			
+			FMOVE.X	FP3,FP1				; fp0 = t*t fp1=t fp2 = t^5*P/Q fp3 = t
+;			FADD.X	#"-0.75",FP1		; fp1 = t - 3/4						DELETED <4/23/92, JPO>
+;			FDIV.W	#3,FP1				; fp1 = t' = ( t - 3/4 ) / 3		DELETED <4/23/92, JPO>
+			FADD.S	#"$BF400000",FP1	; FP1 <- t - 0.75					<4/23/92, JPO>
+			FDIV.S	#"$40400000",FP1	; FP1 <- t' = (t - 0.75)/3.0		<4/23/92, JPO>
+			FMUL.X	FP0,FP1				; fp1 = t' * s = t' * t * t
+			FADD.X	FP2,FP1				; fp1 = t' * s + t^5 * P(s)/Q(s)
+;			FDIV.W	#4,FP0				; before fp0 = t*t, now t*t/4		DELETED <4/23/92, JPO>
+			FMUL.S	#"$3E800000",FP0	; FP0 <- t*t*0.25					<4/23/92, JPO>
+			FADD.X	FP1,FP0				; fp0 = s/4 + s*t' + s*(t^3*P(s)/Q(s))
+			FADD.X	FP3,FP0				; finished, this is tg(t)
+
+LastCheck
+
+			FMOVE.L FPSR,D0				; q is in 1st byte of higher word
+			SWAP	D0					; q is in 1st byte of lower word
+			LSR.B	#1,D0				; is it 0 or 1? ( odd or even )
+			BCC.B	@1					; ok, get ready to fly out
+;			FMOVE.W	#-1,FP1				; it is odd so invert & negate tg(t)	DELETED <4/23/92, JPO>
+			FMOVE.S	#"$BF800000",FP1	; odd, so invert and negate result		<4/23/92, JPO>
+			FDIV.X	FP0,FP1				; fp1 = -1/tg(t)
+			FMOVE.X	FP1,FP0				; get ready to go: fp0 = -1/tg(t)
+
+; still to do is to check for tg(t) = 0.  if true then return infinity
+; it does not seem to ever happen.  what do we do?
+;
+; it does happen!  take the π representation used in REM above and π/2 gives ∞.
+; If tg was ±INF in last step by the nature of the algorithm, flipping the
+; result sign corrects the error. 9/17/90 ... ali
+
+			BTST	#10,D0				; we already have fpsr, see if fp0 was 0
+			BEQ.S	@1					; if it is zero, then
+			FNEG.X	FP0				; flip the sign of INF in fp0
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	The algorithm for tg requires the computation of t^5, which will set the  ;;
+;;	underflow flag when t is small enough ( in the order of 1.0e-1000 ) but	  ;;
+;;	not demormal.  In that case we clear the underflow flag. 12/12/89...ali	  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+@1:
+;			BFEXTU	(A1) {1:16},D0		; get the exponent & 1st mantissa bit	DELETED <4/23/92, JPO>
+;			MOVEA.L	(SP)+,A1			; restore the register after use		DELETED <4/23/92, JPO>
+;			BEQ.B	@2					; if D0 = 0 then current s = denorm		DELETED <4/23/92, JPO>
+			MOVE.L	#SetInexact,D0		; set the inexact flag
+;			MOVE.B	#ClrUflow ,D0		; and clear the underflow bit			DELETED <4/23/92, JPO>
+			JMP		(A4)
+			
+;@2			MOVE.L	#SetInexact + SetUflow,D0     	; signal inexact			DELETED <4/23/92, JPO>
+;			JMP		(A4)				; deliver the result					DELETED <4/23/92, JPO>
+			
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Problem cases: NaN, +∞ and zero.										  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	
+BadBoys		BMI.B	tgOut				; is arg = 0 ? ( N set )
+			BTST	#29,D0				; is arg a NaN? ( bit position 29 )
+			BNE.B	tgOut				; scream, arg = NaN detected!
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	All right boys & girls, at this time it is apparent that the good old arg ;;
+;;	is an infinity or a NaN.												  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+			FMOVE.X	#NaNTrig,FP0		; arg = +∞ => tg(arg) = NaN
+			MOVE.L	#SetInvalid,D0     	; signal invalid
+			JMP		(A4)				; bye
+tgOut		MOVEQ	#0,D0				; signal no exceptions
+			JMP		(A4)				; return either NaN, +∞ or +-0

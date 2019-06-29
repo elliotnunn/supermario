@@ -1,0 +1,224 @@
+;
+;	File:		Ovals.a
+;
+;	Copyright:	© 1981-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM2>	 6/11/92	stb		<sm 6/9/92>stb Synch with QDciPatchROM.a, added comment at
+;									StdOval.
+;	  <•1.4>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;	  <•1.3>	 4/12/89	BAL		Blasting in 32-Bit QuickDraw 1.0B1
+;				  1/8/89	BAL		Vectorized CheckPic
+;				  9/5/86	EHB		Added FillCOval
+;				 8/16/86	EHB		In FillOval, call SetFillPat for color patterns.
+;
+;
+
+		BLANKS	ON
+		STRING	ASIS
+
+;-----------------------------------------------------------
+;
+;
+;	   ***	 *	 *	  *    *	  ***
+;	  *   *  *	 *	 * *   *	 *	 *
+;	  *   *  *	 *	*	*  *	 *
+;	  *   *  *	 *	*	*  *	  ***
+;	  *   *  *	 *	*****  *		 *
+;	  *   *   * *	*	*  *	 *	 *
+;	   ***	   *	*	*  *****  ***
+;
+;
+
+StdOval PROC  EXPORT
+		IMPORT PutPicVerb,PutPicRect
+		IMPORT PutOval,PushVerb,DrawArc
+;---------------------------------------------------------------
+;
+;  PROCEDURE StdOval(verb: GrafVerb; r: Rect);
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+; contains _CheckPic fix from QDciPatchROM.a							<sm 6/9/92>stb
+
+PARAMSIZE		EQU 	6
+VERB			EQU 	PARAMSIZE+8-2		;GRAFVERB
+RECT			EQU 	VERB-4				;LONG, ADDR OF RECT
+
+OVWD			EQU 	-2					;WORD
+OVHT			EQU 	OVWD-2				;WORD
+VARSIZE 		EQU 	OVHT				;TOTAL BYTES OF LOCALS
+
+
+		LINK	A6,#VARSIZE 				;ALLOCATE STACK FRAME
+		MOVEM.L D7/A3-A4,-(SP)				;SAVE REGS
+		MOVE.B	VERB(A6),D7 				;GET VERB
+		_CheckPic							;SET UP A4,A3 AND CHECK PICSAVE
+		BLE.S	NOTPIC						;BRANCH IF NOT PICSAVE
+
+		MOVE.B	D7,-(SP)
+		bsr.l	PutPicVerb					;PUT ADDIONAL PARAMS TO THEPIC
+		MOVEQ	#$50,D0 					;PUT OVALNOUN IN HI NIBBLE
+		ADD 	D7,D0						;PUT VERB IN LO NIBBLE
+		MOVE.B	D0,-(SP)					;PUSH OPCODE
+		MOVE.L	RECT(A6),-(SP)				;PUSH ADDR OF RECT
+		bsr.l 	PutPicRect					;PUT OPCODE AND RECTANGLE
+
+NOTPIC	PEA		StdDraw						;PUSH ADDRESS OF DRAW ROUTINE
+		PEA		GetRect						;PUSH ADDRESS OF RECT ROUTINE
+		_StdDevLoop							;DRAW TO ALL DEVICES
+
+		MOVEM.L (SP)+,D7/A3-A4				;RESTORE REGS
+		UNLINK	PARAMSIZE,'STDOVAL '
+
+
+;---------------------------------------------------------------
+;
+;	PROCEDURE GetRect(VAR theRect: rect); 
+;
+;	RETURN THE OBJECT'S RECTANGLE
+;
+GetRect	MOVE.L	(SP)+,D0					;GET RETURN ADDRESS
+		MOVE.L	(SP)+,A1					;GET DST RECT
+		MOVE.L	RECT(A6),A0					;GET SRC RECT
+		MOVE.L	(A0)+,(A1)+					;SET TOPLEFT
+		MOVE.L	(A0),(A1)					;SET BOTRIGHT
+		MOVE.L	D0,A0						;GET RETURN ADDRESS
+		JMP		(A0)						;AND RETURN
+
+
+;---------------------------------------------------------------
+;
+;	PROCEDURE StdDraw; 
+;
+;	DRAW THE OBJECT
+;
+StdDraw	MOVE.L	RECT(A6),A0 				;POINT TO RECT
+		MOVE	RIGHT(A0),D0
+		SUB 	LEFT(A0),D0
+		MOVE	D0,OVWD(A6) 				;OVWD := R.RIGHT - R.LEFT
+		MOVE	BOTTOM(A0),D0
+		SUB 	TOP(A0),D0
+		MOVE	D0,OVHT(A6) 				;OVHT := R.BOTTOM - R.TOP
+
+		MOVE.L	A0,-(SP)					;PUSH ADDR OF RECT
+		TST.B	D7							;IS VERB FRAME ?
+		BNE.S	NOTFR						;NO, CONTINUE
+		TST.L	RGNSAVE(A3) 				;YES, IS RGNSAVE TRUE ?
+		BEQ.S	NOTRGN						;NO, CONTINUE
+
+		MOVE.L	A0,-(SP)					;YES, PUSH ADDR OF RECT
+		MOVE.L	OVHT(A6),-(SP)				;PUSH OVWD, OVHT
+		MOVE.L	RGNBUF(A4),-(SP)			;PUSH RGNBUF
+		PEA 	RGNINDEX(A4)				;PUSH VAR RGNINDEX
+		PEA 	RGNMAX(A4)					;PUSH VAR RGNMAX
+		_PutOval 							;ADD AN OVAL TO THERGN
+
+NOTRGN	MOVE.B	#1,-(SP)					;PUSH HOLLOW = TRUE
+		BRA.S	DOIT
+NOTFR	CLR.B	-(SP)						;PUSH HOLLOW = FALSE
+DOIT	MOVE.L	OVHT(A6),-(SP)				;PUSH OVWD,OVHT
+		_PushVerb							;PUSH MODE AND PATTERN
+		CLR 	-(SP)						;PUSH STARTANGLE = 0
+		MOVE	#360,-(SP)					;PUSH ARCANGLE = 360
+
+;  DrawArc(r,hollow,ovWd,ovHt,mode,pat,startAng,arcAng);
+
+		_DrawArc
+DONESD	RTS
+
+
+
+FrameOval	PROC	EXPORT
+			EXPORT	CallOval,PaintOval,EraseOval,InvertOval,FillOval,FillCOval
+			IMPORT	SETFILLPAT
+;-----------------------------------------------------
+;
+;  PROCEDURE FrameOval(* r: Rect *);
+;
+		MOVEQ	#FRAME,D0					;VERB = FRAME
+		BRA.S	CallOval					;SHARE COMMON CODE
+
+
+;-----------------------------------------------------
+;
+;  PROCEDURE PaintOval(* r: Rect *);
+;
+PaintOval
+		MOVEQ	#PAINT,D0					;VERB = PAINT
+		BRA.S	CallOval					;SHARE COMMON CODE
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE EraseOval(* r: Rect *);
+;
+EraseOval
+		MOVEQ	#ERASE,D0					;VERB = ERASE
+		BRA.S	CallOval					;SHARE COMMON CODE
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE InvertOval(* r: Rect *);
+;
+InvertOval
+		MOVEQ	#INVERT,D0					;VERB = INVERT
+		BRA.S	CallOval					;SHARE COMMON CODE
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE FillOval(* r: Rect; pat: Pattern *);
+;
+FillOval
+		MOVEQ	#0,D0						;FLAG = FILLOVAL
+		BRA.S	SHARE						; => USE COMMON CODE
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE FillCOval(r: Rect; PPH: PixPatHandle);
+;
+FILLCOVAL MOVEQ	#1,D0						;FLAG = FILLCOVAL
+
+SHARE	MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,A1					;POP ADDR OF PATTERN
+		MOVE.L	A0,-(SP)					;PUT RETURN ADDR BACK
+		MOVE.L	A1,-(SP)					;PUSH ADDR OF PATTERN
+		_SETFILLPAT							;FILLPAT := PAT
+		MOVEQ	#FILL,D0					;VERB = FILL
+;		BRA.S	CallOval					;SHARE COMMON CODE
+
+
+
+;---------------------------------------------------------------
+;
+;  PROCEDURE CallOval(r: Rect);
+;
+;  code shared by FrameOval, PaintOval, EraseOval, InvertOval, and FillOval.
+;  enter with verb in D0.
+;
+CallOval
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,A1					;POP ADDR OF RECT
+		MOVE.B	D0,-(SP)					;PUSH VERB
+		MOVE.L	A1,-(SP)					;PUSH ADDR OF RECT
+		MOVE.L	A0,-(SP)					;RESTORE RETURN ADDR
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE.L	GRAFPROCS(A0),D0			;IS GRAFPROCS NIL ?
+		MOVE.L	JStdOval,A0 				;get piece of trap table
+		BEQ.S	USESTD						;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	OVALPROC(A0),A0 			;NO, GET PROC PTR
+USESTD	JMP 	(A0)						;GO TO IT
+
+
+		ENDPROC 
+
+
+
+
+

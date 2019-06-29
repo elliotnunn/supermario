@@ -1,0 +1,328 @@
+;
+;	File:		SeekRgn.a
+;
+;	Copyright:	© 1981-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM3>	 9/12/93	SAM		Fixed a comment.
+;	   <SM2>	 9/12/93	SAM		Changed all instances of _Translate24to32 to _rTranslate24to32
+;									so they can conditionalized out of the build.
+;
+;	To Do:
+;_____________________________________________________________________________________________________
+;EASE$$$ READ ONLY COPY of file “SEEKRGN.a”
+;•1.4	BAL 05/29/1989 Blasting in 32-Bit QuickDraw version 1.0 Final
+;•1.3	BAL 04/12/1989 Blasting in 32-Bit QuickDraw 1.0B1
+; File SeekRgn.a
+;
+; Copyright Apple Computer, Inc.  1981-1986
+; All Rights Reserved
+
+
+		BLANKS	ON
+		STRING	ASIS
+
+		MACHINE MC68020
+
+;------------------------------------------------------------------
+;
+;  -->	SEEKRGN.TEXT
+;
+;  Routines to play back a region into a scanline buffer.
+;
+
+;------------------------------------------------------------------
+;
+;	MODIFICATION HISTORY
+;
+;  8May86  EHB	Added backwards seekRgn
+;  9May86  EHB  Optimized InvPair (to make up for time spent calling it)
+;  2Oct88  BAL  Altered seekRgn to return number of scans until mask changes
+
+;------------------------------------------------------------------
+;
+;  REGION STATE RECORD:
+;
+;  RGNPTR		EQU  $0  				; [LONG] POINTER TO REGION
+;  DATAPTR 		EQU  $4  				; [LONG] POINTER TO REGION'S DATA
+;  SCANBUF 		EQU  $8  				; [LONG] POINTER TO REGION'S SCANLINE BUFFER
+;  SCANSIZE		EQU  $C  				; [WORD] SIZE OF SCANBUF IN LONGS
+;  THISV		EQU  $E  				; [WORD] CURRENT VERT POSITION OF SCANBUF 
+;  NEXTV		EQU  $10	 			; [WORD] NEXT VERT IN REGION STRUCTURE
+;  MINH			EQU  $12	 			; [WORD] LEFT EDGE OF MINRECT
+;  MAXH			EQU  $14	 			; [WORD] RIGHT EDGE OF MINRECT
+;  LEFTH		EQU  $16	 			; [WORD] LEFT EDGE OF BUFFER
+
+
+INITRGN PROC  EXPORT
+;------------------------------------------------------
+;
+;  INPUTS: 	A0: RGNPTR
+;	   		A1: STATE RECORD
+;	   		D0: MINH
+;	   		D1: MAXH
+;	   		D2: BUFLEFT
+;
+;  OUTPUTS: ALL FIELDS OF STATE RECORD,
+;		SCANBUF ALLOCATED ON STACK
+;
+;  CLOBBERS: D0,D1,A0
+;
+		MOVE	D0,MINH(A1) 				;INSTALL MINH
+		MOVE	D1,MAXH(A1) 				;INSTALL MAXH
+		MOVE	D2,LEFTH(A1)				;INSTALL LEFTH
+		move.l	a0,d0						;get master ptr				@@@@ BAL 09Apr88
+		_rTranslate24To32					;and with high byte mask	@@@@ BAL 09Apr88
+		move.l	d0,a0						;put back in a0				@@@@ BAL 09Apr88
+		MOVE.L	A0,RGNPTR(A1)				;INSTALL RGNPTR
+		MOVE	#-32767,THISV(A1)			;THISV := -32767
+		MOVE	RGNBBOX+TOP(A0),NEXTV(A1)	;NEXTV := RGN BBOX TOP
+		LEA 	RGNDATA(A0),A0				;POINT TO FIRST DATA
+		MOVE.L	A0,DATAPTR(A1)				;INIT DATAPTR
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		SUB 	D2,D1						;CALC BUFFER WIDTH IN DOTS
+		SUBQ	#1,D1						;MINUS ONE FOR EDGE CASES
+		LSR 	#5,D1						;DIV BY 32 FOR #LONGS-1
+		MOVE	D1,SCANSIZE(A1) 			;SAVE SCANSIZE FOR LATER
+
+CLRLOOP CLR.L	-(SP)						;ALLOCATE AND CLEAR BUFFER
+		DBRA	D1,CLRLOOP
+		MOVE.L	SP,SCANBUF(A1)				;REMEMBER BUFFER START
+		JMP 	(A0)						;RETURN
+
+
+
+SEEKRGN PROC  	EXPORT
+		EXPORT	SEEKDOWN,SEEKUP
+;------------------------------------------------------------------
+;
+;  SeekRgn(rgnState,vert);
+;
+;  ROUTINE TO PLAY BACK A REGION FORWARD OR BACKWARD UNTIL ITS SCAN
+;  BUFFER CONTAINS THE BITMAP FOR THE GIVEN VERTICAL COORDINATE.
+;
+;  INPUTS:	A1 POINTS TO A REGION STATE RECORD
+;		DO CONTAINS THE DESIRED VERTICAL COORD
+;
+;  OUTPUTS: UPDATES THISV, NEXTV, DATAPTR, AND SCANBUF^ OF STATE RECORD
+;		D2--> number of scanlines before mask changes
+;
+;  CLOBBERS: A0,D1,D2.
+;
+
+;----------------------------------------------------
+;
+;  RETURN QUICKLY IF SCANBUF IS ALREADY CURRENT.
+;
+		CMP 	NEXTV(A1),D0				;IS DESIRED VERT >= NEXTV ?
+		BGE.S	SEEKDOWN					;YES, BUMP DOWNWARD
+		CMP 	THISV(A1),D0				;IS DESIRED VERT < CURRENT VERT ?
+		BLT.S	SEEKUP						;YES, BUMP UPWARD
+		move	nextV(a1),d1				;compute nextV-vert
+		sub		d0,d1
+		move	d0,d2						;compute vert-thisV+1
+		sub		thisV(a1),d2
+		cmp		d1,d2						;return d2=min(d1,d2)
+		blt.s	@d2
+		move	d1,d2
+@d2		RTS 								;AND RETURN
+
+;-----------------------------------------------------
+;
+;  RESET TO START AND MOVE DOWN.
+;  CALLED BY UP1 WHEN DESIRED LINE < RGNBBOX.TOP
+;
+UP2		MOVE.L	SCANBUF(A1),A0				;POINT TO SCANBUF
+		MOVE	SCANSIZE(A1),D1 			;GET BUFFER SIZE
+CLRLP	CLR.L	(A0)+						;CLEAR A LONG
+		DBRA	D1,CLRLP					;LOOP ENTIRE SCANBUF
+		MOVE.L	RGNPTR(A1),A0				;GET RGNPTR
+		MOVE	RGNBBOX+TOP(A0),NEXTV(A1)	;NEXTV := TOP VERT
+		MOVE	#-32767,THISV(A1)			;RESET THISV TO -32767
+		LEA 	RGNDATA(A0),A0				;POINT TO START OF REGION DATA
+		MOVE.L	A0,DATAPTR(A1)				;RESET DATAPTR
+		CMP 	NEXTV(A1),D0				;IS DESIRED VERT >= NEXTV ?
+		bge.s 	SEEKDOWN					;yes, SEEKDOWN
+		moveq	#1,d2						;no, set count to 1 and return
+		bra.s	done
+
+
+;------------------------------------------------------
+;
+;  WHILE DESIRED VERT >= NEXTV DO BUMP DOWN.
+;
+SEEKDOWN MOVEM.L D0/d3-D7/A2-A4,-(SP)			; SAVE REGS
+		MOVE	D0,D2						; SAVE VERT
+		MOVE.L	DATAPTR(A1),A2				; POINT TO VERT COORD
+		LEA		NEXTHOR,A4					; RETURN ADDRESS FOR INVPAIR
+		MOVE.W	MINH(A1),D6					; D6 = MINH FOR INVPAIR
+		MOVE.W	MAXH(A1),D7					; D7 = MAXH FOR INVPAIR
+
+DOWN1	MOVE	(A2)+,THISV(A1) 			; UPDATE CURRENT VERT
+
+;-------------------------------------------------
+;
+;  GET LEFT AND RIGHT HORIZ COORDS
+;  AND CALL INVPAIR TO TRIM AND INVERT BUFFER
+;
+NEXTHOR MOVE	(A2)+,D3					; GET LEFT COORD
+		CMP 	#32767,D3					; IS IT A TERMINATOR ?
+		BEQ.S	DONE1						; YES, QUIT
+		MOVE	(A2)+,D4					; GET RIGHT COORD
+		BRA.S	INVPAIR						; INVERT THIS PAIR OF COORDINATES
+											; AND RETURN TO NEXTHOR
+DONE1	CMP 	(A2),D2						; IS DESIRED VERT >= NEXTV ?
+		BGE.S	DOWN1						; YES, BUMP DOWN SOME MORE
+		sub		(a2),d2						; compute scan count = nextV-vert
+		neg		d2							; return in d1
+		
+		MOVE	(A2),NEXTV(A1)				; UPDATE NEXT VERT
+		MOVE.L	A2,DATAPTR(A1)				; UPDATE DATAPTR
+		MOVEM.L (SP)+,D0/d3-D7/A2-A4			; RESTORE REGS
+DONE	RTS 								; AND RETURN
+
+
+;-----------------------------------------------------
+;
+;  TO MOVE UPWARDS, SCAN BACKWARDS THROUGH RGNDATA.
+;
+SEEKUP	MOVE.L	RGNPTR(A1),A0				; GET THE REGION POINTER
+		MOVE.W	RGNBBOX+TOP(A0),D1			; GET TOPMOST VERT
+		CMP.W	D1,D0						; ABOVE REGION?
+		BLT.S	UP2							; =>YES, RESET TO START
+		
+		MOVEM.L D0/d3-D7/A2-A5,-(SP)			; SAVE REGS
+		MOVE	D0,D2						; SAVE VERT
+		LEA		RGNDATA(A0),A5				; POINT TO START OF REGION DATA
+		LEA		NEXTH1,A4					; RETURN ADDRESS FOR INVPAIR
+		MOVE.W	MINH(A1),D6					; D6 = MINH FOR INVPAIR
+		MOVE.W	MAXH(A1),D7					; D7 = MAXH FOR INVPAIR
+
+NEXTH	MOVE.L	DATAPTR(A1),A2				; POINT TO VERT COORD
+		SUBQ	#2,A2						; POINT TO TERMINATOR
+		
+;-------------------------------------------------
+;
+;  GET LEFT AND RIGHT HORIZ COORDS
+;  AND CALL INVPAIR TO TRIM AND INVERT BUFFER
+;
+NEXTH1	MOVE	-(A2),D4					; GET RIGHT COORD (OR VERT)
+		MOVE	-(A2),D3					; GET LEFT COORD (OR TERMINATOR)
+		CMP 	#32767,D3					; IS IT A TERMINATOR ?
+		BEQ.S	DONEH1						; => YES, DONE WITH THIS SCAN
+		BRA.S	INVPAIR						; ELSE INVERT THIS PAIR 
+
+DONEH1	MOVE.L	A2,D0						; GET POINTER TO TERMINATOR
+		ADDQ.L	#2,D0						; BUMP PAST TERMINATOR
+		MOVE.L	D0,DATAPTR(A1)				; SAVE DATA POINTER
+		MOVE.W	D4,NEXTV(A1)				; AND SAVE VERT
+		
+; DONE WITH THIS SCAN.  SCAN BACK TO PRIOR VERT TO SET THISV.
+		
+NEXTH2	MOVE	-(A2),D4					; GET RIGHT COORD (OR VERT)
+		CMP.L	A5,A2						; AT BEGINNING OF DATA?
+		BLE.S	DONEH2						; => YES, DONE
+		MOVE	-(A2),D3					; GET LEFT COORD (OR TERMINATOR)
+		CMP 	#32767,D3					; IS IT A TERMINATOR ?
+		BNE.S	NEXTH2						; => NO, KEEP SCANNING
+DONEH2	MOVE.W	D4,THISV(A1)				; save as first scan in this range
+		CMP 	D4,D2						; IS DESIRED VERT < NEXTV ?
+		BLT.S	NEXTH						; YES, BUMP UP SOME MORE
+		
+		sub		d4,d2						; compute vert-thisV+1
+		addq	#1,d2						;
+
+		MOVEM.L (SP)+,D0/d3-D7/A2-A5		; RESTORE REGS
+		RTS 								; AND RETURN
+
+
+INVPAIR
+;-------------------------------------------------
+;
+;		LOCAL PROCEDURE INVPAIR
+;
+;		CLIP THE LEFT AND RIGHT COORDINATES IN D3 AND D4
+;		TO THE MINRECT, THEN INVERT THAT RANGE IN SCANBUF.
+;
+;		D6 = MINH
+;		D7 = MAXH
+;		A4 = RETURN ADDRESS
+
+		CMP 	D6,D4 						;IS RIGHT <= MINH ?
+		BLE.S 	IDONE						;YES, IGNORE ON LEFT
+		CMP 	D7,D3 						;IS LEFT >= MAXH ?
+		BGE.S 	IDONE						;YES, IGNORE ON RIGHT
+		CMP 	D6,D3 						;IS LEFT < MINH ?
+		BGE.S	LOK 						;NO, CONTINUE
+		MOVE	D6,D3 						;YES, TRIM LEFT
+LOK 	CMP 	D7,D4 						;IS RIGHT > MAXH ?
+		BLE.S	ROK 						;NO, CONTINUE
+		MOVE	D7,D4 						;YES, TRIM RIGHT
+
+ROK 	SUB 	LEFTH(A1),D3				;MAKE COORDS REL TO BUFFER
+		SUB 	LEFTH(A1),D4
+
+;------------------------------------------
+;
+;  GET LEFTMASK IN D5 AND RIGHTMASK IN D1
+;
+		MOVEQ	#$1F,D0						;GET MASK FOR LO 5 BITS
+
+		MOVE	D3,D1						;COPY LEFT COORD
+		AND		D0,D1						;CALC LEFT MOD 32
+		MOVEQ	#-1,D5						;GET ALL ONES
+		LSR.L	D1,D5						;SHIFT IN 0'S FROM LEFT
+
+		AND		D4,D0						;CALC RIGHT MOD 32
+		MOVEQ	#-1,D1						;GET ALL ONES
+		LSR.L	D0,D1						;SHIFT IN 0'S FROM LEFT
+		NOT.L	D1							;AND COMPLEMENT FOR RIGHTMASK
+
+
+;------------------------------------------
+;
+;  CALC LEFTWORD, BUFPTR, WORDCOUNT
+;
+		LSR 	#5,D3						;CONVERT DOTS TO LONGS
+		MOVE.L	SCANBUF(A1),A3				;COPY BUFSTART
+		MOVE	D3,D0						;GET LEFT LONGS
+		LSL		#2,D0						;CONVERT TO BYTES
+		ADD 	D0,A3						;INIT BUFPTR TO LEFTLONG
+		LSR 	#5,D4						;CALC RIGHT DIV 32
+		SUB 	D3,D4						;LONGCOUNT:=RIGHTLONG-LEFTLONG
+		BGT.S	NOTIN1						;BR IF NOT ALL IN ONE
+
+
+;------------------------------------------
+;
+;  LEFT AND RIGHT ARE ALL IN ONE WORD
+;
+		AND.L	D5,D1						;COMBINE LEFT AND RIGHT MASKS
+		EOR.L	D1,(A3) 					;XOR COMBINATION INTO BUFFER
+IDONE	JMP		(A4)						; => RETURN TO CALLER
+
+
+;------------------------------------------
+;
+;  NOT ALL IN ONE WORD.  DO LEFT, MIDDLE IF ANY, THEN RIGHT
+;
+NOTIN1	EOR.L	D5,(A3)+					;XOR LEFTMASK INTO BUFFER
+		BRA.S	TEST						;SEE IF ANY FULL LONGS
+DO2LONG NOT.L	(A3)+						;INVERT 2 WHOLE LONGS
+		NOT.L	(A3)+
+TEST	SUBQ	#2,D4						;ANY LONGS LEFT ?
+		BGT.S	DO2LONG 					;YES, AT LEAST 2
+		BLT.S	ENDLONG 					;NO, FINISH UP LAST WITH MASK
+		NOT.L	(A3)+						;YES, DO LAST FULL LONG
+ENDLONG EOR.L	D1,(A3) 					;XOR RIGHTMASK INTO BUFFER
+		JMP		(A4)						; => RETURN TO CALLER
+
+
+
+		ENDPROC 
+
+
+
+
+

@@ -1,0 +1,3377 @@
+;
+;	File:		ScriptMgrUtilDate.a (formerly SMgrUtilDate.a)
+;
+;	Contains:	Script Manager date/time utilities
+;
+;	Written by:	MED	Mark Davis
+;				JLT
+;				LDC	Lee Collins
+;				PKE	Peter Edberg
+;
+;	Copyright:	© 1987-1992 by Apple Computer, Inc.  All rights reserved.
+;
+;   This file is used in these builds:   ROM, disk
+;
+;	Change History (most recent first):
+;
+;	   <SM5>	11/12/92	PN		Get rid of ≥ 020 conditionals for ROM builds
+;	   <SM4>	 11/6/92	SWC		Changed PackMacs.a->Packages.a.
+;		<15>	 6/12/92	FM		remove MacsBug symbols and obsolete smgrKeepMacsBugSymbols
+;									conditional. Replaced long divisions w/ a macro that uses a
+;									divu.l instruction for 020 cpus and a subroutine otherwise.
+;									Removed if 0 then code from division routine.
+;		<14>	 4/30/92	FM		Remove conditional smgrUsesStdExit
+;		<13>	 3/16/92	csd		#1017570,<gbm>:
+;									Removed the MoveHHi call on the itl0 and itl1 resources to avoid
+;									System heap fragmentation.
+;		<12>	 2/19/91	PKE		smb,#DTS FT: ToggleDate trashes one word past the end of its
+;									“VAR lSecs: LongDateTime” parameter (reported by a developer).
+;		<11>	 2/15/91	PKE		JSM,#54736: Redo conditionals to move change <10> to Post 7.0.
+;									Object compare identical to <9>.
+;		<10>	 1/28/91	JH		PKE,#54736: Changed InitDateCache so that the date separators
+;									are now part of the cache. Then fixed String2Date to use these
+;									separators and not be quite so forgiving about allowed
+;									separators.  Now if a separator is used that is not part of the
+;									cache before a number is found the routine returns invalid date.
+;									If a non-cached separator is found after a number the routine
+;									continues, but a warning result is returned.  Also changed
+;									ValidLong so that it won't allow numbers > 32768.
+;		 <9>	 9/14/90	BG		Removed <8>. 040s are now behaving more reliably.
+;		 <8>	 7/17/90	BG		Added EclipseNOPs for flakey 040s.
+;		 <7>	  7/5/90	PKE		NEEDED FOR SIXPACK: Rearranged InitDateCache to fix old problem:
+;									itl0 and itl1 may be purged before we try to use them.
+;		 <6>	  6/1/90	PKE		Just cleaned up some comments, formatting, and superfluous
+;									definitions.
+;		 <5>	  5/5/90	PKE		Updated 3 previously overlooked ‘SysVers’ symbols to
+;									((smgrSysVers >= $605) OR (smgrROMVers >= 2)) so we can build
+;									with new ScriptPriv.a.
+;		 <4>	 4/10/90	PKE		Deleted conditionalized definitions of forRom, SysVers and
+;									TestScriptManager. Fixed tabs. Replaced local definition of
+;									_FixDiv with include of FixMath.a. Used smgrSysVers,
+;									smgrROMVers, and smgrUseStdExit symbols instead of SysVers and
+;									buildLevel. Removed remaining MacsBug symbols for 7.0.
+;		 <3>	  3/4/90	PKE		Changed _UprText to _UpperText to match new Traps.a.
+;		 <2>	 2/22/90	PKE		Replaced obsolete _LwrStringToUpr opword with _UprText. Updated
+;									header to BBS format.
+;		 <1>	12/18/89	CCH		Adding for the first time into BBS. Changed include 'inc.sum.a'
+;									to load 'StandardEqu.d'. Updated file name references.
+;
+;	(BBS versions above, EASE versions below:)
+;	   <2.5>	 11/6/89	PKE		NEEDED FOR 6.0.5!! (since 2.4 change is conditionalized for 7.0,
+;									the file can be used as is, except that you might need to add
+;									back the load 'nEqu.d') -Bug fixes for InitDateCache and
+;									String2Date needed for HyperCard. InitDateCache: Fixed CopyArray
+;									to use correct register (A4) for source pointer, and to
+;									initialize all relevant bytes of length register (D0).
+;									String2Date: if first relevant (i.e., day or month name) alpha
+;									token is a month name, we now search the day name list if we
+;									find another alpha token (fixes BRC #54946). Rearranged Cache
+;									structure to fix invalid use of month/day name index. Note that
+;									the invalid index use in String2Date happened to work before
+;									because of the incorrect source pointer use in CopyArray, but it
+;									was incomprehensible.
+;	   <2.4>	 9/18/89	PKE		Replace _GetScript call in InitDateCache with direct access to
+;									ScriptRecord, since we may not have GetScript yet; this is also
+;									an optimization.
+;	   <2.3>	 8/26/89	PKE		Cleaned up some conditionals, moved a comment.
+;	   <2.2>	 8/22/89	SES		Removed references to nFiles.
+;	   <2.1>	 6/30/89	PKE		NEEDED FOR AURORA: Use OPWORD _LwrStringToUpr for LwrString with
+;									uppercase function; use _LwrStringToUpr instead of UprString in
+;									ToggleDate (ToggleDate may now move memory, but the 2.0
+;									documentation didn't indicate whether or not it moved memory).
+;									For ROMs on 020 or greater machines, get rid of LongDiv and move
+;									divs.l inline. Use constant NoonHr for 12 where appropriate.
+;									(all of these changes from code review).
+;	   <2.0>	 6/23/89	PKE		In String2Date, change conditionals so Lee's heuristic for dates
+;									near the beginning or end of the century is used for 7.0 as well
+;									as ROM; skip definition of buildLevel (done in ScriptPriv.a).
+;	   <1.9>	 6/13/89	PKE		(ROM & 7.0 only) Fix bug introduced by 1.6 below: In
+;									InitDateCache, lock itl0 & itl1 around direct or indirect calls
+;									to Block2String, which now calls LwrString and can move memory.
+;	   <1.8>	  6/9/89	PKE		Fix InitDateCache bug that could trash random memory (BRC
+;									#50472).
+;	   <1.7>	  6/4/89	PKE		Modify ValidDate and ToggleDate to check genCdevRangeBit flag
+;									and restrict valid dates to the Gregorian range 1920-2019 (or
+;									equivalent range in another calendar), as in General CDEV. Note:
+;									these changes were originally checked in on 5/25/89 as version
+;									1.6, but the EASE version list didn't get updated. Consequently,
+;									(1) that version couldn't be checked out, and (2) the next
+;									checkout/checkin sequence resulted in the new version 1.6 below,
+;									which didn't have these changes.
+;	   <1.6>	 5/30/89	PKE		(New ROMs & System 7.0 only) Replace UprString calls in routines
+;									that already move memory with calls to enhanced LwrString for
+;									localizable uppercasing.
+;	   <1.5>	  5/2/89	PKE		Change CPU test in LongDiv to work properly for 68030 (BRC
+;									35696); for ROM, replace test with conditionals that select the
+;									right code.
+;	   <1.4>	  4/7/89	PKE		Modified ValidDate to compare LongDateRec fields from pm to era
+;									(was from era to weekOfYear, but undocumented): fixes the "2/29"
+;									problem in ToggleDate. Eliminated the ValidDate code
+;									(ROM/BigBang only) restricting hour to 0-11 if twelveHourBit
+;									set; check pm field instead, so hour will always be 0-23.
+;									Modified ToggleDate to mask out togFlags bits for LongDateRec
+;									fields it can't deal with; to place tighter restrictions on
+;									toggling by char in numeric fields (only $30-$39 and $b0-$b9
+;									allowed); and to handle 12-hour time in various ways with the
+;									addition of 3 flag bits. Fixed bug in LongSecs2Date for negative
+;									LongSecs.
+;	   <1.3>	 2/21/89	PKE		Replaced with RomProj version, which already had system and Rom
+;									sources merged.
+;	(EASE ROMproj history below)
+;	   <1.5>	 2/21/89	PKE		Fix up includes: always use include 'inc.sum.a'.
+;	   <1.4>	 2/14/89	PKE		Updated to use MPW 3.0 final ScriptEqu.a equate names
+;	   <1.3>	  2/3/89	PKE		Merged with current system sources (CCH's 01/16/1989 merge of
+;									6.0.3 and 7.0 sources, done in RES.sys:smgr)
+;	   <1.2>	11/14/88	PKE		Synchronize EASE and Projector
+;	   <1.1>	11/11/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	(old EASE ROMproj history below)
+;	   <1.8>	10/27/88	LDC		Mods by Carl Hewitt and Brian McGhie in the process of putting
+;									Script Manager in ROM
+;	(EASE SYSproj history below)
+;	   <1.2>	 2/14/89	PKE		Updated to use MPW 3.0 final ScriptEqu.a equates
+;	   <1.1>	 1/16/89	CCH		Merged 6.0.3 final sources into 7.0.
+;	   <1.0>	11/16/88	CCH		Added to EASE.
+;	(pre-EASE history below)
+;				10/12/88	ldc		removed longDay, etc.
+;				10/10/88	ldc		include 'inc.sum.d'
+;				 9/30/88	ldc		Added check for 12 hour time using #12HourBit in ValidDate
+;				 9/27/88	ldc		Changed heuristic for determining when input year less than 100
+;									belongs in previous, current or next century
+;				 7/25/88	ldc		Changed error equ names per Keithen
+;				 5/19/88	ldc		Standardized routine exits
+;			* above changes for ROM or buildLevel >= 2 *
+;				 2/22/88	med		Use token length instead of abbrevLen for matching months,
+;									daysOfWeek
+;				 2/22/88	med		Use MatchString for time testing.
+;				 1/13/88	med		Added LongDiv routine for 64/32 -> r32,q32
+;				 1/13/88	med		Changed LongDateTime to type Comp throughout
+;				 1/12/88	med		Changed String2Date, Date2String to use LongDateRec, ValidDate
+;				 1/12/88	med		Added dispatch for ValidDate, added field flag bits
+;				 1/11/88	med		Fix BC
+;				 1/11/88	med		Fix day of week if divs overflow
+;				 1/11/88	med		Fix range bug (<1600) with Long dates
+;				  1/5/88	med		Major revamp of String2Time and Time2String for compression
+;				  1/4/88	med		Statements were outside of With TBlock
+;				11/21/87	med		Asm adds extra bytes to front of dc.x
+;				11/20/87	med		dy100 to big as divisor, must hack around, misc fixes
+;				11/17/87	med		Added c version of LongDate2Secs, LongSecs2Date; started
+;									assemblyizing
+;				  9/2/87	med		Check for white space as separator
+;				 8/25/87	med		Added check for 12AM
+;				 8/24/87	med		Stop getting time if time string is found OR (not AND) 3
+;									elements
+;				 8/24/87	med		DayFound was missing (a6).
+;				 8/24/87	med		Caught case of null string.
+;				 8/22/87	med		Added fix for 24:xx:xx time
+;				 8/22/87	med		Added test for alternate space
+;				 8/22/87	med		Removed seconds parameter entirely, since it never would work
+;									right
+;				 8/22/87	med		Removed use of A5 as temp register. Not a wise idea, Jim
+;				 8/21/87	med		Stash seconds in var paramter in String2Date, String2Time
+;				 8/21/87	med		Added header and minor changes to resourcize the procedures
+;				 8/11/87	JLT		String2Date/Time only affects date/time fields in var
+;									DateTimeRec parameter
+;				 8/10/87	JLT		Speeded up Compare and MatchString
+;				 8/10/87	JLT		Told Tokenizer to return strings and wrote faster ValidLong
+;									routine
+;				  8/9/87	JLT		Replaced trap calls with JSR's
+;				  8/9/87	JLT		Wrote InitCache to do pre-initialization of String2Date and
+;									String2Time
+;				  8/8/87	JLT		LongSecstoDate is written
+;				  8/7/87	JLT		String2Date and String2Time return number of seconds, and
+;									location of string were date/time stopped
+;				  8/5/87	JLT		Errors and warning codes added to String2Date and String2Time
+;				 7/29/87	JLT		String2Date routine written
+;				 7/28/87	JLT		String2Time routine written
+;				 7/23/87	JLT		Compare, Block2String and MatchString modified to have no var
+;									parameters
+;				 7/22/87	JLT		Block2String modified to not to load in leading spaces, length
+;									bug fixed
+;				 7/20/87	JLT		Final version of PortionText done
+;				 7/13/87	JLT		Portion Text written
+;				  7/1/87	JLT		Final version of GetNeighborhood and SearchText is reached
+;				 6/30/87	JLT		GetNeighborhood; SearchText now calls GetNeighborhood
+;				 6/29/87	JLT		SearchText
+;				 6/20/87	MD		ConvertTable written
+;				 6/20/87	MD		Compare, Block2String and MatchString support routines written
+;									for pascal String2Date
+;___________________________________________________________________________________________________
+;	To Do:
+;		eyeballing algorithm could speed up calendar calculations
+;___________________________________________________________________________________________________
+		PRINT OFF							;	jh, <10>
+		
+	IF &type('CPU')='UNDEFINED' THEN		; <06/30/89 pke>
+CPU:	equ	0								; <06/30/89 pke>
+	ENDIF									; <06/30/89 pke>
+ 
+		load	'StandardEqu.d'
+		include	'ScriptPriv.a'
+		include	'SANEMacs.a'
+		include	'Packages.a'
+FixMathNonPortable	equ	1					; We require Mac Plus or newer		<4>
+		include	'FixMath.a'					; to get _FixDiv					<4>
+		import	StdUnlink
+
+
+		PRINT ON
+
+FixCacheAndStr2Date		equ	0												; do for 7.1 & new ROMs	<11>
+;FixCacheAndStr2Date	equ	((smgrSysVers >= $710) OR (smgrROMVers >= 2))	; do for 7.1 & new ROMs	<11>
+
+; Assorted In-line constants
+
+secsInDay	equ	86400					; seconds in one day
+maxDate		equ	$CE						; max date range is $0000,00EA,D380,0000
+minDate		equ	-$EB					; these correspond to -30000,30000
+NoonHr		equ	12
+
+genCdevRangeLo	equ	504921600			; secs for 1920-Jan-01 00:00:00
+genCdevRangeHi	equ	$DA319179			; =3660681599, secs for 2019-Dec-31 23:59:59
+
+;____________________________________________________________
+; Long division macro macro.  For 020 machines we can use an instruction
+; for efficiency.
+
+		macro
+			LongDiv
+			
+				machine	mc68020
+				divs.l	d2,d0:d1			; do it
+			
+		endm
+
+
+
+
+		proc
+		export	MonthStarts,LeapStarts,secsInDayX,maxOldDate,maxVal
+		
+mLimit	equ	1000						; limit for searching
+
+MonthStarts		dc.w    0,31,59,90,120,151,181,212,243,273,304,334,mLimit
+LeapStarts		dc.w    0,31,60,91,121,152,182,213,244,274,305,335,mLimit
+secsInDayHack	dc.x    "86400.0"
+secsInDayX		equ		*-10			; skip first two byts--asm bug			<11/21/87med>
+maxDateHack		dc.x	"4294967295.0"
+maxOldDate		equ		*-10
+maxVal			dc.w	0,150,13,35,24,60,60,7,400,60
+		endproc
+
+;============================================================
+;	FUNCTION ValidDate (VAR date :	LongDateRec;
+;			flags:	Longint;
+;			var newSecs: LongDateTime,
+;			selector: Longint): DateField;
+;		LABEL
+;			999;
+;		VAR
+;			i:		DateField;
+;			dateTime2:	LongDateRec;
+;============================================================
+ValidDate	proc	export
+
+ValidDateRec	record  {oldA6},decr
+resultSize		equ		2
+result			ds.w	1			; DateField
+argSize			equ		*-8
+date			ds.l    1			; @LongDateREc
+flags			ds.l    1			; long
+newSecs			ds.l	1			; @newSecs
+selector		ds.l    1			; long
+return			ds.l    1
+oldA6			ds.l    1
+dateTime2		ds		LongDateRec
+localFrame		equ		*
+				endr
+
+rResult		equ	d3
+rNewSecs	equ	a2
+rDateTime2	equ	a3
+rDate		equ	a4
+
+ValidDateRegs	reg	rResult/rNewSecs/rDateTime2/rDate
+
+		with	ValidDateRec,LongDateRec,LongDateField
+		import	maxOldDate
+		
+		CheckSelector
+		link	a6,#localFrame
+		movem.l	ValidDateRegs,-(sp)		; save regs
+	
+;		pea		procName
+;		_DebugStr
+	
+;		ValidDate := yearField; {assume bad}
+;		LongDate2Secs(date, newSecs);
+;		if (BAnd(oldDateFlag,flags) <> 0) then
+;			if ((newSecs < 0) or (newSecs > maxOldDate)) then goto 999;
+
+		move.w	#yearField,rResult			; assume bad
+		move.l	newSecs(a6),rNewSecs		; arg
+		lea		dateTime2(a6),rDateTime2	; reg arg
+		move.l	date(a6),rDate				; ditto
+		
+		move.l	rDate,-(sp)					; pass @date
+		move.l	rNewSecs,-(sp)				; pass @newSecs
+		_LongDate2Secs						; get values in array
+		move.l	flags(a6),d0				; get flags for testing
+		btst.l	#smallDateBit,d0			; limited version?
+		beq.s	@InRange					; no, skip test
+		tst.l	(rNewSecs)					; negative? (high long <> 0 => quad used
+		bne.s	@ValidExit					; yes, bail
+
+		btst.l	#genCdevRangeBit,d0			; limited to 1920-2019?
+		beq.s	@InRange					; if not, skip following test
+		cmp.l	#genCdevRangeLo,4(rNewSecs)	; before 1920?
+		bcs.s	@ValidExit					; bail if so
+		cmp.l	#genCdevRangeHi,4(rNewSecs)	; after 2019?
+		bhi.s	@ValidExit					; bail if so
+ 
+@InRange
+;		LongSecs2Date(newSecs, dateTime2);
+
+		move.l	rNewSecs,-(sp)				; pass @newSecs
+		move.l	rDateTime2,-(sp)			; pass @dateTime2 for loading
+		_LongSecs2Date						; call
+
+;		FOR i := eraField TO secondField DO
+;			IF date.list[i] <> dateTime2.list[i] THEN
+;				BEGIN
+;					ValidDate := i;
+;					GOTO 999;
+;				END;
+;		ValidDate := validDateFields;
+
+		move.l	flags(a6),d2				; get flags for testing				<1/11/88med>
+		move.w	#validDateFields,rResult	; assume ok
+
+; Go from end to beginning
+
+		adda.l	#pm+2,rDate					; -(rDate) will start with pm field
+		adda.l	#pm+2,rDateTime2			; -(rDateTime2) starts with pm field
+		move.l	#pmField,d1					; counter & bit mask index
+@ValidLoop
+		move.w	-(rDateTime2),d0			;
+		cmp.w	-(rDate),d0					; same?
+		dbne	d1,@ValidLoop				; loop until not equal
+		beq.s	@ValidExit					; ok, exit
+		btst	d1,d2						; field bit on?						<1/11/88med>
+		dbne	d1,@ValidLoop				; loop until set					<1/11/88med>
+		beq.s	@ValidExit					; bit not set, done					<1/11/88med>
+		move.w	d1,rResult					; now return bad field number
+	
+	
+;999 :
+@ValidExit
+		move.w	rResult,result(a6)			; return result
+		movem.l	(sp)+,ValidDateRegs			; restore registers to their original value
+		checkA6								; check stack
+
+		move.w	#argSize, d0				; for StdUnlink
+		bra		StdUnlink					; standard exit
+
+		endWith
+		endProc
+
+;{============================================================
+;	ToggleDate Code
+; ============================================================}
+;	const
+;		validDateFields = -1;
+;		maxOldDate = 4294967295.0;
+;============================================================
+;	ToggleResults = (toggleUndefined,	{function undefined}
+;			toggleOk,		{worked ok}
+;			toggleBadField,		{field not supported}
+;			toggleBadDelta,		{delta = -1/1}
+;			toggleUnknown		{unknown error}
+;			{others later: use r-});
+;
+;
+;============================================================
+;
+;	Function ToggleDate (	VAR mySecs:	LongDateTime;
+;				field:	DateField;
+;				delta:	DateDelta;
+;				ch:	Integer;
+;				params:	TogglePB;
+;				selector:Longint): ToggleResults;
+;		LABEL
+;			777,888,900,999;
+;		VAR
+;			dateTime0,
+;			dateTime1,
+;;			maxVal:		LongDateRec;
+;			newDate:	LongDateTime;
+;;			succField,
+;			badField:	DateField;
+;;			j,
+;			baseValue,
+;			hundreds:	Integer;
+;			rtPtr:		^ResType;
+;			myLong:		Longint;
+;			tempStr:	Str255;
+;			curChar:	Char;
+;
+;	BEGIN
+;============================================================
+
+ToggleDate	proc	export
+
+ToggleDateRec	record  {oldA6},decr
+resultSize		equ		2
+funcResult		ds.w	1
+argSize			equ		*-8
+mySecsPtr		ds.l    1
+field			ds.w    1
+delta			ds.w	1
+ch				ds.w	1
+paramsPtr		ds.l	1
+selector		ds.l    1
+return			ds.l    1
+oldA6			ds.l    1
+dateTime0		ds		LongDateRec
+dateTime1		ds		LongDateRec
+dateTime2		ds		LongDateRec
+newDate			ds		LongDateTime
+myTogFlags		ds.l	1				; modified copy of togFlags
+localFrame		equ		*
+				endr
+
+rDateFieldPtr	equ	a2
+rDateSuccPtr	equ	a3
+rMaxValPtr		equ	a4
+
+rDelta			equ	d3
+rField			equ	d4
+rCounter		equ	d5
+rBaseValue		equ	d5					; doesn't overlap
+rChar			equ	d6
+rHundreds		equ	d7
+
+ToggleDateRegs	reg	a2-a4/d3-d7
+
+		with	ToggleDateRec,LongDateRec,LongDateField,ToggleResults,TogglePB
+		import	maxOldDate,maxVal
+
+		CheckSelector
+		link	a6,#localFrame
+		movem.l	ToggleDateRegs,-(sp)		; save regs
+		
+;		pea		procName
+;		_DebugStr
+
+		move.b	delta(a6),rDelta			; get delta
+		ext.w	rDelta						; wordize
+		clr.l	rField						; wordize
+		move.b	field(a6),rField			; get field
+		move.w	rField,d0					; temp for field
+		add.w	d0,d0							; double for internal use
+		lea		dateTime0(a6,d0.w),rDateFieldPtr ; date field poitner
+		lea		maxVal,rMaxValPtr				; maxval table
+
+		move.l	paramsPtr(a6),a0			; paramsPtr^
+		move.l	togFlags(a0),d0				; get copy of togFlags
+		andi.w	#$07F,d0					; mask out bits for LongDateRec
+											;   fields we can't deal with…
+		btst.l	#togDelta12HourBit,d0		; but if 12-hour range for delta
+		beq.s	@doneForcePmBit				;   (no -skip)
+		ori.w	#$400,d0					;   then force pm bit on
+@doneForcePmBit								; finished adjusting togFlags
+		move.l	d0,myTogFlags(a6)			; save for ValidDate calls
+	
+		move.l	mySecsPtr(a6),-(sp)			; pass @mySecs
+		pea		dateTime0(a6)				; pass @dateTime0
+		_LongSecs2Date
+
+;		ToggleDate := toggleBadDelta; {assume bad}
+;		if (delta < -1) or (delta > 1) then goto 999;
+
+		tst.w	dateTime0.era(a6)			; BC?							<1/11/88med>
+		blt		UnknownError				; out of range
+
+		move.w	#toggleErr3,funcResult(a6)	; assume out-of-range error
+		move.l	myTogFlags(a6),d0			; get flags
+		btst.l	#smallDateBit,d0			; 1904-2040 range desired?
+		beq.s	@doneTogRangeCheck			; if not, skip these tests
+		move.l	mySecsPtr(a6),a0			; get ptr to longSecs
+		tst.l	(a0)						; is high longword used?
+		bne		ToggleExit					; if so, bail
+		btst.l	#genCdevRangeBit,d0			; 1920-2019 range desired?
+		beq.s	@doneTogRangeCheck			; if not, skip year adjustment
+; force year (in any calendar) into range equivalent to Gregorian 1920-2019
+		cmp.l	#genCdevRangeLo,4(a0)		; before 1920?
+		bcs.s	@togRangeLow				; if so, go fix
+		cmp.l	#genCdevRangeHi,4(a0)		; after 2019?
+		bls.s	@doneTogRangeCheck			; if not, we're done adjusting
+		sub.w	#100,dateTime0.year(a6)		; after 2019, sub 100 from year
+		bra.s	@doneTogRangeCheck
+@togRangeLow:
+		add.w	#100,dateTime0.year(a6)		; before 1920, add 100 to year
+@doneTogRangeCheck:
+
+		move.w	#toggleBadDelta,funcResult(a6)	; assume bad
+		move.w	rDelta,d0						; temp for compare
+		sub.w	#1,d0							; > 1?
+		bgt.s	@ToggleExit3					; yes, bail
+		add.w	#2,d0							; < -1 ?
+		blt.s	@ToggleExit3					; yes? bail
+	
+;		
+;		if (field = pmField) then if (delta <> 0) then begin
+;			LongSecs2Date(mySecs, dateTime0); ****
+;			dateTime0.hour := (dateTime0.hour+12) mod 24;
+;			LongDate2Secs(dateTime0,mySecs);
+;			goto 900;
+;		end;
+
+		move.w	#toggleBadField,funcResult(a6)	; assume bad
+		cmp.w	#pmField,rField					; special case?
+		bne.s	@NotSpecialPM					; no, skip
+		tst.w	rDelta							; zero? (tested above)
+		beq.s	@FieldRangeOk					; skip special if so
+		bra		SwapAmPm						; invertpm, exit
+@ToggleExit3
+		bra		ToggleExit						; for long skip & jump
+@NotSpecialPM
+
+;		ToggleDate := toggleBadField; {assume bad}
+;		if ((field < yearField) or (field > secondField)) then goto 999;
+
+		cmp.w	#yearField,rField			; out of range?
+		blt.s	@ToggleExit3				; bail
+		cmp.w	#secondField,rField			; out of range?
+		bgt.s	@ToggleExit3				; bail
+@FieldRangeOk
+
+;		WITH maxVal DO ****
+;			BEGIN
+;				year := 150;
+;				{if (BAnd(oldDateFlag,params.flags) = 0) then year := 10000;}
+;				month := 13;
+;				day := 35;
+;				hour := 24;
+;				minute := 60;
+;				second := 60;
+;				dayOfWeek := 7;
+;				dayOfYear := 400;
+;				weekOfYear := 60;
+;			END;
+;		LongSecs2Date(mySecs, dateTime0); ****
+
+		
+;		if delta = 0 then begin {character type-in}
+;			curChar := char(ch);
+;			if field = pmField then begin
+;				with params do
+;				 if dateTime0.hour < 12
+;				 then rtPtr := @pmChars
+;				 else rtPtr := @amChars;
+
+		tst.w	rDelta							; zero, character typeing?
+		bne		NoCharInput						; no, skip
+		move.w	#toggleBadChar,funcResult(a6)	; assume bad
+		lea		ch(a6),a0						; ptr
+		move.l	#2,d0							; length
+
+		_UpperText								; _LwrString with uppercase function	<3>
+		move.w	(a0),rChar					; copy
+		beq.s	@ToggleExit3				; skip null
+		cmp.w	#pmField,rField				; special case
+		bne.s	@NoSpecPM2					; no, skip
+		move.l	paramsPtr(a6),a0			; params
+		add.w	#pmChars,a0					; right pointer
+		cmp.w	#NoonHr,dateTime0.hour(a6)	; am?
+		blt.s	@1							; no, skip
+		add.w	#amChars-pmChars,a0			; now pm
+@1
+
+;				for j := 1 to 4 do
+;					if rtPtr^[j] = curChar then begin
+;						dateTime0.hour := (dateTime0.hour+12) mod 24;
+;						LongDate2Secs(dateTime0,mySecs);
+;						goto 900;
+;					end
+;			end;
+
+; NOTE THAT THE FOLLOWING ASSUMES CHARS ARE 1 BYTE !!!
+		move.l	#3,d1						; dbra
+@MatchLoop
+		cmp.b	(a0)+,rChar					; got match?
+		dbeq	d1,@MatchLoop				; no, skip
+		beq		SwapAmPm					; swap if equal
+
+@NoSpecPM2
+
+;			myLong := BAnd(ord(curChar),$F);
+;			{StringToNum(tempStr,myLong); so we are international!}
+;			baseValue := dateTime0.list[field];
+;			hundreds := baseValue - (baseValue mod 100);
+
+		move.w	#toggleBadNum,funcResult(a6)	; assume bad
+
+; NOTE THAT THE FOLLOWING MAKES NON-INTERNATIONAL ASSUMPTIONS ABOUT DIGIT CODES !!!
+
+		cmp.w	#$FF,rChar					; too big?
+		bhi		ToggleExit2					; yes, bail
+		andi.w	#$7F,rChar					; move $b0-$b9 to $30-$39
+		cmp.w	#$30,rChar					; too small?
+		blo		ToggleExit2					; yes, bail
+		cmp.w	#$39,rChar					; too big?
+		bhi		ToggleExit2					; yes, bail
+		and.b	#$F,rChar					; get numeric value of digit
+
+		move.w	(rDateFieldPtr),rBaseValue	; get base value
+
+; if toggling hours in twelve-hour mode, convert hour (0-23) to 12-hour range (1-12)
+		cmp.w	#hourField,rField			; toggling hours?
+		bne.s	@doneHourShiftDown			; skip if not
+		move.l	myTogFlags(a6),d1			;
+		btst.l	#togChar12HourBit,d1		; 12-hour mode?
+		beq.s	@doneHourShiftDown			; skip if not
+		btst.l	#togCharZCycleBit,d1		; zero-cycle?
+		beq.s	@hourShiftDown0				; if not, 0 & 12 are special
+		cmp.w	#NoonHr,rBaseValue			;
+		blt.s	@doneHourShiftDown			;
+		sub.w	#NoonHr,rBaseValue			;
+		bra.s	@doneHourShiftDown			;
+@hourShiftDown0								;
+		cmp.w	#NoonHr,rBaseValue			; hour <= 12?
+		ble.s	@hourShiftDown1				; if so, go test for hour=0
+		sub.w	#NoonHr,rBaseValue			; otherwise, hour -= 12
+		bra.s	@doneHourShiftDown			;
+@hourShiftDown1
+		tst.w	rBaseValue					; hour = 0?
+		bne.s	@doneHourShiftDown			; skip if not
+		move.l	#NoonHr,rBaseValue			; if so, hour = 12
+@doneHourShiftDown							;
+
+		move.w	rBaseValue,d1				; copy
+		ext.l	d1							; longize
+		divs	#100,d1						; get remainder
+		swap	d1							; now here
+		move.w	rBaseValue,rHundreds		; copy
+		sub.w	d1,rHundreds				; e.g. 1967 -> 1900
+		sub.w	rHundreds,rBaseValue		; 1967 -> 67
+		bge.s	@CharRightSign				; positive?
+		neg.w	rChar						; no, fix
+@CharRightSign
+		
+;			while true do begin
+;				baseValue := (baseValue * 10) mod 100;
+;				dateTime0.list[field] := hundreds + baseValue + myLong;
+;				if ValidDate(dateTime0, params.flags, newDate) = validDateFields
+;				then goto 888;
+;				if (baseValue = 0) then begin
+;					if (myLong = 0) then goto 777;
+;					baseValue := myLong;
+;					myLong := 0;
+;				end;
+;			end;
+;		end;
+
+@NumLoop
+		muls	#10,rBaseValue				; * 10
+		cmp.w	#100,rBaseValue				; > 100?
+		blt.s	@BaseOk						; skip if ok
+		divs	#100,rBaseValue				; mod 100
+		swap	rBaseValue					; now mod
+@BaseOk
+		move.w	rHundreds,d0				; hundreds
+		add.w	rBaseValue,d0				; base
+		add.w	rChar,d0					; char value
+
+; if toggling hours in twelve-hour mode, convert time back to 12-hour range.
+		cmp.w	#hourField,rField			; toggling hours?
+		bne.s	@doneHourShiftUp			; skip if not
+		move.l	myTogFlags(a6),d1			;
+		btst.l	#togChar12HourBit,d1		; 12-hour mode?
+		beq.s	@doneHourShiftUp			; skip if not
+											; process 12-hour time
+		btst.l	#togCharZCycleBit,d1		; zero-cycle (0..11) time?
+		beq.s	@hourShiftUp0				; if not, go do 12,1..11 time
+											; process 0..11 time
+		cmp.w	#NoonHr,d0					; check bounds
+		bge.s	@hourShiftUpErr				; if bad, set err
+		tst.w	dateTime0.pm(a6)			; am/pm?
+		beq.s	@doneHourShiftUp			; if am, done
+		add.w	#NoonHr,d0					; if pm, shift up
+		bra.s	@doneHourShiftUp			;
+@hourShiftUp0								; process 12,1..11 time
+		tst.w	d0							; check lo bounds
+		beq.s	@hourShiftUpErr				; if =0, bad
+		tst.w	dateTime0.pm(a6)			; am/pm?
+		beq.s	@hourShiftUp1				; if am, go fix hour=12
+											; pm
+		cmp.w	#NoonHr,d0					; check hour
+		beq.s	@doneHourShiftUp			; if hour=12, leave alone.
+		bgt.s	@hourShiftUpErr				; if hour>12, err (needed?)
+		add.w	#NoonHr,d0					; otherwise, add 12
+		bra.s	@doneHourShiftUp			;
+@hourShiftUp1								; am
+		cmp.w	#NoonHr,d0					; check hour
+		bgt.s	@hourShiftUpErr				; if >12, err
+		blt.s	@doneHourShiftUp			; if <12, done
+		clr.w	d0							; otherwise, set hour=0
+		bra.s	@doneHourShiftUp			;
+@hourShiftUpErr								; error handling
+		move.w	#-1,d0						; make an err
+@doneHourShiftUp							;
+
+		move.w	d0,(rDateFieldPtr)			; set date time record
+		bsr		xValidDate					; is it ok?
+		blt		SetNewDate					; yes, done
+
+		cmp.w	#yearField,rField			; toggling years?
+		bne.s	@doneTogYearAdjust			; no, skip this stuff
+		move.l	myTogFlags(a6),d0			; get flags
+		btst.l	#smallDateBit,d0			; 1904-2040 range desired?
+		beq.s	@doneTogYearAdjust			; if not, skip these tests
+		btst.l	#genCdevRangeBit,d0			; 1920-2019 range desired?
+		beq.s	@doneTogYearAdjust			; if not, skip these tests
+		tst.l	newDate(a6)					; check high longword
+		bmi.s	@togAdjustUp				; if year < 1904, go fix
+		bne.s	@togAdjustDown					; if year > 2040, go fix
+; now check low longword for 1920-2019 range
+		cmp.l	#genCdevRangeLo,newDate+4(a6)	; year < 1920?
+		bcs.s	@togAdjustUp					; if so, go fix
+		cmp.l	#genCdevRangeHi,newDate+4(a6)	; year > 2019?
+		bls.s	@doneTogYearAdjust				; if not, we're done adjusting
+@togAdjustDown:
+		sub.w	#100,(rDateFieldPtr)		; after 2019, sub 100 from year
+		bra.s	@togRecheckValid
+@togAdjustUp:
+		add.w	#100,(rDateFieldPtr)		; before 1920, add 100 to year
+@togRecheckValid:
+		bsr.s	xValidDate					; is it ok?
+		blt		SetNewDate					; yes, done
+@doneTogYearAdjust:
+
+		tst.w	rBaseValue					; base empty?
+	IF FixCacheAndStr2Date THEN				;										<10><11>
+		bne		@NumLoop					; no, continue	<1-8-91,jh> .w added here
+	ELSE									;										<10>
+		bne.s	@NumLoop					; no, continue
+	ENDIF									;										<10>
+		tst.w	rChar						; char empty?
+		beq.s	ToggleExit2					; done, bail
+		move.w	rChar,rBaseValue			; set it
+		clr.w	rChar						; signal done next time
+	IF FixCacheAndStr2Date THEN				;										<10><11>
+		bra		@NumLoop					; done	<1-8-91, jh> changed to .w
+	ELSE									;										<10>
+		bra.s	@NumLoop					; done
+	ENDIF									;										<10>
+
+;----------
+ToggleExit2
+		bra		ToggleExit					; done
+;----------
+SwapAmPm
+		move.w	dateTime0.hour(a6),d0		; get value
+		sub.w	#12,d0						; day/night swap
+		bge.s	@1							; ok
+		add.w	#24,d0						; now ok
+@1
+		move.w	d0,dateTime0.hour(a6)		; fix
+		pea		dateTime0(a6)				; pass @dateTime0
+		move.l	mySecsPtr(a6),-(sp)			; pass @mySecs
+		_LongDate2Secs
+		bra		ReturnOk					; exit.
+
+;----------
+xValidDate
+		clr.w	-(sp)						; allocate return
+		pea		dateTime0(a6)				; pass @datetime0
+
+		move.l	myTogFlags(a6),-(sp)		; pass adjusted togFlags
+
+		pea		newDate(a6)					; pass @newDate
+		_ValidDate							; call it
+		move.w	(sp)+,d0					; pop result
+		rts		
+;----------
+; note: don't care about speed, just space
+
+CopyDate0to1
+		lea		dateTime0(a6),a0			; source
+		lea		dateTime1(a6),a1			; dest
+CopyDateA0toA1
+		move.w	#LongDateRecSize/2-1,d0		; dbra counter
+CopyDateLoop
+		move.w	(a0)+,(a1)+					; copy
+		dbra	d0,CopyDateLoop				; until done
+		rts
+
+;----------
+NoCharInput
+
+;		datetime1 := dateTime0;
+;		dateTime0.list[field] := dateTime0.list[field] + delta;
+;		badField := ValidDate(dateTime0, params.flags, newDate);
+;		if badField = validDateFields then goto 888;
+
+		bsr.s	CopyDate0to1				; copy over
+		add.w	rDelta,(rDateFieldPtr)		; add delta
+		bsr.s	xValidDate					; is it ok?
+		blt.s	SetNewDate					; yes, done
+
+;		IF badField >= field THEN {try finer field}
+;			BEGIN
+;				succField := succ(field);
+;				FOR j := 1 TO maxVal.list[succField] DO
+;					BEGIN
+;					dateTime0.list[succField] := dateTime0.list[succField] - 1;
+;					IF ValidDate(dateTime0, params.flags, newDate) = validDateFields THEN
+;						GOTO 888;
+;					END;
+;			END;
+
+		cmp.w	#pmField,d0					; If bad field is pm,
+		bne.s	@donePmAdjust				;
+		move.w	#hourField,d0				;   say that it is hour instead
+@donePmAdjust
+	
+		cmp.w	rField,d0					;
+		ble.s	@NoFiner					; badfield<=field, don't try finer
+		add.w	d0,d0							; word offset for bad field
+		lea		dateTime0(a6,d0.w),rDateSuccPtr	; pointer to bad field
+		move.w	0(rMaxValPtr,d0.w),rCounter		; get maximum value
+
+@FinerLoop
+		sub.w	#1,(rDateSuccPtr)			; drop
+		bsr.s	xValidDate					; is it ok?
+		dblt	rCounter,@FinerLoop			; til done
+		blt.s	SetNewDate					; yes, exit
+		
+@NoFiner
+
+;		dateTime0 := dateTime1;
+;		if delta < 0
+;		then dateTime0.list[field] := dateTime0.list[field] + maxVal.list[field]
+;		else dateTime0.list[field] := dateTime0.list[field] - maxVal.list[field];
+
+		lea		dateTime1(a6),a0			; source
+		lea		dateTime0(a6),a1			; dest
+		bsr.s	CopyDateA0toA1				; date0 := date1
+		move.w	rField,d0					; double for word array
+		add.w	d0,d0						; double
+		move.w	0(rMaxValPtr,d0),rCounter	; get value
+		move.w	rCounter,d0					; temp value for adding
+		tst.w	rDelta						; <0?
+		blt.s	@DeltaNegative				; yes, d0 ok
+		neg		d0							; reverse
+@DeltaNegative
+		add.w	d0,(rDateFieldPtr)			; bump the other direction
+
+;		for j := 0 to maxVal.List[field] do begin
+;			dateTime0.list[field] := dateTime0.list[field] + delta;
+;			if ValidDate(dateTime0, params.flags, newDate) = validDateFields then goto 888;
+;		end;
+
+@BackwardsLoop
+		add.w	rDelta,(rDateFieldPtr)		; bump
+		bsr.s	xValidDate					; is it ok?
+		dblt	rCounter,@BackwardsLoop		; yes, exit
+		blt.s	SetNewDate					; with correct date from ValidDate
+
+; Couldn't deal with it. bail
+;777:
+;		ToggleDate := toggleUnknown;
+;		goto 999;
+
+UnknownError
+		moveq	#toggleUnknown,d0			; unknown error
+		bra.s	ToggleResult				; bail
+		
+SetNewDate
+;888:
+;		mySecs := newDate;
+
+		lea		newDate(a6),a0				; source
+		move.l	mySecsPtr(a6),a1			; dest
+		move.w	#4-1,d0						; word count, -1 for dbra				<12>
+		bsr.s	CopyDateLoop				; copy date
+		
+;900:
+;		ToggleDate := toggleOk;
+
+ReturnOk	
+		moveq	#toggleOk,d0				; good return
+ToggleResult
+		move.w	d0,funcResult(a6)			; return result
+;999:
+;	END;
+;;999 :
+ToggleExit
+		movem.l	(sp)+,ToggleDateRegs		; restore registers to their original value
+		checkA6								; check stack
+
+		move	#argSize, d0				; for StdUnlink
+		bra		StdUnlink					; standard exit
+	
+		endWith
+		endProc
+
+;============================================================================
+;	LongDate Tables & equates
+;============================================================================
+
+;typedef short	YearStarts[13];
+;typedef double	LongDate;
+
+dy400	equ	146097	; days in quadcentury
+dy100	equ	 36524	; days in non-leap century--must be even!
+dy4		equ	  1461	; days in quad year
+dy1		equ	   365	; days in non-leap year
+dy2001	equ	 35430	; days between jan1,1904 and jan1,2001
+sd1		equ	 86400	; seconds in day
+dow2001	equ		 1	; day of week for Jan 1,2001
+
+;============================================================================
+;pascal void LongDate2Secs (longDate, longSecs, selector)
+;   LongDateRec*	longDate;
+;   LongDate*		longSecs;
+;   long			selector;
+;   register long	days, years, secs, months;
+;   register short	leapYear = 0;
+;============================================================================
+
+LongDate2Secs	proc	export
+
+LD2SRec		record  {oldA6},decr
+resultSize	equ		0
+argSize		equ		*-8
+longDate	ds.l    1
+longSecs	ds.l    1
+selector	ds.l    1
+argBottom	equ		*
+return		ds.l    1
+oldA6		ds.l    1
+mulDest		ds		LongDateTime
+leapYear	ds.w	1
+srcLong		ds.l	1
+localFrame	equ		*
+			endr
+
+RD2SRegs	reg	a2/d3-d7
+
+;	d3	years
+;	d4	months
+;	d5	days
+;	d6	secs
+;	d7	temp
+
+		with	LD2SRec,LongDateRec
+		import	MonthStarts,LeapStarts
+		
+		CheckSelector
+		link	a6,#localFrame
+		movem.l	RD2SRegs,-(sp)			; save regs
+	
+;		pea	procName
+;		_DebugStr
+
+; initial values
+	
+;    years = longDate->year - 2001;
+;    months = longDate->month-1;
+;    days = 0;
+;    secs = longDate->second + (longDate->minute + longDate->hour * 60) * (long) 60;
+
+		move.l	longDate(a6),a2			; longDatePtr
+
+; add BC <1/11/88med>
+
+		lea		longDateRec.era(a2),a0	; for unloading <1/11/88med>
+		move.w	(a0)+,d1				; get era
+		move.w	(a0)+,d3				; year
+		tst.w	d1						; era < 0?
+		bge.s	@EraAD					; no, skip
+		sub.w	#1,d3					; no year zero
+		neg.w	d3						; now negative
+@EraAd
+		sub.w	#2001,d3				; - 2001
+		move.w	(a0)+,d4				; months
+		add.w	#2,a0					; skip day, for later
+		sub.w	#1,d4					; - 1
+		clr.l	d5						; days = 0
+		move.w	(a0)+,d6				; hour
+		muls	#60,d6					; * 60 (word: don't worry about overflow)
+		add.w	(a0)+,d6				; minute
+		muls	#60,d6					; * 60 (long)
+		move.w	(a0)+,d1				; second
+		ext.l	d1						; extend to add to long
+		add.l	d1,d6					; value for seconds
+		clr.b	leapYear(a6)			; leapyear = 0
+	
+;    if (months > 11)
+;    {	years += (months / 12);
+;	months %= 12;
+;    }
+
+		move.w	#12,d7					; comparison value
+		cmp.w	d7,d4					; turn 12+ months into years
+		blo.s	@MonthsOk				; bail if ok already
+		ext.l	d4						; longize for divide
+		divs	d7,d4					; mod & div
+		add.w	d4,d3					; years = years + div
+		swap	d4						; months = mod
+		tst.w	d4						; mod negative?
+		bge.s	@MonthsOk				; if rem < 0 then mod = mod + divisor, div = div - 1
+		sub.w	#1,d3					; div = div - 1
+		add.w	d7,d4					; mod = mod + divisor
+@MonthsOk
+
+;    if (years >= 400 | years <= -400)
+;    {	days += dy400 * (years / 400);
+;	years %= 400;
+;    }
+;    if (years < 0)
+;    {	years += 400;
+;	days -= dy400;
+;    }
+;    if (years == 399) leapYear += 2;
+
+		move.w	#400,d7					; comparison value
+		cmp.w	d7,d3					; year out of bounds?
+		blo.s	@YearsPositive			; no, continue
+		bgt.s	@YearBig400				; too big (otherwise negative)
+		move.w	d7,d0					; d0=400
+		add.w	d3,d0					; d3 < -400?
+		bge.s	@YearNegative			; no, continue
+@YearBig400
+		ext.l	d3						; long for divide
+		divs	d7,d3					; get mod & quo
+		move.w	d3,d1					; divisor
+		swap	d3						; years = rem
+		ext.l	d1						; longize
+		move.l	d1,-(sp)				; pass it
+		move.l	#dy400,-(sp)			; pass it
+		pea		mulDest(a6)				; pass address of result
+		_LongMul
+		add.l	mulDest+4(a6),d5		; days +=
+@YearOk400
+		tst.w	d3						; < 0?
+		bge.s	@YearsPositive			; no, skip								<1/11/88med>
+@YearNegative
+		add.w	d7,d3					; fix years
+		sub.l	#dy400,d5				; fix days
+@YearsPositive
+		subq.w	#1,d7					; get last year in cycle
+		cmp.w	d7,d3					; at last year?
+		bne.s	@LeapOk400				; no, skip
+		move.b	#2,leapYear(a6)			; leapyear += 2
+@LeapOk400
+
+; years and months now guaranteed to be positive!
+;    if (years >= 100)
+;    {	days += dy100 * (years / 100);
+;	years %= 100;
+;    }
+;    if (years == 99) leapYear -= 1;
+
+		move.w	#100,d7					; comparison value
+		cmp.w	d7,d3					; year out of bounds?
+		blo.s	@YearOk100				; no, continue
+		ext.l	d3						; long for divide
+		divu	d7,d3					; get mod & quo
+		move.w	d3,d1					; divisor
+		swap	d3						; years = rem
+		mulu	#dy100/2,d1				; partial multiply, since it is too big
+		asl.l	#1,d1					; rest of the way
+		add.l	d1,d5					; days +=
+@YearOk100
+		subq.w	#1,d7					; get last year in cycle
+		cmp.w	d7,d3					; at last year?
+		bne.s	@LeapOk100				; no, skip
+		sub.b	#1,leapYear(a6)			; leapyear -= 1
+@LeapOk100
+
+;    if (years >= 4)
+;    {	days += dy4 * (years / 4);
+;	years %= 4;
+;    }
+;    if (years == 3) leapYear += 1;
+
+		moveq	#4,d7					; comparison value
+		cmp.w	d7,d3					; year out of bounds?
+		blo.s	@YearOk4				; no, continue
+		ext.l	d3						; longize for divide
+		divu	d7,d3					; get mod & quo
+		move.w	d3,d1					; quotient
+		swap	d3						; years = rem
+		mulu	#dy4,d1					; quick mul
+		add.l	d1,d5					; days +=
+@YearOk4
+		subq.w	#1,d7					; get last year in cycle
+		cmp.w	d7,d3					; at last year?
+		bne.s	@LeapOk4				; no, skip
+		add.b	#1,leapYear(a6)			; leapyear += 1
+@LeapOk4
+
+;    days += years * d1;
+
+		mulu	#dy1,d3					; quick mul, dont need d3
+		add.l	d3,d5					; days +=
+
+;    days += MonthStarts[months];
+;    if (leapYear > 0)
+;    {	if (months > 1)
+;	{   days += 1;
+;	}
+;    }
+
+		lea		MonthStarts,a0			; get months array
+		tst.b	leapYear(a6)			; leap?
+		ble.s	@LeapOk					; no
+		lea		LeapStarts,a0			; adjust
+@LeapOk
+		add.w	d4,d4					; for word offset
+		clr.l	d0						; longize
+		move.w	0(a0,d4.w),d0			; get days in year
+		add.l	d0,d5					; add days in year
+
+;	if (longDate->day !=0) days += longDate->day;
+;	else if (longDate->dayOfYear != 0) days += longDate->dayOfYear;
+;	else 
+;	{	temp = (days - dow2001) % 7;
+;		if (temp < 0) temp += 7;
+;		days += (longDate->weekOfYear - 1) * 7 - temp + longDate->dayOfWeek + 1;
+;	}
+;	days += d2001 - 1;
+
+		move.w	day(a2),d0				; get day
+		bne.s	@GotDay					; ok, skip
+		move.w	dayOfYear(a2),d0		; get day of year
+		bne.s	@GotDay					; ok, skip
+		move.w	weekOfYear(a2),d0		; get week of year
+		sub.w	#1,d0					; make zero based
+		muls	#7,d0					; get days
+		move.l	d5,d1					; get days to year
+		sub.l	#dow2001,d1				; normalize for year 2001
+		divs	#7,d1					; get first day of year
+		swap	d1						; d1 = (d5-dow2001) % 7
+		tst.w	d1						; negative (rem)
+		bge.s	@1						; no, ok
+		add.w	#7,d1					; rem -> mod
+@1
+		sub.w	d1,d0					; remove first day
+		add.w	dayOfWeek(a2),d0		; add day of week
+		add.w	#1,d0					; make 1 based (soon to be removed)
+	
+@GotDay
+		ext.l	d0						; normal
+		add.l	#dy2001-1,d0			; adjust
+		add.l	d0,d5					; now in days
+
+;    *longSecs = secs + days * secsInDayX;
+
+		move.l	d5,-(sp)				; pass days
+		move.l	#secsInDay,-(sp)		; pass secs in day
+		move.l	longSecs(a6),-(sp)		; pass dest address
+		_LongMul
+
+		clr.l	d1						; for foolish addx syntax
+		move.l	longSecs(a6),a0			; addr of result
+		move.l	(a0)+,d0				; get high
+		add.l	d6,(a0)					; add to low part
+		addx.l	d1,d0					; add to high part
+		move.l	d0,-(a0)				; stick back in
+
+	IF 0 THEN
+		lea		srcLong(a6),a1			; address of source
+		move.l	a1,-(sp)				; pass source address
+		move.l	d5,(a1)					; source = long days
+		lea		secsInDayX,a0			; constant
+		move.l	longSecs(a6),a1			; dst address
+		move.l	a1,-(sp)				; pass address
+		move.l	(a0)+,(a1)+				; copy
+		move.l	(a0)+,(a1)+				; copy
+		move.w	(a0)+,(a1)+				; copy
+		FMULL							; dst = source * dest
+		
+		lea		srcLong(a6),a1			; address of source
+		move.l	a1,-(sp)				; pass source address
+		move.l	d6,(a1)					; source = secs
+		move.l	longSecs(a6),-(sp)		; pass dst address
+		FADDL							; dst2 = extended
+	ENDIF
+
+; done, so exit gracefully
+
+		movem.l	(sp)+,RD2SRegs			; restore registers to their original value
+		checkA6							; check stack
+
+		move.w	#argSize, d0			; for StdUnlink
+		bra		StdUnlink				; Standard exit
+
+		endWith
+		endProc
+	
+
+
+;============================================================================
+;pascal void LongSecs2Date (longSecs, longDate, selector)
+;    LongDate*		longSecs;
+;    LongDateRec*	longDate;
+;    long			selector;
+;============================================================================
+
+LongSecs2Date	proc	export
+
+LS2DRec		record  {oldA6},decr
+resultSize	equ		0
+argSize		equ		*-8
+longSecs	ds.l    1
+longDate	ds.l    1
+selector	ds.l    1
+return		ds.l    1
+oldA6		ds.l    1
+fExt		ds.x	1
+fLong		ds.l	1
+mulDest		ds		LongDateTime
+localFrame	equ		*
+			endr
+
+;	a2	LongDatePtr
+;	d3	years
+;	d4	leapyear
+;	d5	days
+;	d6	secs
+;	d7	temp
+
+; leapyear contains 3 bits:
+;	bit 0: not end of century
+;	bit 1: end of quadcentury
+;	bit 2: end of quadyear
+; so the year is a leap year if leapyear > 4: (qy + (qc or nc))
+
+RS2DRegs	reg	a2/d3-d7
+
+		with	LS2DRec,LongDateRec
+		import	MonthStarts,LeapStarts,secsInDayX
+
+		CheckSelector
+		link	a6,#localFrame
+		movem.l	RS2DRegs,-(sp)		; save regs
+	
+;		pea	procName				; save
+;		_DebugStr
+
+; initial values
+;    register long   days, years, secs, dow, i, temp;
+;    register short  leapYear = 1;
+;    register YearStarts*
+;		myStarts;
+;
+;    days = *longSecs / secsInDayX;
+;    secs = *longSecs - secsInDayX * days;
+
+		move.l	longDate(a6),a2		; longDatePtr
+		moveq	#1,d4				; leapyear = 1
+
+; divide a sixty-four by a 32 and produce quotient and remainder in d5, d6
+
+		move.l	longSecs(a6),a0		; get @source
+		move.l	(a0)+,d0			; get top
+		move.l	(a0)+,d1			; get bottom
+		cmp.l	#maxDate,d0			; too big?
+		blo.s	@DateInRange		; no, keep going
+		bge.s	@OutOfRangeDate		; fix
+		cmp.l	#minDate,d0			; now try bottom 		<was d2, fixed 4/07/89 pke>
+		bge.s	@DateInRange		; ok, continue
+@OutOfRangeDate
+		clr.l	d0					; assume zero date, cant help it
+		clr.l	d1					; ditto (just drop through, don't care about performance)
+@DateInRange
+		move.l	#secsInDay,d2		; divisor
+
+
+		LongDiv						; results in rd1,qd0
+	
+	
+		move.l	d1,d5				; get quotient
+		move.l	d0,d6				; get remainder
+
+; if secs < 0 then secs = secs + secsInDayX, days = days - 1;
+
+		bge.s	@SecsPlus			; no, continue
+		add.l	#sd1,d6				; secs +
+		sub.l	#1,d5				; days -
+@SecsPlus
+
+;    dow = (days + 5) % 7;
+;    if (dow < 0) dow += 7;
+;    longDate->dayOfWeek = dow+1;
+
+		move.l	d5,d0				; temp d0
+		add.l	#5,d0				; +5
+		divs	#7,d0				; (d5+5)/7
+		bvc.s	@Mod7Ok				; mod ok, skip
+	
+; fix days if overflow <1/11/88med>
+	
+		divs	#16807,d0			; divide by large power of 7
+		swap	d0					; get modulo
+		ext.l	d0					; longize
+		divs	#7,d0				; (d5+5)/7
+@Mod7Ok
+		swap	d0					; modulo
+		tst.w	d0					; <0?
+		bge.s	@DofWPlus			; skip if not
+		add.w	#7,d0				; fix
+@DofWPlus
+		add.w	#1,d0				; make 1 based
+		lea		dayOfWeek(a2),a0	; for walking through array
+		move.w	d0,(a0)				; set day of week
+
+;    longDate->second = secs % 60;
+;    secs /= 60;
+;    longDate->minute = secs % 60;
+;    longDate->hour = secs / 60;
+
+		move.w	#60,d0				; common factor
+		divu	d0,d6				; /60
+		swap	d6					; modulo
+		move.w	d6,-(a0)			; save seconds in record
+		clr.w	d6					; longize for after swap				<11/23/87med>
+		swap	d6					; recover divisor
+		divu	d0,d6				; /60
+		move.w	d6,d0				; save quo
+		swap	d6					; modulo
+		move.w	d6,-(a0)			; save minutes in record
+		move.w	d0,-(a0)			; save hours in record
+		lea		pm(a2),a0			; for storing
+		cmp.w	#NoonHr,d0			; am/pm?
+		sge	d0						; set bottom byte
+		neg.b	d0					; top byte already zero
+		move.w	d0,(a0)+			; set pm state
+		clr.l	(a0)+				; clear ldReserved
+
+;    days = days - dy2001;
+;    years = 0;
+
+		sub.l	#dy2001,d5			; normalize
+		clr.l	d3					; years = 0
+	
+;    if (days >= dy400 | days <= -400)
+;    {	years += 400 * (days / dy400);
+;	days %= dy400;
+;    }
+;    if (days < 0)
+;    {	days += dy400;
+;	years -= 400;
+;    }
+
+		move.l	#dy400,d7			; temp comparison value
+		cmp.l	d7,d5				; in range?
+		blo.s	@In400Range			; yes, skip
+		bgt.s	@Adjust400			; no, adjust
+		move.l	d7,d0				; temp
+		add.l	d5,d0				; > dy400?
+		bge.s	@Adjust400Neg		; yes, just fix negation
+@Adjust400
+		move.l	d7,d2				; divisor
+		move.l	d5,d1				; dividend
+		slt		d0					; now extend long to quad
+		ext.w	d0					; more
+		ext.l	d0					; and more
+
+		LongDiv						; results in rd1,qd0
+	
+		muls	#400,d1				; get years = quotient * 400
+		add.l	d1,d3				; add in
+		move.l	d0,d5				; set remainder
+	
+;		tst.l	d5					; remainder negative?
+		bge.s	@In400Range			; no, continue
+@Adjust400Neg
+		add.l	#dy400,d5			; bump up
+		sub.l	#400,d3				; fix years
+@In400Range	
+
+;	days are now safely positive
+;    temp = 0;
+;    if (days > dy100)
+;    {	temp += 100 * (days / dy100);
+;	days %= dy100;
+;	if (temp == 400)
+;	{	temp -= 100;
+;		days += d100;
+;	}
+;    }
+;    if (temp == 300) leapYear += 2;
+
+; note: d5 is long from above.
+		clr.w	d0					; temp years
+		move.l	#dy100,d7			; comparison value
+		cmp.l	d7,d5				; in range?
+		blt.s	@InRange100			; yes, skip
+		move.l	d5,d1				; days
+		divu	#dy100,d5			; days/dy100
+		move.w	d5,d0				; quotient
+		clr.w	d5					; longize for after swap
+		swap	d5					; remainder=modulo
+		mulu	#100,d0				; 100 * (days / dy100)- don't need to add
+		cmp.w	#300,d0				; (years are word) leap?
+		blt.s	@InRange100			; no, continue
+		beq.s	@Leap100			; too big
+		sub.l	#100,d0				; back one century
+		add.l	#dy100,d5			; bump days up
+@Leap100
+		add.b	#2,d4				; bump flag up
+@InRange100
+		add.w	d0,d3				; add in to days						<11/20/87med>
+
+;	years +=temp; ****
+;    temp = 4 * (days / dy4); ****
+;    days %= dy4;
+;    if (temp == 96) leapYear -= 1;
+;    years += temp;
+
+; don't test for range of 4 years, very unlikely
+; note: d5 is long from above. Do NOT sign extend.
+		divu	#dy4,d5				; div days
+		move.w	d5,d0				; quo
+		asl.w	#2,d0				; *4
+		swap	d5					; rem=mod
+		cmp.w	#96,d0				; end of cycle?
+		bne.s	@InRange4			; no, skip
+		sub.b	#1,d4				; bump down, at end
+@InRange4
+		add.l	d0,d3				; years +=
+
+;    temp = (days / d1);
+;    days %= d1;
+;    if (temp < 3)
+;    {	leapYear += 4;
+;	if (temp == 4)
+;	{   temp -= 1;
+;	days += d1;
+;	}
+;    }
+;    years += temp;
+
+		ext.l	d5					; for division
+		divu	#dy1,d5				; get number of years in 4 yr cycle
+		move.w	d5,d0				; temp = quo
+		swap	d5					; days = remainder
+		cmp.w	#3,d0				; leap year?
+		blt.s	@InRange1			; no, skip
+		beq.s	@Leap1				; yes, simple case
+		sub.w	#1,d0				; back up a year
+		add.w	#dy1,d5				; correct days
+@Leap1
+		add.b	#4,d4				; possible leap year
+@InRange1
+		add.w	d0,d3				; years
+
+;	longDate->dayOfYear = days+1;
+;	{algorithm changed in asm!}
+;	temp = (days - longDate->dayOfWeek) % 7;
+;	if (temp < 0) temp += 7;
+;	longDate->weekOfYear = (days  + temp - longDate->dayOfWeek) / 7 + 1;
+;	longDate->era = 0; /* for now */
+
+		move.w	d5,d0				; get days in year
+		add.w	#1,d0				; one-based
+		move.w	d0,dayOfYear(a2)	; save
+	
+		move.w	d5,d1				; days
+		ext.l	d1					; prepare to di(vid)e
+		divu	#7,d1				; days are unsigned
+		move.w	d1,d0				; save weeks
+		swap	d1					; get quo=rem for unsigned
+		cmp.w	dayOfWeek(a2),d1	; if remainder day <= day of week, add 1
+		blt.s	@WeekOk				; ow bail (dow is 1 based, so < )
+		add.w	#1,d0				; fix
+@WeekOk
+		add.w	#1,d0				; make 1 based
+	
+		move.w	d0,weekOfYear(a2)	; save
+	
+;    if (leapYear > 4)
+;    {
+;    for (i = 0; LeapStarts[i] <= days; ++i);
+;    days -= LeapStarts[i-1];
+;    }
+;    else
+;    {
+;    for (i = 0; MonthStarts[i] <= days; ++i);
+;    days -= MonthStarts[i-1];
+;    }
+
+		lea		MonthStarts,a0		; assume not leap
+		cmp.b	#4,d4				; leap?
+		ble.s	@ArrayOk			; no, continue
+		lea		LeapStarts,a0		; fix
+@ArrayOk
+
+		move.l	#-1,d0				; init month
+@FindMonthLoop
+		add.w	#1,d0				; inc month
+		cmp.w	(a0)+,d5			; in range yet?
+		bge.s	@FindMonthLoop		; no, keep going (d5 limited, must terminate)
+
+;	longDate->year = years + 2001;
+;	longDate->month = i;
+;	longDate->day = days+1;
+
+; add BC <1/11/88med>
+
+		lea		era(a2),a1			; for loading							<1/11/88med>
+		clr.w	d1					; assume AD								<1/11/88med>
+		add.w	#2001,d3			; add offset							<11/20/87med>
+		bgt.s	@EraOK				; skip if AD (> 0)						<1/11/88med>
+		moveq	#-1,d1				; set BCq								<1/11/88med>
+		neg		d3					; now positive	(BC)					<1/11/88med>
+		add.w	#1,d3				; no year zero
+@EraOk
+		move.w	d1,(a1)+			; set era								<1/11/88med>
+		move.w	d3,(a1)+			; set year
+		move.w	d0,(a1)+			; set month
+		sub.w	-4(a0),d5			; days in month (zero based
+		add.w	#1,d5				; now 1 based
+		move.w	d5,(a1)+			; day, and we are done
+
+; done, so exit gracefully
+
+		movem.l	(sp)+,RS2DRegs		; restore registers to their original value
+		checkA6						; check stack
+
+		move.w	#argSize, d0		; for StdUnlink
+		bra		StdUnlink			; standard exit
+	
+		endWith
+		endProc
+
+;============================================================================
+; String & Date conversions
+;============================================================================
+
+WhiteSpace		EQU	1	; token number for white space
+AlphaToken		EQU	4	; token number for string
+NumericToken	EQU	5	; token number for number
+AltNumericToken equ	$B	; alternate token type for numbers						<9/2/87med>
+NonAlphNumToken EQU	16	; token numbers starting here correspond to non-alpha numeric tokens
+NilToken		EQU	$7F	; token number for nil
+MaxTokens		EQU	32	; number of tokens for which there is space
+
+omdy			EQU	0	; date order constants
+odmy			EQU	1
+oymd			EQU	2
+omyd			EQU	3
+odym			EQU	4
+oydm			EQU	5
+
+; long date order constants defined in PackMacs.a		<10/12/88ldc>
+
+invalidPart	EQU	$80000000
+
+Str15			EQU	16				; length of string[15]
+	IF FixCacheAndStr2Date THEN		;												<10><11>
+Str4			EQU 5				; length of string[4]	added for more space-efficient cache <1-8-91jh><10>
+Str8			EQU 9				; length of string[8]	ditto					<1-8-91jh><10>
+	ENDIF							;												<10>
+DayMonthLen		equ	15				; length of days and months
+	IF FixCacheAndStr2Date THEN		;												<10><11>
+TimeLen			equ	4				; length of time strings
+	ELSE
+TimeLen			equ	15				; length of time strings
+	ENDIF
+NumDays 		EQU	7				; length of various arrays
+NumMonths		EQU	12
+	IF FixCacheAndStr2Date THEN		;												<10><11>
+NumTimeStrings	equ	4
+	ELSE
+NumTimeStrings	equ	3				; number of time strings
+	ENDIF
+DayList 		EQU	NumDays*Str15
+MonthList		EQU	NumMonths*Str15
+NumStrBytes		EQU	300
+
+	IF FixCacheAndStr2Date THEN		;												<10><11>
+;;-------BEGIN <1-8-90, jh> equates for extend itl1
+; new itl1 extensions
+itl1Version			equ		localRtn+2
+itl1Format			equ		itl1Version+2
+calendarcode		equ		itl1Format+2
+extraDaysOffset		equ		calendarcode+2
+extraDaysLength		equ		extraDaysOffset+4
+extraMonthsOffset	equ		extraDaysLength+4
+extraMonthsLength	equ		extraMonthsOffset+4
+abbrevDaysOffset	equ		extraMonthsLength+4
+abbrevDaysLength	equ		abbrevDaysOffset+4
+abbrevMonthsOffset	equ		abbrevDaysLength+4
+abbrevMonthsLength	equ		abbrevMonthsOffset+4
+extraSepsOffset		equ		abbrevMonthsLength+4
+extraSepsLength		equ		extraSepsOffset+4
+; For any of the above offsets there will be data down here in all cases this
+; data will have the STR# format (i.e. word for string count followed by an
+; array of pstring)
+
+extformatkey		equ		$A89F
+maxExtraSeps		equ		10		; count of extra seps in cache, must be at least 1!!	<10>
+	IF maxExtraSeps<1 THEN			;												<10>
+		aerror	&concat('maxExtraSeps wrong: ',&i2s(maxExtraSeps))	;				<10>
+	ENDIF							;												<10>
+itl1stCount			equ		4		; 0..4 st's in itl1
+
+;;-----------END <1-8-91, jh> equates for extended itl1
+	ENDIF							;												<10>
+
+monthReplace	EQU	0				; offsets to CvtTable
+reorder 		EQU	18
+theYear 		EQU	0				; offset to elements of arrays in CvtTable.reorder
+theMonth		EQU	1
+theDay			EQU	2
+
+		
+	IF 0 THEN						; already defined
+tokenOK 		EQU	0				; tokenizer result constants
+tokenOverflow	EQU	1
+stringOverflow	EQU	2
+badDelim		EQU	3
+unknownToken	EQU	4
+
+TokenRec  		RECORD  	0,INCR		;
+theToken  		ds.w		1			; TokenType
+position  		ds.l		1			; Ptr into original source
+length			ds.l		1			; length of text in original source
+stringPosition	ds.l		1			; StringPtr to copy of identifier
+tokenRecSize  	equ 		*
+  				ENDR
+
+tokenBlock		RECORD	0
+source			DS.L	1
+sourceLength	DS.L	1
+tokenList		DS.L	1
+tokenLength		DS.L	1
+tokenCount		DS.L	1
+stringList		DS.L	1
+stringLength	DS.L	1
+stringCount		DS.L	1
+doString		DS.B	1
+doAppend		DS.B	1
+doAlphaNumeric	DS.B	1
+doNest			DS.B	1
+leftDelims		DS.W	4
+rightDelims		DS.W	4
+leftComment		DS.W	4
+rightComment	DS.W	4
+escapeCode		DS.W	1
+				ENDR
+	ENDIF
+
+;========================IMPORTANT NOTE,POTENTIAL DANGER===================================
+;
+;	The Data structure below is actually 6 bytes longer than the size of a
+;	DateCacheRecord.  Initially, I fixed it so that the Record fit within 512 bytes
+;	but that change forced very large patches to String2Date and String2Time in the 
+;	aurora and esprit ROMs.
+;
+;	Since these patches were large and required a fair amount of change to ScriptMgrROMPatch.a
+;	we rethought fixing the cache so that it fit into 512 bytes and instead opted
+;	for keeping the fields in identical offsets.
+;
+;	This is not as bad as it sounds (although it is bad, let there be no doubt about that)
+;	since the last 32 bytes of a tokenBlock are reserved and at this time (7.0 and earlier)
+;	are neither read from nor written to.  For that reason, the fact that the declaration
+;	below is 6 bytes longer than the memory provided for it is only a forgiveable bit
+;	of forgetfulness.
+;
+;	However, do NOT read or write any values past the itlResource field of the token block.
+;	And do NOT do what inside mac and the published headers say to do which is zero out
+;	the last 32 bytes of the token block.  Doing that will TRASH memory. DON'T DO IT.
+;========================================================================================
+	
+Cache			RECORD	0
+version			ds.w	1
+CurrentDate		DS		LongDateRec
+BaseDate		DS		LongDateRec
+theDays 		DS.B	DayList
+theMonths		DS.B	MonthList
+
+	IF FixCacheAndStr2Date THEN			;										<10><11>
+theEveStr		DS.B	Str4			;use new string definitions to make room for altseps
+theMornStr		DS.B	Str4			;
+the24hrAMStr	DS.B	Str4			;
+the24hrPMStr	DS.B	Str4			;
+countAltSeps	DS.W	1				;number of separator tokens				<1-8-91, jh>
+AltSeps			DS.W	maxExtraSeps	;contains an array of separator tokens	<1-8-91, jh>
+filler			DS.B	6
+ 	ELSE								;										<10>
+theEveStr		DS.B	Str15
+theMornStr		DS.B	Str15
+the24hrStr		DS.B	Str15
+	ENDIF								;										<10>
+theTimeSep		DS.W	1
+theDateSep		DS.W	1
+theDateOrder	DS.b	1
+longDateOrder	ds.b	1
+theAbbrLen		DS.W	1
+TBlock			DS		tokenBlock
+CacheSize		equ		*
+theTimeStrings	equ		theEveStr
+				ENDR
+				
+MaxInteger		equ		$00008000		;										<10>
+
+;============================================================================
+; Utility Routines
+;============================================================================
+
+;======================================================================
+; Function	ValidLong(aStr: Str255): Longint;	<2.5>
+; Input 	stringPtr:  ptr 		in A0
+; Output	theLong ($80000000 if invalid)	in D0
+;			returns a valid longint, positive.  Number sets status register
+;======================================================================
+
+	
+ValidLong	proc	export
+	
+		movem.l d3/d4,-(sp)
+		move.l	#$80000000,d0		; assume bad
+		clr.l	d4
+		move.b	(A0)+,d4			; get length
+		ble.s	@BailValid			; bail if not there
+
+		clr.l	d1					; longize
+		move.b	(a0)+,d1			; new value
+		sub.b	#'0',d1 			; adjust
+		subq.b	#1,D4				; adjust string length
+
+		move.l	d1,d2				; initialize total
+		bra.s	@FastEntry			; enter loop in middle
+
+@FastPathLoop
+; multiply by 10
+
+		add.l	d2,d2				; double
+		move.l	d2,d3				; save copy
+		lsl.l	#2,d2				; now * 8
+		add.l	d3,d2				; now * 10, at a cost of 6+4+12+6=28 10x = 2x + 4·2x
+		add.l	d1,d2				; accumulate
+@FastEntry
+		move.b	(a0)+,d1			; new value
+		sub.b	#'0',d1 			; adjust
+		dbra	d4,@FastPathLoop	; yes, continue
+
+@DoneFastPath
+	IF FixCacheAndStr2Date THEN		;											<10><11>
+	
+		cmp.l	#MaxInteger,d2		; is it greater than 32768?
+		bhi.s	@BailValid			; yes, so it is too high, bail
+		
+	ENDIF							;											<10>
+		move.l	d2,d0				; return result and set status register
+		
+@BailValid
+		tst.l	d0
+@Exit
+		movem.l (sp)+,d3/d4
+		rts
+		endProc
+
+
+;======================================================================
+; Procedure Block2String
+; Input     	textPtr:	ptr	in A0
+;	textLen:	word		in D0
+;	var dstStr:	strNN		in A1	; not necessarily Str15						<10>
+;	leadSpaces: boolean     in D1
+;	altSpace:	byte		in d2												<8/22/87med>
+; Function		Copy text to pascal string, stopping at null byte,
+;				stripping leading spaces, and uppercasing						<1/5/88med>
+; Uses			A0-1,D0-2
+;======================================================================
+Block2String	proc	export
+		move.l	d3,-(sp)			; save d3								<8/22/87med>
+		move.l	a1,-(sp)			; save destination string for later		<1/5/88med>
+		move.b	d2,d3				; use for alternate space				<8/22/87med>
+		move.b	d1,d2				; move lead spaces into d2
+
+; pin length
+		clr.l	d1					; assume zero
+		tst.l	d0					; length 0 or negative?
+		ble.s	@QuickExit			; exit now
+		not.b	d1					; d2 = 255
+		cmp.l	d1,d0				; too big?
+		ble.s	@NoPin				; no, keep going (catches negatives)
+		move.l	d1,d0				; pin at value
+@NoPin
+		move.l	a1,-(sp)			; save length position
+		move.l	d0,d1				; save length
+		add.l	#1,a1				; skip length for now
+		tst.b	d2					; discard leading spaces?
+		beq.b	@CopySpaces			; no, copy everything
+		bra.b	@DiscardSpaces		; yes, discard leading spaces
+
+@DSLoopStart
+		subq.b	#1,d1				; found leading space, resultant string will be shorter by 1
+@DiscardSpaces
+		move.b	(a0)+,d2			; get next character
+		cmp.b	#' ',d2 			; is it a space
+		beq.s	@1					; keep looping							<8/22/87med>
+		cmp.b	d3,d2				; alternate space?						<8/22/87med>
+@1
+		dbne	d0,@DSLoopStart 	; if yes, and we haven't exhausted string, loop
+		beq.b	@QuickExit			; whoops! string was all spaces, return null string.
+		tst.b	d2					; set status register to current character
+		bne.b	@LoopEnd			; copy string.
+
+@CopySpaces
+		move.b	(a0)+,d2			; get byte
+		bra.s	@LoopEnd			; dbra setting
+@CopyBytes
+		move.b	d2,(a1)+			; copy
+		move.b	(a0)+,d2			; get byte
+@LoopEnd
+		dbeq	d0,@CopyBytes		; copy
+		bne.b	@SkipZero			; continue if not null
+		sub.b	d0,d1				; readjust length as null was found
+@SkipZero
+; fix length, exit
+		move.l	(sp)+,a1			; recover length
+@QuickExit
+		move.b	d1,(a1) 			; set it
+
+		move.l	(sp)+,a0			; restore string address
+		CLR.L	D0
+		MOVE.B	(A0)+,D0			; UprString wants textPtr and length in D0.  Get it from
+									; string and adjust A0 to string's text at same time
+		_UpperText					; _LwrString with uppercase function			<3>
+
+		move.l	(sp)+,d3			; restore d3							<8/22/87med>
+		rts
+		endproc
+
+;======================================================================
+; routine	Compare
+; input 	a0	source pointer
+;			a1	destination pointer
+;			d0.w	source length (>= 0)
+;			d1.w	destination length (>=0)
+; output	d0.w	=0 if match <>0 if not
+;			ccr	set according to d1
+; matches if source is an initial substring of destination
+;======================================================================
+Compare 	PROC	EXPORT
+
+		CMP.w	D1,D0				; word length
+		BGT.S	NotFound			; if source > destination, skip
+
+		SUBQ.w	#1,D0				; word length
+;;		BMI.S	NotFound			; destination is never null, so omit this test.	<2/23/88med>
+		
+CompareLoop
+		CMPM.B	(A0)+,(A1)+
+LoopEnd
+		DBNE	D0,CompareLoop
+;;		BNE.S	NotFound
+		
+		CLR.L	D0
+		BRA.S	Exit
+
+NotFound
+		MOVEQ	#-1,D0
+Exit
+		RTS
+
+		ENDPROC
+
+;======================================================================
+; FUNCTION MatchString (textPtr : Ptr; textLen: Integer; textMinLen: Integer;
+;			strArrPtr : Ptr; strArrMaxLen: Integer;
+;			strArrCount: Integer) : Integer; external;
+; function	Finds the longest match between the text and an
+;		initial portion of a string in the array.
+;		return is the number of the match (1 based), -1 if not found
+;======================================================================
+MatchStrFrame	record	{oldA6},decrement
+result			ds.w	1
+textPtr 		ds.l	1
+textLen 		ds.w	1
+textMinLen		ds.w	1
+strArrPtr		ds.l	1
+strArrMaxLen	ds.w	1
+strArrCount		ds.w	1
+return			ds.l	1
+oldA6			ds.l	1
+args			equ		result-return-4
+				endr
+
+MatchStrRegs	reg	a2-a4/d3-d5
+
+MatchString	proc	export
+		with	MatchStrFrame
+		link	a6,#Frame			; allocate
+		movem.l MatchStrRegs,-(sp)	; save regs
+		move.l	textPtr(a6),a3		; get textPtr
+		move.w	textLen(a6),d3		; get len
+		move.l	strArrPtr(a6),a4	; get string array
+	IF NOT FixCacheAndStr2Date THEN	;											<10><11>
+		; moved the following into loop since we must reset every time
+		; around if dealing with variable length pstrings <1-8-91jh>
+		move.w	strArrMaxLen(a6),d4	; get max str length 
+	ENDIF							;											<10>
+		move.w	strArrCount(a6),d5	; get count
+		bra.s	@EndLoop			; for dbra
+@MainLoop
+	IF FixCacheAndStr2Date THEN		;											<10><11>
+		; if 0 we have variable length pstrings in the array and handle
+		; differently, see below <1-8-91jh>
+		move.w	strArrMaxLen(a6),d4	; get max str length
+	ENDIF							;											<10>
+; call compare with array entry
+		
+		move.l	a3,a0				; pass ptr1
+		move.l	d3,d0				; pass len1
+		clr.l	d1					; wordize
+		move.b	(a4)+,d1			; get length
+	IF FixCacheAndStr2Date THEN		;											<10><11>
+		tst.w	d4					; if d4.w=0 then we need to remember the actual string
+									;	length for each string and now the strArrMaxLen as
+									;	above <1-9-91, jh>
+		bne.s	@UsingStrArrMaxLen	; valid length in d4.2 so we don't need to remember
+									;	the real length <1-9-91, jh> 
+		move.b	d1,d4				; remember # of characters so we can move to next string <1-8-91 jh>
+@UsingStrArrMaxLen					; added label to branch to <1-9-91, jh>
+	ENDIF							;											<10>
+		move.l	a4,a1				; pass start of text
+
+; move compare to in-line, add min length test <2/23/88med>
+
+		CMP.w	D1,D0				; word length
+		BGT.S	@NextString			; if len actual > len template, skip
+		beq.s	@TryCompare			; lens equal, try anyway
+		cmp.w	textMinLen(a6),d0	; len actual < abbrev len?
+		blt.s	@NextString			; do next
+
+@TryCompare
+
+		SUBQ.w	#1,D0				; word length
+		blt.s	@NextString			; actual string is null
+@CompareLoop
+		CMPM.B	(A0)+,(A1)+
+		DBNE	D0,@CompareLoop
+		beq.s	@GotString			; exit									<2/23/88med>
+
+@NextString
+		add.w	d4,a4				; get to next string
+@EndLoop
+		dbra	d5,@MainLoop		; loop til done
+		
+		bra.s	@Exit				; bail with d5 = -1.
+
+@GotString
+; return number of string, 1 based
+
+		sub.w	strArrCount(a6),d5	; get difference						<2/23/88med>
+		neg.w	d5					; now right direction					<2/23/88med>
+
+@Exit
+		move.w	d5,result(a6)
+		movem.l (sp)+,MatchStrRegs	; restore regs
+
+		move.w	#args, d0			; for StdUnlink
+		bra		StdUnlink			; standard exit
+
+		endWith
+		endProc
+
+;============================================================================
+InitDateCache	FUNC	EXPORT
+;
+; function InitDateCache(theCache: CachePtr): OSErr;
+;
+; InitDateCache will initialize the items in the DateCacheRecord pointed to by theCache^
+; and set the initialized item to true
+;
+	IF FixCacheAndStr2Date THEN	;												<10><11>
+SaveRegs	REG	A2-A4/D3-d7		; use d5,d6,d7 in our code to cache separators	<1-10-91, jh>
+	ELSE						;												<10>
+SaveRegs	REG	A2-A4/D3/D4
+	ENDIF						;												<10>
+
+InitCacheRec	RECORD	{A6link},decr
+Result			DS.W	1					; offset to function result (integer)
+paramBegin		EQU		*
+theCache		DS.L	1					; pointer to the cache record
+selector		ds.l	1					; added for resource				<8/21/87med>
+paramEnd		EQU		*
+return			DS.L	1
+A6link			DS.L	1
+theTokens		DS.B	2*TokenRec.tokenRecSize
+Intl0			DS.L	1					; handle, not pointer
+Intl1			DS.L	1					; handle, not pointer
+altSpace		ds.w	1					; use top byte
+aLongDate		ds		LongDateTime		;									<1/12/88med>
+	IF FixCacheAndStr2Date THEN				;									<10><11>
+temp4bytes		ds.l	1					;4 bytes to cache temp string		<1-10-91,jh>
+	ENDIF									;									<10>
+localsize		EQU		*
+				ENDR
+	
+		WITH	InitCacheRec,LongDateField
+
+parametersize	EQU	paramBegin - paramEnd		; size of parameter space on stack
+
+		LINK	A6,#localsize			; Establish local frame and variables
+		MOVEM.L	SaveRegs,-(SP)			; saved used registers
+
+		CLR.W	Result(A6)				; clear function result
+
+		MOVE.L	theCache(A6),A2			; cache addr
+
+		move.b	#' ',altSpace(a6)		; assume no alt space
+
+		with	SMgrRecord,ScriptRecord
+		subq.w	#2,sp					; space for IntlScript result
+		_IntlScript
+		move.w	(sp)+,d0				; we know this script is ok
+		lsl.w	#2,d0					; make it a long offset
+		GetSMgrCore a0					; get SMgrRecord pointer
+		move.l	smgrEntry(a0,d0.w),a0	; get ScriptRecord pointer
+		tst.b	scriptRight(a0)			; 
+		endwith
+
+		beq.s	@NoAltSpace 			; no									<8/22/87med>
+		move.b	#' '+$80,altSpace(a6)	; use alt space.
+@NoAltSpace
+
+		WITH	Cache
+
+		lea		aLongDate(a6),a0		; @temp
+		clr.l	(a0)+					; no high
+		move.l	Time,(a0)+				; low = current
+		pea		aLongDate(a6)			; extended
+		pea		CurrentDate(A2)			; get current date from system global…
+										; …time and convert to date
+		_LongSecs2Date
+
+		lea		aLongDate(a6),a0		; @temp
+		clr.l	(a0)+					; no high
+		clr.l	(a0)+					; low = current
+		pea		aLongDate(a6)			; extended
+		pea		BaseDate(A2)			; get base date and convert to date
+		_LongSecs2Date
+
+; IUGetIntl(0): Handle
+
+		CLR.L	-(SP)
+		CLR.W	-(SP)
+		_IUGetIntl
+		MOVE.L	(SP)+,Intl0(A6)
+
+		move.w	ResErr,d0				; did intl0 load in all right			<1/5/88med>
+		BEQ.S	GotIntl0Ok				; if so, go on
+		
+		MOVE.W	d0,Result(A6)
+		BRA		Exit
+
+GotIntl0Ok
+
+		MOVE.L	Intl0(A6),A3
+
+; Lock itl0 across Block2String calls (which can now move memory)
+		move.l	a3,a0
+		_HLock
+		MOVE.L	(A3),A3					; now a3 is pointer to itl0
+
+; Block2String(eveStr,theEveStr,4,true)
+
+		LEA		eveStr(A3),A0			; get international 0 record for evening string
+		LEA		theEveStr(A2),A1
+		MOVEQ	#4,D0
+		MOVE.B	#1,D1
+		move.b	altSpace(a6),d2			; pass alt string					<8/22/87med>
+		JSR		Block2String			; convert packed array of char into…
+										; …string with no leading spaces
+
+; Block2String(mornStr,theMornStr,4,true)
+
+		LEA		mornStr(A3),A0			; get international 0 record for morning string
+		LEA		theMornStr(A2),A1
+		MOVEQ	#4,D0
+		MOVE.B	#1,D1
+		move.b	altSpace(a6),d2			; pass alt string					<8/22/87med>
+		JSR		Block2String			; convert packed array of char into…
+										; …string with no leading spaces
+
+; Block2String(time1Stuff,the24hrStr,1,true)
+	IF FixCacheAndStr2Date THEN			;								<10><11>
+		lea		timeSuff(a3),A0			; AM trailer for 24 hour time
+		lea		the24hrAMStr(a2),a1		; position in cache		
+		moveq	#4,d0					; max four bytes per trailer
+	ELSE								;								<10>
+		LEA		timeSuff(A3),A0			; get international 0 record for 24 hour string
+		LEA		the24hrStr(A2),A1
+		MOVEQ	#1,D0
+	ENDIF								;								<10>
+		MOVE.B	#1,D1
+		move.b	altSpace(a6),d2			; pass alt string					<8/22/87med>
+		JSR		Block2String			; convert packed array of char into…
+										; …string with no leading spaces
+	IF FixCacheAndStr2Date THEN			;								<10><11>
+		lea		timeSuff+4(a3),A0		; PM trailer for 24 hour time
+		lea		the24hrPMStr(a2),a1		; position in cache		
+		moveq	#4,d0					; max four bytes per trailer
+		MOVE.B	#1,D1
+		move.b	altSpace(a6),d2			; pass alt string					<8/22/87med>
+		JSR		Block2String			; convert packed array of char into…
+	ENDIF								;								<10>
+
+	
+		
+		MOVE.B	timeSep(A3),theTimeSep(A2)		; get time separator from intl 0
+		MOVE.B	dateOrder(A3),theDateOrder(A2)
+		MOVE.B	dateSep(A3),(theTimeSep + 1)(A2)
+
+; Now unlock itl0
+		move.l	Intl0(A6),a0
+		_HUnlock
+
+
+; This was moved from above to prevent itl0 and itl1 handles from being purged	<7>
+; before we lock them.
+
+; IUGetIntl(1): Handle
+
+		CLR.L	-(SP)
+		MOVE.W	#1,-(SP)
+		_IUGetIntl
+		MOVE.L	(SP)+,Intl1(A6)
+
+		TST.W	ResErr					; did intl1 load in all right
+		BEQ.S	GotIntl1				; if so, go on
+		
+		MOVE.W	ResErr,Result(A6)
+		BRA		Exit
+
+GotIntl1
+
+ 
+		MOVE.L	Intl1(A6),A3
+
+; Lock itl1 across Copy Array calls; it calls Block2String, which can now move memory
+		move.l	a3,a0
+		_HLock
+		MOVE.L	(A3),A3					; now a3 is pointer to itl1
+
+; Get the long date order and convert <8/24/87med>
+; false => dmy, true => mdy; otherwise fancy stuff 
+; see constants defined above: omdy, odmy, etc.
+
+		move.l	#omdy,d1				; assume false
+		clr.w	d0						; wordize
+		move.b	lngDateFmt(a3),d0		; get long format
+		beq.s	@GotLong				; done
+		move.l	#odmy,d1				; assume true
+		cmp.b	#$FF,d0					; true?
+		beq.s	@GotLong				; yes, got it
+		
+; if we are looking at the long date, only the day and year are important,
+; since the dayOfWeek and month are both strings. Walk through the format until
+; we find either one or the other
+
+@LongFmtLoop
+		move.b	d0,d2					; get bottom half-nybble
+		and.b	#3,d2					; got it
+		cmp.b	#longDay,d2 			; day?
+		beq.s	@GotLong				; yes, return #odmy
+		cmp.b	#longYear,d2			; year?
+		beq.s	@LongYearFirst			; go for it
+		lsr.b	#2,d0					; strip bottom
+		bne.s	@LongFmtLoop			; repeat until done
+@LongYearFirst
+		move.l	#oymd,d1				; year first (also if none found)
+		
+@GotLong
+		move.b	d1,longDateOrder(a2)	; set it
+		
+; continue <8/24/87med>
+
+		MOVE.B	abbrLen(A3),theAbbrLen(A2)	; get abbrLen
+
+; changed order for more convenience in the later routine <2/23/88med>
+
+		lea		months(a3),a4			; source of days							<2/23/88med>
+		LEA		theMonths(A2),a1		; destination names of the day and months
+		MOVE.L	#(numMonths - 1),D3   	; load day and months from intl 1 rec into space
+		jsr		CopyArray				; copy days
+
+		lea		days(a3),a4				; source of days							<2/23/88med>
+		LEA		theDays(A2),a1			; destination names of the day and months
+		MOVE.L	#(numDays - 1),D3   	; load day and months from intl 1 rec into space
+		jsr		CopyArray				; copy days
+		
+		
+	IF FixCacheAndStr2Date THEN			;											<10><11>
+	
+; Begin addition where we try to cache any valid st0 through st4 strings 			<10>
+;	and any alternative separators included in the extended itl1
+;	note that these separators are not cached as strings but as tokens produced by IntlTokenize
+;	jh, 1-8-91
+; Notes on the loop:
+; An itl1 has 5 fields that are declared as PACKED ARRAY[1..4] OF CHAR
+; This field contain valid separators for the long date format
+; This loop walks through those arrays, and converts valid separators into pascal
+;	strings; those strings are then converted to tokens and potentially cached in the subroutine TokenizeSepAndCache
+; Register usage in the loop:
+;	a0-used to pass address of separator string to TokenizeSepAndCache
+;	a1-used briefly in the beginning to copy the date separator obtained previously from the itl0 into the cache
+;	a2-just like the rest of this code holds pointer to the cache
+;	a3-contains pointer to itl1
+;	a4-points at the ST arrays is 
+;	d0-used to hold characters so they can be compared to null and space
+;	d1-used as a scratch register
+;   d3 - loop control for inner loop
+;	d4 - used to hold count of characters placed in temp4bytes, for that reason used to pass length of string to TokenizeSepAndCache
+;	d6 - loop control for outer loop
+;	d7 - holds available cache space
+
+		
+		move.w	#maxExtraSeps,d7		;hold onto the maximum tokens allowed
+		clr.w	CountAltSeps(a2)		;clear the count
+		
+		; get the itl resource and stash it in parameter block 
+		WITH	TBlock
+		clr.l	-(sp)					; return handle
+		move.w	#4,-(sp)				; get itl4
+		_IUGetIntl
+		move.l	(sp)+,itlResource(a2)	; store itl resource
+		ENDWITH
+		beq		@FatalError				; couldn't get it give up
+		
+		lea		st0(a3),a4				;load start of 4-byte char blocks
+		move.l	#4,d6					; 5 ST strings to look at
+		
+@startSTLoop
+		clr.l	d4						; clear our offset into temp4bytes			
+		move.w	#3,d3
+		lea		temp4bytes(a6),a1		;get our temp string address
+	
+@char4loop
+		move.b 	(a4)+,d0
+		beq.s	@looptotop				; yes its null so just continue
+		cmp.b	#32,d0					; space ?
+		beq.s	@looptotop				; yes don't copy it, but continue
+		move.b	d0,(a1)+
+		addq	#1,d4					;increment our offset
+	
+@looptotop
+		dbra	d3,@char4loop			;loop back
+		
+		tst.w	d4						; if d4 > 0 we have some sort of string
+		beq.s	@looptoTopST			; its 0 so look at the next st[x]
+		
+	;if we got a string we want to turn it into a Token here and then stick the token into
+	; our cache
+		moveq	#1,d5					; only one token permitted
+		
+	;now we need to tokenize this separator and check to see if it is in the cache
+		lea		temp4bytes(a6),A0		; load the address of the source text into A0 which is where the subroutine expects it
+		bsr		TokenizeSep				; branch to subroutine
+		bne.s	@looptoTopST			; something went wrong with that one
+		bsr		CompareAndCache; check the token against the cache
+		ble.s	@DoneWithItls			; if we have run out of cache, quit this
+@looptoTopST
+		dbra	d6,@startSTloop
+		
+		;now we've copied the old st0-st4 separators, its time to check and see if we are
+		;dealing with an extended itl1 that might have some more separators added
+		cmp.w	#extformatkey,localRtn(a3)	;is local routine $A89F ($A89F (unimplemented trap)
+											; is used here to flag this itl1 as an extended itl1)
+		bne.s	@DoneWithItls				;nope, so branch around extra sep copying code	
+		
+		move.l	extraSepsOffset(a3),d1	;ok move the offset into d1
+		beq.s	@DoneWithItls			;moved a 0 nothing is actually here so give it up
+		
+		move.l	extraSepsLength(a3),d0	;how long is this array
+		ble.s	@DoneWithItls			;negative or 0 means nothing is really here so get out
+		add.l	a3,d1					;add offset to ptr to itl1
+		move.l	d1,a4					;move result to a4
+		move.w	(a4)+,d3				;move the count of extra separators to d3,
+		subq	#1,d3					;for dbra
+		clr.l	d4						;clear d4 for safety
+		moveq	#1,D5					;D5 carrys number of token recs allowed into subroutine
+@extraSepLoop
+		move.b	(a4)+,d4				;A0 points at the length byte, put that in d4 and increment a0 to point at actual string
+		move.l	a4,a0					;TokenizeSep expects source in a0
+		bsr		TokenizeSep				; branch to subroutine
+		bne.s	@extraSepLoop			; NE is tokenizer failed
+		bsr		CompareAndCache			; tokenizer was OK so compare the token and potentially cache it
+		ble.s	@DoneWithItls			; if we have run out of cache, quit this
+		add		d4,a4					; increment to next string
+		dbra	d3,@extraSepLoop
+
+@DoneWithItls
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;end addition 
+;jh, 1-8-91																		<10>
+;;;;;;;;;;;;;;;;;;;;;;;;;;end addition
+	ENDIF								;										<10>
+
+; Now unlock itl1
+		move.l	Intl1(A6),a0
+		_HUnlock
+	
+	IF NOT FixCacheAndStr2Date THEN		;										<10><11>
+; load the tokenizer parameter block for later
+
+		WITH	TBlock
+
+		LEA		theTokens(A6),A0		; spaces for tokens in local frame
+		MOVE.L	A0,tokenList(A2)
+		move.l	#2,d0					; less filling							<1/4/88med>
+		MOVE.L	d0,tokenLength(A2)		; no more than 2 tokens, please
+		CLR.L	tokenCount(A2)
+		CLR.L	DoString(A2)			; clear out DoString, DoAppend, DoAlphaNumeric, and DoNest
+
+		LEA		leftDelims(A2),A0
+		MOVE.W	#(decimalCode-leftDelims)/2,D0	; load NilToken into leftDelims, rightDelims, leftComment, <1/4/88med>
+@LOOP0
+		MOVE.W	#NilToken,(A0)+			; RightComment, EscapeCode & decimal code
+		DBRA	D0,@LOOP0
+
+; get the itl resource and stash it in parameter block <1/4/88med>
+
+		clr.l	-(sp)					; return handle
+		move.w	#4,-(sp)				; get itl4
+		_IUGetIntl
+		move.l	(sp)+,itlResource(a2)	; store itl resource
+
+; get the token corresponding to the time separator
+
+		LEA		theTimeSep(A2),A0
+		MOVE.L	A0,source(A2)			; inside With TBlock					<1/4/88med>
+		move.l	#2,d0					; less filling							<1/4/88med>
+		MOVE.L	d0,sourceLength(A2)		; inside With TBlock					<1/4/88med>
+
+		ENDWITH	; TBlock
+
+; IntlTokenize(@TBlock): signedByte;
+
+		CLR.B	-(SP)
+		PEA		TBlock(A2)
+		_IntlTokenize					; tokenize text
+		TST.B	(A7)+					; check if ok
+		BEQ.S	GotSeparators			; if so, handle the token
+		
+	ELSE								; new way calls our subroutine			<10>
+		
+		
+		LEA		theTimeSep(A2),A0		;get ready for tokenize sub routine
+		moveq	#2,d5					;we allow two tokens
+		move.l	#2,d4					; length into d4
+		bsr		TokenizeSep				;
+		beq.s	GotSeparators			; OK so back to the old code
+		
+@FatalError								;added label so I could branch here from new code <10>
+	ENDIF
+		
+		MOVE.W	#fatalDateTime,Result(A6)	; if not, exit procedure and return fatal error
+		BRA.S	Exit
+
+GotSeparators
+		MOVE.W	theTokens(A6),theTimeSep(A2)
+		MOVE.W	(theTokens + TokenRec.tokenRecSize)(A6),theDateSep(A2)  ; store date and time sep tokens
+		MOVE.L	#MaxTokens,TBlock.tokenLength(A2)						; no more than 2 tokens, please
+
+Exit
+		MOVEM.L	(SP)+,SaveRegs			; restore registers to their original value
+
+		move.w	#parametersize, d0		; for StdUnlink
+		bra		StdUnlink				; standard exit
+
+; little subroutine for code savings
+; a4 is source pointer
+; a1 is dest pointer
+; d3 is byte length
+
+CopyArray
+		move.l	a1,d4					; dest ptr								<2/23/88med>
+
+@LOOP	MOVE.L	A4,A0					; move string from intl 1 rec			<2.5>
+		MOVE.L	d4,A1					; into local frame						<2/23/88med>
+
+		moveq	#0,d0					; Block2String wants a long!			<2.5>
+		MOVE.B	(A0)+,D0				; with length from first byte of string
+		MOVEQ	#1,D1					; with no local frame
+		move.b	altSpace(a6),d2			; pass alt string						<8/22/87med>
+		JSR		Block2String
+		ADD.L	#Str15,d4				; get next string to transfer
+		ADD.w	#Str15,A4				; into next string in local frame		<2.5>
+		DBRA	D3,@LOOP
+		rts
+		
+	IF FixCacheAndStr2Date THEN			;	{								<10><11>
+;-----------------------------------------------------------------------------------
+;	TokenizeSep
+;		This subroutine is called to tokenize any separator we have found and store the
+;		resulting token in the datecache
+;		registers
+;			INPUT
+;				A0 - ptr to the source text
+;				A2 - which holds a ptr to the cache which contains a token paramblock
+;				D5 - number of tokens allowed
+;				D4 - length of source text
+;			TRASHED
+;				A1,D0,D1
+;		sets NE if Tokenizer fails
+;-------------------------------------------------------------------------------------
+
+TokenizeSep
+	; load the tokenizer parameter block for later
+
+		WITH	TBlock
+
+		LEA		theTokens(A6),A1		; spaces for tokens in local frame
+		MOVE.L	A1,tokenList(A2)
+		MOVE.L	d5,tokenLength(A2)		; number of tokens allowed (shouldn't be more than 2)
+		CLR.L	tokenCount(A2)
+		CLR.L	DoString(A2)			; clear out DoString, DoAppend, DoAlphaNumeric, and DoNest
+
+		LEA		leftDelims(A2),A1
+		MOVE.W	#(decimalCode-leftDelims)/2,D0	; load NilToken into leftDelims, rightDelims, leftComment
+@LOOP0
+		MOVE.W	#NilToken,(A1)+			; RightComment, EscapeCode & decimal code
+		DBRA	D0,@LOOP0
+
+
+; get the address of the source from a1
+
+		MOVE.L	A0,source(A2)			; inside With TBlock					
+		MOVE.L	d4,sourceLength(A2)		; d4 holds the length
+
+		ENDWITH	; TBlock
+
+; IntlTokenize(@TBlock): signedByte;
+
+		CLR.B	-(SP)
+		PEA		TBlock(A2)
+		_IntlTokenize					; tokenize text
+		tst.b	(sp)+					; test the result and set the return bit
+		
+		rts
+		
+;---------------------------------------------------------------------------------------------------
+;	CompareAndCache
+;		Once we've sucessfully tokenized one of the separators we use this routine to compare
+;		the new token against the stuff already in the cache
+;		if the new token is not there it is cached
+;
+;		REGISTERS
+;			INPUT
+;				a2		-	Ptr to cache	
+;				d7.w	-	token slots available in cache
+;			TRASHED
+;				d0,d1,a1
+;			SETS cc AT EXIT BASED ON UPDATED d7.w
+;-------------------------------------------------------------------------------------------------
+CompareAndCache
+		WITH	TBlock
+		
+		; so we have a token type in theTokenRec
+		lea		AltSeps(a2),a1	; get destination in a1
+		move.w	countAltSeps(a2),d0		; number of tokens in d0
+		beq.s	@storeToken				; none there so store it
+		subq	#1,d0					; for dbra
+@tokenCompare							; otherwise compare token with whats in the cache
+		move.w	(a1)+,d1
+		cmp.w	theTokens(a6),d1		;
+		beq.s	@quitSubroutine			; we've already got this one so lets get on with it
+;		addq	#2,a1					; increment the pointer into the cache
+		dbra	d0,@tokenCompare		; ne so look at the next one
+@storeToken
+		move.w	theTokens(A6),(a1)		; when loop completes a1 points at first empty slot
+		add.w	#1,countAltSeps(a2)		; increment our count of separators
+		subq	#1,d7					; decrement our number of available token slots in cache
+		
+		ENDWITH
+@quitSubroutine
+		tst.w	d7						; set condition codes
+		rts
+
+		ENDIF							;	}								<10>
+
+		
+		ENDWITH	; Cache
+		ENDWITH
+		ENDFUNC
+;============================================================================
+String2Date	FUNC	EXPORT
+;
+;function String2Date(	textPtr:	 Ptr;
+;			textLen:	longint;
+;			theCache:	DateCachePtr;
+;			var lengthUsed: longint;
+;			var DateTime:	LongDateRec): Integer;
+;
+; String2Date will look for a date in the text given it according to the international
+; resource format.  Using the Tokenizer routine it will look for a dayOfWeek (which will
+; be a string), a month (either a string or a number) and a day and year (both numbers).
+; If the month is a number, order is decided by the ShortDate format in INTL 0; otherwise
+; String2Date uses a table.  Note if only two numbers are found they are assumed to be day
+; and month.  If one number is found it is assumed to be a date.  Missing fields are
+; filled in by the current date and time
+;
+; Register Usage
+;
+;	A2  - Work register	D3	- loop control register
+;	A3  - Work register	D4	- MonthFound
+;	A4  - Cache Addr	D5	- ResultNum
+;				D6	- AbbrLen
+;				D7	- NumDelimsFound
+;
+
+SaveRegs	REG	D3-D7/A2-a4 		; removed a5								<8/22/87med>
+
+DateFrame 	RECORD	{A6link},decr
+Result		DS.W	1				; offset to function result (integer)
+paramBegin	EQU		*
+textPtr 	DS.L	1				; offset to Date2Time's paramters
+textLen 	DS.L	1
+theCache	DS.L	1				; @DateCacheRecord
+RestofText	DS.L	1				; @Longint
+DateTime	DS.L	1				; @LongDateRec
+selector	ds.l	1				; added for resource						<8/21/87med>
+paramEnd	EQU		*
+return		DS.L	1
+A6link		DS.L	1
+theTokens	DS.B	MaxTokens*TokenRec.tokenRecSize	; storage for tokens found by tokenizer
+theDate 	DS		LongDateRec 					; date time rec
+results 	DS.W	3								; three temporary results
+myDateOrder	DS.W	1
+DayFound	DS.W	1
+lastItemSep	DS.W	1
+lastToken	DS.W	1
+lastTokenAddr DS.L	1
+lastExToken	  DS.W	1
+dummyLongDate ds	LongDateTime
+stringStorage DS.B	NumStrBytes
+localsize	EQU		*
+			ENDR
+	
+		WITH	DateFrame
+		With	Cache,LongDateField
+
+parametersize	EQU	paramBegin - paramEnd	; size of parameter space on stack
+
+		LINK	A6,#localsize			; Establish local frame and variables
+		MOVEM.L	SaveRegs,-(SP)			; saved used registers
+		bsr		DateTimeEntry			; initialize & call _IntlTokenize
+
+; Note that DateTimeEntry also does the following:
+; 1. moves theCache(a6) into a4
+; 2. moves TheTokens(a6) into a3
+; 3. sets result(a6)
+; 4. clears D7,D6; sets D5.L = -1
+; 5. after IntlTokenize, sets D3= number of tokens - 1
+
+		tst.w	result(a6)				; entry failed?
+		bne		DTComExit				; bail if so
+
+; specific stuff
+
+		MOVEQ	#-1,D4					; initialize MonthFound to -1
+		CLR.W	DayFound(A6)
+		LEA		CurrentDate(A4),A1		; source
+		LEA		theDate(A6),A0			;
+		MOVE.L	(A1)+,(A0)+				; era, year
+		MOVE.L	(A1)+,(A0)+				; month, day
+		MOVE.L	(A1)+,(A0)+				; hour, minute
+		move.w	(a1)+,(a0)+				; second
+		CLR.W	(A0)+					; clear out dayOfWeek.  Will either be set by user or…
+										; …be set in the course of the validity check of the date
+		MOVE.B	theAbbrLen(A4),D6
+				
+		WITH	TokenRec
+
+@TokenLoop
+		MOVE.W	theToken(A3),D1			; get token code from TokenRec record at (A3)
+		CMP.W	#NonAlphNumToken,D1 	; is it a separator
+		BGE.S	@FoundSeparator
+		SUB.W	#WhiteSpace,D1			; was it a white space?
+		BEQ		@TokenLoopEnd							; ignore
+		SUBQ.W	#(AlphaToken - WhiteSpace),D1   		; is it an alpha token?
+	IF FixCacheAndStr2Date THEN			;	{										<10><11>
+		beq		@FoundAlpha								; <1-8-91, jh> changed to .w
+		SUBQ.W	#(NumericToken - AlphaToken),D1 		; is it a number token?
+		BEQ		@NumberToken							; <1-8-91, jh> changed to .w
+		SUBQ.W	#(AltNumericToken - NumericToken),D1    ; is it a number token?		<9/2/87med>
+		BEQ		@NumberToken 							; <1-8-91, jh> changed to .w	<9/2/87med>
+	ELSE								;	}{										<10>
+		beq.s	@FoundAlpha
+		SUBQ.W	#(NumericToken - AlphaToken),D1 		; is it a number token?
+		BEQ.S	@NumberToken
+		SUBQ.W	#(AltNumericToken - NumericToken),D1    ; is it a number token?		<9/2/87med>
+		BEQ.S	@NumberToken 							;							<9/2/87med>
+	ENDIF								;	}										<10>
+		BRA		@TokenLoopEnd			; ignore any other characters
+		
+@FoundSeparator
+		TST.B	D7						; possible separator.  Has a separator already been found?
+		BEQ.S	@OneDelimFound			; no, so no error yet
+		OR.W	#TooManySeps,Result(A6)	; yes, so now we have too many separators
+
+@OneDelimFound
+	IF FixCacheAndStr2Date THEN			;	{										<10><11>
+;***********************
+;begin <1-8-91 jh> changes															<10>
+;here we compare if any of the separators in the itl1 equal this so-called
+;separator we just found
+;*********************
+		cmp.w	theDateSep(a4),d1		; start by comparing the DateSep (which is not cached with the other stuff) with the new token
+		beq.s	@SeparatorFound			; found it 
+		move.w	countAltSeps(a4),d0		; d0 will be our loop counter
+		beq.s	@SeparatorFound			; hmm, nothing cached, but didn't match DateSep we could fail completely
+										; but I guess will just go with the old method of having everything match
+		subq	#1,d0					; set up for dbra
+		lea		AltSeps(a4),a0			; address of alternate separators
+@compareSeps	
+		cmp.w	(a0)+,d1				; compare cached tokens with new token
+		beq.s	@SeparatorFound			; found it branch out of loop
+		dbra	d0,@compareSeps			; decrement and branch
+		;no separator match.  If any of the date is there we set up for an error and kind of continue
+		TST.w	D5							; is this after the first number loaded? (.w)
+		bmi.s	@firstNonAlphaInvalid		; if first non-alphanumeric isn't a valid separator we return dateTimeInvalid
+		or.w	#SepNotIntlSep+sepNotConsistent+extraneousStrings,Result(a6)
+		bra.s	@SeparatorFound
+@firstNonAlphaInvalid
+		OR.W	#dateTimeInvalid,Result(A6)	; date not valid, return error
+		BRA		DTComExit
+		
+@SeparatorFound
+;;********************************************
+;	end <1-8-91, jh> changes														<10>
+;;********************************************
+	ENDIF								;	}										<10>
+		ADDQ.B	#1,D7					; record separator found		
+		TST.w	D5						; is this after the first number loaded? (.w)	<1/5/88med>
+		BMI		@TokenLoopEnd			; if we have not reached a number yet go on
+		BNE.S	@CheckDateSep			; if we loaded in a number then check consistency
+
+		MOVE.W	D1,lastItemSep(A6)		; otherwise update lastItemSep with just found separator
+		BRA		@TokenLoopEnd
+		
+@CheckDateSep
+		CMP.W	lastItemSep(A6),D1		; are they consistent
+		BEQ		@TokenLoopEnd			; if yes, then go on
+		
+		OR.W	#SepNotIntlSep+sepNotConsistent,Result(A6)	; record warning
+		BRA		@TokenLoopEnd
+		
+@NumberToken
+; check for numbers separated only by white space <9/2/87med>
+		tst.w	d7						; got a separator?
+		bne.s	@1						; yes
+		tst.w	d5						; first number?
+		blt.s	@1						; yes, skip
+		bne.s	@0							; have 1 number
+		move.w	#WhiteSpace,lastItemSep(A6)	; set separator
+		bra.s	@1							; continue
+@0
+		cmp.w	#WhiteSpace,lastItemSep(a6)	; same?
+		beq.s	@1							; yes, continue
+		or.w	#SepNotIntlSep+sepNotConsistent,Result(A6)	; record warning		
+@1
+; end of white space check  <9/2/87med>
+
+		CLR.L	D7						; clear out past separators
+		CMP.W	#2,D5					; make sure that results array is not full
+		BGE		@ExtrnsToken 			; if full, record warning and search for final string (remove .s <2.5>)
+
+;	ValidLong(position,textLength): longint
+
+		MOVE.L	stringPosition(A3),A0
+		JSR		ValidLong				; get number in text at TokenRec.position
+	IF FixCacheAndStr2Date THEN			;									<10><11>
+		bpl.s	@numberOK				; branch around error if the number is a valid long
+		ori.w	#dateTimeInvalid,result(a6)	;bad number so or in the dateTimeInvalid error
+		bra		DTComExit				; and branch to our exit place
+@numberOK
+	ELSE								;									<10>
+
+		BMI		DTComExit
+		
+	ENDIF
+	
+		bsr		FixValue
+		bra		@TokenRecognized		; get next token (remove .s <2.5>)
+
+@FoundAlpha
+		CLR.L	D7						; clear out past separators
+;;		CMP.L	length(A3),D6			; is alpha token string length less than abbrLen?	<2/23/88med>
+;;		BGT		@ExtrnsToken 			; if so, record warning and continue searching		<2/23/88med>
+
+; UprString(newTextPtr,AbbrLen)			; and make it uppercase for case insensitive search
+
+		MOVE.L	stringPosition(A3),A2
+		ADDQ.L	#1,A2
+		MOVE.L	A2,A0
+;;		MOVE.L	D6,D0
+		MOVE.L	length(A3),D0			; use real length
+
+		_UpperText						; _LwrString with uppercase function		<3>
+		
+		TST.W	D4						; d4<0: month not found, otherwise month num
+		BPL.S	@SearchForDay			;											<2.5>
+
+; MatchString(newTextPtr,AbbrLen,@months,15,12): integer
+
+		CLR.W	-(SP)					; attempt to find a day/month string which matches alpha token
+		MOVE.L	A2,-(SP)
+		MOVE.W	length+2(a3),-(SP)		; push length as integer				<2/22/88med>
+		MOVE.W	D6,-(SP)				; push minlen as integer				<2/23/88med>
+		PEA		theDays(A4)
+		MOVE.W	#DayMonthLen,-(SP)
+;;		MOVE.W	#NumMonths,-(SP)
+		MOVE.W	#NumMonths+NumDays,-(SP)	; check for both at once			<2/23/88med>
+		JSR		MatchString
+		MOVE.W	(SP)+,D2					; save in D2
+;;		BLE.S	@CheckForDay
+		BLE.S	@ExtrnsToken				; checking both						<2/23/88med>
+
+; decide between days and months <2/23/88med>
+
+		sub.w	#NumDays,d2				; months?								<2/23/88med>
+		ble.s	@CheckForDay			; no, do days							<2/23/88med>
+
+; got a month
+
+		CMP.W	#2,D5					; is result array already full?
+		BGE.S	@ExtrnsToken 			; if so, then its not a needed token
+		
+;;		CMP.W	#NumMonths,D2			; dump									<2/23/88med>
+;;		BGT.S	@CheckForDay 			; got a month but out of range?, check if day <2/23/88med>
+		ADDQ.W	#1,D5					; is in range, result is not full and string
+		MOVE.W	D5,D1					; did not match as a day
+		ADD.W	D1,D1					; double index for integer array
+		LEA		results(A6),A1			; ResultNum:= ResultNum + 1
+		MOVE.W	D2,(A1,D1.W)			; results[ResultNum]:= match result
+		MOVE.W	D5,D4					; MonthFound:= resultNum
+		BRA.S	@TokenRecognized
+
+; if day not found yet, we need to see if current string matches a day <2.5>
+@SearchForDay
+		TST.B	DayFound(a6)			; have we found one yet?
+		BNE.S	@ExtrnsToken 			; day already found, record warning
+
+		CLR.W	-(SP)					; attempt to find a day string which matches alpha token
+		MOVE.L	A2,-(SP)
+		MOVE.W	length+2(a3),-(SP)		; push length as integer
+		MOVE.W	D6,-(SP)				; push minlen as integer
+		PEA		theDays(A4)
+		MOVE.W	#DayMonthLen,-(SP)
+		MOVE.W	#NumDays,-(SP)			; just check days this time
+		JSR		MatchString
+		MOVE.W	(SP)+,D2				; save in D2
+		BLE.S	@ExtrnsToken			; checking both
+		
+		BRA.S	@HaveDay
+	
+@CheckForDay
+		TST.B	DayFound(a6)			; off of a6!						<8/24/87med>
+		BNE.S	@ExtrnsToken 			; day already found, record warning
+
+	IF 0 THEN							;									<2/23/88med>
+; MatchString(newTextPtr,AbbrLen,@days,15,12): integer
+
+		CLR.W	-(SP)					; also attempt to find a day string…
+										; …which matches alpha token
+		MOVE.L	A2,-(SP)
+;;		MOVE.W	D6,-(SP)				; push length as integer
+		MOVE.W	length(a3),-(SP)		; push length as integer			<2/22/88med>
+		PEA		theDays(A4)
+		MOVE.W	#DayMonthLen,-(SP)
+		MOVE.W	#NumDays,-(SP)
+		JSR		MatchString
+		MOVE.W	(SP)+,D2				; save DResult in D2
+		BLE.S	@ExtrnsToken 			; neither matched a day or month, record warning
+
+		CMP.W	#NumDays,D2
+		BGT.S	@ExtrnsToken 			; day out of range, record warning
+	ENDIF								; <2/23/88med>
+
+		add.w	#NumDays,d2				; restore days
+@HaveDay
+		ST		DayFound(A6)			; record that day was found			<2.5>
+		MOVE.W	D2,theDate.dayOfWeek(A6)	; otherwise, load dayOfWeek into date time record
+		
+		TST.W	D5						; is dayOfWeek between two numbers (.w)	<1/5/88med>
+		BMI.S	@NoWarning				; if no number has been found yet, go on
+		OR.W	#fieldOrderNotIntl,Result(A6)	; record warning
+@NoWarning
+		BRA.S	@TokenRecognized
+		
+@ExtrnsToken
+		TST.W	lastExToken(A6)			; is this the first extraneous token found?
+		BPL.S	@TokenLoopEnd			; no, go on
+
+		MOVE.W	D3,lastExToken(A6)		; a string which we don't recognize has been found
+		BRA.S	@TokenLoopEnd			; record warning and go on
+		
+@TokenRecognized
+		MOVE.W	D3,lastToken(A6)
+		MOVE.L	A3,lastTokenAddr(A6)	; save loop and token addr for later use
+		
+@TokenLoopEnd
+		ADD.L	#tokenRecSize,A3 		; add size of TokenRec record to A3 to get next token
+		CMP.W	#2,D5					; if the result array full (.w) <1/5/88med>
+		SGE		D0
+		AND.B	DayFound(A6),D0			; and dayofWeek string been found	
+		DBNE	D3,@TokenLoop			; then stop loop, otherwise go until all tokens are looked at
+
+		TST.W	D5						; test if ResultNum is negative
+		BPL.S	@CheckRestTokens		; if not, go on and check the rest of the tokens
+		
+		OR.W	#dateTimeNotFound,Result(A6)
+		BRA		DTComExit				; if no numbers were found, exit function
+
+@CheckRestTokens
+		bsr		CheckRest
+
+;CheckIfSepIntl
+		LEA		CvtTables,A0			; load A0 with addr of convert tables
+		LEA		results(A6),A1			; load A1 with addr of results
+
+		move.b	longDateOrder(a4),d2	; assume long date order
+		TST.W	D4
+		BPL.S	CheckDateOrder			; if month string found, don't check sep but date order
+		move.b	theDateOrder(a4),d2 	; is actually short-date
+		
+		TST.W	D5						; first off, check if we needed separator
+		BEQ.S	MonthNotFound			; if only one number, dont check, go on
+
+		MOVE.W	lastItemSep(A6),D0		; separators were used
+		CMP.W	theDateSep(A4),D0		; was the separator the date separator?
+		BEQ.S	MonthNotFound			; if yes, go on
+
+		OR.W	#SepNotIntlSep,Result(A6)	; no, return warning
+		BRA.S	MonthNotFound
+
+CheckDateOrder
+		OR.W	#LongDateFound,Result(A6)	; month string found, long date
+; now clear out warnings irrelevant to long date
+		AND.W	#-(fieldOrderNotIntl + sepNotConsistent + SepNotIntlSep + 1),Result(A6)
+		TST.W	D5						; if Month was found than we must fix order to include it
+		BNE.S	NotMonthOnly
+		MOVEQ	#1,D5					; but if month was all that was found than include date
+		MOVE.W	#1,2(A1)				; as first day of month (result[1]:= 1). Year will be
+										; current year
+NotMonthOnly
+		MOVE.W	D4,D0					; theDateOrder= CvtTable.monthReplace[FoundMonth,theDateOrder]
+		MULU.W	#6,D0					; fix theDateOrder so that month is where it was found
+		ADD.B	D2,D0		
+		MOVE.B	monthReplace(A0,D0.W),d2	; fix order
+;		MOVE.B	monthReplace(A0,D0.W),theDateOrder(A4)
+		
+;		CMP.B	theDateOrder(A4),D0 	; is date order still intl?
+;		BEQ.S	MonthNotFound			; if so, go on
+;		OR.W	#fieldOrderNotIntl,Result(A6)	; otherwise record warning
+		
+		WITH	LongDateRec
+
+MonthNotFound
+		CLR.L	D1
+		LEA		theDate(A6),A2			; load theDate addr in A2
+		MOVE.W	D5,D0					; copy ResultNum
+		MULU.W	#24,D0					; 24 byte array. multiply index by 24
+;		MOVE.B	theDateOrder(A4),D2
+		ADD.B	D2,D2
+		ADD.B	D2,D2					; four byte array. multiply index by 4
+		ADD.B	D2,D0
+		MOVE.B	(reorder + theYear)(A0,D0.W),D1 ; get CvtTables.reorder[resultNum,theDateOrder].year
+		BMI.S	YearNotDefined					; if less than zero go to month
+		ADD.W	D1,D1
+		MOVE.W	(A1,D1.W),theDate.year(a6)		; theDate.year:= result[year]
+YearNotDefined
+		MOVE.B	(reorder + theMonth)(A0,D0.W),D1 ; get CvtTables.reorder[resultNum,theDateOrder].month
+		BMI.S	MonthNotDefined					; if less than zero go to day
+		ADD.W	D1,D1
+		MOVE.W	(A1,D1.W),theDate.month(a6) 	; theDate.month:= result[month]
+MonthNotDefined
+		MOVE.B	(reorder + theDay)(A0,D0.W),D1  ; get CvtTables.reorder[resultNum,theDateOrder].day
+		ADD.W	D1,D1							; day is always defined, so load it in
+		MOVE.W	(A1,D1.W),theDate.day(a6)		; theDate.day:= result[day]
+
+		CMP.W	#1,D5					; were three numbers found?
+		BLE.S	ValidateDate			; no, so don't bother adjusting year
+		
+		
+		MOVE.W	BaseDate.year(A4),D0
+		move.w	theDate.year(a6),d1		; temp values
+		CMP.W	d1,D0 					; is starting year of Mac calender more than current year
+		BLE.S	ValidateDate			; if not than year is Ok and see if everthing else is valid
+		
+;		CMP.W	#10,d1					; is year from input less than 10?
+;		BGE.S	Adjust100				; if not, adjust century
+;		MOVE.W	#10,D0					; yes fill in current decade, century and millenia
+;		BRA.S	AdjustYear				; do adjustment
+		
+;Adjust100
+		
+		CMP.W	#100, d1				; is year from input less than 100?
+		BGE.S	Adjust1000				; if not adjust millenia
+		
+lowerYear	equ	10
+upperYear 	equ	100-lowerYear
+
+;<9/27/88ldc>	Added code to determine how to interpret input years less than 100
+;	If currentdate.year >= upperYear and theDate.year <= lowerYear then 
+;		theDate.year goes to next century
+;	else if currentDate.year <= lowerYear and theDate.year >= upperYear then
+;		theDate.year goes to previous century
+;	else theDate.year belongs in the current century
+
+		move.w	CurrentDate.year(a4), d0	; currentYear mod 100 <= lowerYear?
+		divu.w	#100, d0					; currentYear mod 100 >= upperYear
+		mulu.w	#100, d0					;
+		move.w	d0, d1						; copy	
+		move.w	CurrentDate.year(a4), d0	;
+		sub.w	d1, d0						; d0 := currentdate.year mod 100
+		move.w	theDate.year(a6), d1		;
+		cmp.w	#upperYear, d0			; CurrentDate.year mod 100 >= upper year bound?
+		bls.s	@checkLowerYear			; no, check less than lower
+		cmp.w	#lowerYear, d1			; theDate.year <= 10?
+		bgt.s	Adjust100				; no, so assume in same century
+		add.w	#100, theDate.year(a6)	; yes, so put this year in the next century
+		bra.s	Adjust100
+		
+@checkLowerYear
+		cmp.w	#lowerYear, d0			; current year mod 100 <= lowerYear ?
+		bgt.s	Adjust100				; no, no need to adjust
+		cmp.w	#upperYear, d1			; input year >= upperYear?
+		bls.s	Adjust100				; no, just adjust century
+		sub.w	#100, theDate.year(a6)	; adjust input date and fall through		
+		
+Adjust100
+
+		MOVE.W	#100,D0					; yes fill in current century and millenia
+		BRA.S	AdjustYear
+		
+Adjust1000
+		CMP.W	#1000,d1				; is year from input less than 1000?
+		BGE.S	ValidateDate			; if not, than there is nothing we can do about it
+		MOVE.W	#1000,D0				; put in current millenia
+
+AdjustYear
+		MOVE.W	CurrentDate.year(A4), D1 ; theDate.year:= (CurrentDate.year div D0)*D0 + theDate.year
+		DIVU.W	D0,D1
+		MULU.W	D0,D1
+		ADD.W	D1,theDate.year(a6)
+
+ValidateDate
+		move.l	#yearMask++monthMask++dayMask,d0 ; fields to test						<1/11/88med>
+		tst.w	theDate.dayOfWeek(a6)			; if dayofweek was not gotten from user then <1/11/88med>
+		beq.s	@0								;										<1/11/88med>
+		or.l	#dayOfWeekMask,d0				; add checking this field				<1/11/88med>
+@0
+		bsr		CheckValid				; check the date								<1/11/88med>
+		blt.s	FoundDate				; yes, exit										<1/11/88med>
+
+ 		ENDWITH	; LongDateRec
+		
+		OR.W	#dateTimeInvalid,Result(A6)	; date not valid, return error
+		BRA.S	DTComExit
+
+FoundDate
+		MOVE.L	DateTime(A6),A1
+		LEA		theDate(A6),A0
+		MOVE.W	LongDateRec.dayOfWeek(A0),LongDateRec.dayOfWeek(A1)
+		MOVE.L	(A0)+,(A1)+				; era, year
+		MOVE.L	(A0)+,(A1)+ 			; month, day; load date fields into DateTime parameter
+		MOVE.L	RestofText(A6),A0		; return last byte of text used
+
+;======================================================================
+DTComFinish
+		MOVE.L	lastTokenAddr(A6),A1
+		MOVE.L	TokenRec.position(A1),(A0)
+		MOVE.L	textPtr(A6),D0
+		SUB.L	TokenRec.length(A1),D0
+		SUB.L	D0,(A0)					; restofText:= lastToken.position + lastToken.length
+										;		- textPtr
+DTComExit
+		MOVEM.L	(SP)+,SaveRegs			; restore registers to their original value
+		UNLK	A6						; get rid of local frame and variables
+		MOVE.L	(SP)+,A0				; pull return addr
+		ADD.L	#parametersize,SP		; destroy parameters on stack
+		JMP		(A0)
+;======================================================================
+CheckRest
+		MOVE.L	lastTokenAddr(A6),A3
+		ADD.L	#tokenRecSize,A3 		; get addr of token after last used token
+		MOVE.W	lastToken(A6),D3		; restore loop variable
+		
+		TST.W	lastExToken(A6)			; any extranous tokens found?
+		BMI.S	@NoExTokens				; if none anywhere, go on
+		CMP.W	lastExToken(A6),D3		; was it after the last token to be recognized
+		BGT.S	@NoExTokens				; if so, go on
+		
+		OR.W	#extraneousStrings,Result(A6)	; no, extraneous token was found
+@NoExTokens
+		MOVEQ.L	#0,D1					; force zero flag on
+		BRA.S	@LoopEnd
+@CheckToken
+		MOVE.W	theToken(A3),D1			; get token code from TokenRec record at (A3)
+		SUBQ.W	#WhiteSpace,D1			; was it a white space?
+		ADD.L	#tokenRecSize,A3
+@LoopEnd
+		DBNE	D3,@CheckToken			; ignore white spaces
+		
+		ENDWITH	; TokenRec
+				
+		TST.B	D3
+		BMI.S	@0							; if all tokens were checked, branch
+		OR.W	#LeftOverChars,Result(A6)	; otherwise report left overs
+@0
+		rts
+;======================================================================
+FixValue
+		ADDQ.W	#1,D5					; resultNum:= resultNum + 1;
+		MOVE.W	D5,D1
+		ADD.W	D1,D1					; integer array, so double index
+		LEA		results(A6),A1
+		MOVE.W	D0,(A1,D1.W)			; results[resultNum]:= ValidLong(position,length)
+		rts
+
+;======================================================================
+DateTimeEntry
+;
+; Side effects (comment added <1.9>)
+; Note that if textLen(a6) ≤ 0 then nothing is set up except result(a6)
+;
+; 1. moves theCache(a6) into a4
+; 2. moves TheTokens(a6) into a3
+; 3. sets result(a6)
+; 4. clears D7,D6; sets D5.L = -1
+; 5. after IntlTokenize, sets d3= number of tokens - 1
+
+; first check degenerate case (len = 0) <8/24/87med>
+
+		move.w	#dateTimeNotFound,result(a6) ; assume bad
+		tst.l	textLen(A6) 				; bad case?
+		ble.s	DateEntryExit				; yes, take off
+
+; continue with initialization <8/24/87med>
+
+		CLR.W	Result(A6)				; clear function result
+		MOVE.L	theCache(A6),A4
+		
+		CLR.L	D7						; clear out any delims
+		CLR.L	D6
+		MOVEQ	#-1,D5					; initialize ResultNum to -1
+		CLR.W	lastItemSep(A6)			; clear out separator found in input
+		CLR.W	lastToken(A6)
+		MOVE.W	#-1,lastExToken(A6) 	; put -1 in lastExToken
+		MOVE.L	RestOfText(A6),A0
+		CLR.L	(A0)					; default RestOfText:= 0;
+
+		LEA		results(A6),A0
+		CLR.L	(A0)+
+		CLR.W	(A0)+					; Clear out result array
+
+		WITH	TBLock
+		
+		LEA		theTokens(A6),A0		; spaces for tokens in local frame
+		MOVE.L	A0,tokenList(A4)
+		ST		DoString(A4)
+		LEA		stringStorage(A6),A0
+		MOVE.L	A0,stringList(A4)
+		MOVE.L	#NumStrBytes,stringLength(A4)
+		MOVE.L	textPtr(A6),source(A4) 		; tokenize starting at text given routine
+		MOVE.L	textLen(A6),sourceLength(A4) ; for length given texT
+		LEA		TheTokens(A6),A3			; put address of the tokens in A3
+
+		ENDWITH	; TBlock
+		
+; IntlTokenize(@Cache^.TBlock): signedByte;
+
+		CLR.B	-(SP)
+		PEA		TBlock(A4)
+		_IntlTokenize					; tokenize text
+		TST.B	(A7)+					; check if ok
+		BEQ.S	@HandleTokens			; if so, handle the tokens
+		
+		OR.W	#fatalDateTime,Result(A6)	; if not, exit procedure and return fatal error
+		bra.s	DateEntryExit
+
+@HandleTokens
+		MOVE.L	TBlock.tokenCount(A4),D3	; get number of tokens
+		SUBQ	#1,D3
+		clr.w	result(a6)				; show ok
+DateEntryExit
+		rts
+
+;======================================================================
+CheckValid
+		move.w	#0,-(sp)				; allocate return
+		pea		theDate(a6)				; pass the date
+		move.l	d0,-(sp)				; fields to test
+		pea		dummyLongDate(a6)		; toss result
+		_ValidDate						; check it
+		tst.w	(sp)+					; ok? (lt?)
+		rts
+;======================================================================
+	WITH DateOrders
+
+CvtTables
+; first array is a 0..2 x 0..6 array, for recasting type when month is inserted
+
+;		mdy	dmy	ymd	myd	dym	ydm
+	DC.B	mdy,	mdy,	myd,	myd,	mdy,	myd	; month is 0
+	DC.B	dmy,	dmy,	ymd,	ymd,	dmy,	ymd	; month is 1
+	DC.B	dym,	dym,	ydm,	ydm,	dym,	ydm	; month is 2
+
+; second array is a triple array, first by number of elements
+; each item is y,m,d; with -1 for no setting
+; extra 0 is because pascal pads subarrays to even boundary
+
+;		mdy		dmy		ymd		myd		dym		ydm
+	DC.B	-1,-1,0,0,	-1,-1,0,0,	-1,-1,0,0,	-1,-1,0,0,	-1,-1,0,0,	-1,-1,0,0	; 1 element
+	DC.B	-1, 0,1,0,	-1, 1,0,0,	-1, 0,1,0,	-1, 0,1,0,	-1, 1,0,0,	-1, 1,0,0	; 2 elements
+	DC.B	 2, 0,1,0,	 2, 1,0,0,	 0, 1,2,0,	 1, 0,2,0,	 1, 2,0,0,	 0, 2,1,0	; 3 elements
+
+;============================================================================
+		export	String2Time
+String2Time
+;
+;function String2Time(	textPtr:	Ptr;
+;			textLen:	longint;
+;			theCache:	CachePtr;
+;			var lengthUsed: longint;
+;			var DateTime:	LongDateRec): integer;
+;
+; String2Time will look for a time in the text given it according to the international resource format.  It will
+; look for 1 to 3 numbers in the text using the IntlTokenize routine and assign them to the hour minute and second
+; respectively.  If it finds the evestr (in the INTL 0 resource) in the text 12 will be added to the hour.
+;
+; Register Usage
+;
+;	A2  - Work register	D3	- loop control register
+;	A3  - Work register	D4	- PMFound
+;	A4  - CacheAddr 	D5	- ResultNum
+;						D6	- TimeSep
+;						D7	- NumDelimsFound
+;
+
+		LINK	A6,#localsize			; Establish local frame and variables
+		MOVEM.L	SaveRegs,-(SP)			; saved used registers
+
+		bsr		DateTimeEntry
+		tst.w	result(a6)				; entry failed?
+		bne		DTComExit				; bail if so
+
+; specific stuff
+
+		CLR.W	D4						; assume PM not found
+		LEA		theDate(A6),A0
+		LEA		BaseDate(A4),A1
+		MOVE.w	LongDateRec.dayOfWeek(A1),LongDateRec.dayOfWeek(A0)
+		MOVE.L	(A1)+,(A0)+				; era, year
+		MOVE.L	(A1)+,(A0)+				; hour, minute
+		
+		WITH	TokenRec
+@TokenLoop
+		MOVE.W	theToken(A3),D1			; get token code from TokenRec record at (A3)
+		CMP.W	#NonAlphNumToken,D1 	; is it a separator
+		BGE.S	@FoundSeparator
+		sub.w	#WhiteSpace,D1			; was it a white space?
+		beq		@TokenLoopEnd			; ignore
+		SUBQ.W	#(AlphaToken - WhiteSpace),D1   ; is it an alpha token?
+		BEQ		@FoundAlpha
+		SUBQ.W	#(NumericToken - AlphaToken),D1 ; is it a number token?
+		BEQ.S	@NumberToken
+		SUBQ.W	#(AltNumericToken - NumericToken),D1	; is it a number token?	<9/2/87med>
+		BEQ.S	@NumberToken 			;										<9/2/87med>
+		BRA		@TokenLoopEnd			; ignore any other characters
+		
+@FoundSeparator
+		TST.B	D7						; possible separator.  Has a separator already been found?
+		BEQ.S	@OneDelimFound			; no, so no error yet
+		OR.W	#TooManySeps,Result(A6)	; yes, so now we have too many separators
+
+@OneDelimFound
+		ADDQ.B	#1,D7					; record separator found		
+		TST.w	D5						; is this after the first number loaded?
+		BEQ.S	@GetTimeSep				; one number has been loaded in, so get separator
+		BPL.S	@CheckTimeSep			; if we loaded in a number then check consistentcy
+		
+		OR.W	#extraneousStrings,Result(A6)	; shouldn't be anything before time, record warning
+		BRA		@TokenLoopEnd
+
+@GetTimeSep
+		MOVE.W	D1,lastItemSep(A6)		; otherwise update lastItemSep with just found separator
+		BRA		@TokenLoopEnd
+		
+@CheckTimeSep
+		CMP.W	lastItemSep(A6),D1		; are they consistent
+		BEQ		@TokenLoopEnd			; if yes, than go on
+		
+		OR.W	#SepNotIntlSep+sepNotConsistent,Result(A6)	; record warning
+		BRA		@TokenLoopEnd
+		
+@NumberToken
+; check for numbers separated only by white space <9/2/87med>
+		tst.w	d7							; got a separator?
+		bne.s	@1							; yes
+		tst.w	d5							; first number?
+		blt.s	@1							; yes, skip
+		bne.s	@0							; have 1 number
+		move.w	#WhiteSpace,lastItemSep(A6)	; set separator
+		bra.s	@1							; continue
+@0
+		cmp.w	#WhiteSpace,lastItemSep(a6)	; same?
+		beq.s	@1							; yes, continue
+		or.w	#SepNotIntlSep+sepNotConsistent,Result(A6)	; record warning		
+@1
+; end of white space check  <9/2/87med>
+
+		CLR.L	D7						; clear out past separators
+		CMP.w	#2,D5					; make sure that results array is not full
+		BGE.s	@ExtrnsToken 			; if full, record warning and search for final string
+
+;	ValidLong(position,textLength): longint
+
+		MOVE.L	stringPosition(A3),A0
+		JSR		ValidLong				; get number in text at TokenRec.position
+		BMI		DTComExit
+		
+		TST.B	D6						; have we found a number after finding AM, PM or 24 hr str?
+		BEQ.S	@RightFieldOrder
+		OR.W	#fieldOrderNotIntl,Result(A6)	; if so, record a warning but go on
+
+@RightFieldOrder
+		bsr		FixValue
+		BRA.s	@TokenRecognized		; get next token
+
+@FoundAlpha
+		TST.B	D6
+		BNE.S	@ExtrnsToken 			; if time strings have been found record warning
+
+; UprString(newTextPtr,AbbrLen)			; and make it uppercase for case insensitive search
+
+		MOVE.L	stringPosition(A3),A2
+		ADDQ.L	#1,A2
+		MOVE.L	A2,A0
+		MOVE.L	length(A3),D0
+		_UpperText						; _LwrString with uppercase function			<3>
+
+; change to use MatchString <2/22/88med>
+; MatchString(newTextPtr,AbbrLen,@months,15,12): integer
+
+		CLR.W	-(SP)					; attempt to find a time string which matches alpha token
+		MOVE.L	A2,-(SP)
+		MOVE.W	length+2(a3),-(SP)		; push length as integer
+		MOVE.W	#2,-(SP)				; push minlen as integer				<2/23/88med>
+		PEA		theTimeStrings(a4)		; array
+
+		MOVE.W	#TimeLen,-(SP)
+		MOVE.W	#NumTimeStrings,-(SP)
+		JSR		MatchString
+		MOVE.W	(SP)+,D2				; save in D2
+		BLE.S	@DiscardAlpha			; not found, exit gracefully
+		cmp.w	#2,d2					; morning?
+		bgt.s	@GotRightString			; 24hour, exit
+		st	D4							; save comparison of alpha token and evening string (-1 if =)
+		blt.s	@GotRightString			; done if eve
+		neg.b	d4						; +1 for AM
+
+@GotRightString
+		st		D6						; record whether or not time string has been found
+		TST.B	D7						; were any separators found.  Should be none before time str		
+		BEQ.S	@DiscardAlpha			; if so, go on
+		OR.W	#TooManySeps,Result(A6)	; otherwise record error
+
+@DiscardAlpha
+		CLR.L	D7						; clear out any previous separators found
+		TST.B	D6						; was a string actually found that we recognize
+		BNE.S	@TokenRecognized		; if so, record token
+
+@ExtrnsToken
+		TST.W	lastExToken(A6)			; is this the first extraneous token found?
+		BPL.S	@TokenLoopEnd			; no, go on
+
+		MOVE.W	D3,lastExToken(A6)		; a string which we don't recognize has been found
+		BRA.S	@TokenLoopEnd			; record warning and go on
+
+@TokenRecognized
+		MOVE.W	D3,lastToken(A6)
+		MOVE.L	A3,lastTokenAddr(A6)	; put in here for later use
+
+@TokenLoopEnd
+		ADD.L	#tokenRecSize,A3 		; add size of TokenRec record to A3 to get next token
+;		CMP.B	#2,D5					; if the result array full
+;		SGE	D0
+;		OR.B	D6,D0					; and time string been found				<8/24/87med>
+		tst.b	d6						; time string been found					<8/25/87med>
+		DBNE	D3,@TokenLoop			; then stop loop, otherwise go until all tokens are looked at
+
+		TST.w	D5						; test if ResultNum is negative
+		BPL.s	@CheckRestTokens		; if not, go on and check the resot of the tokens
+		
+		OR.W	#dateTimeNotFound,Result(A6)
+		BRA		DTComExit				; if no numbers were found, exit function
+
+@CheckRestTokens
+		bsr		CheckRest
+
+;CheckIfSepIntl
+		TST.w	D5						; first off, check if we needed separator
+		BEQ.S	CheckPMString			; if only one number, dont check, go on
+		MOVE.W	lastItemSep(A6),D0		; separators were used
+		CMP.W	theTimeSep(A4),D0		; was the separator the time separator?
+		BEQ.S	CheckPMString			; if yes, go on
+		OR.W	#SepNotIntlSep,Result(A6)	; no, return warning
+
+CheckPMString
+		move.l	#NoonHr,d0				; for testing							<8/25/87med>
+		TST.B	D4						; was PM/AM string found?
+		BEQ.S	SaveTime				; no
+		blt.s	@FixPM
+@FixAM
+		sub.w	results(a6),d0			; hour >= 12?							<8/22/87med>
+		bgt.s	SaveTime				; yes, skip add							<8/22/87med>
+		neg		d0						; 12 => 0, 13 => 1...
+		move.w	d0,results(a6)			; set result
+		bra.s	SaveTime				; continue
+@FixPM
+		cmp.w	results(a6),d0			; d0 >=?								<8/22/87med>
+		ble.s	SaveTime				; yes, skip add							<8/22/87med>
+		ADD.W	d0,results(A6)			; 11- => x+12
+		
+SaveTime	
+		cmp.w	#24,results(A6)			; catch degenerate case
+		bne.s	@1						; no, skip
+		clr.w	results(a6) 			; set 24:xx:xx to 00:xx:xx
+@1
+		LEA		results(A6),A2
+		LEA		theDate.hour(A6),A3
+		MOVE.L	(A2)+,(A3)+ 			; load hour and minute into theDate
+		MOVE.W	(A2)+,(A3)+ 			; load secs into theDate.  Note any numbers not found are 0
+
+		move.l	#hourMask++minuteMask++secondMask,d0
+		bsr		CheckValid				; valid?
+		blt.s	FoundTime				; yes, exit
+
+		OR.W	#dateTimeInvalid,Result(A6)	; date not valid, return error
+		BRA		DTComExit
+
+FoundTime
+		MOVE.L	DateTime(A6),A1
+		ADDQ.L	#LongDateRec.hour,A1
+		LEA		theDate.hour(A6),A0
+		MOVE.L	(A0)+,(A1)+
+		MOVE.W	(A0)+,(A1)+
+		MOVE.L	RestofText(A6),A0
+		bra		DTComFinish
+
+		ENDWITH	;DateOrders
+		ENDWITH
+		ENDFUNC
+		END

@@ -1,0 +1,1011 @@
+;
+;   File:       HWElemsFinancial.a
+;
+;   Contains:   Routines to calculate Compound, Annuity, XPwrY and XPwrl
+;
+;   Written by: Apple Numerics Group, DSG
+;
+;   Copyright:   © 1985-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;        <SM2>   2/3/93	    CSS	Update from Horror:
+;        <H2>   9/29/92	    BG	Adding Jon Okada's latest fixes.
+;        <1>   10/24/91	    SAM/KSM	Rolled in Regatta file.
+;		
+;	Terror Change History:
+;
+;         <1>   01/06/91    BG      Added to TERROR/BBS for the time.
+;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: 881ELEMSfinancial.a				      ;;
+;; Implementation of Compound, annuity, XPwrY and XPwrI for OmegaSANE.	      ;;
+;; Expects 68881/2	    				      ;;
+;; Copyright Apple Computer, Inc. 1985-7,1989-90, 1992		      ;;
+;; All Rights Reserved					      ;;
+;; Confidential and Proprietary to Apple Computer,Inc.		      ;;
+;;						      ;;
+;; Written by Clayton Lewis, begun 19 June 85.			      ;;
+;; Current version is debugged and put in working order by ali sazegari.      ;;
+;; Based on Elems881, package code for Mac by Jerome Coonen.	      ;;
+;;						      ;;
+;;						      ;;
+;; Modification history:				      ;;
+;;    22 Jun 89	Brought over from ChipElems881.a 		      ;;
+;;		(pre-history Mac II code)		      ;;
+;;    10 Feb 90	XpwrY debugged.  It passes a test of 144 simple	      ;;
+;;		and edge cases. ... ali			      ;;
+;;    11 Feb 90	XpwrI debugged.  It passes a test of 144 simple       ;;
+;;		and edge cases. ... ali			      ;;
+;;    13 Feb 90	XpwrI passes a head to head test of 20 extended	      ;;
+;;		simple and edge cases combined with all the 	      ;;
+;;		possible short integers (65536). ... ali	      ;;
+;;    14 Feb 90	Changes of Compound from ChipElems881.a:	      ;;
+;;		Compound is debugged.  Calling convention of elems    ;;
+;;		changed to the one used by the rest of the financial  ;;
+;;		functions.  Register FP4 and A4 are no longer needed, ;;
+;;		flags set by CallElems and not set in Compound.  Head ;;
+;;		to head testing of 841 edge cases with the current    ;;
+;;		sane reveal no errors in value or flags. ... ali      ;;
+;;    15 Feb 90	Changes of Annuity from ChipElems881.a:	      ;;
+;;		Annuity is debugged.  Some omputational logic was     ;;
+;;		incorrect, see below.  Head to head testing of 841    ;;
+;;		edge cases including some simple inputs reveal no     ;;
+;;		erros. ... ali			      ;;
+;;    25 May 90	XPwrY did not treat base = -0 inputs correctly,	      ;;
+;;		this has been taken care of. The program for XPwrY    ;;
+;;		and XPwrI is difficult to maintain and needs to be    ;;
+;;		properly rewritten. ... ali		      ;;
+;;    31 May 90	Annuity did not have support for signaling NaN and    ;;
+;;		did not signal deserved computed underflows. ... ali  ;;
+;;    05 Jun 90	Annuity did not raise the inexact flag for arguments  ;;
+;;		larger than $407f ( it passed through a different     ;;
+;;		code segment. ... ali			      ;;
+;;    16 Aug 90	The inexact flag was wrongly set for r = ∞ in compound;;
+;;		A0 was set to random if r = ∞ was detected. ... ali   ;;
+;;    31 Mar 92	Replaced FMOVECR instructions.  	  ... JPO	      ;;
+;;		Replaced FSCALE immed instructions.   ... JPO	      ;;
+;;		Replaced FGETEXP instructions.	  ... JPO         ;;
+;;    15 Apr 92	Modified "CallElems" (putting arg on stack)  ... JPO  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; The stack looks like:				      ;;
+;;	 _______________________________________________	      ;;
+;;	|				|	      ;;
+;;	|       	address of source 2		|  - Long	      ;;
+;;	|_______________________________________________|	      ;;
+;;	|				|	      ;;
+;;	|       	address of source 1		|  - Long	      ;;
+;;	|_______________________________________________|	      ;;
+;;	|				|	      ;;
+;;	|       	address of destination		|  - Long	      ;;
+;;	|_______________________________________________|	      ;;
+;;	|				|	      ;;
+;;	|	return address		|  - Long	      ;;
+;;	|_______________________________________________|	      ;;
+;;	|				|	      ;;
+;;	|	saved registers from control	| - SavedReg Words;;
+;;	|_______________________________________________|	      ;;
+;;						      ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ENTRY POINT to Compound (result, numberOfPeriods, rate) called (x,n,r) below
+;;   special cases are filtered off first, then the algorithm is simple:
+;;     if r is smaller than an ulp of 1 or is infinite, then (1+r)^n = e^n*r since r≈ln(1+r)
+;;     if r is larger than 2^-64 (an ulp of 1), then (1+r)^n = 2^(n*log2(1+r)).
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+RCompound
+
+	BSR	FinInit	; classify r and n, handle all NaN output cases
+
+	FBNE.W	CpdRateBig	; if here, then r ≥ -1.  Branch if r > -1.
+	BTST	#ZeroBit,D0	; is n=0?
+	BNE	P1STUFFFIN	;   if so, stuff 1 and exit
+	BTST	#NegBit,D0	;   if not, check sign of n
+	BNE	DIVP0STUFFFIN	;     if neg, deliver 1/0
+	BRA	P0STUFFFIN	;     if pos, deliver 0
+CpdRateBig
+	BTST	#ZeroBit,D0	; is n=0?
+	BNE	P1STUFFFIN	;   if so, branch
+	BTST	#InfBit,D0	; is n=∞?
+	BEQ.S	CpdCompute	;   if not, branch to general case (r > -1 and n finite)
+	BTST	#ZeroBit,D1	; is r=0?
+	BNE	ERRFINAN	;   if so, branch
+	EOR.L	D1,D0	; exclusive OR of sign bits r, n
+	BTST	#NegBit,D0	;   same or different signs?
+	BEQ	PINFSTUFFFIN	;     if same sign, deliver ∞
+	BRA	P0STUFFFIN	;     if different, deliver 0
+CpdCompute
+;	MOVE.L	A4,-(SP)	; save A4 over calls to log and exp (on stack to use RTS later)
+	MOVEM.L	A1/A4,-(SP)	; save A4 over calls to log and exp (on stack to use RTS later)
+;	FMOVEM	FP4,-(SP)	; save an extra register (all are trashed by BRA's below)
+;	FMOVE	FP2,FP4	; use it to hold n
+	
+;	BTST	#InfBit,D1	; is r=INF?			- DELETED <3/31/92, JPO>
+	BFTST	D1{5:2}	; r = 0 or r = INF?	 	<3/31/92, JPO>
+;	BNE.S	@1	;   if so, branch, skipping GETEXP(INF)=>Invalid. -S.McD.
+	BEQ.S	@5	; if not continue
+;	MOVEA.L	#0,A0	; otherwise, clear A0 and ready to jump out - DELETED <3/31/92, JPO>
+	SUBA.L	A0,A0	; clear A0			<3/31/92, JPO>
+	BRA.S	@1	; r = 0 or ∞, skip to the end
+@5
+;	FGETEXP	FP0,FP3	; check r for very small	- DELETED <3/31/92, JPO>
+;	FMOVE.W	#-64,FP1	; constant -64		- DELETED <3/31/92, JPO>
+;	FCMP	FP1,FP3	; compare exponent of r with -64	- DELETED <3/31/92, JPO>
+	FABS.X	FP0,FP3	; FP3 <- abs(r)		 <3/31/92, JPO>
+	FCMP.S	#"$1F800000",FP3   ; compare abs(r) with 2^(-64) <3/31/92, JPO>
+	FBOLT.W	@1	; if exponent of r <-64, replace ln(1+r) with r itself (branch)
+	
+;	LEA	CpdLogRtn,A4	; return address for next instruction
+;	FMOVE.X	FP0,-(SP)	; copy of input to exponential
+;	LEA	(SP),A0	; exponential expects arg address in A0
+;	BRA	RLog21x	; log2(1+r)
+;;	MOVE.L	D2,-(SP)	; d2 will hold the exceptions generated by log21
+	LEA	RLog21x,A1
+	BSR	CallElems
+	FMOVE.L	FPSR,D0	; d2 contains the current flags
+	MOVE.L	D1,A0
+;CpdLogRtn
+;	ADD.L	#12,SP	; pop argument
+;	BSR	RecordExceptions
+
+	FMUL	FP2,FP0	; n*log2(1+r)
+;	FMUL	FP4,FP0	; n*log2(1+r)
+;	LEA	CpdExpRtn,A4	; return address for next instruction
+;	FMOVE.X	FP0,-(SP)	; copy of input to exponential
+;	LEA	(SP),A0	; exponential expects arg address in A0
+;	BRA	RExp21x	; 2 ^ n*log2(1+r) = (1+r)^n
+	LEA	RExp2x,A1
+	BSR	CallElems
+	BRA.S	@2
+@1
+	FMUL	FP2,FP0	; n*r,  r is inf or small, so r is as good as ln(1+r)
+;	LEA	CpdExpRtn,A4	; return address for next instruction
+;	SUB.L	#12,SP	; fake push of arg onto stack to match pop below
+;	BRA	RExpx	; e ^ n*ln(1+r) = (1+r)^n (A0 need not be set)
+	LEA	RExpx,A1
+	BSR	CallElems
+@2
+;	ADD.L	#12,SP	; pop argument
+;	OR.L	#ClrUFlow,D0
+	MOVE.L	A0,D1
+	BTST	#3,D1	; is the inexact flag set from log21 ?
+	BEQ.S	@3	; no continue
+	MOVE.L	#SetInexact,D0
+	BRA.S	@4
+@3	MOVE.L	#0,D0	; otherwise, claer all flags
+;;	MOVE.L	#0,D0	; otherwise, claer all flags
+;;@4	MOVE.L	(SP)+,D2	; restore the register used to keep log21 flags
+;	FMOVEM	(SP)+,FP4	; restore register
+;	MOVEA	(SP)+,A4	; restore A4
+@4	MOVEM.L	(SP)+,A1/A4
+	BRA	FinExit	;   and leave
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ENTRY POINT to Annuity (result, numberOfPeriods, rate) called (x,n,r) below
+;;   ( 1  - (1 + r)^-n ) / r
+;;   special cases are filtered off first
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+RAnnuity
+	BSR	FinInit
+	FBNE.W	AnnOK	; if r <> -1, branch
+
+	BTST	#ZeroBit,D0	; is n=0?
+	BNE	P0STUFFFIN	;   if so, stuff 0 and exit
+	BTST	#NegBit,D0	;   if not, check sign of n
+	BNE	M1STUFFFIN	;     if neg, deliver -1
+	BRA	DIVP0STUFFFIN	;     if pos, deliver 0
+AnnOK
+	BTST	#ZeroBit,D0	; is n=0?
+	BNE	P0STUFFFIN	;   if so, return 0
+	BTST	#InfBit,D1	; is r=∞?
+	BNE.S	AnnInfRate	;   if so, return ∞
+	BTST	#ZeroBit,D1	; is r=0?
+	BEQ.S	AnnRateOK	;   if not, branch, else return n
+AnnReturnN
+	FMOVE	FP2,FP0	; copy n to result
+	BRA	FinExit	;   and leave
+AnnInfRate
+	BTST	#NegBit,D0	; is n positive?
+	BEQ	P0STUFFFIN	;   if so, branch
+
+	FCMP	FP1,FP2	; compare n with -1
+	FBEQ.W	M1STUFFFIN	; if src = -1, then return -1
+	FBOGT.W	M0STUFFFIN	; if src > -1, then return -0
+	BRA	MINFSTUFFFIN	; src < -1, return -∞
+
+AnnRateOK
+	FMOVE	FP0,FP3	; move r to FP3 to improve later register use
+	BTST	#InfBit,D0	; is n=∞?
+	BEQ.S	AnnCompute
+
+	EOR.L	D1,D0	; exclusive OR of sign bits n, r
+	BTST	#NegBit,D0	;   same or different signs?
+	BNE.S	AnnReturnN	;     if different, return n
+
+;	FMOVECR	#CONSTONE,FP0	;     if same sign, return 1/r - DELETED <3/31/92, JPO>
+	FMOVE.W	#1,FP0	;     if same sign, return 1/r	 <3/31/92, JPO>
+	FDIV	FP3,FP0	; divide r into 1
+	BRA	FinExit	;   and leave
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Finally, compute  ( 1  -  (1 + r)^-n ) / r.			      ;;
+;; ( A better control flow of the computation. ... ali )		      ;;
+;; Distinguish two general cases:				      ;;
+;;						      ;;
+;;	r normal ( r ≥ 2^-64 ):				      ;;
+;;		log2(1 + r)				      ;;
+;;		n * log2(1 + r)			      ;;
+;;		-n * log2(1 + r)			      ;;
+;;		is ( -n * log2(1 + r) ) < 2^8 ?		      ;;
+;;	yes1:					      ;;
+;;		2^( -n * log2(1 + r) ) - 1		      ;;
+;;		1 - 2^( -n * log2(1 + r) )		      ;;
+;;		(1 - 2^( -n * log2(1 + r) )) / r		      ;;
+;;	no1:					      ;;
+;;		is ( -n * log2(1 + r) ) > "$407f800...00" ?	      ;;
+;;	yes11:					      ;;
+;;		log2(r)				      ;;
+;;		( 1 + n ) * log2(r)			      ;;
+;;		- ( 1 + n ) * log2(r)			      ;;
+;;		- 2 ^ ( ( 1 + n ) * log2(r) )		      ;;
+;;	no11:					      ;;
+;;		continue with yes1.			      ;;
+;;						      ;;
+;;	r small ( r < 2^64 ):				      ;;
+;;		ln(1 + r) is about r			      ;;
+;;		n * r				      ;;
+;;		-n * r				      ;;
+;;		e^(...) - 1				      ;;
+;;		1 - e^(...)				      ;;
+;;		(1 - e^(...)) / r			      ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+AnnCompute
+	MOVEM.L	A1/A4,-(SP)	; save A1 and A4
+;	FGETEXP	FP3,FP0	; check r for small	    - DELETED <3/31/92, JPO>
+;	FMOVE.W	#-64,FP1	; constant -64	    - DELETED <3/31/92, JPO>
+;	FCMP	FP0,FP1	; compare r with 2^(-64)    - DELETED <3/31/92, JPO>
+;	FBOGT.W	AnnBasee	; if r<2^(-64), branch to different algorithm - DELETED <3/31/92, JPO>
+	FABS.X	FP3,FP0	; FP0 <- abs(r)		 <3/31/92, JPO>
+	FCMP.S	#"$1F800000",FP0  ; compare abs(r) with 2^(-64)	 <3/31/92, JPO>
+	FBOLT.W	AnnBasee	; tiny r gets special treatment	 <3/31/92, JPO>
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Call Log21 (r)
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	LEA	Rlog21x,A1	; Elementary function to be called
+	FMOVE	FP3,FP0	; pass r as argument to Rlog21x
+	BSR	CallElems
+
+	FMUL	FP2,FP0	; n*log2(1 + r)
+	FNEG	FP0	; -n*log2(1 + r)
+	FCMP.W	#256,FP0	; is this less than 2^8?
+	FBOLT.W	AnnResult	;   if so, branch
+	
+	FMOVE.S	#"$7F7FFFFF",FP1	; 2^128 - ulp
+;	FCMP	FP1,FP0	; is result so far > 2^128?
+	FCMP	FP1,FP3	; is r > $407f?
+	FBOGT.W	AnnSpecial	;   if so, branch
+	BRA.S	AnnResult	; otherwise, continue with 2^(-n*log2(1 + r)) - 1
+AnnBasee
+	FMOVE.X	FP3,FP1	; make a working copy of r
+	FMUL.X	FP2,FP3	; n*r
+	FNEG.X	FP3,FP0	; - n * r
+	FMOVE.X	FP1,FP3	; get the variable r back
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Call Exp1 (r)
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	LEA	Rexp1x,A1	; Elementary function to be called
+	BSR	CallElems
+	BRA.S	AnnResult2
+AnnResult
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Call Exp21 (r)
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	LEA	Rexp21x,A1	; Elementary function to be called
+	BSR	CallElems
+AnnResult2	
+	FNEG	FP0
+	FDIV	FP3,FP0
+AnnClear
+;	OR.L	#ClrUFlow+ClrOFlow,D0
+	MOVE.L	#ClrUFlow+ClrOFlow,D0
+
+	FMOVE	FPSR,D1
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	underflow was not signaled when tiny was detected. ... ali	      ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	BTST	#11,D1	; is the underflow flag set?
+	BEQ.S	@3	; if not continue
+	BTST	#9,D1	; is the number inexact?
+	BEQ.S	@3	; if not continue
+	OR.L	#SetUFlow+SetInexact,D0	; otherwise, signal tiny
+	BRA.S	@2
+@3
+	BTST	#InfBit,D1	; is result infinite?
+	BNE.S	@1	;    if so, branch
+	BTST	#ZeroBit,D1	; is result 0?
+	BEQ.S	@2	;    if not, branch
+	OR.L	#SetUFlow,D0	;    if so, force underflow ...
+	BRA.S	@2	;   and leave
+@1
+	OR.L	#SetOFlow,D0
+@2
+	MOVEM.L	(SP)+,A1/A4	; restore A1 and A4
+	BRA	FinExit	;   and leave
+	
+AnnSpecial
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Call Log2 (r)
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	LEA	Rlog2x,A1	; Elementary function to be called
+	FMOVE	FP3,FP0	; pass  parameter in FP0
+	BSR	CallElems
+
+	FADD.W	#1,FP2
+	FMUL	FP2,FP0
+	FNEG	FP0
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Call Exp2 (r)
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	LEA	Rexp2x,A1	; Elementary function to be called
+	BSR	CallElems
+
+	FNEG	FP0,FP0
+	FMOVE	FPSR,D1
+	BSET.L	#XBIT,D1	; the entire operation is inexact
+	FMOVE	D1,FPSR
+	BRA.S	AnnClear
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; FinInit - unpack both input arguments and classify them.
+;;   Finish handling of these cases:
+;;     n is NaN
+;;     r is NaN or r < -1
+;; 
+;;   n to FP2
+;;   r to FP0
+;;   classify n into D0
+;;   classify r into D1
+;;   status register reflecting data move of r
+;;
+;;   note that stack offsets are adjusted to account for the BSR into this code
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+FinInit
+	MOVEA.L	Addr2+4(SP),A0	; n address in A0
+	
+	TST.B	Opcode+5(SP)	; 80 or 96-bit data?
+	BPL.S	@1	; branch to unpack 80-bit input data
+	
+	FMOVE.X	(A0),FP2	; n to FP2
+	FMOVE	FPSR,D0	; classify n
+	MOVEA.L	Addr3+4(SP),A0	; r address in A0
+	FMOVE.X	(A0),FP0	; r to FP0
+	FMOVE	FPSR,D1	; classify r
+	BRA.S	@2	; skip 80-bit unpack code
+@1
+	ADDQ.L	#6,A0	; move n to stack
+	MOVE.L	(A0),-(SP)
+	MOVE.L	-(A0),-(SP)
+	SUBQ.L	#2,A0
+	MOVE.L	(A0),-(SP)
+
+	FMOVE.X	(SP)+,FP2	; n to FP2
+	FMOVE	FPSR,D0	; classify n
+
+	MOVEA.L	Addr3+4(SP),A0	; r address in A0
+
+	ADDQ.L	#6,A0	; move r to stack
+	MOVE.L	(A0),-(SP)
+	MOVE.L	-(A0),-(SP)
+	SUBQ.L	#2,A0
+	MOVE.L	(A0),-(SP)
+
+	FMOVE.X	(SP)+,FP0	; r to FP0
+	FMOVE	FPSR,D1	; classify r
+@2
+	BTST	#NanBit,D0	; is n a NaN?
+	BEQ.S	@3	;   branch if not
+	FMOVE	FP2,FP0	;   if so, copy to dst
+	BTST	#14,D0	; is it a signaling NaN?
+	BEQ.S	@6	; no, leave without invalid set
+	MOVE.L	#SetInvalid,D0	; yes, set invalid
+	BRA.S	@6	;   and leave
+@3
+	FMOVE.W	#-1,FP1	; constant -1
+	FCMP	FP1,FP0	; compare r with -1
+	FBOLT.W	@4	; if r<-1, error
+	FBUN	@5	; if r is a  NaN, error
+
+	RTS
+@4
+	ADDQ.L	#4,SP	; pop local return address
+	BRA.S	ERRFINAN
+@5
+	BTST	#14,D1	; is it a signaling NaN?
+	BEQ.S	@6	; no, leave without invalid set
+	MOVE.L	#SetInvalid,D0	; yes, set invalid
+@6
+	ADDQ.L	#4,SP	; pop local return address
+	BRA.S	FinExit	;   and leave
+	
+ERRFINAN
+	MOVEQ	#NANFINAN,D1
+ERRORNAN
+	LSL.L	#8,D1	; put nan code in single format position
+	OR.L	#$7FC00000,D1	; note quiet nan bit (#22)
+	MOVE.L	#SetInvalid,D0	; signal invalid
+	BRA.S	StuffOutFin
+
+P1STUFFFIN
+	MOVE.L	#PLUSONESGL,D1
+	BRA.S	StuffOutFin
+P0STUFFFIN
+	MOVEQ	#0,D1
+	BRA.S	StuffOutFin
+M1STUFFFIN
+	MOVE.L	#MINUSONESGL,D1
+	BRA.S	StuffOutFin
+M0STUFFFIN
+	MOVE.L	#MINUSZEROSGL,D1
+	BRA.S	StuffOutFin
+DIVP0STUFFFIN
+	OR.L	#SetDivByZ,D0
+PINFSTUFFFIN
+	MOVE.L	#PLUSINFSGL,D1
+	BRA.S	StuffOutFin
+MINFSTUFFFIN
+	MOVE.L	#MINUSINFSGL,D1
+StuffOutFin
+	FMOVE.S	D1,FP0
+FinExit
+	
+	MOVE.L	RetAddr(SP),Addr2(SP)	; move user return address
+	LEA	FinFinal,A0
+	MOVE.L	A0,RetAddr(SP)	; back end will RTS to FinFinal
+	JMP	(A4)	; go to back end
+FinFinal
+	RTD	#4	; stack:  user return address < src2 addr
+	
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Call other routines in Elems
+;;   requires saving registers, setting A4, recording exceptions
+;;   this subroutine expects the address of the routine to be called in A1
+;;   input and output parameters are in FP0
+;;
+;;   Note:  This code makes internal calls to logarithm and exponential routines.
+;;   The interface to these routines bypasses the common front end and back end
+;;   which dispatches on opcode, moves data to and from FP registers, handles procentry
+;;   and procexit, and saves and restores registers.  Consequently, one must be careful
+;;   to adhere to strict interface conventions.  These are:
+;;
+;;     Routines being called will use registers A0,A4,D0,D1,FP0-FP3
+;;     Place argument to routine in FP0
+;;     A1 must contain address of Elems routine to be called
+;;     Retrieve result from FP0
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+CallElems
+	FMOVEM	FP1/FP2/FP3,-(SP)	; preserve registers
+	MOVEM.L	A0/A4,-(SP)
+	FTEST.X	FP0		; set the right condition code in fpsr
+	LEA	ReturnToHere,A4	; return address for call below
+	FMOVEM.X	FP0,-(SP)		; argument to stack (temporary) - used FMOVEM <4/15/92, JPO>
+	LEA	(SP),A0		; address of arg into A0
+	MOVE.W	4(A0),2(A0)		; put sig.HI word in pad space on stack <4/15/92, JPO>
+	JMP	(A1)
+ReturnToHere
+	ADD.L	#12,SP		; remove arg from stack
+	MOVEM.L	(SP)+,A0/A4		; restore registers
+	FMOVEM	(SP)+,FP1/FP2/FP3
+RecordExceptions
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; On return, D0.lo contains exception
+	;;   bits to be cleared, D0.hi to be set.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEQ	#-1,D1	; set mask
+	EOR.B	D1,D0	; exception bits to be cleared now in D0.lo
+	FMOVE	FPSR,D1	; collect current exceptions
+	AND.B	D0,D1	; clear unwanted exceptions
+	SWAP	D0	; exceptions to be set now in D0.lo
+	OR.B	D0,D1	; set desired exceptions
+	FMOVE	D1,FPSR	; record pending exceptions from this "operation"
+	RTS
+
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ENTRY POINT to XpwrI (i, x)
+;;   both arguments passed by address
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+RXpwri
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;;   Real work starts here
+	;;   Save registers, move I to D2.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEM.L	A1/D2/D3/D4,-(SP)	; save more registers
+	MOVEA.L	Addr2+16(SP),A1	; source address
+	MOVE.W	(A1),D2	; value of exponent I
+;	BEQ	P1STUFFXPWR	; if exponent=0, just return 1.
+	CLR.L	D4	; used by XpwrY k^k computation
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Filter off special cases based on condition codes in FPSR
+	;;
+	;; If D0 is not 0, then one of Z, I or NaN is set.
+	;;   Handle zeros, infinitites and NaNs specially.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FMOVE	FPSR,D0	; collect status bits from move of input data
+	MOVE.L	#ExcMask,D1	; mask to show only four status bits
+	AND.L	D1,D0	; apply the mask to pick off N,Z,I,NaN bits
+	MOVE.L	D0,D1	; keep a copy of fpsr for use in -0^i & 0^i
+	LSL.L	#5,D0	; N-bit -> Carry, Z-bit -> bit 31, I-bit -> bit 30, NaN-bit -> bit 29
+	BEQ.S	FinPwrI	;   if not 0, NaN, or infinity, go do real work
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Here if base is NaN, 0 or ∞.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	BTST	#29,D0	; dispatch NaN first
+	BNE.W	PwrAllDone	;   if NaN, just leave
+	TST	D2	; test for exponent 0
+	BEQ	P1STUFFXPWR	; if exponent=0, just return 1.
+	BTST	#0,D2	; test parity bit of I for odd/even
+	BNE.S	@4	;   handle odd exponents at @4
+
+	TST.W	D2	; exponent is even, check its sign
+	BMI.S	@2
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Base 0/∞, Exponent even and positive
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FABS	FP0,FP0	; return absolute value of base
+	BRA	PwrAllDone
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Base 0/∞, Exponent even and negative
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@2
+	TST.L	D0	; test base
+	BMI	DIVP0STUFFXPWR	;   if base = 0
+	BRA	P0STUFFXPWR	;   if base = ∞
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Base 0/∞, Exponent odd
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@4
+	TST.W	D2	; is I positive?
+	BPL	PwrAllDone	;   if so, return value is current base
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Base 0/∞, Exponent odd and negative
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	TST.L	D0	; test base
+	BMI.S	@6	;    if base = 0
+	LSL.L	#5,D1	; set the C bit if it is -∞
+	BCC.W	P0STUFFXPWR	;    if base = ∞, handle +∞ and -∞ separately
+	BRA.W	M0STUFFXPWR
+@6
+	LSL.L	#5,D1	; set the C bit if it is -0
+	BCC.W	DIVP0STUFFXPWR	; handle +0 and -0 separately
+	BRA.W	DIVM0STUFFXPWR
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Base not NaN, not 0, not ∞.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+FinPwrI
+
+	MOVE.W	D2,D0	; Abs(exponent) -> D0
+	BPL.S	@1
+	NEG.W	D0
+@1
+	CMPI.W	#SMALLEXP,D0
+	BHI.S	XPWRBIG	; use log and exp for large exponents
+	BSR.S	XPWRK	;   for small exponents just multiply
+	CLR.L	D0	; get ready for exit
+	BRA	PwrAllDone
+XPWRBIG
+	FABS	FP0,FP0	; |base|
+	FMOVE.W	D2,FP3	; exp to FP3
+
+	BSR	XPWRY	; FP0^FP3 -> FP0
+	CLR.L	D0	; get ready for exit
+
+	TST.L	(A0)	; check sign of base
+	BPL	PwrAllDone	;   if positive, return
+
+	BTST	#0,D2	; if base neg, check parity of exp
+	BEQ	PwrAllDone	;   if odd, return
+
+	FNEG	FP0,FP0	; base neg & exp odd => negate result
+	BRA	PwrAllDone
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Small integer exponents.
+	;;   D0  - |exp|
+	;;   D2  - exp
+	;;   FP0 - base input / binary powers of base in xpwrloop
+	;;   FP1 - unchanged copy of base
+	;;   FP2 - result accumulator in multiplication loop
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+XPWRK
+
+	FMOVE	FP0,FP1	; hold a fresh copy of base
+	BSR.S	XPWRKLOOP
+	TST.W	D2
+	BMI.S	XPWRKDIV
+XPWRKSTORE
+	FMOVE	FP2,FP0	; move result to output
+	RTS
+XPWRKDIV
+	MOVE.W	D2,D0	; |D2| -> D0  ... reinitialize D0. -S.McD.
+	BPL.S	@1
+	NEG.W	D0
+@1
+	FMOVE	FPSR,D1
+	AND.L	#OFlow+UFlow,D1	; is either exception set?
+	BNE.S	XpwrKClear	; i<0 and flag => start again with 1/x
+
+;	FMOVECR	#CONSTONE,FP0	; if all is OK, then reciprocate - DELETED <3/31/92, JPO>
+	FMOVE.W	#1,FP0	; if all is OK, then reciprocate	 <3/31/92, JPO>
+	FDIV	FP2,FP0	;   result and move to output
+	RTS
+XPWRKCLEAR
+	FMOVE	FPSR,D1
+	MOVE.L	#ClrUflow+ClrOflow,D0
+	EOR.L	#-1,D0
+	AND.L	D0,D1
+	FMOVE	D1,FPSR
+
+;	FMOVECR	#CONSTONE,FP0	; DELETED <3/31/92, JPO>
+	FMOVE.W	#1,FP0		; <3/31/92, JPO>
+	FDIV	FP1,FP0	; reciprocate base
+
+	BSR.S	XPWRKLOOP
+	BRA.S	XPWRKSTORE
+XPWRKLOOP
+;	FMOVECR	#CONSTONE,FP2	; preset accumulator with 1 - DELETED <3/31/92, JPO>
+	FMOVE.W	#1,FP2		; preset accumulator with 1  <3/31/92, JPO>
+	BRA.S	XKLPENTRY
+XKLPTOP
+	FMUL	FP0,FP0	; dst^(2^i)
+XKLPENTRY
+	LSR.W	#1,D0
+	BCC.S	XKLPSKIP
+
+	FMUL	FP0,FP2	; multiply in current value of dst^(2^i)
+XKLPSKIP
+	BNE.S	XKLPTOP	;   if D0 is nonzero, continue
+	RTS		;   else done
+
+ClearInexact
+	FMOVE	FPSR,D1
+	MOVE.L	#ClrInexact,D0
+	EOR.L	#-1,D0
+	AND.L	D0,D1
+	FMOVE	D1,FPSR
+	RTS
+ForceDivByZero
+	FMOVE	FPSR,D0
+	OR.L	#SetDivByZ,D0
+	FMOVE	D0,FPSR
+	RTS
+P1STUFFXPWR
+	MOVE.L	#PLUSONESGL,D1
+	BRA.S	StuffOutXpwr
+P0STUFFXPWR
+	MOVEQ	#0,D1
+	BRA.S	StuffOutXpwr
+M0STUFFXPWR
+	MOVE.L	#MINUSZEROSGL,D1
+	BRA.S	StuffOutXpwr
+DIVP0STUFFXPWR
+	BSR.S	ForceDivByZero
+PINFSTUFFXPWR
+	MOVE.L	#PLUSINFSGL,D1
+	BRA.S	StuffOutXpwr2
+DIVM0STUFFXPWR
+	BSR.S	ForceDivByZero
+MINFSTUFFXPWR
+	MOVE.L	#MINUSINFSGL,D1
+	BRA.S	StuffOutXpwr2
+StuffOutXpwr
+	MOVEQ	#0,D0
+StuffOutXpwr2
+	FMOVE.S	D1,FP0
+PwrAllDone
+	TST.B	D4	; check parity of exp (See 4 lines up)
+	BEQ.S	@1	;   if even, done
+	FNEG	FP0,FP0	; else negate result
+@1
+	MOVEM.L	(SP)+,A1/D2/D3/D4	; restore registers
+	MOVE.L	RetAddr(SP),Addr2(SP)	; move user return address
+	LEA	PwrFinal,A0
+	MOVE.L	A0,RetAddr(SP)	; back end will RTS to FinFinal
+	JMP	(A4)	; go to back end
+PwrFinal
+	RTS		; user return address now on top of stack
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; XPWRY - guts of the computation
+;;    Compute 2^(y*log2(x)) for large integer exponents.
+;;    FP0 - base input / base^exp returned here
+;;    FP3 - exponent input
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+XPWRY
+
+	LEA	RLog2x,A1	; call Log2(x)
+	BSR	CallElems
+	FMUL	FP3,FP0	; exp * log2(base)
+	LEA	RExp2x,A1	; call Exp2(x)
+	BSR	CallElems
+	RTS
+	
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; ENTRY POINT to XpwrY (y, x)
+;;   both arguments passed by address
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+RXpwry
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Classify base, collect exponent, classify exponent
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FMOVE	FPSR,D0	; collect status bits from move of input data	
+	
+	MOVEM.L	A1/D2/D3/D4,-(SP)	; save more registers
+	MOVEA.L	Addr2+16(SP),A1	; source address (inst above grew stack)
+
+	MOVE.B	Opcode+17(SP),D1
+	BPL.S	@1	; branch to unpack 80-bit input data
+	FMOVE.X	(A1),FP3	;   else unpack 96-bit data
+	BRA.S	@2
+@1
+	ADDQ.L	#6,A1
+	MOVE.L	(A1),-(SP)
+	MOVE.L	-(A1),-(SP)
+	SUBQ.L	#2,A1
+	MOVE.L	(A1),-(SP)
+
+	FMOVE.X	(SP)+,FP3
+@2	
+	CLR.L	D4	; set to zero for k^k, odd or even
+	FMOVE	FPSR,D1	; classify exp
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Filter off special cases based on condition codes in FPSR
+	;;   If D0/D1 is not 0, then one of Z, I or NaN is set.
+	;;   Handle zeros, infinitites and NaNs elsewhere.
+	;;   D0 contains base status.
+	;;   D1 contains an unchanged exponent status passed by control
+	;;   D2 contains the mask
+	;;   D3 contains a working copy of the original exponent status
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.L	#ExcMask,D2	; mask to show only four status bits
+	
+	MOVE.L	D1,D3	; save the status of exponent, make a working copy
+	AND.L	D2,D3	; apply the mask to pick off N,Z,I,NaN bits
+	LSL.L	#5,D3	; N-bit -> Carry, Z-bit -> bit 31, I-bit -> bit 30, NaN-bit -> bit 29
+	
+	AND.L	D2,D0	; apply the mask to pick off N,Z,I,NaN bits
+	LSL.L	#5,D0	; N-bit -> Carry, Z-bit -> bit 31, I-bit -> bit 30, NaN-bit -> bit 29
+	BNE.S	XpwrWierd	; branch if Z, I, or NaN
+	BCS.S	XpwrWierd	;   and for base, handle separately if negative
+	
+	TST.L	D3	; check exponent status
+	BNE.S	XpwrWierd	; Branch if Z, I, or NaN
+XPWRYOK
+	FMOVE.W	FP3,D2	; is exp an integer other than INF or NaN? -S.McD.
+	FMOVE	FPSR,D1
+
+	BCLR	#IBit,D1	; test and clear invalid
+	SNE	D2	; D2=0 if no invalid
+
+	FMOVE	D1,FPSR
+
+	BTST	#XBit,D1
+	SNE	D0	; D0=0 if no inexact
+	OR.B	D2,D0
+	BNE.S	XPWRYHARD	; if either invalid or inexact, branch
+
+	FMOVE.W	FP3,D2	; else move integer exponent to D2
+
+	MOVE.W	D2,D0	; |exp| -> D0
+	BPL.S	@1
+	NEG.W	D0
+@1
+	CMPI.W	#SMALLEXP,D0
+	BLE.S	@7
+	BRA.S	@8
+@7
+	BSR.W	XPWRK
+	BRA.S	ByPassXPWRY	
+@8
+XPWRYHARD
+	BCLR	#XBit,D1
+
+	FMOVE	D1,FPSR	; clear inexact
+
+	BSR	XPWRY
+ByPassXPWRY	
+;	MOVE.L	D0,D1	; prepare to jump to control
+	CLR.L	D0
+	BTST	#31,D3	; exponent=0?
+	BNE.S	@1	; if so, clear inexact again
+	BTST	#30,D3	; exponent=∞?
+	BEQ.S	@2	; if not, exit
+@1
+	MOVE.B	#ClrInexact,D0
+@2
+
+	BRA.W	PwrAllDone
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; All zero, infinity and NaN handling done here
+	;;   D0 contains classification of base
+	;;   D3 contains classification of exponent
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+XpwrWierd
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Start of correction for base = -0 case handeling of XPwrY.	      ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	
+	BPL.S	@54	; base not a ±0, continue
+	BCC.S	@54	; base not a -0, continue
+	BTST	#29,D3	; base is -0, test explicitly for exp NaN
+	BNE.S	@54	; send it out the nan way
+	LSL.L	#5,D1	; is d1 = 0 ? ( d1 contains fp3's fpsr )
+	BNE.S	@56	; 0 and ±∞ cases found
+	FINT	FP3	;   else round exponent to integer
+	FMOVE	FPSR,D2	;   and test for inexact
+	BTST	#Inexact,D2
+	BNE.S	XPWRYERR	; if inexact, then error neg^(non-int)
+	BCS.S	@57	; negative exponent found
+;	FSCALE.W	#-1,FP3	; FP3 <- FP3/2 - DELETED <3/31/92, JPO>
+	FMUL.S	#"$3F000000",FP3	; FP3 <- FP3/2 <3/31/92, JPO>
+	FINT	FP3	;   else round exponent to integer
+	FMOVE	FPSR,D2	;   and test for inexact
+	BTST	#Inexact,D2
+	BNE.S	@58	; if odd, then return 0
+	FABS.X	FP0	; if even, then return -0
+@58
+	MOVE.L	#ClrInexact,D0
+	BRA	PwrAllDone
+@57
+	BSR	ForceDivByZero
+;	FSCALE.W	#-1,FP3	; FP3 <- FP3/2 - DELETED <3/31/92, JPO>
+	FMUL.S	#"$3F000000",FP3	; FP3 <- FP3/2 <3/31/92, JPO>
+	FINT	FP3	;   else round exponent to integer
+	FMOVE	FPSR,D2	;   and test for inexact
+	BTST	#Inexact,D2
+	BNE.S	@59	; if odd, then return +∞
+	BRA	DIVP0STUFFXPWR	; -0^(odd negative power), return ∞
+@59
+	BRA	DIVM0STUFFXPWR	; -0^(even negative power), return -∞
+@56	
+	BRA.S	XPWRYERR	; call the 0 and ±∞ cases
+@54
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	End of correction for base = -0 case. ... ali 5/25/90	      ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	BTST	#29,D0	; test explicitly for base NaN?
+	BEQ.S	@4	;   keep going if base is not a NaN
+	BRA	PwrAllDone
+@4
+	BTST	#29,D3	; test explicitly for exp NaN
+	BEQ.S	@3	;   if exp is not a NaN, continue
+	FMOVE	FP3,FP0	;   if exp is a NaN, return it
+	BRA	PwrAllDone	;   yes, for NaN(a)^NaN(b), return NaN(a)
+@3
+	FTEST	FP0
+	FBLT.W	NEGPWRY	; if base is negative, branch
+	BSR.S	XPWRYCOM	;   else compute
+	BRA	PwrAllDone	;   and exit
+	
+XPWRY9ERR
+	ADDQ.L	#4,SP	; pop return
+XPWRYERR
+	BSR	ClearInexact
+	MOVEQ	#NANPOWER,D1
+PwrErrorNaN
+	LSL.L	#8,D1	; put nan code in single format position
+	OR.L	#$7FC00000,D1	; note quiet nan bit (#22)
+	MOVE.L	#SetInvalid,D0	; signal invalid
+	BRA	StuffOutXpwr2
+NEGPWRY
+	BTST	#30,D3	; test explicitly for infinite exponent
+	BNE.S	XPWRYERR	;   if so, return error
+
+	BTST	#30,D0	; test explicitly for -∞ base
+	BEQ.S	@1	; no, continue
+	BTST	#31,D3	; test explicitly for 0 exponent
+	BNE.S	XPWRYERR	; if so -∞^0 detected, return error
+@1	
+	FINT	FP3,FP2	;   else round exponent to integer
+	FMOVE	FPSR,D2	;   and test for inexact
+	BTST	#Inexact,D2
+	BNE.S	XPWRYERR	; if inexact, then error neg^(non-int)
+
+;	FSCALE.W	#-1,FP2	; FP2 <- FP2/2 - DELETED <3/31/92, JPO>
+	FMUL.S	#"$3F000000",FP2	; FP2 <- FP2/2 <3/31/92, JPO>
+	FINT	FP2,FP2	; round to integer
+
+	FMOVE	FPSR,D2	;   and test for inexact
+	BTST	#Inexact,D2
+	SNE	D4	; 0 if even exp (See 4 lines down)
+	BSR	ClearInexact
+	FABS	FP0,FP0	; make base positive
+
+	BSR.S	XPWRYCOM
+	TST.B	D4	; check parity of exp (See 4 lines up)
+	BEQ	PwrAllDone	;   if even, done
+
+	FNEG	FP0,FP0	; else negate result
+	BRA	PwrAllDone	; and exit
+XPWRYCOM
+
+	FBNE.W	@3	;   branch if base non-zero
+
+	BTST	#30,D3	; test explicitly for infinity exponent
+	BNE.S	@4	; yes, exp = ∞ => return zero with no exceptions
+	
+	TST.L	D3	; is exp also zero?
+	BNE.S	XPWRY9ERR	;   if so, error
+	
+	FTEST.X	FP3	; is exp negative? ( negative info from d3 lost! )
+	FBLT.W	@1	;   if exp is negative, branch
+@4
+	LSL.L	#5,D1	; is it a -∞ or a +∞? ( d1 contains fp3's fpsr )
+	BCS.S	@1	; 0^-∞, return ∞
+ 	
+	MOVEQ	#0,D1	; 0^pos, return 0
+	MOVEQ	#0,D0	; report no additional exceptions on exit
+	BRA.S	@2
+@1
+	BSR	ForceDivByZero
+	MOVE.L	#PLUSINFSGL,D1	; 0^neg, return ∞
+@2
+	FMOVE.S	D1,FP0
+
+	RTS
+@3
+	BTST	#30,D0	; test explicitly for base = ∞
+	BEQ.S	FINPWRY	;   if not, branch
+
+	TST.L	D3	; check exp for zero
+	BMI.S	@7	; yes it is zero
+	BRA.S	@5	; no, the exponent is not zero
+@7
+	TST.L	D0	; test for negative base
+	BPL.S	@6	; no base is not negative
+;	FMOVECR	#CONSTONE,FP0	; negative^0 detected, return 1 - DELETED <3/31/92, JPO>
+	FMOVE.W	#1,FP0		; negative^0 returns 1	    <3/31/92, JPO>
+	MOVEQ.L	#0,D0	; clear all exceptions
+	ADDQ.L	#4,SP	; pop return address before calling XPWRYOK
+	BRA.W	PwrAllDone	; get ready to go out
+@6	
+	BRA.W	XPWRY9ERR	; ∞^0, error
+@5	
+	ADDQ.L	#4,SP	; pop return address before calling XPWRYOK
+	BRA.W	XPWRYOK	; ∞^#, including ∞^±∞ OK
+FINPWRY
+	BTST	#30,D3	; is exp=∞?
+	BEQ.S	@1	;   if not, branch
+
+;	FMOVECR	#CONSTONE,FP1	; DELETED <3/31/92, JPO>
+;	FCMP	FP0,FP1		; DELETED <3/31/92, JPO>
+	FCMP.S	#"$3F800000",FP0	; base = 1? <3/31/92, JPO>
+	FBNE.W	@1
+
+	BRA	XPWRY9ERR	; 1^∞, error
+@1
+	ADDQ.L	#4,SP	; pop return address from XPWRYCOM
+	BRA.W	XPWRYOK	; ( positive finite base ≠ 1 ) ^ ±∞

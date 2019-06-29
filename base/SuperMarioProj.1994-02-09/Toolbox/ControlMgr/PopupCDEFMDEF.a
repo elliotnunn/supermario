@@ -1,0 +1,145 @@
+;
+;	File:		PopupCDEFMDEF.a
+;
+;	Contains:	code resource that postprocesses menu defproc's mSizeMsg
+;				by expanding the width by a given delta amount
+;
+;	Written by:	Byron Han
+;
+;	Copyright:	© 1989-1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <5>	 11/3/92	DTY		Clean up includes.
+;		 <4>	 3/30/91	DTY		ngk, #f1-ngk-002: lock down MDEF before calling through to it.
+;		 <3>	 3/19/90	EMT		Deleted spurious characters inserted in <2>.
+;		 <2>	 3/19/90	BBH		moved dsMDEFNotFound to SysErr.a
+;		 <1>	  3/5/90	BBH		first checked in to BBS
+;
+;	Pre-BBS Modification History
+;				12/2/89		BBH			Swap version/procID
+;										Incorporate changes from code revu
+;										(tighten up code, add syserr if cannot load mdef)
+;				11/28/89	BBH			Created
+;
+;
+;	PROCEDURE MyMDEF(msg: INTEGER; hMenu: MenuHandle; 
+;						VAR mRect: Rect; hitPt: Point; VAR mItem: INTEGER);
+;
+;	This MDEF calls the mdef stored in the header.  If the size message is
+;		passed in, we increase the width by the value in extend.
+;
+;	So, to do this from pascal…
+;
+;	TYPE 			
+;		MyHandle = ^MyPtr;
+;		MyPtr = ^MyRecord;
+;		MyRecord = RECORD									{ format of the header		}
+;			branch:		INTEGER;							{ BRA.S blah blah blah		}
+;			flags:		INTEGER;
+;			rType:		ResType;
+;			procID:		INTEGER;
+;			version:	INTEGER;
+;			
+;			defProc:	Handle;
+;			extend:		INTEGER;
+;		END;
+;
+;		theHandle := MyHandle(GetResource('MDEF', $DFE0));	{ get new mdef 				}
+;		WITH theHandle^^ DO									{ and fill in the blanks 	}
+;		BEGIN
+;			defProc := theMenu^^.menuProc;
+;			extend := info.widMax
+;		END;
+;				
+;		theMenu^^.menuProc := Handle(theHandle);			{ set up new mdefproc 		}
+;
+;		{ call popupmenuselect here }
+;
+;		theMenu^^.menuProc := theHandle^.defProc;			{ restore the mdefproc 		}
+;
+
+
+
+wholeErrors	EQU		1				; <BBH 12/2/89> we want ALL error codes
+			INCLUDE	'SysErr.a'		; <BBH 12/2/89>
+			INCLUDE	'ToolEqu.a'
+			INCLUDE	'Traps.a'
+		
+MDEF		PROC	EXPORT
+retAddr		EQU		4				; stack frame constants
+mItem		EQU		retAddr+4
+hitPt		EQU		mItem+4
+mRect		EQU		hitPt+4
+hMenu		EQU		mRect+4
+msg			EQU		hMenu+4
+	
+branch		BRA.S	Main			; 2 bytes
+flags		DC.W	0				; flags
+rType		DC.L	('MDEF')			
+procID		DC.W	$DFE0			; procID (owned by CDEF 63)
+version		DC.W	0				; version
+			
+defproc		DC.L	0				; handle for the menu defproc
+extend		DC.W	0				; amount to increase horizontal by
+
+Main		LINK	A6,#-2			; create a stack frame
+		
+			MOVE.W	msg(A6),-(SP)	; repush the parameters
+			MOVE.L	hMenu(A6),-(SP)
+			MOVE.L	mRect(A6),-(SP)
+			MOVE.L	hitPt(A6),-(SP)
+			MOVE.L	mItem(A6),-(SP)
+			
+			MOVE.L	defProc,A0		; replaces two lines below <BBH 12/2/89>
+									; LEA		defproc,A0		; get the defProc storage
+									; MOVE.L	(A0),A0			; get the defproc
+		
+			MOVE.L	A0,-(SP)		; load mdefproc <BBH 12/2/89>
+			_LoadResource
+			
+			MOVE.L	(A0),D1			; check if still not loaded <BBH 12/2/89> <4, #f1-ngk-002>
+			BNE.S	@AOK			; all right 
+	
+			MOVEQ	#dsMDEFNotFound,D0	; deep shit alert error
+			_SysError
+			
+			BRA.S	@byebye			; and now back to the future…
+		
+@AOK								; end addition <BBH 12/2/89>
+			_HGetState				; Get state of MDEF				<4, #f1-ngk-002>
+			move.w	d0,-2(a6)		; Save state					<4, #f1-ngk-002>
+			_HLock					;								<4, #f1-ngk-002>
+			MOVE.L	D1,A0			; dereference defproc			<4, #f1-ngk-002>
+			JSR		(A0)			; jump through it please
+			
+			move.l	defProc,a0		;								<4, #f1-ngk-002>
+			move.w	-2(a6),d0		; Restore state of handle		<4, #fl-ngk-002>
+			_HSetState				;								<4, #f1-ngk-002>
+			
+			CMP.W	#mSizeMsg,msg(A6)	; replaces two lines below <BBH 12/2/89>
+										; MOVE.W	msg(A6),D0		; is this a size measurement?
+										; CMP		#mSizeMsg,D0
+			BNE.S	@byebye
+			
+			MOVE.W	extend,D0		; replaces two lines below <BBH 12/2/89>
+									; LEA		extend,A0		; get amount to widen the menu
+									; MOVE.W	(A0),D0			
+			
+			MOVE.L	hMenu(A6),A0	; get the mHandle
+			MOVE.L	(A0),A0			; dereference
+			
+			ADD.W	D0,menuWidth(A0)	; and add amount to extend by…
+	
+@byebye								; common exit code
+			UNLK	A6				; destroy stack frame
+			
+			MOVE.L	(SP)+,A0		; get return address
+			
+			LEA		18(SP),SP		; replaces line below <BBH 12/2/89>
+									; ADD.L	#18,SP			; strip 
+									
+			JMP		(A0)			; and go home
+			ENDPROC
+			
+			END

@@ -1,0 +1,1076 @@
+;EASE$$$ READ ONLY COPY of file “BITMAPS.m.a”
+; 1.2	cv 04/03/1989  Added header patch to PackBits made in PMA207.
+; The patch was not being called until PMA399 was made to StdBits
+; for a bug with the Scanner app. PMA399 made a call to PackBits
+; trap rather than a JSR to PackBits.
+; 1.1	CCH 11/11/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.2	CCH 10/12/1988 Changed “m.GrafType.a” to “GrafType.m.a”.
+; 1.1	MSH 5/18/88 Changed inclides to use m.GRAPHTYPES to work under EASE.
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+
+
+		BLANKS	ON
+		STRING	ASIS
+
+		INCLUDE  'GRAFTYPES.m.a'
+		INCLUDE  'traps.a'
+;-----------------------------------------------------------
+;
+;
+;	  ****	 ***  *****  *	   *	 *	   ****    ***
+;	  *   *   * 	*	 **   **	* *    *   *  *   *
+;	  *   *   * 	*	 * * * *   *   *   *   *  *
+;	  ****	  * 	*	 *	*  *   *   *   ****    ***
+;	  *   *   * 	*	 *	   *   *****   *		  *
+;	  *   *   * 	*	 *	   *   *   *   *	  *   *
+;	  ****	 ***	*	 *	   *   *   *   *	   ***
+;
+;
+;
+;  QuickDraw Routines to operate on BitMaps.
+;
+
+StdBits PROC  EXPORT
+		IMPORT CheckPic,PutPicByte,PutPicWord,PutPicRgn,PutPicData
+		IMPORT StretchBits,PackBits
+;---------------------------------------------------------------
+;
+;  PROCEDURE StdBits(VAR srcBits: BitMap;
+;			 VAR srcRect: Rect;
+;			 VAR dstRect: Rect;
+;			 mode:	  INTEGER;
+;			 maskRgn:	  RgnHandle);
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+PARAMSIZE		EQU 	18
+SRCBITS 		EQU 	PARAMSIZE+8-4			;LONG, ADDR OF BITMAP
+SRCRECT 		EQU 	SRCBITS-4			;LONG, ADDR OF RECT
+DSTRECT 		EQU 	SRCRECT-4			;LONG, ADDR OF RECT
+MODE			EQU 	DSTRECT-2			;WORD
+MASKRGN 		EQU 	MODE-4				;LONG, RGNHANDLE
+
+MYBITS			EQU 	-14 			;BITMAP
+PACKBUF 		EQU 	MYBITS-256			;SCANLINE PACKING BUFFER
+SRCPTR			EQU 	PACKBUF-4			;LONG
+DSTPTR			EQU 	SRCPTR-4			;LONG
+VARSIZE 		EQU 	DSTPTR				;TOTAL BYTES OF LOCALS
+
+
+		LINK	A6,#VARSIZE 			;ALLOCATE STACK FRAME
+		MOVEM.L D3-D7/A2-A4,-(SP)			;SAVE REGS
+		JSR 	CHECKPIC				;SET UP A4,A3 AND CHECK PICSAVE
+		BLE 	NOTPIC					;BRANCH IF NOT PICSAVE
+
+		MOVEQ	#8,D6
+;
+;  TRIM SRCBITS
+;
+		MOVE.L	SRCBITS(A6),A0				;GET ADDR OF SRCBITS
+		LEA 	MYBITS(A6),A1				;POINT TO MY COPY
+		MOVE.L	BASEADDR(A0),A3 			;GET BASEADDR (CLOBBERS A3)
+		MOVE	ROWBYTES(A0),D4 			;GET OLD ROWBYTES
+		MOVE.L	BOUNDS+TOPLEFT(A0),BOUNDS+TOPLEFT(A1)	 ;COPY BOUNDS TOPLEFT
+		MOVE.L	BOUNDS+BOTRIGHT(A0),BOUNDS+BOTRIGHT(A1)  ;COPY BOUNDS BOTRIGHT
+		MOVE.L	SRCRECT(A6),A0				;POINT TO SRCRECT
+		MOVE	TOP(A0),D0				;GET SRCRECT.TOP
+		SUB 	BOUNDS+TOP(A1),D0			;SKIPTOP:=SRCRECT.TOP-BOUNDS.TOP
+		BLE.S	TOPOK					;CONTINUE IF SKIPTOP NEG
+		ADD 	D0,BOUNDS+TOP(A1)			;NEWTOP := SRCRECT TOP
+		MULU	D4,D0					;CALC VERT OFFSET
+		ADD.L	D0,A3					;ADJUST BASEADDR
+
+TOPOK	MOVE	BOTTOM(A0),D0				;GET SRCRECT.BOTTOM
+		CMP 	BOUNDS+BOTTOM(A1),D0			;IS SRCRECT BOT < BOUNDS BOT ?
+		BGE.S	BOTOK					;NO, CONTINUE
+		MOVE	D0,BOUNDS+BOTTOM(A1)			;YES, TRIM BOUNDS BOTTOM
+
+BOTOK	MOVE	LEFT(A0),D0 			;GET SRCRECT.LEFT
+		SUB 	BOUNDS+LEFT(A1),D0			;CALC SKIPLEFT
+		BLE.S	LEFTOK					;CONTINUE IF SKIPLEFT NEG
+		LSR 	#3,D0					;DIV BY 8 FOR SKIP BYTES
+		ADD 	D0,A3					;OFFSET BASEADDR HORIZ
+		LSL 	#3,D0					;BYTES TIMES 8 FOR DOTS
+		ADD 	D0,BOUNDS+LEFT(A1)			;ADD DOTS TO BOUNDS.LEFT
+
+LEFTOK	MOVE	RIGHT(A0),D0				;GET SRCRECT.RIGHT
+		SUB 	BOUNDS+LEFT(A1),D0			;CONVERT TO GLOBAL
+		ADD 	#7,D0					;ROUND UP
+		LSR 	#3,D0					;TO NEXT MULT OF 8
+		LSL 	#3,D0
+		ADD 	BOUNDS+LEFT(A1),D0			;RETURN TO LOCAL
+		CMP 	BOUNDS+RIGHT(A1),D0 		;IS RESULT < BOUNDS.RIGHT ?
+		BGE.S	RIGHTOK 				;NO, CONTINUE
+		MOVE	D0,BOUNDS+RIGHT(A1) 		;YES, TRIM RIGHT
+RIGHTOK
+;
+;  CALC NEW ROWBYTES AFTER TRIMMING
+;
+		MOVE	BOUNDS+RIGHT(A1),D5 		;GET TRIMMED RIGHT
+		SUB 	BOUNDS+LEFT(A1),D5			;CALC WIDTH
+		ADD 	#15,D5					;ROUND UP
+		LSR 	#4,D5					;DIV BY 16
+		BLE 	BITSOK					;IGNORE IF NEWROW <= 0
+		ADD 	D5,D5					;DOUBLE FOR NEW ROWBYTES
+		MOVE	D5,ROWBYTES(A1)			;COPY ROWBYTES
+
+		MOVE.B	#$90,-(SP)				;PUSH OPCODE=BITSRECT
+		TST.L	MASKRGN(A6) 			;IS MASKRGN NIL ?
+		BEQ.S	NOTRGN					;YES, CONTINUE
+		ADD.B	#1,(SP) 				;REPLACE OPCODE=BITSRGN (IE. $91)
+										;FIXED BUG 12/3/83, RP
+NOTRGN	CMP 	D6,D5					;IS NEWROW < 8 ?
+		BLT.S	NOPACK					;YES, DONT BITPACK
+		ADD.B	#8,(SP) 				;SET BIT 3 FOR BITPACK
+NOPACK	JSR 	PutPicByte				;PUT OPCODE TO THEPIC
+
+		PEA 	MYBITS+ROWBYTES(A6) 	;PUSH ADDR OF ROWBYTYES,BOUNDS
+		MOVE	#10,-(SP)				;PUSH BYTECOUNT = 10
+		JSR 	PutPicData				;PUT ROWBYTES,BOUNDS TO THEPIC
+
+		MOVE.L	SRCRECT(A6),-(SP)
+		MOVE	D6,-(SP)
+		JSR 	PutPicData				;PUT SRCRECT
+		MOVE.L	DSTRECT(A6),-(SP)
+		MOVE	D6,-(SP)
+		JSR 	PutPicData				;PUT DSTRECT
+		MOVE	MODE(A6),-(SP)
+		JSR 	PutPicWord				;PUT MODE
+
+		TST.L	MASKRGN(A6) 			;IS MASKRGN NIL ?
+		BEQ.S	NOMASK					;YES, SKIP IT
+		MOVE.L	MASKRGN(A6),-(SP)		;NO, PUSH MASKRGN
+		JSR 	PutPicRgn				;PUT MASKRGN TO THEPIC
+NOMASK
+;
+;  NOW PUT THE BITMAP DATA:  IF NEWROW >= 8 THEN USE PACKBITS
+;
+		LEA 	MYBITS(A6),A2			;POINT TO (TRIMMED) BITMAP
+		MOVE	BOUNDS+BOTTOM(A2),D7
+		SUB 	BOUNDS+TOP(A2),D7		;HEIGHT := BOUNDS BOT - TOP
+
+		CMP 	D6,D5					;IS NEWROW < 8 ?
+		BLT.S	START2					;YES, DONT TRY TO PACK
+		BRA.S	START1					;GO TO LOOP START
+MORE1	MOVE.L	A3,SRCPTR(A6)			;SRCPTR := ^SCANLINE DATA
+		LEA 	PACKBUF(A6),A0
+		MOVE.L	A0,DSTPTR(A6)			;DSTPTR := @PACKBUF
+		PEA 	SRCPTR(A6)				;PUSH VAR SRCPTR
+		PEA 	DSTPTR(A6)				;PUSH VAR DSTPTR
+		MOVE	D5,-(SP)				;PUSH SRCBYTES = NEWROW
+		_PackBits						;PACK ROW INTO PACKBUF <1.2/23mar89>
+		MOVE.L	DSTPTR(A6),D6			;GET UPDATED DSTPTR
+		LEA 	PACKBUF(A6),A0			;POINT TO PACKBUF
+		SUB.L	A0,D6					;CALC PACKED BYTECOUNT
+		MOVE.B	D6,-(SP)
+		JSR 	PutPicByte				;PUT PACKED BYTECOUNT TO THEPIC
+		PEA 	PACKBUF(A6)
+		MOVE	D6,-(SP)
+		JSR 	PutPicData				;PUT PACKED DATA TO THEPIC
+		ADD 	D4,A3					;ADD OLDROW TO BITS PTR
+START1	DBRA	D7,MORE1				;LOOP FOR HEIGHT ROWS
+		BRA.S	BITSOK
+
+;
+;  ROWBYTES < 8, DONT USE PACKBITS
+;
+MORE2	MOVE.L	A3,-(SP)				;PUSH ADDR OF BITS
+		MOVE	D5,-(SP)				;PUSH BYTECOUNT = NEWROW
+		JSR 	PutPicData				;PUT ONE ROW OF BITMAP DATA
+		ADD 	D4,A3					;ADD OLDROW TO BITS PTR
+START2	DBRA	D7,MORE2				;LOOP FOR HEIGHT ROWS
+
+
+BITSOK	MOVE.L	THEPORT(A4),A3			;RESTORE THEPORT PTR
+NOTPIC	TST 	PNVIS(A3)				;IS PNVIS >= 0 ?
+		BLT.S	GOHOME					;NO, QUIT
+		MOVE.L	SRCBITS(A6),-(SP)		;PUSH SRCBITS
+		PEA 	PORTBITS(A3)			;PUSH DSTBITS = PORTBITS
+		MOVE.L	SRCRECT(A6),-(SP)		;PUSH SRCRECT
+		MOVE.L	DSTRECT(A6),-(SP)		;PUSH DSTRECT
+		MOVE	MODE(A6),-(SP)			;PUSH MODE
+		MOVE.L	CLIPRGN(A3),-(SP)		;PUSH CLIPRGN
+		MOVE.L	VISRGN(A3),-(SP)		;PUSH VISRGN
+		MOVE.L	MASKRGN(A6),-(SP)		;PUSH MASKRGN
+		BNE.S	MASKOK					;WAS IT NIL ?
+		MOVE.L	WIDEOPEN(A4),(SP)		;YES, REPLACE WITH WIDEOPEN
+MASKOK	JSR 	STRETCHBITS 			;CALL STRETCHBITS
+
+GOHOME	MOVEM.L (SP)+,D3-D7/A2-A4		;RESTORE REGS
+		UNLINK	PARAMSIZE,'STDBITS '
+
+
+
+CopyBits PROC  EXPORT	
+		IMPORT ShieldCursor,ShowCursor,StretchBits
+;---------------------------------------------------------------
+;
+;  PROCEDURE CopyBits(srcBits,dstBits: BitMap;
+;			  srcRect,dstRect: Rect;
+;			  mode: 	   INTEGER;
+;			  maskRgn:		   RgnHandle *);
+;
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	22					;TOTAL BYTES OF PARAMS
+SRCBITS 		EQU 	PARAMSIZE+8-4		;LONG, ADDR OF BITMAP
+DSTBITS 		EQU 	SRCBITS-4			;LONG, ADDR OF BITMAP
+SRCRECT 		EQU 	DSTBITS-4			;LONG, ADDR OF RECT
+DSTRECT 		EQU 	SRCRECT-4			;LONG, ADDR OF RECT
+MODE			EQU 	DSTRECT-2			;WORD
+MASKRGN 		EQU 	MODE-4				;LONG, RGNHANDLE
+
+
+		LINK	A6,#0						;NO LOCAL VARS
+		MOVEM.L D6-D7/A2-A4,-(SP)			;SAVE REGS
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A3				;POINT TO CURRENT GRAFPORT
+		MOVE.L	SRCBITS(A6),A2				;POINT TO SRCBITS
+		MOVE.L	BASEADDR(A2),D7 			;GET SRCBITS.BASEADDR
+		MOVE.L	SCREENBITS+BASEADDR(A4),D6	;GET SCREENBITS.BASEADDR
+		CMP.L	D6,D7						;IS SRC FROM THE SCREEN ?
+		BNE.S	SRCOK						;NO, CONTINUE
+		MOVE.L	SRCRECT(A6),-(SP)			;YES, PUSH SRCRECT
+		MOVE.L	BOUNDS+TOPLEFT(A2),-(SP)	;PUSH OFFSET POINT
+		JSR 	SHIELDCURSOR				;HIDE THE CURSOR IF IN SRCRECT
+
+;-----------------------------------------------------
+;
+;  TEST IF DST IS TO THEPORT, (IF SO WE CLIP)
+;
+SRCOK	MOVE.L	DSTBITS(A6),A1				;POINT TO DSTBITS
+		MOVE.L	A3,D0						;IS THEPORT NIL ?
+		BEQ.S	NOTPORT 					;YES, NOT TO THEPORT
+		BTST	#0,D0						;IS THEPORT ODD ?
+		BNE.S	NOTPORT 					;YES, NOT TO THEPORT
+		MOVE.L	PORTBITS+BASEADDR(A3),D0	;GET PORTBITS.BASEADDR
+		CMP.L	BASEADDR(A1),D0 			;IS DST BASEADDR SAME ?
+		BNE.S	NOTPORT 					;NO, NOT TO THEPORT
+		MOVE.L	PORTBOUNDS(A3),D0			;GET PORT BOUNDS TOPLEFT
+		CMP.L	BOUNDS(A1),D0				;IS BOUNDS TOPLEFT SAME ?
+		BEQ.S	TOPORT						;YES, ITS PROBABLY TO THEPORT
+;
+;  DST IS DEFINITELY NOT TO THEPORT, SO WE CAN'T USE THE CAPTURE PROC.
+;  StretchBits(srcBits,dstBits,srcRect,dstRect,mode,wideOpen,wideOpen,maskRgn);
+;
+NOTPORT MOVE.L	A2,-(SP)					;PUSH SRCBITS
+		MOVE.L	A1,-(SP)					;PUSH DSTBITS
+		MOVE.L	SRCRECT(A6),-(SP)			;PUSH SRCRECT
+		MOVE.L	DSTRECT(A6),-(SP)			;PUSH DSTRECT
+		MOVE	MODE(A6),-(SP)				;PUSH MODE
+		MOVE.L	WIDEOPEN(A4),-(SP)			;PUSH WIDEOPEN
+		MOVE.L	(SP),-(SP)					;PUSH WIDEOPEN
+		MOVE.L	MASKRGN(A6),-(SP)			;PUSH MASKRGN
+		BNE.S	MASKOK						;WAS IT NIL ?
+		MOVE.L	WIDEOPEN(A4),(SP)			;YES, REPLACE WITH WIDEOPEN
+MASKOK	JSR 	STRETCHBITS 				;CALL STRETCHBITS
+		BRA.S	CLEANUP 					;AND CONTINUE
+
+;
+;  DST IS PROBABLY TO THEPORT, SO WE USE THE CAPTURE PROC.
+;  CallBits(srcBits,srcRect,dstRect,mode,maskRgn)
+;
+TOPORT	MOVE.L	A2,-(SP)					;PUSH SRCBITS
+		MOVE.L	SRCRECT(A6),-(SP)			;PUSH SRCRECT
+		MOVE.L	DSTRECT(A6),-(SP)			;PUSH DSTRECT
+		MOVE	MODE(A6),-(SP)				;PUSH MODE
+		MOVE.L	MASKRGN(A6),-(SP)			;PUSH MASKRGN (NIL OK)
+		MOVE.L	GRAFPROCS(A3),D0			;IS GRAFPROCS NIL ?
+		MOVE.L	JStdBits,A0 				;get piece of trap table
+		BEQ.S	USESTD						;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	BITSPROC(A0),A0 			;NO, GET PROC PTR
+USESTD	JSR 	(A0)						;CALL IT
+
+CLEANUP CMP.L	D6,D7						;WAS SRC FROM THE SCREEN ?
+		BNE.S	DONE						;NO, CONTINUE
+		JSR 	SHOWCURSOR					;YES, REPLACE CURSOR
+DONE	MOVEM.L (SP)+,D6-D7/A2-A4			;RESTORE REGS
+		UNLINK	PARAMSIZE,'COPYBITS'
+
+
+
+
+CopyMask PROC  EXPORT
+		IMPORT RSect,HideCursor,ShowCursor,InitRgn,SeekRgn,XorSlab
+;--------------------------------------------------------------
+;
+;  PROCEDURE CopyMask(srcBits,maskBits,dstBits: BitMap;
+;			  srcRect,maskRect,dstRect: Rect);
+;
+;  NEW ROUTINE ADDED TO QUICKDRAW April 28, 1985
+;
+;  Written by Bill Atkinson.  CopyRight 1985 Apple Computer Inc.
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+paramSize	  EQU	   24				;total bytes of params
+srcBits 	  EQU	   paramSize+8-4	;long, addr of BitMap
+maskBits	  EQU	   srcBits-4		;long, addr of BitMap
+dstBits 	  EQU	   maskBits-4		;long, addr of BitMap
+srcRect 	  EQU	   dstBits-4		;long, addr of Rect
+maskRect	  EQU	   srcRect-4		;long, addr of Rect
+dstRect 	  EQU	   maskRect-4		;long, addr of Rect
+
+
+;-------------------------------------------------
+;
+;  A6 OFFSETS OF LOCALS AFTER LINK:
+;
+MINRECT 	  EQU	  -8				;RECT
+RGNA		  EQU	  MINRECT-4 		;RgnHandle
+RGNB		  EQU	  RGNA-4			;RgnHandle
+STATEA		  EQU	  RGNB-RGNREC		;REGION STATE RECORD
+STATEB		  EQU	  STATEA-RGNREC 	;REGION STATE RECORD
+BUFLEFT 	  EQU	  STATEB-2			;WORD
+SRCADDR 	  EQU	  BUFLEFT-4 		;LONG
+MASKADDR	  EQU	  SRCADDR-4 		;LONG
+DSTADDR 	  EQU	  MASKADDR-4		;LONG
+SRCROW		  EQU	  DSTADDR-4 		;LONG
+MASKROW 	  EQU	  SRCROW-4		 ;LONG
+DSTROW		  EQU	  MASKROW-4 	 ;LONG
+SAVESTK 	  EQU	  DSTROW-4		 ;LONG
+VARSIZE 	  EQU	  SAVESTK		 ;SIZE OF LOCALS
+
+
+		 LINK	  A6,#VARSIZE			 ;ALLOCATE STACK FRAME
+		 MOVEM.L  D0-D7/A1-A4,-(SP) 	 ;SAVE REGS
+		 MOVE.L   SP,SAVESTK(A6)		 ;REMEMBER STACK FOR LATER
+		 MOVE.L   GRAFGLOBALS(A5),A2		 ;point to QuickDraw globals
+		 MOVE.L   WIDEOPEN(A2),RGNA(A6) 	 ;init RGNA to wideOpen
+		 MOVE.L   WIDEOPEN(A2),RGNB(A6) 	 ;init RGNB to wideOpen
+		 MOVE.L   THEPORT(A2),A2		 ;point to thePort
+		 MOVE.L   DSTBITS(A6),A4		 ;A4 POINTS TO DSTBITS
+		 MOVE.L   DSTRECT(A6),A3		 ;A3 POINTS TO DSTRECT
+;
+;  if dst is in thePort, then clip to visRgn and clipRgn
+;
+		 MOVE.L   portBits+baseAddr(A2),D0	 ;get thePort^.portBits
+		 CMP.L	  baseAddr(A4),D0		 ;is dst on screen ?
+		 BNE.S	  NOTPORT			 ;no, continue
+		 MOVE.L   CLIPRGN(A2),RGNA(A6)		 ;yes, clip to clipRgn
+		 MOVE.L   VISRGN(A2),RGNB(A6)		 ;and to visRgn
+NOTPORT
+;
+;  CALC MINRECT, THE INTERSECTION OF DSTRECT, DSTBITS.BOUNDS,
+;  AND TWO REGION BOUNDING BOXES.  QUIT IF RESULT IS EMPTY.
+;
+		 MOVE.L   A3,-(SP)			 ;PUSH DSTRECT
+		 PEA	  BOUNDS(A4)			 ;PUSH DSTBITS.BOUNDS
+		 MOVE.L   RGNA(A6),A0			 ;GET RGNHANDLE
+		 MOVE.L   (A0),A0			 ;DE-REFERENCE IT
+		 PEA	  RGNBBOX(A0)			 ;PUSH BOUNDING BOX
+		 MOVE.L   RGNB(A6),A0			 ;GET RGNHANDLE
+		 MOVE.L   (A0),A0			 ;DE-REFERENCE IT
+		 PEA	  RGNBBOX(A0)			 ;PUSH BOUNDING BOX
+		 MOVE	  #4,-(SP)			 ;PUSH NRECTS = 4
+DOSECT	 PEA	  MINRECT(A6)			 ;PUSH WHERE TO PUT RESULT
+		 JSR	  RSECT 			 ;INTERSECT 4 RECTS
+		 BEQ	  GOHOME			 ;QUIT IF EMPTY
+		 JSR	  HideCursor			 ;ELSE HIDE THE CURSOR
+
+;
+;  CALC BUFLEFT SO THAT RGNBUF WILL ALIGN TO DSTBITS
+;
+		 MOVE	  MINRECT+LEFT(A6),D1		 ;GET MINRECT LEFT
+		 SUB	  BOUNDS+LEFT(A4),D1		 ;CONVERT TO GLOBAL COORDS
+		 AND	  #$FFF0,D1 		 ;TRUNC TO MULT OF 16
+		 ADD	  BOUNDS+LEFT(A4),D1		 ;CONVERT BACK TO LOCAL
+		 MOVE	  D1,BUFLEFT(A6)		 ;SAVE AS BUFLEFT
+
+;
+;  INIT BOTH REGION STATE RECORDS AND ALLOCATE BUFFERS
+;
+		 MOVE.L   RGNA(A6),A0			 ;GET RGNHANDLE
+		 LEA	  STATEA(A6),A1 		 ;POINT TO STATE RECORD
+AGAIN	 MOVE.L   (A0),A0			 ;DE-REFERENCE RGNHANDLE
+		 CMP	  #10,RGNSIZE(A0)		 ;IS IT RECTANGULAR ?
+		 SEQ	  D7				 ;REMEMBER FOR BELOW
+		 MOVE	  MINRECT+LEFT(A6),D0		 ;GET MINH
+		 MOVE	  MINRECT+RIGHT(A6),D1		 ;GET MAXH
+		 MOVE	  BUFLEFT(A6),D2		 ;GET BUFLEFT
+		 JSR	  INITRGN			 ;INIT STATE, ALLOC BUFFER
+;
+;  IF REGION WAS RECTANGULAR, DRAW TOP SCANLINE INTO ITS BUFFER
+;  AND SET UP THISV AND NEXTV SO SEEKRGN DOES NOTHING
+;
+		 TST.B	  D7				 ;was region rectangular ?
+		 BEQ.S	  NOTRECT			 ;no, continue
+		 MOVE	  #-32767,THISV(A1) 	 ;yes, say we're at infinity
+		 MOVE	  #32767,NEXTV(A1)		 ;and next change is never
+		 MOVE.L   SCANBUF(A1),A0		 ;point to buffer
+		 MOVE	  MINRECT+LEFT(A6),D3		 ;get minrect.left
+		 SUB	  BUFLEFT(A6),D3		 ;make buffer relative
+		 MOVE	  MINRECT+RIGHT(A6),D4		 ;get minrect.right
+		 SUB	  BUFLEFT(A6),D4		 ;make buffer relative
+		 JSR	  XorSlab			 ;draw into buffer
+NOTRECT  LEA	  STATEB(A6),A0 		 ;point to state record B
+		 CMP.L	  A0,A1 			 ;did we just do RGNB ?
+		 BEQ.S	  GETDST			 ;yes, continue
+		 MOVE.L   A0,A1 			 ;no, point to STATEB
+		 MOVE.L   RGNB(A6),A0			 ;get RGNB handle
+		 BRA	  AGAIN 			 ;and loop to init STATEB
+;
+;  Set up dstRow and starting dstAddr
+;
+GETDST	 MOVE	  ROWBYTES(A4),D1		 ;get dst rowBytes
+		 EXT.L	  D1				 ;make it long
+		 MOVE.L   D1,DSTROW(A6) 		 ;save dstRow for later
+		 MOVE	  MINRECT+TOP(A6),D0		 ;get dst top
+		 SUB	  BOUNDS+TOP(A4),D0 	 ;convert to global
+		 MULU	  D1,D0 			 ;mult by rowbytes
+		 MOVE.L   BASEADDR(A4),A0		 ;get dst baseAddr
+		 ADD.L	  D0,A0 			 ;add vertical offset
+		 MOVE	  MINRECT+LEFT(A6),D0		 ;get dst left
+		 SUB	  BOUNDS+LEFT(A4),D0		 ;convert to global
+		 LSR	  #4,D0 			 ;convert dots to words
+		 ADD	  D0,D0 			 ;double for bytes
+		 ADD	  D0,A0 			 ;add horizontal offset
+		 MOVE.L   A0,DSTADDR(A6)		 ;save result in dstAddr
+
+;
+;  Set up srcRow, srcShift, and starting srcAddr
+;
+		 MOVE.L   SRCRECT(A6),A1		 ;point to srcRect
+		 MOVE.L   SRCBITS(A6),A2		 ;point to srcBits
+		 MOVE	  ROWBYTES(A2),D1		 ;get src rowBytes
+		 EXT.L	  D1				 ;make it long
+		 MOVE.L   D1,SRCROW(A6) 		 ;save srcRow for later
+
+		 MOVE	  LEFT(A3),D6			 ;get dst left
+		 SUB	  BOUNDS+LEFT(A4),D6		 ;convert to global
+		 MOVE	  LEFT(A1),D1			 ;get src left
+		 SUB	  BOUNDS+LEFT(A2),D1		 ;convert to global
+		 SUB	  D1,D6 			 ;calc delta horiz
+		 AND	  #$F,D6			 ;mod 16 for srcShift
+
+		 MOVE	  MINRECT+TOP(A6),D0		 ;get clipped dst top
+		 SUB	  TOP(A3),D0			 ;convert from dst coords
+		 ADD	  TOP(A1),D0			 ;to src coords
+		 SUB	  BOUNDS+TOP(A2),D0 	 ;convert to global
+		 MULU	  ROWBYTES(A2),D0		 ;mult by src rowbytes
+		 MOVE.L   BASEADDR(A2),A0		 ;get src baseAddr
+		 ADD.L	  D0,A0 			 ;add vertical offset
+
+		 MOVE	  MINRECT+LEFT(A6),D0		 ;get clipped dstLeft
+		 SUB	  LEFT(A3),D0			 ;convert from dst coords
+		 ADD	  LEFT(A1),D0			 ;to src coords
+		 SUB	  BOUNDS+LEFT(A2),D0		 ;convert to global
+		 ADD	  D6,D0 			 ;add srcShift
+		 LSR	  #4,D0 			 ;convert dots to words
+		 ADD	  D0,D0 			 ;double for bytes
+		 ADD	  D0,A0 			 ;add horiz offset
+		 MOVE.L   A0,SRCADDR(A6)		 ;save srcAddr for later
+
+;
+;  Set up maskRow, maskShift, and starting maskAddr
+;
+		 MOVE.L   MASKRECT(A6),A1		 ;point to maskRect
+		 MOVE.L   MASKBITS(A6),A2		 ;point to maskBits
+		 MOVE	  ROWBYTES(A2),D1		 ;get mask rowBytes
+		 EXT.L	  D1				 ;make it long
+		 MOVE.L   D1,MASKROW(A6)		 ;save maskRow for later
+
+		 MOVE	  LEFT(A3),D7			 ;get dst left
+		 SUB	  BOUNDS+LEFT(A4),D7		 ;convert to global
+		 MOVE	  LEFT(A1),D1			 ;get mask left
+		 SUB	  BOUNDS+LEFT(A2),D1		 ;convert to global
+		 SUB	  D1,D7 			 ;calc delta horiz
+		 AND	  #$F,D7			 ;mod 16 for maskShift
+
+		 MOVE	  MINRECT+TOP(A6),D0		 ;get clipped dst top
+		 SUB	  TOP(A3),D0			 ;convert from dst coords
+		 ADD	  TOP(A1),D0			 ;to mask coords
+		 SUB	  BOUNDS+TOP(A2),D0 	 ;convert to global
+		 MULU	  ROWBYTES(A2),D0		 ;mult by mask rowbytes
+		 MOVE.L   BASEADDR(A2),A0		 ;get mask baseAddr
+		 ADD.L	  D0,A0 			 ;add vertical offset
+
+		 MOVE	  MINRECT+LEFT(A6),D0		 ;get clipped dstLeft
+		 SUB	  LEFT(A3),D0			 ;convert from dst coords
+		 ADD	  LEFT(A1),D0			 ;to mask coords
+		 SUB	  BOUNDS+LEFT(A2),D0		 ;convert to global
+		 ADD	  D7,D0 			 ;add maskShift
+		 LSR	  #4,D0 			 ;convert dots to words
+		 ADD	  D0,D0 			 ;double for bytes
+		 ADD	  D0,A0 			 ;add horiz offset
+		 MOVE.L   A0,MASKADDR(A6)		 ;save maskAddr for later
+
+;
+;  MAKE REGION BUFFERS CURRENT FOR THIS VERTICAL.
+;  THEN SET UP AND DRAW CURRENT SCANLINE.
+;
+		 MOVE	  MINRECT+TOP(A6),D5		 ;init CURRENT VERTICAL
+NEXTROW  MOVE	  D5,D0 			 ;get current vert
+		 LEA	  STATEA(A6),A1 		 ;point to state record A
+		 JSR	  SEEKRGN			 ;seek region to current vert
+		 MOVE	  D5,D0 			 ;get current vert
+		 LEA	  STATEB(A6),A1 		 ;point to state record B
+		 JSR	  SEEKRGN			 ;seek region to current vert
+		 MOVE.L   STATEA+SCANBUF(A6),A0 	 ;init REGION A PTR
+		 MOVE.L   STATEB+SCANBUF(A6),A1 	 ;init REGION B PTR
+		 MOVE.L   SRCADDR(A6),A2		 ;init SRCPTR
+		 MOVE.L   MASKADDR(A6),A3		 ;init MASKPTR
+		 MOVE.L   DSTADDR(A6),A4		 ;init DSTPTR
+		 MOVE	  STATEA+SCANSIZE(A6),D3	 ;init LONGCOUNT
+
+NEXTLONG MOVE.L   -2(A2),D0 		 ;get a long of src
+		 LSR.L	  D6,D0 			 ;align to dst
+		 SWAP	  D0				 ;put result in hi word
+		 MOVE.L   (A2)+,D1			 ;get second long of src
+		 LSR.L	  D6,D1 			 ;align to dst
+		 MOVE.W   D1,D0 			 ;assemble one long of src
+		 MOVE.L   -2(A3),D1 		 ;get a long of mask
+		 LSR.L	  D7,D1 			 ;align to dst
+		 SWAP	  D1				 ;put result in hi word
+		 MOVE.L   (A3)+,D2			 ;get second long of mask
+		 LSR.L	  D7,D2 			 ;align to dst
+		 MOVE.W   D2,D1 			 ;assemble one long of mask
+		 AND.L	  (A0)+,D1			 ;and with RGNA buffer
+		 AND.L	  (A1)+,D1			 ;and with RGNB buffer
+		 AND.L	  D1,D0 			 ;mask src data
+		 NOT.L	  D1				 ;form notmask
+		 AND.L	  (A4),D1			 ;get dst data
+		 OR.L	  D1,D0 			 ;merge with src data
+		 MOVE.L   D0,(A4)+			 ;store result into dst
+		 DBRA	  D3,NEXTLONG			 ;loop all longs this scanline
+;
+;  bump vertically and loop for all scanlines
+;
+		 MOVE.L   SRCROW(A6),D0 		 ;GET SRC ROWBYTES
+		 ADD.L	  D0,SRCADDR(A6)		 ;BUMP SRC TO NEXT ROW
+		 MOVE.L   MASKROW(A6),D0		 ;GET MASK ROWBYTES
+		 ADD.L	  D0,MASKADDR(A6)		 ;BUMP MASK TO NEXT ROW
+		 MOVE.L   DSTROW(A6),D0 		 ;GET DST ROWBYTES
+		 ADD.L	  D0,DSTADDR(A6)		 ;BUMP DST TO NEXT ROW
+		 ADD	  #1,D5 			 ;ADD ONE TO VERT
+		 CMP	  MINRECT+BOTTOM(A6),D5 	 ;ARE WE AT THE BOTTOM ?
+		 BNE	  NEXTROW			 ;NO, LOOP FOR ALL SCAN LINES
+
+		 JSR	  SHOWCURSOR			 ;RESTORE CURSOR
+GOHOME	 MOVE.L   SAVESTK(A6),SP		 ;STRIP VARIABLE SIZED BUFFER
+		 MOVEM.L  (SP)+,D0-D7/A1-A4 	 ;RESTORE REGISTERS
+		 UNLINK   PARAMSIZE,'CopyMask'
+
+
+
+
+SeedFill PROC	 EXPORT 
+		EXPORT	CalcMask
+;-------------------------------------------------------------------------
+;
+;  PROCEDURE SeedFill(srcPtr,dstPtr: Ptr;
+;			  srcRow,dstRow,height,words: INTEGER;
+;			  seedH,seedV: INTEGER)
+;
+		MOVE.L	(SP)+,A0				;pop return addr
+		MOVEQ	#-1,D0					;get a long of -1
+		MOVE.L	D0,-(SP)				;push edge = all ones
+		BRA.S	SHARE					;share common code
+
+
+;-------------------------------------------------------------------------
+;
+;  PROCEDURE CalcMask(srcPtr,dstPtr: Ptr;
+;			  srcRow,dstRow,height,words: INTEGER);
+;
+CalcMask MOVE.L   (SP)+,A0			  ;pop return addr
+		 MOVEQ	  #-1,D0			  ;get a long of -1
+		 MOVE.L   D0,-(SP)			  ;push seed = (-1,-1)
+		 CLR.L	  -(SP) 			  ;push edge = zeros
+SHARE	 MOVE.L   A0,-(SP)			  ;restore return addr
+
+
+
+;-------------------------------------------------------------------------
+;
+;  LOCAL PROCEDURE MakeMask(srcPtr,dstPtr: Ptr;
+;				srcRow,dstRow,height,words: INTEGER;
+;				seedH,seedV: INTEGER;
+;				edge: LongInt);
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+params			EQU 	24
+srcPtr			EQU 	params+8-4			;long
+dstPtr			EQU 	srcPtr-4			;long
+srcRow			EQU 	dstPtr-2			;word
+dstRow			EQU 	srcRow-2			;word
+height			EQU 	dstRow-2			;word
+words			EQU 	height-2			;word
+seedH			EQU 	words-2 			;word
+seedV			EQU 	seedH-2 			;word
+edge			EQU 	seedV-4 			;long
+
+
+dstBump 		EQU 	-2				;word
+saveStk 		EQU 	dstBump-4			;long
+varSize 		EQU 	saveStk 			;total locals
+
+
+		LINK	A6,#varSize 			;allocate stack frame
+		MOVEM.L D3-D7/A2-A4,-(SP)			;save regs
+		MOVE.L	SP,saveStk(A6)				;save stack pointer
+
+;
+;  prepare height and words for DBRA count.  Quit if either <= 0.
+;
+		MOVE	words(A6),D5				;get count of words
+		BLE 	GOHOME					;quit if words <= 0
+		SUB 	#1,D5					;subtract 1 for DBRA count
+		SUB 	#1,height(A6)				;convert height to DBRA
+		BLT 	GOHOME					;quit if height <= 0
+
+;
+;  init dst to all ones:
+;
+		MOVE	words(A6),D0				;get # of words
+		ADD 	D0,D0					;double for bytes
+		MOVE	dstRow(A6),D1				;get dstRow
+		SUB 	D0,D1					;subtract bytes for dstBump
+		MOVE	D1,dstBump(A6)				;save dstBump for later
+		MOVE.L	dstPtr(A6),A2				;point to dst
+		MOVEQ	#-1,D0					;get some black
+		MOVE	height(A6),D3				;init DBRA rowCount
+BLACK1	MOVE	D5,D2					;init DBRA wordCount
+BLACK2	MOVE	D0,(A2)+				;put a word of black
+		DBRA	D2,BLACK2				;loop all words in row
+		ADD 	D1,A2					;bump to next row
+		DBRA	D3,BLACK1				;loop height rows
+
+;
+;  clear one dst pixel at seedH,seedV
+;
+		MOVE	seedV(A6),D0				;get seed vert coord
+		BLT.S	NOSEED					;skip if neg (no seed)
+		MULU	dstRow(A6),D0				;mul times dst row
+		MOVE.L	dstPtr(A6),A0				;point to dst
+		ADD.L	D0,A0					;add vertical offset	<EHB 28-Oct-85>
+		MOVE	seedH(A6),D0				;get seed horiz coord
+		MOVE	D0,D1					;copy seedH
+		LSR 	#3,D0					;div by 8 for byte
+		NOT 	D1					;invert bit number
+		BCLR	D1,0(A0,D0) 			;clear seed pixel
+NOSEED
+;
+;  allocate a scanline buffer of ones or zeros on the stack:
+;
+		MOVE.L	edge(A6),D6 			;get zero or all ones
+		MOVE	D5,D1					;get longCount
+NEXTBUF MOVE	D6,-(SP)				;write a word of ones or zeros
+		DBRA	D1,NEXTBUF				;loop all words
+
+		MOVE.L	srcPtr(A6),A0				;point to top of src
+		MOVE.L	dstPtr(A6),A2				;point to top of dst
+NXTPASS SF		D7					;clear dirty flag
+		MOVE	height(A6),D4				;get DBRA rowCount
+		MOVE.L	SP,A1					;point dst above to edgeBuf
+
+;
+;  smear dst zeros down and to the right, smear limited by src.
+;
+NEXTROW MOVE.L	D6,D1					;init prev dst to edge
+		MOVE	D5,D3					;get DBRA wordCount
+RNEXT	MOVE	(A2),D1 				;get dst word
+		BNE.S	RDSTOK					;is it already zero ?
+		ADD 	#2,A0					;yes, bump srcPtr
+		ADD 	#2,A1					;bump dstAbove ptr
+		ADD 	#2,A2					;bump dst ptr
+		SWAP	D1					;put prev dst in hi word
+		DBRA	D3,RNEXT				;loop all words in row
+		BRA 	RDONE					;and continue below
+RDSTOK	MOVE	(A0)+,D2				;get src word
+		AND 	(A1)+,D1				;smear zeros down
+		OR		D2,D1					;limit vertical smear by src
+		BRA.S	RSTART					;go to loop start
+RMORE	MOVE	D0,D1					;update dst
+RSTART	MOVE.L	D1,D0					;copy dst and prev dst word
+		LSR.L	#1,D0					;shift right with carry from prev
+		AND 	D1,D0					;smear zeros to the right
+		OR		D2,D0					;limit smear by src
+		CMP 	D1,D0					;any changes ?
+		BNE 	RMORE					;yes, keep smearing
+		CMP 	(A2),D1 				;has dst changed ?
+		BEQ.S	RSAME					;no, leave it alone
+		ST		D7					;yes, set dirty flag
+RSAME	MOVE	D1,(A2)+				;write dst to memory
+		SWAP	D1					;put prev dst in hi word
+		DBRA	D3,RNEXT				;loop all words in row
+RDONE
+
+
+;
+;  smear dst zeros down and to the left, smear limited by src.
+;
+LSMEAR	MOVE.L	D6,D1					;init prev dst to edge
+		MOVE	D5,D3					;get DBRA wordCount
+LNEXT	MOVE	-(A2),D1				;get dst word
+		BNE.S	LDSTOK					;is dst already zero ?
+		SUB 	#2,A0					;yes, just bump srcPtr
+		SUB 	#2,A1					;bump dstAbove ptr
+		SWAP	D1					;put prev dst in hi word
+		DBRA	D3,LNEXT				;loop all words in row
+		BRA.S	LDONE					;and continue
+LDSTOK	MOVE	-(A0),D2				;get src word
+		AND 	-(A1),D1				;smear zeros down
+		OR		D2,D1					;limit vertical smear by src
+		BRA.S	LSTART					;go to loop start
+LMORE	MOVE	D0,D1					;update dst
+LSTART	MOVE.L	D1,D0					;copy dst and prev dst word
+		ROL.L	#1,D0					;shift left with carry from prev
+		AND 	D1,D0					;smear zeros to the left
+		OR		D2,D0					;limit smear by src
+		CMP 	D1,D0					;any changes ?
+		BNE 	LMORE					;yes, keep smearing
+		CMP 	(A2),D1 				;has dst changed ?
+		BEQ.S	LSAME					;no, leave it alone
+		ST		D7					;yes, set dirty flag
+		MOVE	D1,(A2) 				;write dst to memory
+LSAME	SWAP	D1					;put prev dst in hi word
+		DBRA	D3,LNEXT				;loop all words in row
+LDONE
+;
+;  bump three pointers down and loop for height scanlines
+;
+		ADD 	srcRow(A6),A0				;bump srcPtr down a row
+		ADD 	dstRow(A6),A2				;bump dstPtr down a row
+		MOVE.L	A2,A1					;copy dstPtr
+		SUB 	dstRow(A6),A1				;point to dst above
+		DBRA	D4,NEXTROW				;loop all rows
+;
+;  switch directions, adjust pointers, and loop till no change
+;
+		NEG 	srcRow(A6)				;reverse src bump
+		NEG 	dstRow(A6)				;reverse dst bump
+		ADD 	srcRow(A6),A0				;offset first src scanline
+		ADD 	dstRow(A6),A2				;offset first dst scanline
+		TST.B	D7					;did anything change this pass ?
+		BNE 	NXTPASS 				;yes go for another pass
+;
+;  if seedFill, then invert dst
+;
+		TST 	D6					;is edge = black ?
+		BPL.S	GOHOME					;no, we're done
+		MOVE	dstBump(A6),D1				;get dstBump
+		MOVE.L	dstPtr(A6),A2				;point to dst
+		MOVE	height(A6),D3				;init DBRA rowCount
+INVERT1 MOVE	D5,D2					;init DBRA wordCount
+INVERT2 NOT 	(A2)+					;invert a word of dst
+		DBRA	D2,INVERT2				;loop all words in row
+		ADD 	D1,A2					;bump to next row
+		DBRA	D3,INVERT1				;loop height rows
+
+GOHOME	MOVE.L	saveStk(A6),SP				;restore stack pointer
+		MOVEM.L (SP)+,D3-D7/A2-A4			;restore regs
+		UNLK	A6					;release stack frame
+		MOVE.L	(SP)+,A0				;pop return addr
+		ADD 	#params,SP				;strip params
+		JMP 	(A0)					;and return
+
+
+
+
+ScrollRect PROC  EXPORT 	
+		IMPORT NewRgn,RectRgn,SectRgn,CopyRgn,OffsetRgn,SetEmptyRgn
+		IMPORT DiffRgn,ShieldCursor,RgnBlt,ShowCursor
+;---------------------------------------------------------------------
+;
+;  PROCEDURE ScrollRect(dstRect: Rect; dh,dv: INTEGER; updateRgn: RgnHandle);
+;
+;  Scroll a rectangular block of bits, erase and return an update region
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	12				;TOTAL BYTES OF PARAMS
+DSTRECT 		EQU 	PARAMSIZE+8-4			;LONG, ADDR OF RECT
+DH			EQU 	DSTRECT-2			;WORD
+DV			EQU 	DH-2				;WORD
+UPDATERGN		EQU 	DV-4				;LONG, RGNHANDLE
+
+SRCRECT 		EQU 	-8				;RECT
+VARSIZE 		EQU 	SRCRECT 			;TOTAL LOCALS
+
+
+		LINK	A6,#VARSIZE 			;ALLOCATE STACK FRAME
+		MOVEM.L D6-D7/A3-A4,-(SP)			;SAVE REGS
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A3				;POINT TO CURRENT GRAFPORT
+		TST 	PNVIS(A3)				;IS PNVIS < 0 ?
+		BLT 	ABORT					;YES, QUIT FAST
+		TST.L	DV(A6)					;ARE DH AND DV BOTH 0 ?
+		BEQ 	ABORT					;YES, QUIT FAST
+
+		CLR.L	-(SP)					;ROOM FOR FCN RESULT
+		JSR 	NEWRGN					;ALLOCATE SRCRGN
+		MOVE.L	(SP)+,D7				;GET SRCRGN HANDLE IN D7
+		CLR.L	-(SP)					;ROOM FOR FCN RESULT
+		JSR 	NEWRGN					;ALLOCATE DSTRGN
+		MOVE.L	(SP)+,D6				;GET DSTRGN HANDLE IN D6
+;
+;  srcRgn := dstRect SECT visRgn SECT clipRgn
+;
+		MOVE.L	D7,-(SP)				;PUSH SRCRGN
+		MOVE.L	DSTRECT(A6),-(SP)			;PUSH DSTRECT
+		JSR 	RECTRGN 				;RectRgn(srcRgn,dstRect);
+
+		MOVE.L	D7,-(SP)				;PUSH SRCRGN
+		MOVE.L	VISRGN(A3),-(SP)			;PUSH VISRGN
+		MOVE.L	D7,-(SP)				;PUSH SRCRGN
+		JSR 	SECTRGN 				;SectRgn(srcRgn,visRgn,srcRgn);
+
+		MOVE.L	D7,-(SP)				;PUSH SRCRGN
+		MOVE.L	CLIPRGN(A3),-(SP)			;PUSH CLIPRGN
+		MOVE.L	D7,-(SP)				;PUSH SRCRGN
+		JSR 	SECTRGN 				;SectRgn(srcRgn,clipRgn,srcRgn);
+;
+;  dstRgn := offset srcRgn
+;
+		MOVE.L	D7,-(SP)				;PUSH SRCRGN
+		MOVE.L	D6,-(SP)				;PUSH DSTRGN
+		JSR 	COPYRGN 				;CopyRgn(srcRgn,dstRgn);
+		MOVE.L	D6,-(SP)				;PUSH DSTRGN
+		MOVE.L	DV(A6),-(SP)				;PUSH DH,DV
+		JSR 	OFFSETRGN				;OffsetRgn(dstRgn,dh,dv);
+
+		MOVE.L	DSTRECT(A6),A0				;POINT TO DSTRECT
+		MOVE.L	(A0)+,SRCRECT(A6)			;COPY DSTRECT INTO SRCRECT
+		MOVE.L	(A0)+,SRCRECT+4(A6)
+		MOVE.L	DV(A6),D0				;GET DH,DV
+		SUB 	D0,SRCRECT+LEFT(A6) 		;OFFSET SRCRECT (-DH,-DV)
+		SUB 	D0,SRCRECT+RIGHT(A6)
+		SWAP	D0					;GET DV IN LO WORD
+		SUB 	D0,SRCRECT+TOP(A6)
+		SUB 	D0,SRCRECT+BOTTOM(A6)
+
+;
+;  Compute updateRgn := srcRgn - dstRgn
+;
+		MOVE.L	D7,-(SP)				;PUSH SRCRGN
+		MOVE.L	D6,-(SP)				;PUSH DSTRGN
+		MOVE.L	UPDATERGN(A6),-(SP) 		;PUSH UPDATERGN
+		JSR 	DIFFRGN 				;DiffRgn(srcRgn,dstRgn,updateRgn);
+;
+;  ShieldCursor(dstRect,portBits.bounds.topLeft);  { protect source }
+;
+		MOVE.L	DSTRECT(A6),-(SP)		   ;PUSH DSTRECT
+		MOVE.L	PORTBITS+BOUNDS+TOPLEFT(A3),-(SP)  ;PUSH OFFSET POINT
+		JSR 	SHIELDCURSOR			   ;REMOVE CRSR IF INTERSECTS
+;
+;  Copy all bits which are in both srcRgn and dstRgn.
+;  RgnBlt(portBits,portBits,srcRect,dstRect,0,white,dstRgn,srcRgn,wideOpen);
+;
+		PEA 	PORTBITS(A3)				;PUSH SRCBITS
+		MOVE.L	(SP),-(SP)				;PUSH DSTBITS
+		PEA 	SRCRECT(A6) 			;PUSH SRCRECT
+		MOVE.L	DSTRECT(A6),-(SP)			;PUSH DSTRECT
+		CLR 	-(SP)					;PUSH MODE = SRCCOPY
+		CLR.L	-(SP)					;PAT NOT USED
+		MOVE.L	D6,-(SP)				;PUSH DSTRGN
+		MOVE.L	D7,-(SP)				;PUSH SRCRGN
+		MOVE.L	WIDEOPEN(A4),-(SP)			;PUSH WIDEOPEN
+		JSR 	RGNBLT					;COPY THE BITS
+;
+;  Erase the update region
+;  RgnBlt(portBits,portBits,dstRect,dstRect,8,bkPat,updateRgn,wideOpen,wideOpen);
+;
+		PEA 	PORTBITS(A3)				;PUSH SRCBITS
+		MOVE.L	(SP),-(SP)				;PUSH DSTBITS
+		MOVE.L	DSTRECT(A6),-(SP)			;PUSH SRCRECT
+		MOVE.L	(SP),-(SP)				;PUSH DSTRECT
+		MOVE	#8,-(SP)				;PUSH MODE = PATCOPY
+		PEA 	BKPAT(A3)				;PUSH PAT = BKPAT
+		MOVE.L	UPDATERGN(A6),-(SP) 		;PUSH UPDATERGN
+		MOVE.L	WIDEOPEN(A4),-(SP)			;PUSH WIDEOPEN
+		MOVE.L	(SP),-(SP)				;PUSH WIDEOPEN
+		JSR 	RGNBLT					;ERASE THE UPDATE RGN
+
+		JSR 	SHOWCURSOR				;RESTORE THE CURSOR
+		MOVE.L	D7,A0					;GET SRCRGN
+		_DisposHandle					;DISCARD IT
+		MOVE.L	D6,A0					;PUSH DSTRGN
+		_DisposHandle					;DISCARD IT
+		BRA.S	DONE
+
+ABORT	MOVE.L	UPDATERGN(A6),-(SP) 		;PUSH UPDATERGN HANDLE
+		JSR 	SETEMPTYRGN 			;SET IT TO EMPTY
+
+DONE	MOVEM.L (SP)+,D6-D7/A3-A4			;RESTORE REGS
+		UNLINK	PARAMSIZE,'SCROLLRE'
+
+
+
+
+PackBits PROC  EXPORT
+		EXPORT UnpackBits
+;---------------------------------------------------------------------
+;
+;  PROCEDURE PackBits(VAR srcPtr,dstPtr: Ptr; srcBytes: INTEGER);
+;
+;  Packs one scanline of data, compressing equal bytes.
+;  Returns updated srcPtr and dstPtr.
+;
+;  Equates for parameters are shared with UnpackBits
+;
+PARAMSIZE		EQU 	10				;TOTAL BYTES OF PARAMS
+SRCPTR			EQU 	PARAMSIZE+4-4			;LONG, VAR
+DSTPTR			EQU 	SRCPTR-4			;LONG,VAR
+SRCBYTES		EQU 	DSTPTR-2			;WORD
+DSTBYTES		EQU 	SRCBYTES			;ALIAS
+;---------------------------------------------------------------------
+; <1.2/23mar89>
+; Header code added to Packbits that corresponds to patch PMA207 and
+; used by PMA399.  This patch to PackBits allows scanlines passed to 
+; packBits to be longer than the 127 byte limit that currently exists 
+; on all machines except the Mac II.
+; ** Note : This patch does not pack images exactly the same as a 
+;   		Mac II.  (To do so would have taken more code.)
+;
+; STACK:	0:D3(2) 2:RTS(4) 6:count(2) 8:dst(4) 12:src(4)
+
+			MOVE	D3,-(SP)					; save work register
+			MOVE	6(SP),D3					; get number of bytes to pack
+@nextchunk	MOVE	D3,D0						; get size
+			MOVEQ	#127,D1						; get max chunk size
+			SUB		D1,D3						; is chunk too big?
+			BLS.S	@lastchunk					; => no, do last chunk
+			BSR.S	@restore					; and pack last chunk
+			BRA.S	@nextchunk					; => repeat for next chunk
+			
+@lastchunk	MOVE	D0,D1						; get size of last chunk
+			BSR.S	@restore					; and pack last chunk			
+			MOVE	(SP)+,D3					; restore work register
+			MOVE.L	(SP)+,A0					; get return address
+			ADD		#10,SP						; strip params
+			JMP		(A0)						; and return
+			
+@restore	MOVE.L	12+4(SP),-(SP)				; push src
+			MOVE.L	8+8(SP),-(SP)				; push dst
+			MOVE	D1,-(SP)					; push count
+			JSR		DOPACK						; call packbits loop
+			RTS									; return to caller
+; <1.2/23mar89>  end fix
+
+;---------------------------------------------------------------------
+; Start of Packbits prior to adding header code just above this
+;
+DOPACK	MOVE.L	A2,-(SP)				;SAVE REGS	<1.2/23mar89>
+		MOVE.L	SRCPTR+4(SP),A0 			;GET VAR ADDR
+		MOVE.L	(A0),A0 				;GET SRCPTR ITSELF
+		MOVE.L	DSTPTR+4(SP),A1 			;GET VAR ADDR
+		MOVE.L	(A1),A1 				;GET DSTPTR ITSELF
+		MOVE	SRCBYTES+4(SP),D1			;GET SRCBYTES
+		SUB 	#1,D1					;INIT SRC DBRA COUNT
+		BLT.S	DONE					;QUIT IF SRCBYTES <= 0
+		MOVE.B	(A0)+,D0				;GET FIRST BYTE OF SRC
+		BRA.S	START					;AND GO TO LOOP START
+
+FILLOP	MOVE.B	-1(A0),D0				;PUT SRCDATA IN DO
+		SUB 	A0,D2					;COMPUTE FILLOP
+		ADD 	#1,D2
+		MOVE.B	D2,(A2) 				;STORE FILLOP
+
+START	MOVE	A0,D2					;REMEMBER SRCSTART
+		MOVE.L	A1,A2					;REMEMBER OPLOC
+		CLR.B	(A1)+					;RESERVE ROOM FOR OPCODE
+		CMP.B	(A0),D0 				;IS NEXT SRC THE SAME ?
+		BNE.S	DOCOPY					;NO, USE COPY LOOP
+		CMP.B	1(A0),D0				;THREE IN A ROW ?
+		BNE.S	DOCOPY					;NO, USE COPY LOOP
+		BRA.S	DOFILL					;YES, USE FILL LOOP
+
+NXTCOPY MOVE.B	(A0)+,D0				;GET BYTE OF SRC
+		CMP.B	(A0),D0 				;IS THE NEXT THE SAME ?
+		BNE.S	DOCOPY					;NO, CONTINUE
+		CMP.B	1(A0),D0				;THREE IN A ROW ?
+		BEQ.S	COPYOP					;YES, END OF COPY RUN
+DOCOPY	MOVE.B	D0,(A1)+				;COPY DATA TO DST
+		DBRA	D1,NXTCOPY				;AND LOOP FOR MORE
+
+ENDCOPY SUB 	A0,D2					;COMPUTE COPYOP
+		NEG 	D2					;NEGATE ONLY
+		MOVE.B	D2,(A2) 				;INSTALL COPYOP
+		BRA.S	DONE					;AND QUIT
+
+COPYOP	TST 	D1					;IS THIS THE LAST SRC BYTE ?
+		BEQ 	DOCOPY					;YES, FINISH OFF COPY RUN
+		SUB 	A0,D2					;COMPUTE COPYOP
+		NOT 	D2					;NEGATE AND SUBTRACT 1
+		MOVE.B	D2,(A2) 				;STORE COPYOP
+		MOVE.L	A0,D2					;REMEMBER SRCSTART
+		MOVE.L	A1,A2					;REMEMBER OPLOC
+		CLR.B	(A1)+					;RESERVE ROOM FOR OPCODE
+
+DOFILL	MOVE.B	D0,(A1)+				;COPY THE DATA BYTE
+NXTFILL CMP.B	(A0)+,D0				;IS NEXT BYTE THE SAME ?
+		DBNE	D1,NXTFILL				;LOOP TILL NOT SAME OR END SRC
+		BEQ.S	ENDFILL 				;BRANCH IF SRC EXHAUSTED
+		SUB 	#1,D1					;COMPENSATE FOR DBNE DIDNT SUB
+		BGE 	FILLOP					;BR IF SRC NOT EXHAUSTED
+
+ENDFILL SUB 	A0,D2					;COMPUTE FILLOP
+		ADD 	#1,D2
+		MOVE.B	D2,(A2) 				;INSTALL FILLOP
+
+DONE	CLR.L	D0					;GET READY FOR WORD
+		MOVE	SRCBYTES+4(SP),D0			;GET SRCBYTES
+		MOVE.L	SRCPTR+4(SP),A0 			;GET VAR ADDR OF SRCPTR
+		ADD.L	D0,(A0) 				;BUMP SRCPTR
+		MOVE.L	DSTPTR+4(SP),A2 			;GET VAR ADDR OF DSTPTR
+		MOVE.L	A1,(A2) 				;UPDATE DSTPTR
+		MOVE.L	(SP)+,A2				;RESTORE REGS
+SHARE	MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		ADD 	#PARAMSIZE,SP				;STRIP PARAMS
+		JMP 	(A0)					;AND RETURN
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE UnpackBits(VAR srcPtr,dstPtr: Ptr; dstBytes: INTEGER);
+;
+;  Unpacks one scanline of data, as compressed by PackBits.
+;  Returns updated srcPtr and dstPtr.
+;
+;  Equates for parameters are the same as PackBits!
+;
+UnpackBits
+		MOVE.L	SRCPTR(SP),A0				;GET ADDR OF SRCPTR
+		MOVE.L	(A0),A0 				;GET SRCPTR ITSELF
+		MOVE.L	DSTPTR(SP),A1				;GET ADDR OF DSTPTR
+		MOVE.L	(A1),A1 				;GET DSTPTR ITSELF
+		MOVE	DSTBYTES(SP),D2 			;GET DSTBYTES
+		EXT.L	D2					;MAKE IT LONG
+		ADD.L	A1,D2					;LIMIT := DSTPTR + BYTECOUNT
+		BRA.S	@3					;GO TO LOOP START
+@1		EXT.W	D1					;CLEAR HI BYTE OF COUNT
+@2		MOVE.B	(A0)+,(A1)+ 			;COPY A BYTE OF DATA
+		DBRA	D1,@2					;LOOP ALL COPY BYTES
+@3		CMP.L	D2,A1					;IS DSTPTR >= LIMIT ?
+		BHS.S	@5					;YES, WE'RE DONE
+		MOVE.B	(A0)+,D1				;NO, GET  OPCODE
+		BPL.S	@1					;0..127 --> COPY 1..128 BYTES
+		NEG.B	D1					;-1..-127 --> FILL 2..128 BYTES
+		BVS.S	@3					;IGNORE $80 FOR BACKWARD COMPAT
+		EXT.W	D1					;CLEAR HI BYTE OF COUNT
+		MOVE.B	(A0)+,D0				;GET FILL DATA BYTE
+@4		MOVE.B	D0,(A1)+				;COPY IT TO DST
+		DBRA	D1,@4					;LOOP ALL FILL BYTES
+		BRA.S	@3					;THEN GET NEXT OPCODE
+@5		MOVE.L	A0,D0					;STASH SRCPTR
+		MOVE.L	SRCPTR(SP),A0				;GET VAR ADDR
+		MOVE.L	D0,(A0) 				;UPDATE VAR SRCPTR
+		MOVE.L	DSTPTR(SP),A0				;GET VAR ADDR
+		MOVE.L	A1,(A0) 				;UPDATE VAR DSTPTR
+		BRA.S	SHARE
+
+
+
+
+		END 
+
+
+
+

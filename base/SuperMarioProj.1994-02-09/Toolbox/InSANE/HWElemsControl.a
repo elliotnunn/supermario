@@ -1,0 +1,432 @@
+;
+;	File:		HWElemsControl.a
+;
+;	Contains:	HW Floating Point ELEMS68K ("PACK 5") that calls MC68881/882 or uses MC68040 FPU
+;
+;	Written by:	Apple Numerics Group, DSG
+;
+;	Copyright:	© 1985-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<SM2>	 2/3/92		CSS		Update from Horror: see mod history from below 06 Apr 92, 08 Apr 92.
+;		 <2>	 11/2/91	DTY		Put the End after the EndIf.
+;		 <1>	10/24/91	SAM/KSM	Rolled in Regatta file.
+;		
+;	Regatta Change History:
+;
+;		 <2>	 5/28/91	SAM		Merged from TERROR sources. [<2> Fixed a bug in ANNUITY and
+;									COMPOUND that used to allow the possibility of spuriously
+;									signaling an invalid exception under reasonable circumstances.
+;		 <1>	 5/15/91	SAM		Split off from TERROR Proj.
+;
+;	Terror Change History:
+;
+;		 <1>	01/06/91	BG		Added to TERROR/BBS for the time.
+;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: 881Elemscontrol.a
+;; Implementation of Elems68K for machines using the Motorola 68881/2
+;; Copyright Apple Computer, Inc. 1985-7,1989-92
+;; All Rights Reserved
+;; Confidential and Proprietary to Apple Computer,Inc.
+;;
+;; Written by Clayton Lewis, from the (unshipped) file ChipElems881.a
+;;
+;; Modification history:
+;;    Rev1: 17 May 89	Resurrection from ChipElems881.a begins.
+;;	25 Sep 90	96-bit test for tiny fixed; version updated. -SMcD 
+;;	01 Oct 90   made MAIN & END conditional assembly for ROM & INIT ... ali
+;;	01 Oct 90   chnaged the label STICKMAP to STICKYMAP2 to avoid
+;;		collision with pack 4's STICKYMAP ... ali
+;;	05 Oct 90   merged SMcD’s conditional assembly scheme for
+;;		‘MAIN ... END’ pair
+;;	05 Apr 91	for financial functions only, a jump over the first argument
+;;		fetch was added.  thanks to jon okada for patiently single 
+;;		stepping to find the problem. ... ali
+;;  06 Apr 92	changed version number to 9, updated copyright dates.   ... JPO
+;;	08 Apr 92	used FMOVEM to move result in FP0 to memory.			... JPO
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; The stack looks like:
+;;	 _______________________________________________	
+;;	|												|
+;;	|		address of argument 3 (if any)			|  - Long
+;;	|_______________________________________________|	
+;;	|												|
+;;	|		address of argument 2 (if any)			|  - Long
+;;	|_______________________________________________|	
+;;	|												|
+;;	|       	address of argument 1				|  - Long
+;;	|_______________________________________________|	
+;;	|												|
+;;	|		opcode (NOTE: change to bit 7 !!!)		|  - Word
+;;	|_______________________________________________|	
+;;	|												|
+;;	|				return address					|  - Long
+;;	|_______________________________________________|	
+;;
+;; The number of addresses depends on the operation.  xpwri and xpwry use 2.
+;;      compound and annuity use 3.  All the rest use only 1.
+;;
+;; Opcode - If bit 7 is set, all extended data must be in 96-bit format.
+;;	If bit 7 is clear, all extended data must be in 80-bit format.
+;;
+;; Save registers D0/D1 & A0/A4 & FP2/FP3, and later save FPSR and FPCR.
+;;
+;;	|												|
+;;	|				stack as passed					|
+;;	|_______________________________________________|	
+;;	|												|
+;;	|			saved D0/D1 & A0/A4 & FP2/FP3		| - 10 Longs
+;;	|_______________________________________________|	
+;;	|												|
+;;	|				saved FPSR						| - Long
+;;	|_______________________________________________|	
+;;	|												|
+;;	|				saved FPCR						| - Long
+;;	|_______________________________________________|	
+;;
+;; Conventions - routines getting control through this file may assume:
+;;
+;;	• A0 contains the address of the input argument
+;;	• A4 contains the address of the exit routine - to exit, use: JMP  (A4)
+;;	• FP0 contains the input argument itself
+;;	• D0 & D1 are junk from routine dispatch
+;;	• FP0 must contain the result value for delivery to common exit routines
+;;	• routines must exit with stack unchanged!!!
+;;	• xpwri, xpwry, compound, annuity are special cases handling own data and exit
+;;	• Preserved registers are listed in HWElemsEqus.a
+;;	• Routines which must know whether data is 80-bit or 96-bit can test bit 7
+;;	  of the opcode which is at  Opcode+1(SP) immediately after dispatch.
+;;
+;; Except - no registers are preset for annuity and compound.
+;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	IF &TYPE('InitMe') = 'UNDEFINED' THEN	; to make ΩSANE an INIT, MAIN & END must be
+			MAIN				; commented out.  they are necessary for the
+	ENDIF				; the ROM built. ( and also regular testing )
+	
+			BLANKS  ON
+			STRING  ASIS
+
+;			DATA    MAIN
+;			ORG     -$100
+			CODE
+
+			PRINT   ON
+			MACHINE	MC68020
+			MC68881
+
+			INCLUDE	'HWElemsEqus.a'
+
+FPState   	EQU 	$A4A      	; floating point state [6 bytes]
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;This is the sole entry point of the package.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			EXPORT		ELEMS881
+ELEMS881
+;		IF DebugON THEN
+;			DC.W	$A9FF
+;		ENDIF
+
+			BRA.S		Elemsbegin
+
+			DC.W		$00	; MAC SPECIFIC STUFF
+			STRING		ASIS
+			DC.B		'PACK'
+			DC.W		$5
+			DC.W		$0009	; VERSION 9			<4/6/92, JPO>
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Beginning of code.
+;;    Reserve space, save registers, execute procentry, and dispatch to called routine
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Elemsbegin
+			MOVEM.L		Regs,-(SP)		; save working registers
+			FMOVEM		FPRegs,-(SP)
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; ProcEntry
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			FMOVE.L		FPSR,-(SP)		; Save status register (high memory)
+			FMOVE.L		FPCR,-(SP)		;   and control register (low memory)
+
+			MOVEQ		#0,D1
+			FMOVE.L		D1,FPCR			; IEEE default rounding, precision, halts
+			FMOVE.L		D1,FPSR			; clear exceptions (condition code and Quo)
+	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+	;; Move the (extended) destination value to the chip and select appropriate
+	;;   exit sequence.  If it is a financial function, then skip the first fetch			<T2>
+	;;   since it is going to be a destination for the financials.							<T2>
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			MOVEA.L		Addr1(SP),A0	; destination address in A0
+;			MOVE.B		Opcode+1(SP),D0
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;										<T2> thru next <T2>
+	;; Added this section to handle financials separately.  For these functions the
+	;;   first argument is a destination and at the start may hold garbage including
+	;;   SNaN.  For the 68040, it may slow down the financials since the garbage may
+	;;   be an unnormalized number, which will trap to the software... ali
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;	
+			MOVE.W		Opcode(SP),D0	; grab the entire opword
+			BTST		#IsItFinan,D0	; high byte of opword is $C0 if financial
+			BEQ.S		@2				; if not, go get the first operand
+			BTST		#flag96bit,D0	; it is a financial, find out if 80 or 96 bit
+			BEQ.S		@3				; branch to unpack 80-bit input data
+			LEA			Out96,A4		;   else just take 96-bit input data
+			BRA.S		LiftOff
+@3	
+			LEA			Out80,A4
+			BRA.S		LiftOff
+@2
+			BTST		#flag96bit,D0	; if not continue, find out if 80 or 96 bit 
+			BEQ.S		@1				; branch to unpack 80-bit input data
+;			BPL.S		@1				; branch to unpack 80-bit input data
+			MOVE.W		4(A0),2(A0)		; replicate significant word into junk word <9/25/90-S.McD>
+			LEA			Out96,A4		;   else just take 96-bit input data				<T2>
+			FMOVE.X		(A0),FP0
+			BRA.S		LiftOff
+@1
+			LEA			Out80,A4
+			ADDQ.L		#6,A0
+			MOVE.L		(A0),-(SP)
+			MOVE.L		-(A0),-(SP)
+			SUBQ.L		#2,A0
+			MOVE.L		(A0),-(SP)
+
+			FMOVE.X		(SP)+,FP0
+	
+LiftOff
+			MOVE.W		#OPMASK,D1
+			AND.B		D0,D1
+			MOVE.W		ElemsTab(D1),D1
+			JMP			LiftOff(D1)
+ElemsTab                     
+			DC.W		RLnx-LiftOff
+			DC.W		RLog2x-LiftOff
+			DC.W		RLn1x-LiftOff
+			DC.W		RLog21x-LiftOff
+			DC.W		RExpx-LiftOff
+			DC.W		RExp2x-LiftOff
+			DC.W		RExp1x-LiftOff
+			DC.W		RExp21x-LiftOff
+		
+			DC.W		RXpwri-LiftOff
+			DC.W		RXpwry-LiftOff
+			DC.W		RCompound-LiftOff
+			DC.W		RAnnuity-LiftOff
+
+			DC.W		RSin-LiftOff
+			DC.W		RCos-LiftOff
+			DC.W		RTan-LiftOff
+			DC.W		RAtan-LiftOff
+			DC.W		RRandom-LiftOff
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;  
+;; Exit code
+;;   All one argument routines exit through here  
+;;   A4 contains the address of the appropriate exit routine (80 or 96-bit extended)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Out80
+	
+			MOVEA.L		Addr1(SP),A0	; destination address in A0
+;			FMOVE.X		FP0,-(SP)		; move result to stack - DELETED <4/8/92, JPO>
+			FMOVEM.X	FP0,-(SP)		; move result to stack <4/8/92, JPO>
+
+			MOVE.W		(SP)+,(A0)+		; move result to memory
+			ADDQ.L		#2,SP
+			MOVE.L		(SP)+,(A0)+
+			MOVE.L		(SP)+,(A0)
+			BRA.S		Exit
+
+Out96
+			MOVEA.L		Addr1(SP),A0	; destination address in A0
+;			FMOVE.X		FP0,(A0)		; deliver result - DELETED <4/8/92, JPO>
+			FMOVEM.X	FP0,(A0)		; deliver result <4/8/92, JPO>
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Adjust the pending exceptions
+	;;  D0.hi MUST contain set bits for each exception to be set
+	;;  D0.lo MUST contain set bits for each exception to be cleared
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Exit
+			MOVEQ		#-1,D1			; set mask
+			EOR.B		D1,D0			; exception bits to be cleared now in D0.lo
+			FMOVE		FPSR,D1			; collect current exceptions
+			AND.B		D0,D1			; clear unwanted exceptions
+			SWAP		D0				; exceptions to be set now in D0.lo
+			OR.B		D1,D0			; set desired exceptions
+*
+*  The next step is handled in the Procexit code below, so it is commented out.
+*	FMOVE	D0,FPSR	; record pending exceptions from this "operation"
+*	
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Procexit
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+*
+*  This is a private PROCEXIT for ΩSANE881's PACK5.  Since all
+*  elementary function exceptions are triggered by PROCEXIT, 
+*  PROCEXIT is blamed for all of PACK5's exceptions.
+*
+*  This code performs the halt mechanism steps discussed on p.168
+*  of the Apple Numerics Manual, Second Edition.  Figure 23-1
+*  (Stack frame for halt), p.169, is quite helpful.
+*
+*  This code was written to be as independent as possible from PACK4.
+*  ΩSANE881 PACK5 will run stand-alone without ΩSANE881 PACK4 being present
+*  except because ΩSANE881 PACK4 always runs with OPERR trapping enabled,
+*  the user's invalid halt enable is stored as (BSUN or SNAN), where BSUN,
+*  SNAN, and OPERR are, respectively, the three high bits of the eight FPU
+*  trap enables. See Figure 2-2 (MC68881/MC68882 FPCR Exception Enable Byte),
+*  p.2-2, in Motorola's 881/2 Manual.
+*
+*  That is, halt on invalid is enabled if and only if BSUN or SNAN is set in FPCR.
+*
+*  OPERR trapping is assumed enabled so PACK4 can override the FPU's default
+*  return behavior for operand errors, i.e. so PACK4 can deliver SANE's style
+*  of floating-point and integer NaN codes.
+*
+*  BEFORE:
+*	STACK:  FPCR< FPSR< D0_D1/A0_A4/FP2_FP3< RTS< opcode< &DST< &SRC< &SRC2
+*
+*  AFTER:
+*	STACK:  D0_D1/A0_A4/FP2_FP3< RTS< opcode< &DST< &SRC< &SRC2
+*
+*  SIDE-EFFECT:	Signals the accrued exceptions currently set on the FPU
+*		after restoring the saved FPCR & FPSR values on the stack.
+*
+*  SCRATCHED: A0, D0, D1.
+*
+			OR.B		D0,7(SP)		; 'or' in stickies into saved FPSR on stack
+			MOVE.B		2(SP),D1		; d1.b := saved FPCR trap enables byte
+
+			FMOVEM		(SP)+,FPCR/FPSR ; restore saved environment (cc not affected)
+*
+*  Since OPERR is always enabled, the following branch will never be taken,
+*  so it is commented out.
+*	BEQ.S	PastHalter	; trap enables all zero? then skip haltcheck
+*
+			BCLR		#5,D1			; prepare to map invalid enable onto OPERR bit
+			BFTST		D1{24:2}		; bsun or snan set? (invalid halt enabled?)
+			BEQ.S		@1				; if not, leave OPERR bit clear
+			BSET		#5,D1			; otherwise, set OPERR bit
+@1:	
+			AND			#%00111110,D1	; any halts enabled? (ignores INEX1 for BCD)
+										; (note: clears high-byte of d1.w for mask)
+			BEQ.S		PastHalter		; if none enabled then skip halt check
+			LSL.B		#2,D1			; left justify halt enables in byte
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Halt check.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			AND			D1,D0			; d0.b := any halt-enable intersections?
+										; (note: clears high-byte of d0.w)
+			BEQ.S		PastHalter		; if no intersections, skip halt code
+			LSR.B		#3,D0			; d0.w := 5 intersection bits right justified
+
+HaltCode
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Make the FP68K halt stack frame.
+;;   Save & restore A0 (end of stack frame ptr).
+;;   Set up stack frame:
+;;	------------------
+;;		Pending D0 -	long
+;;	-----------------
+;;		Pending CCR -	word
+;;	------------------
+;;		halts&xcps -	word < ----
+;;	------------------      	   	^
+;;		MISC rec ptr	----------->
+;;	------------------
+;;		SRC2 addr -		long
+;;	------------------
+;;		SRC  addr -		long
+;;	------------------
+;;		DST  addr -		long
+;;	------------------
+;;		opcode -		word
+;;	------------------
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+			CLR.L		-(SP)			; push bogus pending D0  for PROCEXIT
+			CLR.W		-(SP)			; push bogus pending CCR for PROCEXIT
+			MOVE.B		STICKYMAP2(D0),D0 ; d0.w := halts&xcps mapped to SANE order
+			MOVE.W		D0,-(SP)		; push Halt exceptions (note: high-byte clear)
+
+			MOVE.L		SP,-(SP)		; push pointer to stuff now on stack (MISC REC)
+
+			MOVE.L		Addr3-8+4+2+2+4(SP),-(SP) ; push &SRC2
+			MOVE.L		Addr2-8+4+2+2+4+4(SP),-(SP) ; push &SRC
+			MOVE.L		Addr1-8+4+2+2+4+4+4(SP),-(SP) ; push &DST
+			MOVE.W		Opcode-8+4+2+2+4+4+4+4(SP),-(SP) ; push ELEM's Opcode
+			BSET		#7,(SP)			; make it distinguishable from all FP Opcodes
+
+			MOVEA.L		#FPState+2,A0
+			MOVEA.L		(A0),A0			; haltvector
+			JSR			(A0)			; call user's halt routine
+										; user pops halt frame
+			ADDQ		#8,SP			; we pop misc rec
+
+PastHalter
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Stack cleanup and return
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			FMOVEM		(SP)+,FPRegs
+			MOVEM.L		(SP)+,Regs		; restore registers
+	
+			RTD	#6						; return, leaving stack clear
+
+STICKYMAP2:								; maps FPU's 5 accrued bits to SANE order
+										; SANE's bits read backwards with OVFL<-->UNFL
+			DC.B		0,16,8,24,2,18,10,26,4,20,12,28,6,22,14,30
+			DC.B		1,17,9,25,3,19,11,27,5,21,13,29,7,23,15,31
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;  Here is an alternative way of producing the random number ( following the ;;
+;;  same algorithm ).  This method allows the operations to be carried out    ;;
+;;  all in the integer domain, which is good; that is for now.  The bad news  ;;
+;;  is that the old method is still the more efficient way of computing the   ;;
+;;  random function on a 68040!  sorry. ... ali, received from crl and stu.   ;;			      ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;
+;;	seed: d0
+;;	d1 <- random
+;;	MULU.L	#16807,D1:D0
+;;	DIVU.L	#$7FFFFFFF,D1:D0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Functions of one argument
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+RRandom
+			FMUL.W		#16807,FP0			; 7^5 * x
+			MOVEQ		#0,D0				; report no exceptions
+			FMOVE.L		#RANDMODULUS,FP1	; 2^31-1
+			FREM		FP1,FP0				; (7^5 * x) rem (2^31-1)
+			FBGE.W		@1					; branch if positive
+			FADD		FP1,FP0				;   else add 2^31-1 to make positive
+@1
+			JMP			(A4)
+
+
+		INCLUDE 'HWElemsExp.a'	
+		INCLUDE 'HWElemsFinancial.a'	
+		INCLUDE 'HWElemsCommon.a'	
+		INCLUDE 'HWElemsLogs.a'	
+		INCLUDE 'HWElemsTg.a'	
+		INCLUDE 'HWElemsArcTg.a'	
+		INCLUDE 'HWElemsSinCos.a'	
+
+		INCLUDE 'HWElemsCoeffs.a'
+	
+	IF &TYPE('InitMe') = 'UNDEFINED' THEN	; to make ΩSANE an INIT, MAIN & END must be
+; Why include a whole file to execute one pseudo-op?  Seems kinda silly, doesn't it?
+;	INCLUDE '881ELEMSend.a'			; commented out.  they are necessary for the
+	ENDIF				; the ROM built. ( and also regular testing )
+			END

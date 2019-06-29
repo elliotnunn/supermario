@@ -1,0 +1,2186 @@
+;
+;	File:		Regions.a
+;
+;	Contains:	QuickDraw routines to operate on regions.
+;
+;	Copyright:	© 1981-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM4>	 1/25/93	kc		Roll in Shannon Holland's alpha channel fix to DrawRgn.
+;	   <SM3>	 6/11/92	stb		<sm 6/9/92>stb Synch with QDciPatchROM.a; comments added to
+;									StdRgn, MapRgn
+;	   <SM2>	 5/21/92	kc		Change the name of QuickDraws wrapper for NewHandle to
+;									NewHandleWrapper to avoid name conflict with the glue.
+;		<10>	 8/22/91	JSM		Don’t use TRUE and FALSE as labels.
+;		 <9>	 7/23/91	KON		Fix 32-bit clean crimes in BitMapRgn.
+;		 <8>	10/30/90	KON		Forgot to make all the changes before checking in; This updates
+;									to the current version on the ci in QDciPatch. [SMC]
+;		 <7>	10/30/90	KON		Make pmVersion=4 pixmaps work and create rgns as large as 64K
+;									(not 32K).
+;		 <6>	  9/7/90	KON		Fix misleading comment and enter Comment of the Week contest.
+;		 <5>	  9/7/90	KON		Don't remap wideopen rectangular regions since maprect will blow
+;									up.
+;		 <4>	 8/28/90	KON		Remove benign redefinition of pixmapTooDeepErr (-148) which is
+;									now defined in SysErr.a.
+;		 <3>	  8/2/90	gbm		change TEMPRECT to TEMPRECTANGLE to avoid global conflict
+;		 <2>	 7/24/90	gbm		axe duplicate defs
+;	  <•1.6>	 7/14/89	BAL		For Aurora: Final CQD
+;	   <1.5>	 6/30/89	BAL		Now uses equate for qdStackXtra
+;	  <•1.4>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;				 9/26/88	BAL		Provided RectWithinRgn, a variant of TrimRect
+;				 9/25/88	BAL		Rewrote TrimRect for a better than 5X performance improvement
+;				 11/8/87	DAF		Fixed pict opcode recorded by StdRgn
+;				  6/4/87	CRC		set patMode even if user forgets to
+;				  1/3/87	CRC		pass color param to stretch
+;				 10/9/86	EHB		Added mask parameters to stretchbits calls
+;				  9/5/86	EHB		Added FillCRgn
+;				 8/16/86	EHB		In FillRgn added support for color grafports
+;				 6/18/86	EHB		Fixed up references to PortBits in DrawRgn for color ports Call
+;									StretchBits instead of RgnBlt
+;
+
+		BLANKS	ON
+		STRING	ASIS
+
+;-----------------------------------------------------------
+;
+;
+;	  ****	 *****	 ***   ***	 ***   *   *   ***
+;	  *   *  *		*	*	*	*	*  *   *  *   *
+;	  *   *  *		*		*	*	*  **  *  *
+;	  ****	 ***	*  **	*	*	*  * * *   ***
+;	  * *	 *		*	*	*	*	*  *  **	  *
+;	  *  *	 *		*	*	*	*	*  *   *  *   *
+;	  *   *  *****	 ***   ***	 ***   *   *   ***
+;
+;-----------------------------------------------------------
+
+StdRgn	PROC  EXPORT
+		IMPORT PutPicVerb,DPutPicOp,PutPicRgn
+		IMPORT PutRgn,FrRgn,PushVerb,DrawRgn,StdDevLoop
+;---------------------------------------------------------------
+;
+;  PROCEDURE StdRgn(verb: GrafVerb; rgn: RgnHandle);
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+; has fix from QDciPatchROM.a												<sm 6/9/92>stb
+
+PARAMSIZE	EQU 	6
+VERB		EQU 	PARAMSIZE+8-2			;GRAFVERB
+RGN 		EQU 	VERB-4					;LONG, RGNHANDLE
+
+		LINK	A6,#0						;NO LOCALS
+		MOVEM.L D6-D7/A2-A4,-(SP)			;SAVE REGS
+		MOVEQ	#0,D7						;CLEAR LOWORD OF PICT OPCODE <C952/08Nov87> DAF
+		MOVE.B	VERB(A6),D7 				;GET VERB
+		_CheckPic							;SET UP A4,A3 AND CHECK PICSAVE
+		BLE.S	NOTPIC						;BRANCH IF NOT PICSAVE
+
+		MOVE.B	D7,-(SP)					;PUSH VERB
+		JSR		PutPicVerb					;PUT ADDITONAL PARAMS TO THEPIC
+		MOVE	#$80,D0 					;PUT RGNNOUN IN HI NIBBLE
+		ADD 	D7,D0						;PUT VERB IN LO NIBBLE
+		JSR		DPutPicOp					;PUT OPCODE TO THEPIC
+		MOVE.L	RGN(A6),-(SP)				;PUSH RGNHANDLE
+		JSR 	PutPicRgn					;PUT REGION TO THEPIC
+
+;  CALL STANDARD LOOP TO DRAW TO ALL DEVICES
+
+NOTPIC	PEA		StdDraw						;PUSH ADDRESS OF DRAW ROUTINE
+		PEA		GetRect						;PUSH ADDRESS OF RECT ROUTINE
+		_StdDevLoop							;DRAW TO ALL DEVICES
+
+GOHOME	MOVEM.L (SP)+,D6-D7/A2-A4			;RESTORE REGS
+		UNLINK	PARAMSIZE,'STDRGN  '
+
+
+;---------------------------------------------------------------
+;
+;	PROCEDURE GetRect(VAR theRect: rect); 
+;
+;	RETURN THE OBJECT'S RECTANGLE
+;
+GetRect	MOVE.L	(SP)+,D0					;GET RETURN ADDRESS
+		MOVE.L	(SP)+,A1					;GET DST RECT
+		MOVE.L	RGN(A6),A0					;GET REGION
+		MOVE.L	(A0),A0						;POINT AT IT
+		LEA		RGNBBOX(A0),A0				;POINT TO BOUNDING BOX
+		MOVE.L	(A0)+,(A1)+					;SET TOPLEFT
+		MOVE.L	(A0),(A1)					;SET BOTRIGHT
+		MOVE.L	D0,A0						;GET RETURN ADDRESS
+		JMP		(A0)						;AND RETURN
+
+
+;---------------------------------------------------------------
+;
+;	PROCEDURE StdDraw; 
+;
+;	DRAW THE OBJECT
+;
+StdDraw	MOVE.L	RGN(A6),-(SP)				;PUSH RGNHANDLE
+		_PushVerb							;PUSH MODE AND PATTERN
+		TST.B	D7							;IS VERB FRAME ?
+		BNE.S	NOTFR						;NO, CONTINUE
+		TST.L	RGNSAVE(A3) 				;YES, IS RGNSAVE TRUE ?
+		BEQ.S	NOTRGN						;NO, CONTINUE
+		MOVE.L	RGN(A6),-(SP)				;YES, PUSH RGNHANDLE
+		MOVE.L	RGNBUF(A4),-(SP)			;PUSH RGNBUF
+		PEA 	RGNINDEX(A4)				;PUSH VAR RGNINDEX
+		PEA 	RGNMAX(A4)					;PUSH VAR RGNMAX
+		_PutRgn								;ADD INVERSION PTS TO THERGN
+
+NOTRGN	JSR 	FrRgn						;FrRgn(rgn,pnMode,pnPat)
+		BRA.S	drawDone
+
+NOTFR	JSR 	DrawRgn 					;DrawRgn(rgn,mode,pat);
+drawDone
+DONE	RTS
+		
+
+
+FrameRgn	PROC	EXPORT	
+			EXPORT	CallRgn,PaintRgn,EraseRgn,InvertRgn,FillRgn,FillCRgn
+			IMPORT	SetFillPat
+;-----------------------------------------------------
+;
+;  PROCEDURE FrameRgn(* rgn: RgnHandle *);
+;
+		MOVEQ	#FRAME,D0					;VERB = FRAME
+		BRA.S	CallRgn 					;SHARE COMMON CODE
+
+
+;-----------------------------------------------------
+;
+;  PROCEDURE PaintRgn(* rgn: RgnHandle *);
+;
+PaintRgn
+		MOVEQ	#PAINT,D0					;VERB = PAINT
+		BRA.S	CallRgn 					;SHARE COMMON CODE
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE EraseRgn(* rgn: RgnHandle *);
+;
+EraseRgn
+		MOVEQ	#ERASE,D0					;VERB = ERASE
+		BRA.S	CallRgn 					;SHARE COMMON CODE
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE InvertRgn(* rgn: RgnHandle *);
+;
+InvertRgn
+		MOVEQ	#INVERT,D0					;VERB = INVERT
+		BRA.S	CallRgn 					;SHARE COMMON CODE
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE FillRgn(* rgn: RgnHandle; pat: Pattern *);
+;
+FillRgn	MOVEQ	#0,D0						;FLAG = FillRgn
+		BRA.S	SHARE						; => USE COMMON CODE
+		
+		
+;----------------------------------------------------------
+;
+;  PROCEDURE FillCRgn(rgn: RgnHandle; PPH: PixPatHandle);
+;
+FillCRgn MOVEQ	#1,D0						;FLAG = FillCRgn
+
+SHARE	MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,A1					;POP ADDR OF PATTERN
+		MOVE.L	A0,-(SP)					;PUT RETURN ADDR BACK
+		MOVE.L	A1,-(SP)					;PUSH ADDR OF PATTERN
+		_SETFILLPAT							;FILLPAT := PAT
+		MOVEQ	#FILL,D0					;VERB = FILL
+;		BRA.S	CallRgn 					;SHARE COMMON CODE
+
+
+
+;---------------------------------------------------------------
+;
+;  PROCEDURE CallRgn(rgn: RgnHandle);
+;
+;  code shared by FrameRgn, PaintRgn, EraseRgn, InvertRgn, and FillRgn.
+;  enter with verb in D0.
+;
+CallRgn
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,A1					;POP RGN
+		MOVE.B	D0,-(SP)					;PUSH VERB
+		MOVE.L	A1,-(SP)					;PUSH RGN
+		MOVE.L	A0,-(SP)					;RESTORE RETURN ADDR
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE.L	GRAFPROCS(A0),D0			;IS GRAFPROCS NIL ?
+		MOVE.L	JStdRgn,A0					;get piece of trap table
+		BEQ.S	USESTD						;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	RGNPROC(A0),A0				;NO, GET PROC PTR
+USESTD	JMP 	(A0)						;GO TO IT
+
+
+DrawRgn PROC  EXPORT
+		IMPORT STRETCHBITS
+		IMPORT PortToMap
+;--------------------------------------------------------
+;
+;  PROCEDURE DrawRgn(rgn: RgnHandle; mode: INTEGER; pat: Pattern);
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+PARAMSIZE	EQU 	10
+RGN 		EQU 	PARAMSIZE+8-4			;LONG, RGNHANDLE
+MODE		EQU 	RGN-2					;WORD
+PAT 		EQU 	MODE-4					;LONG, ADDR OF PATTERN
+
+BBOX		EQU		-8						;LOCAL COPY OF RGNBBOX
+VARSIZE		EQU		BBOX					;SIZE OF LOCALS
+
+		LINK	A6,#VARSIZE					;ALLOCATE STACK FRAME
+		MOVE.L	RGN(A6),A0					;GET THE REGION HANDLE
+		MOVE.L	(A0),A0						;POINT TO THE RGN
+		MOVE.L	RGNBBOX(A0),BBOX(A6)		;COPY RGNBBOX.TOPLEFT
+		MOVE.L	RGNBBOX+4(A0),BBOX+4(A6)	;COPY RGNBBOX.BOTRIGHT
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT PORT
+		TST 	PNVIS(A0)					;IS PNVIS NEG ?
+		BMI.S	DONE						;YES, QUIT
+		MOVE.L	A0,A1						;SAVE A COPY
+		_PORTTOMAP							;GET BIT/PIXMAP IN A0
+		MOVE.L	A0,-(SP)					;PUSH SRCBITS
+		CLR.L	-(SP)						;NO MASKBITS
+		MOVE.L	A0,-(SP)					;PUSH DSTBITS
+		PEA		BBOX(A6)					;PUSH SRCRECT
+		CLR.L	-(SP)						;NO MASKRECT
+		PEA		BBOX(A6)					;PUSH DSTRECT
+		MOVE	MODE(A6),D1					;PUSH MODE										; <SM4>
+		OR		#$8,D1						;set the pattern bit in case the user forgot to	; <SM4>
+		_GetStreamMode						;strip mode										; <SM4>
+		MOVE.W	D1,-(SP)					;save stripped mode								; <SM4>
+		MOVE.L	PAT(A6),-(SP)				;PUSH PAT
+		MOVE.L	CLIPRGN(A1),-(SP)			;PUSH CLIPRGN
+		MOVE.L	VISRGN(A1),-(SP)			;PUSH VISRGN
+		MOVE.L	RGN(A6),-(SP)				;PUSH RGN
+		CLR		-(SP)						;pass multicolor flag false
+		_STRETCHBITS						;CALL STRETCHBITS
+DONE	UNLINK	PARAMSIZE,'DRAWRGN '
+
+
+
+FrRgn	PROC  EXPORT
+		IMPORT FrmRect,NewRgn,CopyRgn,InsetRgn,DiffRgn,DrawRgn
+;--------------------------------------------------------
+;
+;  PROCEDURE FrRgn(rgn: RgnHandle; mode: INTEGER; pat: Pattern);
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+PARAMSIZE	EQU 	10
+RGN 		EQU 	PARAMSIZE+8-4			;LONG, RGNHANDLE
+MODE		EQU 	RGN-2					;WORD
+PAT 		EQU 	MODE-4					;LONG, ADDR OF PATTERN
+
+		LINK	A6,#0
+		MOVEM.L D7/A3-A4,-(SP)				;SAVE REGS
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A4),A3				;GET CURRENT PORT
+		TST 	PNVIS(A3)					;IS PNVIS NEG ?
+		BMI.S	DONE						;YES, QUIT
+;
+;  special case rectangular region for speed.
+;
+		MOVE.L	RGN(A6),A0					;GET RGNHANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE IT
+		CMP 	#10,RGNSIZE(A0) 			;IS IT RECTANGULAR ?
+		BNE.S	NOTRECT 					;NO, CONTINUE
+		PEA 	RGNBBOX(A0) 				;YES, PUSH ADDR OF BBOX
+		bsr.l 	FRMRECT						;FRAME IT
+		BRA.S	DONE						;AND QUIT
+
+NOTRECT CLR.L	-(SP)						;MAKE ROOM FOR FCN RESULT
+		_NEWRGN								;ALLOCATE TEMPRGN
+		MOVE.L	(A7)+,D7					;PUT TEMPRGN IN D7
+		MOVE.L	RGN(A6),-(SP)				;PUSH RGN
+		MOVE.L	D7,-(SP)					;PUSH TEMPRGN
+		_COPYRGN 							;COPY RGN INTO TEMPRGN
+		MOVE.L	D7,-(SP)					;PUSH TEMPRGN
+		MOVE.L	PNSIZE(A3),-(SP)			;PUSH PNSIZE
+		_INSETRGN							;InsetRgn(tempRgn,pnSize);
+		MOVE.L	RGN(A6),-(SP)				;PUSH RGN
+		MOVE.L	D7,-(SP)					;PUSH TEMPRGN
+		MOVE.L	D7,-(SP)					;PUSH TEMPRGN
+		_DIFFRGN 							;DiffRgn(rgn,tempRgn,tempRgn);
+		MOVE.L	D7,-(SP)					;PUSH TEMPRGN
+		MOVE	MODE(A6),-(SP)				;PUSH MODE
+		MOVE.L	PAT(A6),-(SP)				;PUSH PAT
+		JSR 	DRAWRGN 					;DrawRgn(tempRgn,mode,pat);
+		MOVE.L	D7,A0						;GET TEMPRGN
+		_DisposHandle						;DISCARD IT
+DONE	MOVEM.L (SP)+,D7/A3-A4				;RESTORE REGS
+		UNLINK	PARAMSIZE,'FRRGN   '
+
+
+
+NewRgn	FUNC  EXPORT
+		IMPORT NewHandleWrapper
+;---------------------------------------------------
+;
+;  FUNCTION NewRgn;
+;  Allocate a new region and set it to the empty region.
+;  Altered not to SysErr; if memerr then return nil.		<BAL/dvb/RAJ 03Mar89>
+;
+		moveq	#10,d0						;pass BYTECOUNT=10
+		_NewHandle							;ALLOCATE A RELOCATABLE OBJECT
+		MOVE.L	A0,4(SP)					;STORE INTO NEWRGN RESULT
+		tst.w	d0
+		bne.s	@retNil						;if couldn't get it, return nil
+		MOVE.L	(A0),A0 					;DE-REFERENCE HANDLE
+		MOVE	#10,(A0)+					;INSTALL RGNSIZE=10
+		CLR.L	(A0)+						;INSTALL RGNBBOX=(0,0,0,0)
+		CLR.L	(A0)+
+@retNil	RTS 					;RETURN TO CALLER
+
+
+
+DisposeRgn PROC  EXPORT 	
+;---------------------------------------------------
+;
+;  PROCEDURE DisposeRgn(rgn: RgnHandle);
+;
+		MOVE.L	(SP)+,A1					;pop return addr
+		MOVE.L	(SP)+,A0					;pop handle
+		_DisposHandle						;discard it
+		JMP 	(A1)						;and return
+
+
+
+OpenRgn PROC  EXPORT
+		IMPORT NewHandleWrapper,HidePen
+;---------------------------------------------------
+;
+;  PROCEDURE OpenRgn;
+;
+		MOVEM.L D3/A2-A4,-(SP)				;SAVE REGS
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A0				;GET CURRENT GRAFPORT
+		MOVE.L	#1,D0
+		MOVE.L	D0,RGNSAVE(A0)				;RGNSAVE := TRUE
+		CLR 	RGNINDEX(A4)				;RGNINDEX := 0
+		CLR.L	-(SP)						;MAKE ROOM FOR FCN RESULT
+		MOVE	#256,-(SP)					;PUSH BYTE COUNT = 256
+		MOVE	(SP),RGNMAX(A4) 			;RGNMAX := 256 TOO;
+		JSR 	NewHandleWrapper
+		MOVE.L	(SP)+,RGNBUF(A4)			;RGNBUF := NEWHANDLE(RGNMAX)
+		_HidePen
+		MOVEM.L (SP)+,D3/A2-A4				;RESTORE REGS
+		RTS 								;AND RETURN
+
+
+
+CloseRgn PROC  EXPORT	
+		IMPORT ShowPen,SortPoints,CullPoints,PackRgn
+;---------------------------------------------------
+;
+;  PROCEDURE CloseRgn(* dstRgn: RgnHandle *);
+;  Sort array of inversion points and pack into region.
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE	EQU 	4						;TOTAL BYTES OF PARAMETERS
+DSTRGN		EQU 	PARAMSIZE+8-4			;LONG, RGNHANDLE
+PTCOUNT 	EQU 	-2						;WORD
+VARSIZE 	EQU 	PTCOUNT 				;SIZE OF LOCAL VARS
+
+
+		LINK	A6,#VARSIZE
+		MOVEM.L D3/A2-A4,-(SP)				;SAVE REGS
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A0				;GET CURRENT GRAFPORT
+		TST.L	RGNSAVE(A0) 				;IS RGNSAVE TRUE ?
+		BEQ.S	DONE						;NO, ABORT
+		CLR.L	RGNSAVE(A0) 				;YES, RGNSAVE := FALSE
+		_SHOWPEN 							;UNDO THE HIDEPEN FROM OPENRGN
+		MOVE	RGNINDEX(A4),D0 			;GET CURRENT RGNINDEX
+		
+		cmp.w	#-147,qderr					;rgnTooBigErr?						<BAL 28Apr89>
+		bne.s	@rgnOK						;no, return the region				<BAL 28Apr89>
+		moveq	#0,d0						;yes, return an empty region		<BAL 28Apr89>
+		move	d0,qdErr					;clear error so it doesn't bite us.	<BAL 28Apr89>
+		
+@rgnOK	LSR 	#2,D0						;DIV BY 4
+		MOVE	D0,PTCOUNT(A6)				;FOR PTCOUNT
+		MOVE.L	RGNBUF(A4),A3				;GET RGNBUF HANDLE
+		MOVE.L	(A3),-(SP)					;PUSH BUF POINTER
+		MOVE	D0,-(SP)					;PUSH PTCOUNT
+		_SORTPOINTS							;QUICKSORT IN VH ORDER
+		MOVE.L	(A3),-(SP)					;PUSH BUF POINTER
+		PEA 	PTCOUNT(A6) 				;PUSH VAR PTCOUNT
+		_CULLPOINTS							;CANCEL DUPLICATE PAIRS
+		MOVE.L	A3,-(SP)					;PUSH RGNBUF HANDLE
+		MOVE	PTCOUNT(A6),-(SP)			;PUSH (UPDATED) PTCOUNT
+		MOVE.L	DSTRGN(A6),-(SP)			;PUSH DSTRGN
+		_PACKRGN 							;PACK POINTS INTO DSTRGN
+		MOVE.L	A3,A0						;GET RGNBUF HANDLE
+		_DisposHandle						;DISCARD IT
+DONE	MOVEM.L (SP)+,D3/A2-A4				;RESTORE REGS
+		UNLINK	PARAMSIZE, 'CLOSERGN'
+
+
+
+CopyRgn PROC  EXPORT
+		IMPORT SetHSize
+;---------------------------------------------------
+;
+;  PROCEDURE CopyRgn(* srcRgn,dstRgn: RgnHandle *);
+;
+PARAMSIZE	EQU 	8
+SRCRGN		EQU 	PARAMSIZE+8-4			;RGNHANDLE
+DSTRGN		EQU 	SRCRGN-4				;RGNHANDLE
+
+		LINK	A6,#0						;ESTABLISH STACK FRAME
+		MOVE.L	SRCRGN(A6),A0				;GET SRCRGN HANDLE
+		MOVE.L	DSTRGN(A6),A1				;GET DSTRGN HANDLE
+		CMP.L	A0,A1						;ARE THEY THE SAME?
+		BEQ.S	DONE						;YES, QUIT
+
+		MOVE.L	(A0),A0 					;DE-REFERENCE SRCRGN HANDLE
+		MOVE.L	(A1),A1 					;DE-REFERENCE DSTRGN HANDLE
+		MOVE	RGNSIZE(A0),D0				;GET SRC SIZE
+		CMP 	RGNSIZE(A1),D0				;IS DST SIZE SAME AS SRC ?
+		BEQ.S	COPY						;YES, CONTINUE
+
+		MOVEM.L D0/D3/A2,-(SP)				;SAVE REGS AND BYTECOUNT
+		MOVE.L	DSTRGN(A6),-(SP)			;PUSH DSTRGN HANDLE
+		MOVE	D0,-(SP)					;PUSH NEWSIZE=SRC SIZE
+		JSR 	SetHSize 					;CHANGE SIZE OF DST
+		MOVEM.L (SP)+,D0/D3/A2				;RESTORE REGS AND BYTECOUNT
+		MOVE.L	SRCRGN(A6),A0				;GET SRCRGN HANDLE
+		MOVE.L	DSTRGN(A6),A1				;GET DSTRGN HANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE SRCRGN HANDLE
+		MOVE.L	(A1),A1 					;DE-REFERENCE DSTRGN HANDLE
+
+COPY	LSR 	#2,D0						;LONGCOUNT := BYTECOUNT DIV 4
+		BCC.S	EVEN						;WAS THERE AN ODD WORD ?
+		MOVE	(A0)+,(A1)+ 				;YES, DO IT TO MAKE EVEN
+		BRA.S	EVEN						;AND CONTINUE
+COPYLP	MOVE.L	(A0)+,(A1)+ 				;COPY A LONG OF SRC TO DST
+EVEN	DBRA	D0,COPYLP					;LOOP FOR ALL LONGS
+
+DONE	UNLINK	PARAMSIZE,'COPYRGN '
+
+
+
+SetEmptyRgn PROC  EXPORT	
+		IMPORT SetRectRgn
+;---------------------------------------------------
+;
+;  PROCEDURE SetEmptyRgn(rgn: RgnHandle);
+;
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		CLR.L	-(SP)						;PUSH LEFT, TOP
+		CLR.L	-(SP)						;PUSH RIGHT,BOTTOM
+		MOVE.L	A0,-(SP)					;RESTORE RETURN ADDR
+		JMP 	SETRECTRGN					;DOUBLE UP ON CODE
+
+
+
+SetRectRgn PROC  EXPORT 	
+		IMPORT SetHSize
+;---------------------------------------------------
+;
+;  PROCEDURE SetRectRgn(rgn: RgnHandle; left,top,right,bottom: INTEGER);
+;  make a rectangular region from 4 integers.
+;
+		LINK	A6,#0						;ESTABLISH STACK FRAME
+		MOVEM.L D3/A2,-(SP) 				;SAVE REGS
+		MOVE.L	16(A6),A0					;GET RGN HANDLE
+		MOVE.L	(A0),A1 					;DE-REFERENCE HANDLE
+		MOVEQ	#10,D0
+		CMP 	RGNSIZE(A1),D0				;IS RGNSIZE ALREADY 10 ?
+		BEQ.S	SIZEOK						;YES, CONTINUE
+		MOVE.L	A0,-(SP)					;PUSH RGNHANDLE
+		MOVE	D0,-(SP)					;PUSH SIZE = 10 BYTES
+		JSR 	SetHSize 					;CHANGE SIZE OF REGION
+		MOVE.L	16(A6),A0					;GET RGN HANDLE
+		MOVE.L	(A0),A1 					;DE-REFERENCE HANDLE
+		MOVE	#10,RGNSIZE(A1) 			;INSTALL SIZE = 10
+SIZEOK	MOVE.L	12(A6),RGNBBOX+TOPLEFT(A1)	;INSTALL RGNBBOX TOPLEFT
+		MOVE.L	8(A6),RGNBBOX+BOTRIGHT(A1)	;INSTALL RGNBBOX BOTRIGHT
+		MOVE	RGNBBOX+LEFT(A1),D0
+		CMP 	RGNBBOX+RIGHT(A1),D0		;IS LEFT >= RIGHT ?
+		BGE.S	EMPTY						;YES, SET TO EMPTY
+
+		MOVE	RGNBBOX+TOP(A1),D0
+		CMP 	RGNBBOX+BOTTOM(A1),D0		;IS TOP < BOTTOM ?
+		BLT.S	DONE						;YES, CONTINUE
+
+EMPTY	CLR.L	RGNBBOX+TOPLEFT(A1)
+		CLR.L	RGNBBOX+BOTRIGHT(A1)
+DONE	MOVEM.L (SP)+,D3/A2 				;RESTORE REGS
+		UNLINK	12,'SETRECTR'
+
+
+
+RectRgn PROC  EXPORT
+		IMPORT SetRectRgn
+;---------------------------------------------------
+;
+;  PROCEDURE RectRgn(rgn: RgnHandle; r: Rect);
+;  make a rectangular region from a rectangle
+;
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,A1					;POP ADDR OF RECT
+		MOVE.L	(A1)+,-(SP) 				;PUSH LEFT,TOP
+		MOVE.L	(A1)+,-(SP) 				;PUSH RIGHT,BOTTOM
+		MOVE.L	A0,-(SP)					;RESTORE RETURN ADDR
+		JMP 	SETRECTRGN					;DOUBLE UP ON CODE
+
+
+
+OffsetRgn PROC	EXPORT	
+;---------------------------------------------------------
+;
+;  PROCEDURE OffsetRgn(rgn: RgnHandle; dh,dv: INTEGER);
+;
+		MOVE.L	(SP)+,A1					;POP RETURN ADDR
+		MOVE	(SP)+,D1					;POP DV
+		MOVE	(SP)+,D0					;POP DH
+		MOVE.L	(SP)+,A0					;POP RGN HANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE IT
+		ADD 	#2,A0						;POINT TO RGNBBOX
+
+;------------------------------------------------------
+;
+;  OFFSET THE BOUNDING BOX
+;
+		ADD 	D1,(A0)+					;ADD DV TO TOP
+		ADD 	D0,(A0)+					;ADD DH TO LEFT
+		ADD 	D1,(A0)+					;ADD DV TO BOTTOM
+		ADD 	D0,(A0)+					;ADD DH TO RIGHT
+
+
+;---------------------------------------------------------------------
+;
+;  IF NON-RECTANGULAR REGION, OFFSET THE COORDINATES TOO.
+;
+		CMP 	#10,-10(A0) 				;IS REGION RECTANGULAR ?
+		BEQ.S	DONE						;IF SO, WE'RE ALL DONE
+NXTVERT ADD 	D1,(A0)+					;OFFSET VERTICAL COORD DV
+NXTHOR	ADD 	D0,(A0)+					;OFFSET LEFT COORD DH
+		ADD 	D0,(A0)+					;OFFSET RIGHT COORD DH
+		CMP 	#32767,(A0) 				;HORIZ TERMINATOR ?
+		BNE 	NXTHOR						;NO, LOOP
+		ADD 	#2,A0						;YES, SKIP OVER TERMINATOR
+		CMP 	#32767,(A0) 				;IS NEXT VERT = 32767 ?
+		BNE 	NXTVERT 					;NO, LOOP FOR MORE
+DONE	JMP 	(A1)						;RETURN
+
+
+
+InsetRgn PROC  EXPORT	
+		IMPORT InsetRect,SortPoints
+		IMPORT NewHandleWrapper,RgnOp,PackRgn
+;---------------------------------------------------------
+;
+;  PROCEDURE InsetRgn(rgn: RgnHandle; dh,dv: INTEGER);
+;
+;  Inset a region by (dh,dv). Outset if dh or dv neg
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+PARAMSIZE	EQU 	8
+RGN 		EQU 	PARAMSIZE+8-4			;LONG, RGNHANDLE
+DH			EQU 	RGN-2					;WORD
+DV			EQU 	DH-2					;WORD
+
+
+		LINK	A6,#0						;NO LOCAL VARS
+		MOVEM.L D3-D7/A2-A4,-(SP)			;SAVE REGS
+		MOVE.L	DV(A6),D6					;GET DV AND DH BOTH
+		BEQ.S	JGOHOME 					;QUIT IF BOTH ARE ZERO
+		MOVE.L	RGN(A6),A4					;GET RGNHANDLE
+		MOVE.L	(A4),A3 					;DE-REFERENCE IT
+		MOVE	(A3)+,D7					;GET RGNSIZE
+
+
+;--------------------------------------------------------------
+;
+;  IF RECTANGULAR REGION, CALL INSETRECT AND CHECK FOR EMPTY.
+;
+		CMP 	#10,D7						;IS RGN RECTANGULAR ?
+		BNE.S	NOTRECT 					;NO, CONTINUE
+		MOVE.L	A3,-(SP)					;PUSH ADDR OF RGNBBOX
+		MOVE.L	D6,-(SP)					;PUSH DH AND DV
+		_INSETRECT							;InsetRect(rgn^^.rgnbbox,dh,dv);
+		MOVE	LEFT(A3),D0 				;GET BBOX LEFT
+		CMP 	RIGHT(A3),D0				;IS LEFT >= RIGHT ?
+		BGE.S	EMPTY						;YES, RETURN EMPTY RGN
+		MOVE	TOP(A3),D0					;GET BBOX TOP
+		CMP 	BOTTOM(A3),D0				;IS TOP >= BOTTOM ?
+		BLT.S	JGOHOME 					;NO, CONTINUE
+EMPTY	CLR.L	(A3)+						;SET RGNBBOX TO (0,0,0,0) TO
+		CLR.L	(A3)+						;RETURN EMPTY REGION
+JGOHOME BRA.S	GOHOME						;ALL DONE
+
+
+;-----------------------------------------------------
+;
+;  THE REGION IS NOT RECTANGULAR. ALLOCATE A POINT BUFFER IN THE HEAP.
+;
+NOTRECT ADD 	D7,D7						;TRY BYTES NEEDED = RGNSIZE*2
+		CLR.L	-(SP)						;ROOM FOR FCN RESULT
+		MOVE	D7,-(SP)					;PUSH BYTESNEEDED
+		JSR 	NewHandleWrapper			;ALLOCATE PTBUF
+		MOVE.L	(SP)+,A3					;PUT PTBUF HANDLE IN A3
+		BSR.S	HINSET						;INSET HORIZ AND FLIP
+		SWAP	D6							;GET DV INSTEAD OF DH
+		BSR.S	HINSET						;INSET VERTICAL AND FLIP BACK
+		BRA.S	DONE						;ALL DONE
+
+
+;--------------------------------------------------------------------------
+;
+;  LOCAL ROUTINE TO INSET HORIZONTALLY, SWAP H AND V COORDS, AND RE-SORT
+;
+;  RgnOp(rgn,rgn,bufHandle,maxBytes,op,dh,TRUE);
+;
+HINSET	CLR.W	-(SP)						;ROOM FOR FCN RESULT
+		MOVE.L	A4,-(SP)					;PUSH RGNA = USER RGN
+		MOVE.L	A4,-(SP)					;PUSG RGNB = USER RGN ALSO
+		MOVE.L	A3,-(SP)					;PUSH BUFHANDLE
+		MOVE	D7,-(SP)					;PUSH MAXBYTES
+		MOVE	#8,-(SP)					;PUSH OP = INSET
+		MOVE	D6,-(SP)					;PUSH DH
+		ST		-(SP)						;PUSH OKGROW = TRUE
+		_RGNOP
+		MOVE.W	(SP)+,D5					;GET PTCOUNT IN D5
+;
+;  SWAP VERT AND HORIZ COORDS OF ALL INVERSION POINTS
+;
+		MOVE.L	(A3),A0 					;DE-REFERENCE PTBUF HANDLE
+		MOVE	D5,D1						;COPY PTCOUNT
+		BRA.S	SWAP2						;GO TO LOOP START
+SWAPLP	MOVE.L	(A0),D0 					;GET A POINT
+		SWAP	D0							;SWAP ITS COORDINATES
+		MOVE.L	D0,(A0)+					;PUT IT BACK INTO ARRAY
+SWAP2	DBRA	D1,SWAPLP					;LOOP FOR ALL POINTS
+;
+;  RE-SORT THE POINTS IN V.H ORDER
+;
+		MOVE.L	(A3),-(SP)					;PUSH PTBUF PTR
+		MOVE	D5,-(SP)					;PUSH PTCOUNT
+		_SORTPOINTS							;RE-SORT INTO VH ORDER
+;
+;  PACK THE RESULTING POINTS
+;
+		MOVE.L	A3,-(SP)					;PUSH PTBUF HANDLE
+		MOVE	D5,-(SP)					;PUSH PTCOUNT
+		MOVE.L	A4,-(SP)					;PUSH RGN HANDLE
+		_PACKRGN 							;PackRgn(ptBuf,ptCount,rgn);
+		RTS 								;RETURN TO LOCAL CALLER
+
+
+;----------------------------------------------
+;
+;  DISCARD POINT BUFFER AND QUIT.
+;
+DONE	MOVE.L	A3,A0						;GET PTBUF HANDLE
+		_DisposHandle						;DISCARD IT
+
+GOHOME	MOVEM.L (SP)+,D3-D7/A2-A4			;RESTORE REGS
+		UNLINK	PARAMSIZE,'INSETRGN'
+
+
+
+EmptyRgn FUNC  EXPORT	
+		IMPORT EmptyRect
+;---------------------------------------------------
+;
+;  FUNCTION EmptyRgn(rgn: RgnHandle): BOOLEAN;
+;
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,A1					;POP RGNHANDLE
+		MOVE.L	(A1),A1 					;DE-REFERENCE HANDLE
+		PEA 	RGNBBOX(A1) 				;PUSH RGNBBOX
+		MOVE.L	A0,-(SP)					;PUSH RETURN ADDR
+		JMP 	([4*$ae+$e00])				;USE EMPTYRECT CODE
+
+
+
+EqualRgn FUNC  EXPORT	
+;-------------------------------------------------------
+;
+;  FUNCTION EqualRgn(rgnA,rgnB: RgnHandle): BOOLEAN;
+;
+;  RETURNS TRUE IF RGNA AND RGNB DESCRIBE THE SAME AREA
+;
+		MOVE.L	4(SP),A0				;GET RGNA HANDLE
+		MOVE.L	8(SP),A1				;GET RGNB HANDLE
+		CMP.L	A0,A1					;ARE THEY THE SAME ?
+		BEQ.S	RETTRUE					;YES, THE REGIONS ARE THE SAME
+		MOVE.L	(A0),A0 				;DE-REFERENCE RGN A
+		MOVE.L	(A1),A1 				;DE-REFERENCE RGN B
+		MOVE	(A0),D0 				;GET RGNSIZE A
+		MOVE	D0,D1					;MAKE AN EXTRA COPY
+		LSR 	#2,D1					;DIV BY 4 FOR LONG COUNT
+		SUB 	#1,D1					;INIT DBRA LOOP COUNT
+LOOP	CMPM.L	(A0)+,(A1)+ 			;COMPARE A LONG
+		DBNE	D1,LOOP 				;LOOK TILL DIFFERENT OR COUNT
+		BNE.S	RETFALSE				;DIFFERENT --> FALSE
+		AND 	#3,D0					;GET 0..3 FINISH UP BYTES
+		BEQ.S	RETTRUE					;IF NO MORE, WE MADE IT
+LOOP2	CMPM.B	(A0)+,(A1)+ 			;COMPARE A BYTE
+		BNE.S	RETFALSE				;BR IF DIFFERENT
+		SUB 	#1,D0
+		BNE.S	LOOP2					;LOOP LAST 1..3 BYTES
+RETTRUE	MOVE.L	#1,D0					;TRUE
+		BRA.S	DONE
+RETFALSE MOVE.L	#0,D0					;FALSE
+DONE	MOVE.B	D0,12(SP)				;SET RESULT
+		MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		ADD 	#8,SP					;STRIP PARAMETERS
+		JMP 	(A0)					;RETURN
+
+
+
+SectRgn PROC  EXPORT
+		EXPORT DoRgnOp,UnionRgn,DiffRgn,XorRgn
+		IMPORT EqualRgn,CopyRgn,RSect,RectRgn,SetEmptyRgn
+		IMPORT NewHandleWrapper,RgnOp,PackRgn
+;---------------------------------------------------------
+;
+;  PROCEDURE SectRgn(srcRgnA,srcRgnB,dstRgn: RgnHandle);
+;  calculate the intersection of two regions.
+;
+		MOVEQ	#0,D0						;OP = SECT
+		BRA.S	DoRgnOp 					;SHARE COMMON CODE
+
+
+
+;---------------------------------------------------------
+;
+;  PROCEDURE UnionRgn(srcRgnA,srcRgnB,dstRgn: RgnHandle);
+;  calculate the union of two regions.
+;
+UnionRgn
+		MOVEQ	#4,D0						;OP = UNION
+		BRA.S	DoRgnOp 					;SHARE COMMON CODE
+
+
+
+;---------------------------------------------------------
+;
+;  PROCEDURE DiffRgn(srcRgnA,srcRgnB,dstRgn: RgnHandle);
+;  calculate the difference A-B of two regions
+;
+DiffRgn MOVEQ	#2,D0						;OP = DIFF
+		BRA.S	DoRgnOp 					;SHARE COMMON CODE
+
+
+
+;---------------------------------------------------------
+;
+;  PROCEDURE XorRgn(srcRgnA,srcRgnB,dstRgn: RgnHandle);
+;  calculate the exclusive or of two regions
+;
+XorRgn	MOVEQ	#6,D0						;OP = DIFF
+											;FALL INTO DORGNOP
+
+
+;---------------------------------------------------------
+;
+;  PROCEDURE DoRgnOp(srcRgnA,srcRgnB,dstRgn: RgnHandle);
+;
+;  Computes the Intersection, Difference, Union, or Xor of two regions.
+;
+;  enter with op in D0.
+;  op = 0: SECT
+;		2: DIFF A-B
+;		4: UNION
+;		6: XOR
+;
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	12
+RGNA			EQU 	PARAMSIZE+8-4		;LONG, RGNHANDLE
+RGNB			EQU 	RGNA-4				;LONG, RGNHANDLE
+DSTRGN			EQU 	RGNB-4				;LONG, RGNHANDLE
+;
+TEMPRECTANGLE	EQU 	-8					;RECT
+VARSIZE 		EQU 	TEMPRECTANGLE		;TOTAL LOCALS
+;
+DoRgnOp
+		LINK	A6,#VARSIZE 				;ALLOCATE STACK FRAME
+		MOVEM.L D3-D7/A2-A4,-(SP)			;SAVE REGS
+		MOVE	D0,D5						;COPY OP INTO D5
+		MOVE.L	RGNA(A6),A2 				;GET RGNA
+		MOVE.L	RGNB(A6),A3 				;GET RGNB
+		MOVE.L	DSTRGN(A6),A4				;GET DSTRGN
+		MOVE.L	#2,D7
+;
+;  ARE THE TWO INPUT REGIONS THE SAME ?
+;
+		CLR.B	-(SP)						;MAKE ROOM FOR FCN RESULT
+		MOVE.L	A2,-(SP)					;PUSH RGNA
+		MOVE.L	A3,-(SP)					;PUSH RGNB
+		_EQUALRGN							;CALL EQUALRGN
+		TST.B	(SP)+						;ARE THEY THE SAME ?
+		BEQ.S	NOTSAME 					;NO, CONTINUE
+;
+;  THE TWO REGIONS ARE THE SAME.  IF SECT OR UNION
+;  THEN COPY RGNA INTO DSTRGN, ELSE ZERO OUT DSTRGN.
+;
+		AND 	D7,D5						;WAS OP SECT OR UNION ?
+		BNE.S	ZERO						;NO, ZERO OUT DSTRGN
+COPY	MOVE.L	A2,-(SP)					;PUSH RGNA
+		MOVE.L	A4,-(SP)					;PUSH DSTRGN
+		_COPYRGN 							;COPY RGNA INTO DSTRGN
+		BRA.S	JDONE						;AND QUIT
+ZERO	MOVE.L	A4,-(SP)					;PUSH DSTRGN
+		_SetEmptyRgn 						;SET IT TO EMPTY
+		BRA.S	JDONE						;AND QUIT
+
+;
+;  IF OP = DIFF AND RGNB = EMPTY,  COPY RGNA INTO DST
+;
+NOTSAME MOVE.L	(A2),A0 					;DE-REFERENCE RGNA
+		MOVE.L	(A3),A1 					;DE-REFERENCE RGNB
+		CMP 	D7,D5						;IS OP = DIFF ?
+		BGT.S	UNIXOR						;NO, ITS UNION OR XOR
+		BLT.S	BBOXES						;NO, IT'S SECT
+		MOVE	RGNBBOX+LEFT(A1),D0 		;GET BBOX LEFT
+		CMP 	RGNBBOX+RIGHT(A1),D0		;IS BBOX LEFT >= RIGHT ?
+		BGE 	COPY						;YES, COPY RGNA INTO DST
+
+;
+;  IF op = SECT OR DIFF, THEN INTERSECT THE BOUNDING BOXES.
+;
+BBOXES	PEA 	RGNBBOX(A0) 				;PUSH RGNA^^.RGNBBOX
+		PEA 	RGNBBOX(A1) 				;PUSH RGNB^^.RGNBBOX
+		MOVE	D7,-(SP)					;PUSH NRECTS = 2
+		PEA 	TEMPRECTANGLE(A6)			;PUSH DST = TEMPRECTANGLE
+		_RSECT								;CALC INTERSECTION
+		BNE.S	NOTEMPTY					;BR IF RESULT NOT EMPTY
+;
+;  THE BOUNDING BOXES DON'T INTERSECT.
+;  IF OP = SECT, THEN RETURN EMPTY.
+;  IF OP = DIFF, THEN COPY RGNA INTO DSTRGN.
+;
+		TST 	D5							;IS OP = SECT ?
+		BEQ 	ZERO						;YES, RETURN EMPTY
+		BRA 	COPY						;NO, COPY SRCA INTO DSTRGN
+
+;
+;  IF OP = SECT, THEN CHECK FOR BOTH INPUTS RECTANGULAR
+;
+NOTEMPTY MOVE.L (A2),A0 					;DE-REFERENCE RGNA
+		MOVE.L	(A3),A1 					;DE-REFERENCE RGNB
+		TST 	D5							;IS OP = SECT ?
+		BNE.S	NOTEASY 					;NO, CONTINUE
+		MOVEQ	#10,D0
+		CMP 	RGNSIZE(A0),D0				;IS RGNA RECTANGULAR ?
+		BNE.S	NOTEASY 					;NO, CONTINUE
+		CMP 	RGNSIZE(A1),D0				;IS RGNB RECTANGULAR ?
+		BNE.S	NOTEASY 					;NO, CONTINUE
+		MOVE.L	A4,-(SP)					;PUSH DSTRGN
+		PEA 	TEMPRECTANGLE(A6)			;PUSH TEMPRECTANGLE
+		_RECTRGN 							;RectRgn(dstRgn,tempRect);
+JDONE	BRA.S	DONE
+
+;
+;  OP = UNION OR XOR:  IF EITHER REGION IS EMPTY, COPY THE OTHER.
+;
+UNIXOR	MOVE	RGNBBOX+LEFT(A1),D0 		;GET RGNB BBOX LEFT
+		CMP 	RGNBBOX+RIGHT(A1),D0		;IS RGNB BBOX LEFT >= RIGHT ?
+		BGE 	COPY						;YES, COPY RGNA INTO DST
+
+		MOVE	RGNBBOX+LEFT(A0),D0 		;GET RGNA BBOX LEFT
+		CMP 	RGNBBOX+RIGHT(A0),D0		;IS RGNA BBOX LEFT >= RIGHT ?
+		BLT.S	NOTEASY 					;NO, CONTINUE
+		MOVE.L	A3,A2						;YES, GET RGNB INSTEAD
+		BRA 	COPY						;COPY RGNB INTO DST
+
+
+NOTEASY MOVE	RGNSIZE(A0),D4				;GET RGNA RGNSIZE
+		ADD 	RGNSIZE(A1),D4				;ADD RGNB RGNSIZE
+		ADD 	D4,D4						;TRY DOUBLE FOR BYTECOUNT
+		CLR.L	-(SP)						;MAKE ROOM FOR FCN RESULT
+		MOVE	D4,-(SP)					;PUSH BYTECOUNT
+		JSR 	NewHandleWrapper			;ALLOCATE PTBUF
+		MOVE.L	(SP)+,A3					;GET PTBUF HANDLE IN A3
+;
+;  PtCount := RgnOp(srcA,srcB,bufHandle,maxBytes,op,0,TRUE);
+;
+		CLR.W	-(SP)						;MAKE ROOM FOR FCN RESULT
+		MOVE.L	RGNA(A6),-(SP)				;PUSH RGNA
+		MOVE.L	RGNB(A6),-(SP)				;PUSH RGNB
+		MOVE.L	A3,-(SP)					;PUSH BUFHANDLE
+		MOVE	D4,-(SP)					;PUSH MAXBYTES
+		MOVE	D5,-(SP)					;PUSH OP
+		CLR.W	-(SP)						;PUSH DH=0
+		ST		-(SP)						;PUSH OKGROW = TRUE
+		_RGNOP
+		MOVE	(SP)+,D6					;GET PTCOUNT
+
+		MOVE.L	A3,-(SP)					;PUSH PTBUF HANDLE
+		MOVE	D6,-(SP)					;PUSH PTCOUNT
+		MOVE.L	A4,-(SP)					;PUSH DSTRGN
+		_PACKRGN 							;PackRgn(ptBuf,ptCount,dstRgn);
+
+		MOVE.L	A3,A0						;GET PTBUF HANDLE
+		_DisposHandle						;DISCARD IT
+
+DONE	MOVEM.L (SP)+,D3-D7/A2-A4			;RESTORE REGS
+		UNLINK	PARAMSIZE,'DORGNOP '
+
+
+
+PtInRgn FUNC  EXPORT
+;------------------------------------------------------------
+;
+;  FUNCTION PtInRgn(pt: Point; rgn: RgnHandle): BOOLEAN;
+;
+;  TESTS IF A GIVEN POINT IS INSIDE A REGION.
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE	EQU 	8						;SIZE OF PARAMETERS
+RESULT		EQU 	PARAMSIZE+8 			;BOOLEAN
+PT			EQU 	RESULT-4				;POINT, VALUE
+RGN 		EQU 	PT-4					;LONG, HANDLE
+
+
+ENTRY	LINK	A6,#0						;NO LOCAL VARS
+		MOVE.L	D3,-(SP)					;SAVE REG
+		MOVE	PT+H(A6),D1 				;GET TEST HORIZ
+		MOVE	PT+V(A6),D2 				;GET TEST VERT
+		CLR 	D3							;INIT INSIDE:=FALSE
+
+
+;-----------------------------------------------------------
+;
+;  FIRST CHECK BOUNDING BOX
+;
+		MOVE.L	RGN(A6),A0					;GET RGN HANDLE
+		MOVE.L	(A0),A0 					;DE-REFERENCE IT
+		CMP 	RGNBBOX+LEFT(A0),D1 		;IS PT.H < BBOX LEFT ?
+		BLT.S	DONE						;YES, RETURN FALSE
+		CMP 	RGNBBOX+RIGHT(A0),D1		;IS PT.H >= BBOX RIGHT ?
+		BGE.S	DONE						;YES, RETURN FALSE
+		CMP 	RGNBBOX+TOP(A0),D2			;IS PT.V < BBOX TOP ?
+		BLT.S	DONE						;YES, RETURN FALSE
+		CMP 	RGNBBOX+BOTTOM(A0),D2		;IS PT.V >= BBOX BOT ?
+		BGE.S	DONE						;YES, RETURN FALSE
+		CMP 	#10,RGNSIZE(A0) 			;IS REGION RECTANGULAR ?
+		BNE.S	NOTRECT 					;NO, CONTINUE
+		NOT 	D3							;YES, RETURN TRUE
+		BRA.S	DONE
+
+
+;------------------------------------------------------------------
+;
+;  PT IS INSIDE BOUNDING BOX AND REGION IS NOT RECTANGULAR.
+;  LOOK AT THE INVERSION POINTS TO DETERMINE IF PT IN REGION.
+;
+NOTRECT LEA 	RGNDATA(A0),A0				;POINT TO FIRST VERT COORD
+NXTVERT CMP 	(A0)+,D2					;IS NEXT VERT > PT.V ?
+		BLT.S	DONE						;YES, QUIT
+NEXTHOR MOVE	(A0)+,D0					;GET HORIZ COORD
+		CMP 	#32767,D0					;IS IT THE TERMINATOR ?
+		BEQ 	NXTVERT 					;YES, GET NEXT VERT COORD
+		CMP 	D1,D0						;IS HORIZ <= PT.H ?
+		BGT 	NEXTHOR 					;NO, IGNORE THIS POINT
+		NOT 	D3							;YES, TOGGLE INSIDE
+		BRA 	NEXTHOR 					;AND GO FOR MORE POINTS
+DONE	NEG.B	D3							;BOOLEAN RESULT IS 0 OR 1
+		MOVE.B	D3,RESULT(A6)				;RETURN BOOLEAN FCN RESULT
+		MOVE.L	(SP)+,D3					;RESTORE REG
+		UNLINK	PARAMSIZE,'PTINRGN '
+
+
+
+
+RectInRgn FUNC	EXPORT	
+;--------------------------------------------------
+;
+;  FUNCTION RectInRgn(r: Rect; rgn: RgnHandle): BOOLEAN;
+;
+;  Returns TRUE if any part of the rectangle intersects the region.
+;
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE	EQU 	8						;TOTAL SIZE OF PARAMETERS
+RESULT		EQU 	PARAMSIZE+8 			;BYTE, BOOLEAN
+RECT		EQU 	RESULT-4				;LONG, VAR ADDR
+RGN 		EQU 	RECT-4					;LONG, RGNHANDLE
+
+
+;------------------------------------------------------
+;
+;  A6 OFFSETS OF LOCAL VARIABLES AFTER LINK:
+;
+MINRECT 	EQU 	-8						;RECTANGLE
+SAVESTACK	EQU 	MINRECT-4				;LONG
+STATE		EQU 	SAVESTACK-RGNREC		;REGION STATE RECORD
+VARSIZE 	EQU 	STATE					;TOTAL SIZE OF VARIABLES
+
+
+		LINK	A6,#VARSIZE 				;ALLOCATE LOCAL VARIABLES
+		MOVEM.L D0-D7/A1-A5,-(SP)			;SAVE REGISTERS
+		MOVE.L	SP,SAVESTACK(A6)			;REMEMBER STACK START
+		CLR.B	RESULT(A6)					;INIT BOOLEAN RESULT TO FALSE
+		MOVE.L	RGN(A6),A1					;GET REGION HANDLE
+		MOVE.L	(A1),A1 					;DE-REFERENCE IT
+
+
+;--------------------------------------------------------------
+;
+;  FIRST CHECK IF RECTANGLE INTERSECTS BOUNDING BOX OF REGION
+;
+		MOVE.L	RECT(A6),-(SP)				;PUSH POINTER TO RECT
+		PEA 	RGNBBOX(A1) 				;PUSH POINTER TO RGN BBOX
+		MOVE	#2,-(SP)					;PUSH NRECTS=2
+		PEA 	MINRECT(A6) 				;PUSH ADDR WHERE TO PUT RESULT
+		_RSECT								;CALC INTERSECTION
+		BEQ.S	GOHOME						;QUIT IF NO INTERSECTION
+		CMP 	#10,RGNSIZE(A1) 			;IS REGION RECTANGULAR ?
+		BEQ.S	RETTRUE						;YES, RETURN TRUE
+
+
+;------------------------------------------------------------
+;
+;  THE REGION IS NON-RECTANGULAR AND THE RECTANGLE INTERSECTS
+;  THE REGION'S BOUNDING BOX. WE WILL PLAY BACK THE PORTION OF
+;  THE REGION WITHIN MINRECT AND SEE IF ANY PART OF THE REGION
+;  IS ACTUALLY INSIDE THE RECTANGLE.
+;
+
+
+;-------------------------------------------------
+;
+;  INITIALIZE RGN STATE RECORD AT TOP.
+;
+		MOVE.L	A1,A0						;GET RGNPTR IN A0
+		LEA 	STATE(A6),A1				;GET STATE RECORD IN A1
+		MOVE	MINRECT+LEFT(A6),D0 		;MINH IN D0
+		MOVE	MINRECT+RIGHT(A6),D1		;MAXH IN D1
+		MOVE	D0,D2						;BUFLEFT:=MINH
+		_INITRGN 							;INIT RECORD, ALLOCATE BUFFER
+
+
+;------------------------------------------------------------
+;
+;  PLAY THE REGION BACK INTO SCAN BUFFER UNTIL IT GETS DOWN TO
+;  MINRECT, THEN CHECK EACH SCANLINE FOR NON-ZERO PLAYBACK.
+;  QUIT AND RETURN TRUE IF NON-ZERO FOUND BEFORE RGN GOES BEYOND MINRECT.
+;
+		MOVE	SCANSIZE(A1),D5 			;GET BUFSIZE= # LONGS -1
+		MOVE	MINRECT+TOP(A6),D0
+		_SEEKRGN 							;SEEK THE REGION TO MINRECT TOP
+		MOVE	MINRECT+BOTTOM(A6),D6
+TESTBUF MOVE.L	SCANBUF(A1),A0				;POINT TO BUFFER START
+		MOVE	D5,D0						;INIT LOOP COUNT TO BUFSIZE
+NXTLONG TST.L	(A0)+						;IS SCAN BUF NON-ZERO ?
+		DBNE	D0,NXTLONG					;TEST LONGS TILL NON ZERO OR END
+		BNE.S	RETTRUE						;WE FOUND A NON-ZERO, RETURN TRUE
+		MOVE	NEXTV(A1),D0				;GET NEXT VERTICAL IN RGN
+		CMP 	D0,D6						;IS NEXT RGN VERT BEYOND BOTTOM ?
+		BLE.S	GOHOME						;YES, RETURN FALSE
+		_SEEKRGN 							;NO, SEEK TO NEXT VERT CHANGE
+		BRA.S	TESTBUF 					;AND SEE IF IT IS NON-ZERO
+
+RETTRUE	ADDQ.B	#1,RESULT(A6)				;SET BOOLEAN RESULT TO TRUE
+GOHOME	MOVE.L	SAVESTACK(A6),SP			;STRIP SCAN BUFFER IF ANY
+		MOVEM.L (SP)+,D0-D7/A1-A5			;RESTORE REGISTERS
+		UNLINK	PARAMSIZE,'RECTINRG'
+
+
+	IF 0 THEN
+
+OldTrimRect FUNC  EXPORT
+
+		IMPORT RgnOp,TrimRgn
+;------------------------------------------------------
+;
+;  FUNCTION TrimRect(rgn: RgnHandle; VAR dstRect: Rect): CCR TRISTATE;
+;
+;  RESULT IN CONDITION CODES:
+;
+;  =  RESULT RECTANGULAR, DSTRECT TRIMMED
+;  <  RESULT EMPTY, DSTRECT NOT MODIFIED
+;  >  RESULT NON-RECT, DSTRECT NOT MODIFIED
+;
+;  If the intersection of rgn and dstRect is rectangular,
+;  then return EQUAL and put the intersection into dstRect.
+;  If the intersection is empty or not rectangular, then
+;  return FALSE and don't modify dstRect.
+;
+;	Does not call the storage allocator.
+;
+;	1.	Fake up a rect rgn on the stack from dstRect
+;	2.	Call RgnOp with max bytes = 24, OKGROW = FALSE
+;	3a. If ptCount = 4 THEN result rect, return TRUE and update dstRect.
+;	3b. If ptCount < 4 THEN result empty, return TRUE and clear dstRect.
+;	3c. If ptCount > 4 THEN result not rect, return FALSE
+;
+PARAMSIZE		EQU 	8
+RGN 			EQU 	PARAMSIZE+8-4		;LONG, RGNHANDLE
+DSTRECT 		EQU 	RGN-4				;LONG, ADDR OF DSTRECT
+
+PTDATA			EQU 	-24 				;ROOM FOR 6 POINTS
+PTMASTER		EQU 	PTDATA-4			;LONG, FAKE MASTER
+REGION			EQU 	PTMASTER-10 		;ROOM FOR RECT RGN DATA
+RGNMASTER		EQU 	REGION-4			;LONG
+VARSIZE 		EQU 	RGNMASTER
+
+		bra		TrimRgn
+		
+		LINK	A6,#VARSIZE 				;ALLOCATE STACK FRAME
+		MOVEM.L D0-D2/A1,-(SP)				;SAVE ALL REGS USED
+		LEA 	PTDATA(A6),A0				;POINT TO BUFFER
+		MOVE.L	A0,PTMASTER(A6) 			;INSTALL INTO FAKE MASTER
+		LEA 	REGION(A6),A1				;POINT TO REGION DATA
+		MOVE.L	A1,RGNMASTER(A6)			;INSTALL INTO FAKE MASTER
+		MOVE	#10,(A1)+					;INSTALL RGNSIZE = 10
+		MOVE.L	DSTRECT(A6),A0				;POINT TO DSTRECT
+		MOVE.L	(A0)+,(A1)+ 				;COPY DSTRECT TOPLEFT
+		MOVE.L	(A0)+,(A1)+ 				;COPY DSTRECT BOTRIGHT
+;
+;  RgnOp(rgn,rectRgn,BufHandle,24,sect,0,FALSE)
+;
+		CLR.W	-(SP)						;ROOM FOR FCN RESULT
+		MOVE.L	RGN(A6),-(SP)				;PUSH RGN
+		PEA 	RGNMASTER(A6)				;PUSH FAKE RGNHANDLE
+		PEA 	PTMASTER(A6)				;PUSH BUFHANDLE
+		MOVE	#24,-(SP)					;PUSH MAXBYTES = 24
+		CLR.L	-(SP)						;PUSH OP = SECT, DH = 0
+		CLR.B	-(SP)						;PUSH OKGROW = FALSE
+		_RGNOP								;RgnOp(rgn,rectRgn,buf,64,op,dh,FALSE);
+		MOVE.L	DSTRECT(A6),A0				;POINT TO DSTRECT
+		CMP 	#4,(SP)+					;IS PT COUNT = 4 ?
+		BNE.S	DONE						;NO, RETURN < OR > IN CCR
+		MOVE.L	PTDATA(A6),(A0)+			;UPDATE DSTRECT.TOPLEFT
+		MOVE.L	PTDATA+12(A6),(A0)+ 		;UPDATE DSTRECT.BOTRIGHT
+		SUB 	D0,D0						;SET EQUAL FLAG
+DONE	MOVEM.L (SP)+,D0-D2/A1				;RESTORE ALL REGS
+		UNLK	A6							;RELEASE STACK FRAME
+		RTD		#PARAMSIZE					;STRIP PARAMETERS AND RETURN
+
+	ENDIF
+	
+
+		
+TrimRect FUNC  EXPORT
+;------------------------------------------------------
+;
+;  FUNCTION TrimRgn(rgn: RgnHandle; VAR dstRect: Rect; Trim: integer): CCR TRISTATE;
+;
+;		Quickly determine the complexity of the interection of a 
+;  		rectangle and a region.  If the intersection is rectangular,
+;		return the intersection in dstRect.
+;
+;		If Trim is false, dstRect will not be altered: 
+;		NON-RECT will be returned if intersection ≠ dstRect
+;
+;  RESULT IN CONDITION CODES:
+;
+;  =  RESULT RECTANGULAR
+;  <  RESULT EMPTY
+;  >  RESULT NON-RECT
+;
+;  CLOBBERS: A0
+;
+;	Does not call the storage allocator.
+;
+;	1.	Allocate 2 inversion pair buffers on stack
+;	2.	Play rgn (trimmed to rect.left, right) into buffers until rect.top reached
+;			if more than 2 points in buffer -> NON-RECT result
+;	3.  Play rgn until rect.bottom, 
+;			if pair in buffer changes -> NON-RECT result
+;			else if buffer empty then -> EMPTY/FULL result
+;			else Trimmed RECT result
+;
+;	ASSUMES:	RgnBBox completely encloses Rect
+;
+;	NOTE:  		Only the sides of the dstRect are actually trimmed,
+;				no top/bottom trimming is performed
+;
+;
+PARAMSIZE		EQU 	10
+RGN 			EQU 	PARAMSIZE+8-4		;LONG, RGNHANDLE
+DSTRECT 		EQU 	RGN-4				;LONG, ADDR OF DSTRECT
+TRIM	 		EQU 	DSTRECT-2			;WORD, SHOULD DST BE TRIMMED?
+
+VARSIZE 		EQU 	0
+
+		LINK	A6,#VARSIZE 				;ALLOCATE STACK FRAME
+		MOVEM.L D0-D7/A1-A5,-(SP)			;SAVE ALL REGS USED
+		MOVE.L	DSTRECT(A6),A0				;POINT TO DSTRECT
+		MOVEM.L	(A0),D4/D5					;D4 = MinRect.Top, Left
+											;D5 = MinRect.Bottom, Right
+		MOVE.L	D4,D6
+		SWAP	D6							;D6 = MinRect.Top
+		MOVE.L	RGN(A6),A3					;get RgnHandle
+		MOVE.L	(A3),A3
+		MOVE.W	RGNSIZE(A3),D2				;get rgnSize in D2
+		CMP		#10,D2						;Rect Rgn?
+		BEQ		DONE1						;return with RECT intersect true
+		ADD		#RGNDATA,A3					;point at rgnData
+		
+		_StackAvail 						;get stack avail in D0.L
+		SUB.L	#qdStackXtra,D0				;subtract slop factor				<1.5> BAL
+		EXT.L	D2							;make it long
+		CMP.L	D2,D0						;enough space?
+		BGE.S	STKOK						;yes, go allocate
+
+		MOVE.W	D5,D2
+		SUB.W	D4,D2						;get Right - Left
+		EXT.L	D2							;make it long
+		LSL.L	#2,D2						;2 max buffers = 2 (width * 2)
+		CMP.L	D0,D2						;enough space?
+		BLE.S	STKOK						;yes, go allocate
+		
+	;	_debugger							;I wish I had a better solution here...
+		BRA		DONE1						;return with cc = GT => NON-RECT
+
+STKOK	LSR.L	#1,D2						;
+		BCLR	#0,D2						;make bufSize even
+		MOVE.L	SP,A0						;Save stack base in A0
+		SUB.L 	D2,SP						;allocate one buffer
+		MOVE.L	SP,A4						;remember buffer pointer
+		SUB.L 	D2,SP						;allocate one buffer
+		MOVE.L	SP,A5						;remember buffer pointer
+
+;-------------------------------------------------------------
+;
+;	Seek into region until ThisV >= minRect.Top
+;;
+
+		MOVEQ	#0,D2						;init parity to out=even
+		MOVE.W	#32767,D7					;get a MAXINT for comparisons
+		MOVE.L	A4,A1						;set up src1 ptr
+		bra.s	NXTV
+		
+EQUAL	CMP 	D7,D0						;ALL DONE ?
+		BNE.S	XorScam						;no, go back for more
+
+NXTV	MOVE.W	D7,(A1)						;flag end of buffer
+		
+		CMP.W	(A3)+,D6					;is minRect.Top < thisV?
+		BLT.S	INRECT						;yes, go check result
+		
+		MOVE.L	A4,A2						;set up src1 ptr
+		MOVE.L	A5,A1						;set up dest ptr
+		EXG		A4,A5						;swap the point buffers
+
+
+;-------------------------------------------------------------
+;
+;   Each input scan is a sorted array of integers terminated by 32767.
+;
+;	Combine region inversion point data (A3) with that in current
+;	buffer (A2) and place result in (A1).  Discard inversion points not
+;	between Left = D4 and Right = D5.  Eliminate duplicate points.
+;	Maintain count of inversion points to the left of D4 in D2.
+;
+;	NOTE: 	This routine is similar to XorScan except that
+;			it trims the inversion pairs to minRect.Left, Right
+;
+
+XorScam MOVE	(A2)+,D1					;get next B
+NEXTA	MOVE	(A3)+,D0					;get next A
+NEXT	CMP 	D1,D0						;find the leftmost
+		BEQ.S	EQUAL						;equal points cancel
+		BLT.S	ALESS						;A is less
+BLESS	MOVE	D1,(A1)+					;B is pre-clipped so put to dst
+		MOVE	(A2)+,D1					;get next B
+		BRA.S	NEXT						;loop for more
+ALESS	CMP.W	D4,D0						;is A less than or equal to minRect.Left?
+		BLE.S	FLIP						;yes, flip parity
+		CMP.W	D0,D5						;is A greater than or equal to minRect.Right?
+		BLE.S	NEXTA						;yes, discard
+		MOVE	D0,(A1)+					;PUT A TO DST
+		;move.l	a0,d0
+		;move.l	a1,d3
+		;chk.l	d0,d3						;have we gone to far?
+		BRA.S	NEXTA						;loop for more
+FLIP	ADDQ	#1,D2						;toggle even/odd state
+		BRA.S	NEXTA						;loop for more
+
+;-------------------------------------------------------------
+;
+;	Scan through region pointed to by A3 until 
+;		1) Find an odd number of points to the left of D4  -or-
+;		2) Find a point between D4 and D5  -or-
+;		3) Find a MAXINT (D7)
+;
+
+Scam	MOVE	(A3)+,D0					;get next A
+		CMP.W	D4,D0						;is A less than or equal to minRect.Left?
+		BLE.S	FLIP2						;yes, flip parity
+		CMP.W	D0,D7						;is A MAXINT?
+		BEQ.S	NXTV2						;go get next vert
+		CMP.W	D0,D5						;is A greater than or equal to minRect.Right?
+		BLE.S	Scam						;yes, discard
+		BRA.S	BAIL						;this would alter the result so bail
+FLIP2	MOVE	(A3)+,D0					;get another A
+		CMP.W	D4,D0						;is it also less than or equal to minRect.Left?
+		BLE.S	Scam						;yes, parity preserved
+
+BAIL	CMP.W	#0,D7						;NON-RECT, set CC GT and return
+		BRA.S	DONE
+
+
+;-------------------------------------------------------------
+;
+;	If the initial scanline of intersection is rectangular then
+;	'Scam' through the region until ThisV >= minRect.Bottom.
+;	Else abort and return a NON-RECT result
+;;
+
+INRECT
+		SUB.L	A4,A1						;Get pnt count * 2
+		MOVE	A1,D3						;make a copy
+		CMP		#4,D3						;is pnt count > 2?
+		BGT.S	DONE						;NON-RECT so bail out
+		BLT.S	RECT						;less than 2 pnts => rectangular so far
+		AND		#1,D2						;2 pnts => must check parity, is parity even?
+		BNE.S	BAIL						;no, return NON-RECT
+
+RECT	MOVE.L	D5,D6
+		SWAP	D6							;D6 = MinRect.Bottom
+		SUB		#2,A3						;back up to thisV
+NXTV2	CMP.W	(A3)+,D6					;is thisV < minRect.Bottom?
+		BGT.S	SCAM						;yes, go scan more of region
+		
+		TST		TRIM(A6)					;is trimming allowed?
+		BNE.S	TRIMOK						;yes, go to it
+		TST		D3							;no, there must be zero points
+		BEQ.S	NOTRIM						;check for empty/full result
+		BRA.S	BAIL						;return failure
+
+;-------------------------------------------------------------
+;
+;	The entire intersection is complete and the result is still
+;	rectangular.  First check for the trivial FULL/EMPTY intersections then
+;	process any partial rectangular intersections.
+;
+		
+TRIMOK	MOVE.L	DSTRECT(A6),A1				;point to dstRect
+		MOVE	D2,D0						;prepare for DONE2 fall thru
+		CMP		#2,D3						;How many words in scan buffer?
+		BLT.S	NOTRIM						;none, go decide between full/empty
+		BGT.S	TRIM2						;two, must trim both left and right
+											;one, could be left or right
+		BTST	#0,D0						;check parity
+		BNE.S	TRIMR						;odd, must trim right
+		
+		MOVE	(A4),Left(A1)				;even, trim left and return RECT
+		BRA.S	DONE2
+		
+TRIM2	MOVE	(A4)+,Left(A1)				;trim Left and then Right
+TRIMR	MOVE	(A4),Right(A1)				;trim right and return RECT
+		BRA.S	DONE2
+		
+NOTRIM	MOVEQ	#1,D0
+		AND		D0,D2						;make even/odd count 0/1
+DONE2	CMP		D0,D2						;set cc LT if even, EQ if odd
+DONE	MOVE.L	A0,SP						;strip buffers, restore stack ptr
+DONE1	MOVEM.L (SP)+,D0-D7/A1-A5			;RESTORE ALL REGS
+		UNLK	A6							;RELEASE STACK FRAME
+		RTD 	#PARAMSIZE					;STRIP PARAMETERS AND RETURN
+
+
+ 
+
+
+
+MapRgn	PROC  EXPORT
+		IMPORT MapRect,NewHandleWrapper,PutRgn,MapPt
+		IMPORT SortPoints,CullPoints,PackRgn
+;-------------------------------------------------------------
+;
+;  PROCEDURE MapRgn(rgn: RgnHandle; fromRect,toRect: Rect);
+;
+;  A6 OFFSETS OF PARAMETERS AND LOCALS AFTER LINK:
+;
+; fix from QDciPatchROM.a is in as <7Sept90 KON>							<sm 6/9/92>stb
+
+PARAMSIZE		EQU 	12
+RGN 			EQU 	PARAMSIZE+8-4		;LONG, RGNHANDLE
+FROMRECT		EQU 	RGN-4				;LONG, ADDR OF RECT
+TORECT			EQU 	FROMRECT-4			;LONG, ADDR OF RECT
+
+INDEX			EQU 	-2					;INTEGER
+SIZE			EQU 	INDEX-2 			;WORD
+PTCOUNT 		EQU 	SIZE-2				;WORD
+VARSIZE 		EQU 	PTCOUNT 			;TOTAL BYTES
+
+
+		LINK	A6,#VARSIZE 				;ALLOCATE STACK FRAME
+		MOVEM.L D3/D6-D7/A2-A4,-(SP)		;SAVE REGS
+;
+; QUIT FAST IF FROMRECT = TORECT
+;
+		MOVE.L	FROMRECT(A6),A0 			;POINT TO FROMRECT
+		MOVE.L	TORECT(A6),A1				;POINT TO TORECT
+		CMPM.L	(A0)+,(A1)+ 				;IS TOPLEFT SAME ?
+		BNE.S	NOTSAME 					;NO, CONTINUE
+		CMPM.L	(A0)+,(A1)+ 				;YES, IS BOTRIGHT SAME TOO ?
+		BEQ.S	JDONE						;IF SO, JUST QUIT
+;
+;  SPECIAL CASE RECTANGULAR RGN												<7Sept90 KON>
+;
+NOTSAME MOVE.L	RGN(A6),A4					;GET RGNHANDLE					<7Sept90 KON>
+		MOVE.L	(A4),A0 					;DE-REFERENCE RGN				<7Sept90 KON>
+		CMP 	#10,RGNSIZE(A0) 			;IS RGN RECTANGULAR ?			<7Sept90 KON>
+		BNE.S	NOTRECT 					;NO, CONTINUE					<7Sept90 KON>
+;
+; Don't do anything if region is rectangular and wide open since MapRect will choke	<7Sept90 KON>
+; a0 points to rgn
+;
+		cmp.l	#$80018001,2(a0)			;								<7Sept90 KON>
+		bne.s	@notWide					;								<7Sept90 KON>
+		cmp.l	#$7fff7fff,6(a0)			;wide open?;					<7Sept90 KON>
+		beq.s	JDone						;Yes, Don't remap				<7Sept90 KON>
+@notWide
+		PEA 	RGNBBOX(A0) 				;YES, PUSH RGNBBOX
+		MOVE.L	FROMRECT(A6),-(SP)			;PUSH FROMRECT
+		MOVE.L	TORECT(A6),-(SP)			;PUSH TO RECT
+		_MAPRECT 							;MapRect(rgn^^.rgnBBox,from,to);
+JDONE	BRA.S	DONE
+
+NOTRECT CLR.L	-(SP)						;ROOM FOR FCN RESULT
+		MOVE	#256,-(SP)					;PUSH BYTECOUNT = 256
+		MOVE	(SP),SIZE(A6)				;SIZE := 256 BYTES
+		JSR 	NewHandleWrapper			;ALLOCATE PTBUF
+		MOVE.L	(SP)+,A3					;GET PTBUF HANDLE IN A3
+
+		CLR 	INDEX(A6)					;INDEX := 0
+		MOVE.L	A4,-(SP)					;PUSH RGN
+		MOVE.L	A3,-(SP)					;PUSH PTBUF HANDLE
+		PEA 	INDEX(A6)					;PUSH VAR INDEX
+		PEA 	SIZE(A6)					;PUSH VAR SIZE
+		_PUTRGN								;UNPACK RGN INTO INVERSION PTS
+		MOVE	INDEX(A6),D7				;GET INDEX
+		LSR 	#2,D7						;PTCOUNT := INDEX DIV 4
+;
+;  MAP ALL INVERSION POINTS
+;
+		MOVE	D7,D6						;COPY PTCOUNT FOR LOOP COUNT
+		MOVE.L	(A3),A2 					;DE-REFERENCE PTBUF HANDLE
+		BRA.S	MORE						;GO TO LOOP START
+LOOP	MOVE.L	A2,-(SP)					;PUSH ADDR OF AN INV PT
+		MOVE.L	FROMRECT(A6),-(SP)			;PUSH FROMRECT
+		MOVE.L	TORECT(A6),-(SP)			;PUSH TORECT
+		_MAPPT								;MAP THIS POINT
+		ADD.L	#4,A2						;BUMP TO NEXT POINT
+MORE	DBRA	D6,LOOP 					;LOOP ALL INVERSION POINTS
+
+		MOVE.L	(A3),-(SP)					;PUSH PTBUF PTR
+		MOVE	D7,-(SP)					;PUSH PTCOUNT
+		_SORTPOINTS							;SortPoints(ptBuf^,ptCount)
+
+		MOVE.L	(A3),-(SP)					;PUSH PTBUF PTR
+		MOVE	D7,PTCOUNT(A6)				;PUT PTCOUNT IN MEMORY
+		PEA 	PTCOUNT(A6) 				;PUSH VAR PTCOUNT
+		_CULLPOINTS							;CullPoints(ptBuf^,ptCount)
+
+		MOVE.L	A3,-(SP)					;PUSH PTBUF HANDLE
+		MOVE	PTCOUNT(A6),-(SP)			;PUSH PTCOUNT
+		MOVE.L	A4,-(SP)					;PUSH RGN
+		_PACKRGN 							;PackRgn(ptBuf,ptCount,rgn);
+
+		MOVE.L	A3,A0						;PUSH PTBUF HANDLE
+		_DisposHandle						;DISCARD IT
+
+DONE	MOVEM.L (SP)+,D3/D6-D7/A2-A4		;RESTORE REGS
+		UNLINK	PARAMSIZE,'MAPRGN  '
+
+
+		ENDPROC 
+
+
+;________________________________________________________________________________
+;
+
+;  version of Tuesday, March 28, 1989
+
+; Purpose:
+;  To convert bitmaps to regions.
+;
+;				PRINT			PUSH,OFF
+;				INCLUDE			'Traps.a'
+;				INCLUDE			'ToolEqu.a'
+;				INCLUDE			'QuickEqu.a'
+;				INCLUDE			'SysEqu.a'
+;				PRINT			POP
+;				LOAD			'AIncludes.d'
+
+
+;________________________________________________________________________________
+;
+; 		FUNCTION BitMapRgn(region:RgnHandle; bMap:BitMap): OSErr; INLINE $A8D7;
+;
+; 		Given a region and bitmap, BitMapRgn makes the region a bounding
+;		region for the 'map. If it can't get memory it will return a
+;		Memory Manager-type error and an empty region gibbley. Note that
+;		the region might also be empty with no error (if the bounds is an
+;		empty rectangle or there are no 1 bits in the bitmap). Lastly,
+;		if the region would have to exceed 32K it returns a result of
+;		-500 (rgnTooBigErr).
+;
+;		The bMap parameter may be a pointer to a bitmap, a pointer to a 
+;		pixmap, or a pointer to a portBits field in a color grafport.
+;		In the latter two cases, if the pixmap is not 1-bit deep, an error
+;		result of -148 (pixmapTooDeepErr) is returned.
+;
+; 		(the nibble state machine idea is from the Finder MaskToRgn routine)
+;
+;	History
+;		2/19/88	 RBB	changed to take in washing and handle rect. & empties properly
+;						also now finds minimum rectangle to enclose region
+;		*** version of 2/22/88 ***
+;		2/23/88	 RBB	putting in numerous optimizations recommended by Darin
+;		4/4/88   RBB	trying to re-do lost work from March
+;		         DBA
+;		3/28/89	 CSD	adjusted setup to know about pixmaps and portBits
+;
+;________________________________________________________________________________
+;
+;Theory
+;		We scan each line of the bitmap and pump inversion points (ip's) into the region
+;		to put the areas with ones in the bitmap into the region and the areas
+;		with zeroes outside the region.
+;
+;		In order to keep track of where we are in "inversion land" we use two
+;		techniques:
+
+;		The first is a scanline buffer which records the changes
+;		(zeroes to ones and vice versa) as we go. Wherever a change occurs (a
+;		1 next to a 0 in the buffer) we need to put out an inversion point.
+
+;		The second is a togglin' flag which tells us whether we are "inverted" or not.
+;		Since we use a state machine in the innermost (nibble) loop to churn out
+;		ip's, the input to the state machine must be complemented if the flag is set.
+
+;		The loop stuff looks like this:
+;			outer line loop (grows handle in anticipation of worst case for next line)
+;			longword loop for current line (puts out inter-long ip's as needed)
+;			loop for 4 nibbles in current long (calls state maching for each nibble)
+;
+;________________________________________________________________________________
+
+
+BitMapRgn	PROC	EXPORT
+
+BMFrame		RECORD	{A6Link},DECR
+result		DS.W	1
+
+paramTop	EQU		*
+
+regionH		DS.L	1
+bMapPtr		DS.L	1
+
+paramSize	EQU		paramTop-*
+
+return		DS.L	1
+A6Link		DS.L	1
+
+rowLongs	DS.L	1							;number of longwords per line
+rightMask	DS.L	1							;mask for rightmost long of each line
+slHandle	DS.L	1							;handle to scanline buffer
+numLines	DS.W	1							;number of lines in bitmap
+rowNumBytes	DS.W	1							;rowbytes from the bitmap
+startSize	DS.L	1							;size of region at start of line
+lastLineH	DS.L	1							;last line (zeroes) handle
+
+handSize	DS.L	1							;size of handle (avoid calls to GetHandleSize)
+max2Add		DS.L	1							;worst case for bytes we could add for next line
+MMUSave		ds.b	2							;keep it even!
+SrcPixMap	ds.b	PMREC+CTREC+20 				;room for pixmap and color table
+
+localSize	EQU		*
+			ENDR
+
+		WITH	BMFrame
+		LINK	A6,#localSize
+		MOVEM.L	A2-A5/D3-D7,-(SP)				;save work registers
+
+		CLR.L	slHandle(A6)					;no scanline handle, yet
+		CLR.W	result(A6)						;function result presumed zero at start
+
+		MOVE.L	regionH(A6),A0
+		MOVE.L	(A0),A2
+		MOVEQ	#0,D0
+		MOVE.W	(A2),D0							;get size of region
+		MOVE.L	D0,handSize(A6)					;save it long
+;
+; Convert bitmap/pixmap to a pixmap
+;
+		move.l	bMapPtr(a6),a1
+		lea		SrcPixMap(a6),a2
+		_BitsToPix
+		
+;get boundary rectangle so we can tell how to process the bitmap
+
+		lea		SrcPixMap(A6),A1				;get bitmap pointer
+		CMP.W	#1, pmPixelSize(A1)				;is it 1 bit per pixel deep?
+		BEQ.S	@1								;if yes, we're fine
+		MOVE.W	#pixmapTooDeepErr, D0			;return an error otherwise
+		BRA		BMRBadEmpty						;clean up and bail out
+@1
+		MOVE.W	rowBytes(A1), rowNumBytes(A6)	;get the rowbytes from the bit/pixmap
+		ANDI.W	#$7FFF, rowNumBytes(A6)			;mask off pixmap flag
+		MOVE.L	bounds+topLeft(A1),D2			;get topLeft
+		MOVE.W	bounds+right(A1),D0				;get right
+
+;figure the number of longs per row (according to width, not rowbytes)
+;so we can get a scanline buffer
+
+		SUB.W	D2,D0							;right - left
+		BLE		BMREmptyOut						;if empty rect. then empty region
+		EXT.L	D0
+		MOVE.L	D0,D4
+		ADD.L	D4,D4							;double width for 2 bytes/ip
+		ADDQ.L	#4+2,D4							;add 4 bytes for y value and $7FFF word
+												;add 2 more for the $7FFF if the last line
+		ADD.L	D4,D4							;double, just 'cause I feel like it!
+		MOVE.L	D4,max2Add(A6)					;save max. bytes for a given line
+
+		MOVEQ	#32,D7							;(side effect: clear high word of D7)
+		DIVU	D7,D0							;number of longs = width/32
+
+;get a mask for the rightmost long into rightMask
+
+		MOVE.L	D0,D3							;save remainder(hi word)
+		SWAP	D3								;get remainder from width/32
+		MOVEQ	#-1,D1							;default rightmost long mask
+		TST.W	D3								;zero remainder?
+		BEQ.S	@0								;yes, $FFFF is a good mask
+		ADDQ.W	#1,D0							;we need one more long
+		SUB.W	D3,D7							;32 - remainder = zero bits to shift in
+		ASL.L	D7,D1							;get proper mask
+@0		MOVE.L	D1,rightMask(A6)
+		EXT.L	D0
+		MOVE.L	D0,rowLongs(A6)					;save # of longs
+		ASL.L	#2,D0							;longs => bytes
+
+;get the scanline buffer (D0 = number of bytes per line)
+		_NewHandle clear 						;get a scanline buffer (of zeroes)
+		BNE		BMRBadEmpty						;if we failed then return a NIL handle
+
+		MOVE.L	A0,slHandle(A6)					;save buffer handle
+
+;figure the number of lines
+
+		MOVE.L	D2,D3
+		SWAP	D3								;get top
+		MOVE.W	bounds+bottom(A1),D0			;get bottom
+		SUB.W	D3,D0							;bottom - top
+		BLE		BMREmptyOut						;if empty rect. then empty region
+
+		MOVE.W	D0,numLines(A6)					;number of lines
+
+		MOVE.L	baseAddr(A1),a4					;point to start of map
+		MOVE.W	#rgnData,D7						;initial region size
+
+;OK, now we start the loops.
+;	A1 will point to the bitmap long,
+;	A2 to the region.
+;	A3 points to the current scanline buffer long.
+;	A4 will point to the row in the map.
+;	A5 points to the current word (= size + A2)
+;	D1 holds the current long (modified).
+;	D2 holds the leftmost coordinate of bitmap.bounds.
+;	D3 has the y coordinate, and
+;	D4 the x coordinate (high word stays clear!).
+;	D5 has number of longs remaining for current line.
+;	D6 holds the (on or off) value of the "beam" (for the line).
+;	D7 holds the size outside the longword loop (used as scratch while nibbling).
+;	   (we assume at the very end that D7's high word has remained clear)
+
+;
+; goto 32-bit mode
+;
+		moveq	#true32b,d0					;switch to 32 bit addressing
+		_rSwapMMUMode			;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+		move.b	d0,MMUsave(a6)				;save previous state for later
+		
+BMRHScramLine
+		MOVE.L	regionH(A6),A2
+		MOVE.L	(A2),d0
+		_StripAddress							;clean it up	<9>
+		move.l	d0,a2							;point to start of region
+
+BMRLineLoop
+  		LEA		(A2,D7.L),A5					;point to new region start + size
+
+		MOVE.L	handSize(A6),D1					;get handle size
+		SUB.l	D7,D1							;handle size - region size
+		CMP.L	max2Add(A6),D1					;is there enough for worst case on next line?
+		BGE.S	@1								;skippy if so
+
+		MOVE.L	handSize(A6),D0					;get handle size
+		ADD.L	max2Add(A6),D0					;add more than enough for worst case on next line
+		MOVE.L	D0,handSize(A6)					;save new size
+;
+; go back to previous mode
+;
+		move.b	MMUsave(a6),d0					;get previous MMU state in d0
+		_rSwapMMUMode							;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+		
+		MOVE.L	handSize(A6),d0					;save new size
+		MOVE.L	regionH(A6),A0					;region handle
+		_SetHandleSize
+		BNE		BMRBadEmpty						;if we failed then return a NIL handle
+;
+; goto 32-bit mode
+;
+		moveq	#true32b,d0					;switch to 32 bit addressing
+		_rSwapMMUMode
+		BRA.S	BMRHScramLine					;rederef. handle and recompute current pointer
+@1
+
+		MOVE.W	D2,D4							;get current x coordinate from left
+		MOVEQ	#0,D6							;beam initially off
+		MOVE.L	A4,A1							;start of current line into map pointer
+		MOVE.L	rowLongs(A6),D5					;longs remaining for current line
+		MOVE.L	slHandle(A6),A3					;A3 points to the current "differences" long
+		MOVE.L	(A3),A3
+
+; Note: within this loop we assume that nothing will be done to move the heap
+
+		MOVE.W	D3,D0							;get y position
+		BSR		OutputRgnWord					;output y pos to region
+
+		MOVE.l	D7,startSize(A6)				;save size at line start (a la Derwood)
+		BRA		NextBMRLong						;enter the long loop
+
+BMRLongLoop
+		MOVE.L	(A1)+,D0						;fetch the next long for this line
+BMRLastLEntry
+		MOVE.L	(A3),D1							;get differences long
+
+		EOR.L	D0,D1							;compute the differences
+		BNE		BMRDiff							;if not the same, skip ahead
+
+BMRSame
+;since we want to skip this long (it matches the previous line) we need to
+;put out an ip if the beam is on
+ 		TST.B	D6								;beam on?
+ 		BEQ.S	@1								;skip if not
+ 		MOVE.W	D4,(A5)+						;pump it out
+ 		MOVEQ	#0,D6							;beam off
+
+@1
+		ADD.W	#32,D4							;slip to next long's x coordinate
+@2 		ADDQ.W	#4,A3							;to next changes buffer long
+		BRA		NextBMRLong
+
+;----------------------------------------------------------------------------------------
+
+; Start of State Machine
+
+; Handle state 0001
+
+BMRState1
+		ADDQ.W	#3,D4							;bump x by 3
+State1Common
+		MOVE.W	D4,(A5)+						;generate one
+;Tog1StateDone
+		ADDQ.W	#1,D4							;bump x by one more
+TogStateDone
+		NOT.B	D6								;toggle state
+		RTS
+
+; Handle state 0010
+
+BMRState2
+		ADDQ.W	#2,D4							;bump x by 2
+		MOVE.W	D4,(A5)+						;generate one
+Gen1BumpBy1
+		BSR.S	Gen1InvPoint					;and another one
+BumpBy1
+		ADDQ.W	#1,D4							;bump once more
+		RTS										;state doesn't change
+
+; Handle state 0011
+
+BMRState3
+		ADDQ.W	#2,D4							;bump x by 2
+		MOVE.W	D4,(A5)+						;generate one
+		ADDQ.W	#2,D4							;bump
+		BRA.S	TogStateDone					;toggle the state
+
+; Handle state 0100
+
+BMRState4
+		BSR.S	Gen1InvPoint
+		BSR.S	Gen1InvPoint
+BumpBy2
+		ADDQ.W	#2,D4
+		RTS
+
+; Handle state 0101
+
+BMRState5
+		BSR.S	BMRState4						;start out as state 4
+		SUBQ	#1,D4
+		BRA.S	State1Common					;use common code
+
+; Handle state 0110
+
+BMRState6
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#1,D4
+		BRA.S	Gen1BumpBy1
+
+; Handle state 0111
+
+BMRState7
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#3,D4
+		BRA.S	TogStateDone
+
+; Gen1InvPoint bumps x by one and then generates a horizontal inversion point
+
+Gen1InvPoint
+		ADDQ.W	#1,D4							;bump by 1, first
+		MOVE.W	D4,(A5)+						;add x value (ip) to region
+		RTS
+
+; Handle State 1000
+
+BMRState8
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#3,D4
+		RTS
+
+; Handle State 1001
+
+BMRState9
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#2,D4
+		BRA.S	State1Common
+
+; Handle State 1010 (most complicated case)
+
+BMRState10
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		BSR.S	Gen1InvPoint
+		BRA.S	Gen1BumpBy1
+
+; Handle State 1011
+
+BMRState11
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#2,D4
+		BRA.S	TogStateDone
+
+; Handle State 1100
+
+BMRState12
+		MOVE.W	D4,(A5)+
+		ADDQ.W	#2,D4
+		MOVE.W	D4,(A5)+
+		BRA.S	BumpBy2
+
+; Handle State 1101
+
+BMRState13
+		BSR.S	BMRState12
+		SUBQ	#1,D4
+		BRA.S	State1Common
+
+; Handle State 1110
+
+BMRState14
+		MOVE.W	D4,(A5)+
+		ADDQ.W	#3,D4
+		MOVE.W	D4,(A5)+
+		BRA.S	BumpBy1
+
+; State table
+
+BMRHandler
+		BRA.S	BMRState0
+		BRA.S	BMRState1
+		BRA.S	BMRState2
+		BRA.S	BMRState3
+
+		BRA.S	BMRState4
+		BRA.S	BMRState5
+		BRA.S	BMRState6
+		BRA.S	BMRState7
+
+		BRA.S	BMRState8
+		BRA.S	BMRState9
+		BRA.S	BMRState10
+		BRA.S	BMRState11
+
+		BRA.S	BMRState12
+		BRA.S	BMRState13
+		BRA.S	BMRState14
+
+; Handle State 15 or 1111
+
+BMRState15
+		MOVE.W	D4,(A5)+						;generate one now
+		NOT.B	D6								;toggle the state
+
+; Handle State 0 or 0000
+
+BMRState0
+		ADDQ.W	#4,D4
+		RTS
+
+; End of the State Guys
+
+;----------------------------------------------------------------------------------------
+
+BMRDiff
+		MOVE.L	D0,(A3)+						;fix up scanline buffer for next time
+
+; this long is different from the last one, so output a bunch
+; of inversion points by pumping it through the state machine, a nibble
+; at a time.
+
+		MOVEQ	#3,D7							;4 bytes to process (D7 high word clear)
+		MOVEQ	#0,D0							;prevent need to mask for first nibble
+
+; here is the loop where we feed it through a nibble at a time.
+; it's worth it to special case a whole byte of 0
+
+BMRByteLoop
+		ROL.L	#8,D1							;get next (topmost) byte
+		TST.B	D1								;is it zero?
+		BNE.S	BMRNibble						;if not, 4 bits at a time
+
+		TST.B	D6
+		BNE.S	BMRNibble						;if beam on, must pass through
+
+;the top 8 are zero, so we can save some time
+
+		ADDQ.W	#8,D4							;bump x
+		BRA.S	BMRNextByte
+
+;take care of the rightmost long for a line
+
+BMRLastLong
+		MOVE.L	(A1),D0							;fetch the long from the bitmap
+		AND.L	rightMask(A6),D0				;mask off right bits that aren't in map
+		BRA		BMRLastLEntry					;go process this long
+
+; handle the first nibble
+
+BMRNibble
+		MOVE.B	D1,D0							;get byte
+		EOR.B	D6,D0							;invert nibble when beam is on
+		LSR.B	#4,D0							;get 1st nibble
+		ADD.W	D0,D0							;double for word index
+
+		JSR		BMRHandler(D0.W)				;invoke the handler
+
+; handle the second nibble
+
+		MOVE.B	D1,D0							;get byte again
+		EOR.B	D6,D0							;invert nibble when beam is on
+		AND.W	#%1111,D0						;mask to it
+		ADD.W	D0,D0							;double for word index
+
+		JSR		BMRHandler(D0.W)				;invoke the handler
+
+BMRNextByte
+		DBRA	D7,BMRByteLoop					;loop for all 8 nibbles
+
+; bump to the next long
+
+NextBMRLong
+		SUBQ.W	#1,D5							;decrement longword index
+		BGT		BMRLongLoop						;not at end, loop for whole line
+		BEQ.S	BMRLastLong						;process last long for this line
+
+; we've reached the end of the (this) line
+BMREOL
+		MOVE.l	A5,D7							;current region pointer
+		SUB.l	A2,D7							;figga region size
+		CMP.l	startSize(A6),D7				;did we add inv. pts to this line?
+		BEQ.S	BMRNoLine						;br = no, so back up
+		BLT		BMR64KErr						;if the size decreased, we overflowed
+
+; if the state is on, generate one last inversion point
+
+		TST.B	D6
+		BEQ.S	@1
+
+		MOVE.W	D4,(A5)+						;generate a last one
+		ADDQ.l	#2,D7							;keep sizable advantage
+@1
+
+; end the scan line with the traditional $7FFF
+
+		BSR.S	OutputLastRgnWord
+
+BMREOL2
+		ADDQ.W	#1,D3							;bump y position
+		MOVE.W	D2,D4							;start x at left again
+		ADD.W	rowNumBytes(A6),A4				;bump to next row in map
+		SUBQ.W	#1,numLines(A6)
+		BGT		BMRLineLoop						;if we're not done then do next line
+		BLT.S	BMRFinis						;br if really done
+
+; as the last line process an imaginary line of zeroes to end the region…
+		move.b	MMUsave(a6),d0					;get previous MMU state in d0		<9>
+		_rSwapMMUMode							;(can trash a0/a1/a2, d0/d1/d2)		<9>
+
+		MOVE.L	rowLongs(A6),D0
+		ASL.L	#2,D0							;longs => bytes
+		_NewHandle clear						;get a full line of zero bits
+		BNE		BMRBadEmpty						;if we failed then return a NIL handle
+		MOVE.L	A0,lastLineH(A6)				;save handle
+		MOVE.L	(A0),A4							;start of current line
+;
+; Since we just allocated this handle, there is no need to strip it since the flags are guaranteed
+; to be zero.
+;
+		moveq	#true32b,d0						;switch to 32 bit addressing		<9>
+		_rSwapMMUMode							;									<9>
+		BRA		BMRHScramLine					;do this last one (and rederef handle)
+
+BMRNoLine
+		SUBQ.L	#2,A5							;back up pointer
+		SUBQ.l	#2,D7							;back down size
+		BRA.S	BMREOL2							;go for next line
+
+; Append the "end of line" token to the region
+
+OutputLastRgnWord
+		MOVE.W	#$7FFF,D0
+
+; OutputRgnWord takes the word in D0, appends it to the region,
+; and leaves the condition codes set for ADDQ.l D7 (which contains the length)
+
+OutputRgnWord
+		MOVE.W	D0,(A5)+						;put a word to the region
+		ADDQ.l	#2,D7							;ink the size
+		RTS
+
+
+; all done:  Restore MMU Mode, clean up, and output the final $7FFF
+;
+BMRFinis
+		move.b	MMUsave(a6),d0				;get previous MMU state in d0
+		_rSwapMMUMode						;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+
+		MOVE.L	lastLineH(A6),A0
+		_DisposHandle						;get rid of that last line of zeroes
+
+		CMP.l	#10,D7							;is region empty of inversion points?
+		BEQ.S	BMREmptyOut						;skip if so (it's an empty region)
+
+		BSR.S	OutputLastRgnWord				;put End-O-Region ($7FFF) word
+;
+; check if rgn > 64K
+;
+		cmp.l	#$0000FFFF,d7
+		BGT.S	BMR64KErr						;if larger than $FFFF, we overflowed!
+
+; find the smallest rectangle that encompasses all the inversion points
+; A0 will point to the current region word, A1 to the start of the line
+; D1 will have the smallest x, D2 the largest x, D4 will contain $7FFF
+; D3 gets the smallest y value (which we know at the start)
+
+		LEA		rgnData(A2),A0					;point A0 past the rgnBBox
+		MOVE.W	#$7FFF,D4
+		MOVE.W	D4,D1							;smallest x so far = $7FFF
+		MOVE.W	#$8000,D2						;largest x so far = -32768
+		MOVE.W	(A0),D3							;smallest y there is
+		BRA.S	BMRPackStart					;enter loop
+
+BMRPackY
+		MOVE.L	A0,A1							;remember where the y value is (sort of)
+
+		CMP.W	(A0)+,D1						;less than smallest x so far?
+		BLE.S	@1								;skip if not
+		MOVE.W	-2(A0),D1						;new smallest x
+
+@1		CMP.W	(A0)+,D4						;end of line?
+		BNE.S	@1								;if not then keep looking
+
+		CMP.W	-4(A0),D2						;last x greater than largest x so far?
+		BGE.S	BMRPackStart					;skip if not
+		MOVE.W	-4(A0),D2						;new largest x
+
+BMRPackStart
+		MOVE.W	(A0)+,D0						;get next word (y value or $7FFF)
+		CMP.W	D4,D0							;if $7FFF then we're done
+		BNE.S	BMRPackY						;otherwise loop
+
+		SWAP	D3								;top into top word
+		MOVE.W	D1,D3							;left into bottom word
+		MOVE.W	-2(A1),D4						;bottom (from last y at start of line)
+		SWAP	D4								;move bottom to high word
+		MOVE.W	D2,D4							;get right
+
+		CMP.l	#28,D7							;size = 28? (do we have a rect. region?)
+		BEQ.S	BMRRect							;skip if so
+
+		BRA.S	BMROut							;return complex region
+
+;the region would exceed 64K, so we have to error out, man
+BMR64KErr
+		move.b	MMUsave(a6),d0				;get previous MMU state in d0
+		_rSwapMMUMode						;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+		MOVE.W	#rgnTooBigErr,D0				;if >32K needed return error
+
+;we come here after failing a SetHandleSize (or NewHandle)
+BMRBadEmpty
+		MOVE.W	D0,result(A6)					;OSErr function result
+
+; emptify the region on errors (or when it should be empty with no error)
+BMREmptyOut
+		MOVE.L	regionH(A6),A0					;handle to region
+		MOVE.L	(A0),A2							;point to it
+		CLR.L	D3								;(0, 0) to topLeft
+		CLR.L	D4								;(0, 0) to botRight
+
+BMRRect
+		MOVEQ	#10,D7							;the size of the region = 10
+
+;output the region with size (longword, high word clear) in D7
+;D3 comes in with topLeft, D4 with botRight
+BMROut
+		MOVE.W	D7,(A2)+						;the size of the region
+		MOVE.L	D3,(A2)+						;topLeft to rgnBBox
+		MOVE.L	D4,(A2)							;botRight to rgnBBox
+		MOVE.L	D7,D0							;size
+		MOVE.L	regionH(A6),A0					;handle to region
+		_SetHandleSize
+
+BMRDspSL
+		MOVE.L	slHandle(A6),A0
+		_DisposHandle						;get rid of the scanline buffer (even if NIL)
+
+BMRDone
+		MOVEM.L	(SP)+,A2-A5/D3-D7				;restore work registers
+		UNLK	A6
+		MOVE.L	(SP)+,A0						;pop return address
+		ADD 	#paramSize,SP					;pop params
+		JMP 	(A0)
+		ENDWITH
+
+		ENDPROC 

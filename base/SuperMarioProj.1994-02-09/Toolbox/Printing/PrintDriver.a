@@ -1,0 +1,465 @@
+;
+;	File:		PrintDriver.a
+;
+;	Contains:	generic printer shell
+;
+;				We get called only if the driver has not yet been attached, so we must attach
+;				it.	This involves getting the correct DRVR from the resource file pointed
+;				to by STR -8192 in the system file, and replacing ourselves with it.  This
+;				will convince future calls to the print driver to go direct, until the driver
+;				gets purged, in which case we will get called again, and we simply go get the
+;				real driver again.
+;
+;	Written by:	Burt Sloane
+;
+;	Copyright:	© 1984-1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <8>	 8/14/90	dba		move the TopMapHndl to the LoadDriver call
+;		 <2>	  8/7/90	NB		Only calls PrLoadDriver if the GetResource('DRVR', -8192) fails.
+;									Most of the time (always?) it will succeed, but in certain
+;									background/foreground cases, we may have to force a reload.
+;									This speeds up text printing by huge piles.
+;		 <1>	  8/7/90	csd		Rebuilding the Printing project
+;		 <6>	 4/21/90	dba		Set CurMap to TopMapHndl before calling PrLoadDriver, stealing
+;									code from the old print driver. This fixes some obvious problems
+;									with background printing, but the entire MultiFinder “GetPrName”
+;									mechanism is no longer appropriate with aliases to printers
+;									(instead of driver names); this must be fixed. Also note that
+;									using CurMap directly and bypassing CurResFile and UseResFile is
+;									naughty.
+;		 <5>	  4/6/90	NB		Replaced with the MultiFinder .Print.  Also added a call to
+;									PrLoadDriver. This replaces all the driver load hacks from before.
+;		 <4>	  3/6/90	DDG		Made GetDrvrEntry restore the ResLoad low memory global. (It
+;									used to save it, but not restore it)
+;		 <3>	  1/4/90	dba		get rid of an unneeded branch that caused a warning
+;		 <2>	12/28/89	dba		change from PROC to MAIN to get dead code stripping; get rid of
+;									resource map munging because RsrcMapEntry is now in every ROM
+;	   <1.3>	11/17/89	dba		got rid of checks for 64K ROMs
+;	   <1.2>	 8/28/89	SES		removed references to nFiles
+;	   <1.1>	 6/20/89	CCH		changed ForRam equates to "NOT ForRom"
+;	   <1.0>	11/16/88	CCH		added to EASE
+;	  <S477>	 4/25/88	JNP		If GetString(-8192) fails, return resErr.
+;		<S5>	12/30/86	JTC		Repair A386 above to use rsrc bit twiddling trap only on new
+;									machines.
+;				12/19/86	LBH		Set and return correct error after GetResource error occurs.
+;									Also puts printer resource file refnum in PrintVars area of low
+;									memory.
+;				12/19/86	LBH		Changed OpenRFPerm back to OpenResFile since this code is now
+;									permanently back in RAM.
+;	  <A386>	 11/9/86	JTC		No code change, just an elaboration of C169/24Oct86 above. This
+;									stub driver has the momentous job of determining the true print
+;									driver, loading it, sneaking it into the RSRC map (on top of
+;									this stub’s own entry), and transferring control to it. It’s the
+;									sneakiness we’re concerned with here. When the true driver is
+;									loaded and detached, the RSRC mgr clears the RSRC bit the master
+;									ptr, as is to be expected. Alas, when the handle is stuffed into
+;									the map, that bit should be set to 1 so that
+;									consistency-checking code sniffing around the heaps and maps
+;									will not find anything amiss. There should be no REAL problem
+;									here, since the drivers are not modified in RAM and thus don’t
+;									require any special purge service by the ResPurgeProc.
+;	  <A316>	10/31/86	LAK		Changed OpenResFile call to OpenRFPerm to avoid conflict with
+;									'Q' INIT patch to former.
+;	  <C169>	10/24/86	JTC/ALR	Incorporated change made to system version of this
+;									file setting resource bit of driver handle after detaching
+;									it and stuffing it back on top of this very code.
+;	  <C206>	 10/9/86	bbm		Modified to mpw aincludes.
+;	  <C169>	 9/23/86	JTC		Change two BSETs to _HLocks, with subtle reg effects.
+;				 9/12/85	LAK		Set the dRAMBased bit in the appropriate byte.
+;				 8/28/85	BBM		added .include for tlasm-newequ.text.
+;				 8/26/85	Leo		ROM-ized the driver, incorporating Larry's changes from his
+;									version: if for ROM, then set dNeedsLock bit, set dRAMBased bit
+;									when splicing in printer driver, and don't do the
+;									ReleaseResource on ourselves. Also incorporated use of
+;									RsrcMapEntry trap for ROM version. Changed code to be included
+;									from a superset file that has all the includes and the
+;									definition of the conditional assembly constants forROM and
+;									forRAM in it.
+;				 8/14/85	Leo		Auugh! Hang bug in MacPaint was caused because there's a routine
+;									in some PrLink, somewhere, called PrNoPurge that does a
+;									GetResource('DRVR',2). How obnoxious! In order to work around
+;									this bug, we're writing the handle to DRVR -8192 into the
+;									resource map over the handle to DRVR 2.
+;				 7/31/85	LEO		Added GetDefDrive and GoSetVol from Donion's Scrapbook
+;				 7/15/85	LEO		Added version info corresponding to Cary's memo Eliminated
+;									copying of code into tempRect. Eliminated master pointer/back
+;									pointer swap. Eliminated closing of resource file (speedup,
+;									hopefully).
+;				  2/1/85	BAS		fixed a bug in the error case introduced 16-Jan. also handled
+;									not getting the resource better
+;				 1/16/85	BAS		let openres do the volume hacking for me
+;				10/29/84	BAS		took out the global flag, made it always close the resFile
+;				 9/12/84	BAS		made STR -8192 not need to be in the system file for Bud
+;				  9/7/84	BAS		Put in suggestions/bugs found by LAK & SC & RS { whew! }
+;
+;	To Do:
+;
+
+		LOAD	'StandardEqu.d'
+		INCLUDE	'PrPrivate.a'
+
+; format of a resource map entry (we should use ResourceMgrPriv.a instead)
+
+RID 	EQU 	0
+RNameO	EQU 	RID+2
+RAttr	EQU 	RNameO+2
+RLocn	EQU 	RAttr
+RHndl	EQU 	RLocn+4
+RESize	EQU 	RHndl+4
+
+;-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+;
+; PrintDriver.a - .Print Patch for Juggler
+;
+; Copyright Apple Computer, Inc. 1986-1990
+; All rights reserved.
+;
+; Written by Phil Goldman
+;
+; This is the patch for the .Print driver in the System File
+;
+; PseudoCode:
+;
+;	short
+;	DoOpen(paramBlock, DCEHandle)
+;		{
+;		DoDriver(OFFSET_OPEN, paramBlock, DCEHandle);
+;		}
+;
+;	short
+;	DoPrime(paramBlock, DCEHandle, paramBlock, DCEHandle)
+;		{
+;		return DoDriver(OFFSET_PRIME, paramBlock, DCEHandle);
+;		}
+;
+;	short
+;	DoControl(paramBlock, DCEHandle)
+;		{
+;		return DoDriver(OFFSET_CONTROL, paramBlock, DCEHandle);
+;		}
+;
+;	short
+;	DoStatus(paramBlock, DCEHandle)
+;		{
+;		return DoDriver(OFFSET_STATUS, paramBlock, DCEHandle);
+;		}
+;
+;	short
+;	DoClose(paramBlock, DCEHandle)
+;		{
+;		return DoDriver(OFFSET_CLOSE, paramBlock, DCEHandle);
+;		}
+;
+;
+;	DoDriver(offset, paramBlock, DCEHandle)
+;	long			offset
+;	IOPBPtr			paramBlock;
+;	Handle			DCEHandle;
+;		{
+;		StringPtr	localStrPtr, globalStrPtr;
+;		short		refNum, oldvref;
+;		Handle		drvrHandle;
+;		char		enablePrTypeChanges;
+;
+;		enablePrTypeChanges = TWGetPrTypeStrings(&localStrPtr, &globalStrPtr);
+;
+;		if (RelString(localStrPtr, globalStrPtr) != 0)
+;			{
+;			if (enablePrTypeChanges != PRTYPE_CHANGESTATUS_DISABLED || offset == OFFSET_CLOSE)
+;				globalStrPtr = localStrPtr					/* Ignore global or do the _Close on the old local */
+;			else
+;				{
+;				(void)DoClose(paramBlock, DCEHandle);
+;				CloseResFile(PRINTVARS.refNum);				/* Ignore the error -- might already be closed by high level or glue */
+;				TWSetPrResRefNums(globalStrPtr, nil);
+;				if (offset != OFFSET_OPEN)
+;					(void)DoOpen(paramBlock, DCEHandle);
+;				}
+;			}
+;
+;		PRINTVARS.refNum = OpenRFPerm(globalStrPtr, BOOTVOL, curPerm);
+;		if (ResErr != noErr)
+;			return ResErr;
+;		if (drvrHandle = Get1Resource('STR ', -8192) == nil || ResError != noErr)
+;			return ResError;
+;		HLock(drvrHandle);
+;		retval =  (drvrHandle[drvrHandle[offset]])(paramBlock, DCEHandle);
+;		if (((*drvrHandle)->drvrFlags & dNeedsLock) == 0)
+;			HUnlock(drvrHandle);
+;		return retval;
+;		}
+;
+;
+; Open Questions:
+;	(3) Should the real driver be passed a fake DCE ptr, or can it share with this one?
+;	(4) What happens if this driver gets purged?  (Theoretically, it should not matter since it's always locked)
+;	(5) Should we still unlock the driver at the end if the trap has the IMMED bit set?
+;	(6) Where is question (1)?
+;
+;
+;-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+			STRING	ASIS
+			BLANKS	ON
+
+
+; NOTE:  Make sure to change these if dispatch numbers ever change!
+_KernelDispatch					OPWORD	$A88F
+TWGETPRTYPESTRINGSID			EQU		39
+TWSETPRTYPESTRINGSID			EQU		40
+PRTYPE_CHANGESTATUS_SAME		EQU		(-1)
+PRTYPE_CHANGESTATUS_DISABLED	EQU		(0)
+PRTYPE_CHANGESTATUS_ENABLED		EQU		(1)
+
+PrintShopRefNum					EQU		'cg'
+
+
+	macro
+	_PrLoadDriver
+	move.l		#$D8000000, -(SP)
+	dc.w		$A8FD
+	endm
+;
+;
+PrShell  	PROC		EXPORT
+;
+OrnEntry
+ReadWriteCtlStatus_Flags	EQU	(1<<dReadEnable)+(1<<dWritEnable)+(1<<dCtlEnable)+(1<<dStatEnable)
+			DC.B		ReadWriteCtlStatus_Flags+(1<<dNeedLock),$00	  ;enable all calls and set the lock flag
+			DC.W		0			;no time
+			DC.W		0, 0	  ;no events, no menu
+;
+; Entry point offset table
+;
+			DC.W		OrnOpen  - OrnEntry ;open routine
+			DC.W		OrnPrime - OrnEntry ;prime
+			DC.W		OrnCtl	 - OrnEntry ;control
+			DC.W		OrnStatus- OrnEntry ;status
+			DC.W		OrnClose - OrnEntry ;close
+;
+; and a name for any humans nearby
+			DC.B		$06
+			DC.B		'.Print '
+			ALIGN 	2
+;
+; Version data
+			DC.W		0
+			DC.B		'DRVR'
+			DC.W		$0002
+			DC.W		$0019
+;
+;
+OrnOpen
+			moveq 	#DrvrOpen,D1
+			bra.s 	GetDrvr 			;do the open call
+;
+;
+OrnPrime
+			moveq 	#DrvrPrime,D1
+			bra.s 	GetDrvr 			;do the prime call
+;
+;
+OrnCtl
+			moveq 	#DrvrCtl,D1
+			bra.s 	GetDrvr 			;do the ctl call
+;
+;
+OrnStatus
+			moveq 	#DrvrStatus,D1
+			bra.s 	GetDrvr 			;do the status call
+;
+;
+OrnClose
+			moveq 	#DrvrClose,D1
+;			bra.s 	GetDrvr		 		;do the close call
+;
+;
+; GetDrvr - go find the driver and load it in.	Purge this program, and transfer
+;  control to the right place according to D1, preserving A0/A1.
+;
+GetDrvr
+			movem.l	A0-A3,-(SP) 		;save regs *** beware of changing this!
+			move.w	CurMap,-(SP)		;save the current map
+			move.w	D1,-(SP)			;save D1
+
+; first, try to get universal print driver in the system file
+			clr.w	-(sp)				; system file refnum
+			_UseResFile					; switch to system resource file
+			tst.w	resErr				; get it?
+			bne		UseOtherDriver		; boy, are we in trouble!
+			subq	#4,SP				; space for handle
+			move.l	#'ndrv',-(sp)		; type
+			move.w	#-8192,-(sp)		; ID
+			_Get1Resource				; get the driver indicator
+			move.l	(sp)+,d0			; get the handle
+			beq		UseOtherDriver		; jump if resource not available
+			move.l	d0,a0				; put handle in more useful register
+			move.l	(a0),d0				; get pointer to data
+			beq		UseOtherDriver		; jump if no data
+			move.l	d0,a0				; put pointer in more useful register
+			tst.b	(a0)				; check boolean flag in first byte
+			beq		UseOtherDriver		; jump if 'false' (allow non-sys printer file)
+			move.w	#PrintShopRefNum,PrintVars+$E		; store refnum in low memory
+			bra		LoadDriver			; go get the driver itself
+
+; oh well, get the local and global pr res file names.  Ignore changes for _Close,
+; because we want to close the old one anyway.  Note that _Open should also check
+; for printer change, just like everyone else.
+UseOtherDriver
+			lea		-10(sp),sp			; room for 2 pointers + return value (on bottom)
+			pea		6(sp)				; push addr of first
+			pea		6(sp)				; push addr of second
+			move.w	#TWGETPRTYPESTRINGSID,-(sp)	; get local and global pr res refnums
+			_KernelDispatch
+			move.b	(sp)+,d0			; get enablePrTypeChanges in d0
+			move.l	(sp)+,a3			; get global str ptr
+			move.l	(sp)+,a2			; get local str ptr
+			tst.b	d0					; check enablePrTypeChanges
+			beq.s	ForceLocalByChoice	; if disabled then branch (force the local always)
+			move.l	a2,a0
+			move.l	a3,a1				; Set up for _RelString
+			moveq.l	#0,d0
+			move.b	(a0)+,d0			; get length of global
+			swap	d0
+			move.b	(a1)+,d0			; get length of local
+			_RelString					; are they equal?
+			beq.s	GotResFileName		; if so, branch
+			move.w	(sp),d1				; get call number
+			cmp.w	#DrvrClose,d1		; is it _Close?
+			bne.s	CloseOldOne			; if not, branch
+ForceLocalByChoice						; if explicit call made to disable pr type changes then force the local
+			move.w	(sp),d1				; get call number
+										; if _Close call we can just close the old local one
+			move.l	a2,a3				; make global <- local
+			bra.s	GotResFileName		; go do it
+
+; Close old .XPrint and open new one...
+CloseOldOne
+			movem.l	4(sp),a0-a1			; restore these for new call
+			jsr		OrnClose
+			move.w	PrintVars+$E,-(sp)	; push refnum of old driver
+			_CloseResFile				; close him (and don't punt on errors -- might already be closed)
+			move.l	a3,-(sp)			; set new local to be the global
+			moveq.l	#0,d0
+			move.l	d0,-(sp)			; no global being set
+			move.b	#PRTYPE_CHANGESTATUS_SAME,-(sp)	; no change in this
+			move.w	#TWSETPRTYPESTRINGSID,-(sp)	; routine is to set the refnum of the printer file
+			_KernelDispatch
+			move.w	(sp),d1				; get call number
+			cmp.w	#DrvrOpen,d1		; is it _Open?
+			beq.s	GotResFileName		; if so, branch
+			movem.l	4(sp),a0-a1			; restore these for new call
+			jsr		OrnOpen				; otherwise open new one
+
+GotResFileName
+
+; When we get to this point one way or another the local and global printer names
+; are the same.  Open the correct printer resource file.  We'll just leave it open.
+; Having the current printer resource file open should always be OK.  Open it by
+; calling PrGlue (NB: 4/6/90)
+
+; Next, get the DRVR resource from the print resource file.
+LoadDriver
+			subq	#4,SP				;space for handle
+			move.l	#'DRVR',-(sp)		;type
+			move.w	#-8192,-(sp)		;ID
+			_Get1Resource				;get the actual driver
+			move.l	(sp)+,D0			;get the handle
+			beq.s	TryLoadDriver		;(LBH)no handle, try to load the driver in (NB)
+			move.l	D0,A3
+			tst.l	(a3)				; data loaded?
+			bne.s	ResetStack			; keep on truckin'
+
+; If the resource load failed, then open the driver and try again.
+TryLoadDriver
+			; Because the LaserWriter driver stores a copy of the 'alis' -8192 resource
+			; in the spool file, we need to look there (as well as in the system file)
+			; when doing a PrLoadDriver so that background printing works. This should
+			; really be handled by PrintMonitor making a Process Mgr. call to let it
+			; know about the other 'alis', but this should work for now, since no one
+			; except for the Print Mgr. is allowed to use an ID of -8192.
+
+			move.l	TopMapHndl,A0		; get the top map								<6>
+			move.l	(A0),A0 			; deref											<6>
+			move.w	20(A0),-(sp)		; get the top map refNum *** equate?			<6>
+			_UseResFile					; use the top map for finding the driver alias	<6>
+
+			_PrLoadDriver				; function result is in D0
+			tst.w	D0					; test the error
+			bnz.s	ErrorZ				; exit on error
+
+			subq	#4,SP				;space for handle
+			move.l	#'DRVR',-(sp)		;type
+			move.w	#-8192,-(sp)		;ID
+			_Get1Resource				;get the actual driver
+			move.l	(sp)+,D0			;get the handle
+			beq.s	ForceErr			;(LBH)no handle, fail
+			move.l	D0,A3
+			tst.l	(a3)				; data loaded?
+			beq.s	ForceErr			;(LBH)no data, fail
+
+
+ResetStack	move.w	(SP)+,D1			;get back the call number
+			move.w	(SP)+,curMap		;restore the map
+
+; Here we lock the driver, cuz code oughta be locked while it's executing.
+			movea.l	A3,A0				;						<C169>
+			_HLock						; lock driver down		<C169>
+			movea.l	(A0),A2				; ptr to driver			<C169>
+			move.w	0(A2,D1.w),D1		;get the offset for the correct call
+			add.w	d1,a2				;get the address of the correct call
+
+; Restore the necessary registers and execute the appropriate routine from
+; the "real" print driver.
+			movem.l	(SP),A0-A1 			; Restore needed regs
+			move.w	PrintVars+$E,-(sp)	; save refnum for later
+			move.l	a3,-(sp)			; save a3 (routine can trash all registers)
+			jsr		(a2)				; go do it
+			move.l	(sp)+,a3			; restore a3 (routine can trash all registers)
+
+			move.l	(a3),a2				; get ptr to driver
+			btst	#dNeedLock, drvrFlags(a2)	; should it stay locked?
+			bne.s	NoUnlockNeeded		; if so, branch
+UnlockNeeded
+			move.w	CurMap,a2			; save cur res file
+			_UseResFile
+			tst.w	resErr				; error on _UseResFile (res file got closed in jsr (a2) call)?
+			bne.s	ResFileGone			; if is, don't unlock non-existent driver
+			move.w	a2,CurMap			; restore cur res file
+			move.l	a3,a0
+			_HUnlock					; otherwise, unlock it
+			bra.s	PDrDone
+NoUnlockNeeded
+			addq.w	#2,sp				; get rid of refnum
+ResFileGone
+PDrDone
+			movem.l	(sp)+,A0-A3 		; Restore all used regs
+			bra.s	CompletelyDone		; go to IODone or ret addr
+;
+; (LBH) Force resource manager error since something failed.
+;
+ForceErr
+			move.w	resErr,d0			; get expected error
+			bne.s	ErrorZ				; return with it
+			move.w	#resNotFound,d0		; otherwise force an error
+
+; Got here if the _GetResource or GetDrvrEntry failed,
+; so clean up and go home.
+;
+ErrorZ
+			move.w	D0,PrintVars		;save error code
+;
+			move.w	(SP)+,D1			;get back the call number
+			move.w	(SP)+,curMap		;restore the map
+			movem.l	(SP)+,A0-A3
+;
+CompletelyDone
+			btst	#9,ioTrap(A0)		;were we called Immed?
+			bne.s 	@1					;yes
+			move.l	jioDone,-(SP)		;no, go to ioDone
+@1
+			rts							;go away
+
+			END

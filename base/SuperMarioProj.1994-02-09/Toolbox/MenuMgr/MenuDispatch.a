@@ -1,0 +1,287 @@
+;
+;	File:		MenuDispatch.a
+;
+;	Contains:	Dispatcher to new MenuManager calls.
+;
+;	Written by:	Kevin S. MacDonell
+;
+;	Copyright:	© 1989-1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds: System
+;
+;	Change History (most recent first):
+;
+;		<14>	 5/10/92	KSM		Patches don’t belong in this file.
+;		<13>	 3/27/92	DC		KSM - added InsertIntlResMenu
+;		<12>	 1/20/92	PN		Adding condition for ROM build
+;		<11>	 8/22/91	KSM		DCC,#Bruges: Added utility routine InsertFontResMenu for Finder.
+;		<10>	 3/29/91	JSM		dba, #85831: Set MenuBarGlobalInvalidBit in DrawMBARString.
+;		 <9>	 3/26/91	dba		gbm: handle system menus correctly
+;		 <8>	  3/4/91	dba		dty: get rid of SysVers conditionals
+;		 <7>	 12/3/90	RLC		<ksm> Fix GetMenuTitleRect to return noErr.
+;		 <6>	 7/23/90	dba		get rid of CallMBarProc, since this is now linked with
+;									MenuMgr.a, which has CallMBarProc in it
+;		 <5>	  6/8/90	KSM		Add new IsSystemMenu(menuID) call.
+;		 <4>	  6/5/90	KSM		Return a reasonable OSErr result on success!
+;		 <3>	 5/14/90	KSM		Factor out common sections of rect calls.
+;		 <2>	 5/14/90	KSM		Rewrite it to: a) Be enabled (again) under System 7.0 b) Be a
+;									linked patch and use the new dispatcher macros c) Add new calls
+;									to the MBDF.
+;	   <1.0>	  6/1/89	KSM		Menu manager trap dispatcher for all new calls.
+;
+;	To Do:
+;		*** Make a common file for the utility routines used here to share with menu manager
+;		*** Is it OK that D2 gets trashed calling GetMenuTitleRect from "C" (Pascal is OK)?
+;
+
+
+		load	'StandardEqu.d'
+		include	'InternalMacros.a'
+		include	'LinkedPatchMacros.a'
+		include 'Menus.a'
+		include 'MenuMgrPriv.a'
+
+DEBUG			default		false
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; MenuMgrDispatch
+
+; The dispatcher to the new menu manager routines
+
+MenuMgrDispatch	BeginDispatcher	_MenuDispatch,(Plus,SE,II,Portable,IIci)
+
+;	public routines
+
+		DispatchSelectors __InsertIntlResMenu=selectInsertIntlResMenu
+		DispatchSelectors __InsrtFontResMenu=selectInsertFontResMenu
+
+;	private routines
+
+		DispatchSelectors GetMenuTitleRect=selectGetMenuTitleRect
+		DispatchSelectors GetMBARRect=selectGetMBARRect
+		DispatchSelectors GetAppMenusRect=selectGetAppMenusRect
+		DispatchSelectors GetSysMenusRect=selectGetSysMenusRect
+		DispatchSelectors DrawMBARString=selectDrawMBARString
+		DispatchSelectors IsSystemMenu=selectIsSystemMenu
+
+				EndDispatcher
+				
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+	MACRO
+	CallMBDFWithRectMsgSwappingD0First
+	; It was more expensive to:
+	; 1) fix up the stack on the GetMenuTitleRect call to look like the other rect calls
+	; 2) then call the common rect code
+	; than it was to have 2 copies of the code contained in this macro,
+	; so it is here in this macro and referenced (expanded) ONLY twice.
+		SWAP	D0						; Move param1 (6 B.O.) to high word
+		MOVE.W	#MBDFRectCall, D0		; set up for rect info message
+		MOVE.L	4(SP), D1				; put rect ptr in D1 for CallMBarProc
+		IMPORT	CallMBarProc
+		JSR		CallMBarProc			; Go do it.
+	ENDM
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; MBDFRectCommon
+
+; Common routine for getting rect info from MBDF (msg #14)
+; On entry:  D0:	Rect selector in low word
+;			 8(A6):	Rect ptr param
+
+MBDFRectCommon	PROC	ENTRY
+				CallMBDFWithRectMsgSwappingD0First
+				MOVE.L	(SP)+, (SP)				; Pull off the rect param
+				MOVE.W	#noErr, 4(SP)			; Return success <4>
+				RTS								; Back to where we came
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetMenuTitleRect		(MBDF msg #14/param1=6 B.O.)
+
+;		FUNCTION GetMenuTitleRect(menuID: INTEGER; VAR theRect: Rect): OSErr;
+
+
+GetMenuTitleRect	PROC		EXPORT
+				MOVE.W	8(SP), D1				; Get the menu ID
+				IMPORT	GetIndex
+				JSR		GetIndex				; Convert menuID in D1 -> 6 B.O. in D0
+				BNE.S	@GoCallMBDF				; Not found
+				MOVEQ	#paramErr,D0
+				BRA.S	@Done
+
+@GoCallMBDF
+				CallMBDFWithRectMsgSwappingD0First
+				MOVEQ	#noErr,D0
+@Done
+				MOVE.L	(SP)+, A0				; Get our return address
+				ADDQ	#6, SP					; Cut back the params
+				MOVE.W	D0, (SP)				; Return any error <7>
+				JMP		(A0)					; Return
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetMBARRect		(MBDF msg #14/param1=0)
+
+;		FUNCTION GetMBARRect(VAR theRect: Rect): OSErr;
+
+GetMBARRect		PROC		EXPORT
+
+				MOVEQ	#MBDFRectBar, D0		; Param1 = MBDFRectBar
+				IMPORT	MBDFRectCommon
+				JMP		MBDFRectCommon			; Call the MBDF
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetAppMenusRect		(MBDF msg #14/param1=-1)
+
+;		FUNCTION GetAppMenusRect(VAR theRect: Rect): OSErr;
+
+GetAppMenusRect	PROC		EXPORT
+
+				MOVEQ	#MBDFRectApps, D0		; Param1 = MBDFRectApps
+				IMPORT	MBDFRectCommon
+				JMP		MBDFRectCommon			; Call the MBDF
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetSysMenusRect		(MBDF msg #14/param1=-2)
+
+;		FUNCTION GetSysMenusRect(VAR theRect: Rect): OSErr;
+
+GetSysMenusRect	PROC		EXPORT
+				MOVEQ	#MBDFRectSys, D0		; Param1 = MBDFRectSys
+				IMPORT	MBDFRectCommon
+				JMP		MBDFRectCommon			; Call the MBDF
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; DrawMBARString		(MBDF msg #15)
+
+;		FUNCTION DrawMBARString(bannerMsg: StringPtr; scriptID: INTEGER; teJust: INTEGER): OSErr;
+
+DrawMBARString		PROC		EXPORT
+
+				resultsStackFrame
+result			ds.w		1					; The result <4>
+				parametersStackFrame
+bannerMsg		ds.l		1					; the string pointer
+scriptID		ds.w		1					; the script to use (0=use default)
+teJust			ds.w		1					; the justification in the menu bar
+				endStackFrame
+
+				linkSave
+
+; Just call the MBDF to get the rect
+;	Param1:
+;	lo byte=scriptID
+;	hi byte=teJust for textbox
+
+				MOVE.W	teJust(A6), D0			; Param1 = teJust/Script
+				ASL.W	#8, D0					; Move teJust to high byte of low word
+				MOVE.W	scriptID(A6), D1		; Get the script ID
+				MOVE.B	D1, D0					; Put the script ID into the low byte of D0
+				SWAP	D0						; Move param1 to high word
+				MOVE.W	#MBDFDrawMBARString, D0	; set up for draw MBAR string call
+				MOVE.L	bannerMsg(A6), D1		; put msg in D1 for CallMBarProc
+				IMPORT	CallMBarProc
+				JSR		CallMBarProc			; Go do it.
+				bset	#MenuBarGlobalInvalidBit,MenuBarGlobalInvalidByte	; set the global invalid bit		<10>
+				MOVE.W	#noErr, result(A6)		; Return success! <4>
+				restoreUnlinkReturn
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; IsSystemMenu
+
+;		FUNCTION IsSystemMenu(menuID: INTEGER; VAR isSys: BOOLEAN): OSErr;
+
+IsSystemMenu		PROC		EXPORT
+
+				move.l	(sp)+,a0				; Get the return address
+				move.l	(sp)+,a1				; Get the boolean address
+				move.w	(sp)+,d0				; Get the menuID
+				moveq	#0,d1					; Assume this is not a system menu
+				cmp.w	#kLoSystemMenuRange,d0	; Is it below the lowest value?
+				blt.s	@done
+				cmp.w	#kHiSystemMenuRange,d0	; Is it greater than the highest value?
+				bgt.s	@done
+				moveq	#1,d1					; Return TRUE
+@done
+				move.b	d1,(a1)					; Set the boolean
+				move.w	#noErr,(sp)				; Return noErr
+				jmp		(a0)
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+;	*********************************************************************************************
+;	*									UTILITY ROUTINES										*
+;	*********************************************************************************************
+;	Stolen from the Menu Manager
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		IF NOT forRom THEN
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetIndex
+
+;	GetIndex is a utility routine that returns an index into the menuList given a
+;	menuId.  The menuId is passed in D1 while the index is returned in D0.  If the
+;	menuId can't be found, D0 will return a zero.  A0, A1 and D2 are trashed.
+;	The Z-flag can be used to determine if one was found. As a special bonus, on
+;	exit A0 points to the menu, if a menu was found.
+
+GETINDEX		PROC	ENTRY
+
+				TST		D1						; is index 0?
+				BEQ.S	NOINDEX					; if so, return 0
+				IMPORT	GetA1List
+				JSR		GetA1List				; get menuList into A1
+				MOVE	LASTMENU(A1),D2			; get # of menus
+				BEQ.S	NOINDEX					; if none, say we can't find it
+
+; here is the search loop.  Get the next handle, and check the menuID
+
+GILOOP			MOVE.L	MENUOH(A1,D2),D0		; get the handle
+				MOVE.L	D0,A0					; get handle in A-reg
+				MOVE.L	(A0),A0					; handle -> pointer
+				CMP		MENUID(A0),D1			; is this the one?
+				BEQ.S	GOTINDEX				; if they match, we're done
+;
+NEXTINDEX		SUBQ	#6,D2					; bump to next entry
+				BNE.S	GILOOP					; loop if there's more to do
+
+; we couldn't find it so return zero in D0
+
+NOINDEX			MOVEQ	#0,D2					; return 0
+
+; we found it so return index in D0
+
+GOTINDEX		MOVE	D2,D0					; get index in D0
+				RTS
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetA1List
+
+GetA1List		PROC	ENTRY
+				MOVE.L	MenuList,A1				; get the menuList handle
+				TST.L	(A1)					; has it been purged?
+				BEQ.S	@NoList					; Branch if it has
+				MOVE.L	(A1),A1					; else get the pointer
+				RTS								; and go to heaven
+@NoList
+				MOVEQ	#MenuPrgErr,D0			; get our error code
+				_SysError						; and roast in eternal damnation
+				ENDPROC
+		ENDIF
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+		END

@@ -1,0 +1,350 @@
+;
+;	File:		DeviceLoop.a
+;
+;	Contains:	_DeviceLoop, a trap to assist in multi-device drawing
+;
+;	Written by:	Chris Derossi
+;
+;	Copyright:	© 1990-1991 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <8>	 1/13/92	PN		Adding the quick draw "DeviceLoop" into ROM
+;		 <7>	 3/26/91	dba		csd: take out VisRgnChanged, since I didn’t really understand
+;		 <6>	 9/14/90	csd		Used the interfaces instead of local definitions.
+;		 <5>	 8/20/90	dba		call VisRgnChanged, now that it exists
+;		 <4>	 7/16/90	DC		Fixed bug which I so graciously introduced into this code with
+;									change <3> Used d0 to hold first GDevice to check in stead of
+;									A4.
+;		 <3>	 7/12/90	DC		changed loop priming to use TheGDevice instead of DeviceList
+;									whe TheGDevice is not equal to MainDevice (off-screen case)
+;		 <2>	 4/11/90	dba		put in the trap number
+;		 <1>	 4/11/90	dba		made it a linked patch
+;
+
+		print push,off
+		load 'StandardEqu.d'
+		include 'LinkedPatchMacros.a'
+		print pop
+
+;----------------------------------------------------------------------------------------------
+; PROCEDURE DeviceLoop(drawingRgn : RgnHandle; drawingProc : ProcPtr;
+;						userData : LongInt; flags : DeviceLoopFlags);
+;----------------------------------------------------------------------------------------------
+;	When DeviceLoop gets called, it searches all the active screen devices for the
+;	ones that intersect the drawingRgn. The drawingRgn is in local coordinates, and
+;	will usually be a port’s visRgn (after a BeginUpdate call). For each device which
+;	intersects drawingRgn, the drawingProc routine is called. When the drawingProc is called,
+;	the current port’s visRgn will be the intersection of the original visRgn and the
+;	intersecting portions of the device.
+;	The drawingProc should be declared as follows:
+;
+; PROCEDURE DrawingProc(depth : Integer; deviceFlags : Integer; targetDevice : GDHandle;
+;						userData : LongInt);
+;
+;	where depth will be the pixelSize of the device, and flags are the gdFlags from
+;	the GDevice. The userData passed to DeviceLoop is also passed to the drawingProc.
+;
+;	When called from a machine without Color QuickDraw, the targetDevice parameter passed to the
+;	drawing proc is set to NIL.
+;
+;	The following flags may be passed to DeviceLoop:
+;
+; singleDevices		If this flag is set, then similar devices are not grouped together when the
+;					drawingProc is called. If this flag is not set, DeviceLoop will only call
+;					the drawingProc once for each set of similar devices, but only the first
+;					one found is passed as targetDevice. It is assumed to be representative of
+;					all the similar devices.
+; dontMatchSeeds	If this flag is set, then color table seeds are not considered significant
+;					when comparing devices for similarity. Device similarity is based on color
+;					table depth and important gdevice flags (at this time, only the
+;					monochrome/color flag is considered important). This flag is ignored if
+;					the singleDevices flag is set.
+; allDevices		When this flag is set, the drawingRgn is ignored and DeviceLoop will call
+;					the drawingProc for all active screen gdevices. Whether or not similar
+;					devices are grouped together for a single call to the drawingProc depends
+;					on the setting of the singleDevices flag. The current port’s visRgn is not
+;					affected when this flag is set.
+;----------------------------------------------------------------------------------------------
+;	Register Use:
+;		D3	current device’s ordinal number for indexing into finished bitmap
+;		D4	RgnHandle for working region
+;		D5	bitmap of devices we’ve done
+;		D6	depth of current device (high word) & flags of current device (low word)
+;		D7	ctSeed of current device
+;		A2	current port
+;		A3	pointer to current device
+;		A4	handle to current device
+;----------------------------------------------------------------------------------------------
+
+
+DeviceLoop			patchproc _DeviceLoop,(Plus,SE,II,Portable,IIci)
+
+activeScreenMask	EQU		$A000
+importantFlagsMask	EQU		$A001
+fakeDeviceFlags		EQU		$A801
+
+DeviceLoopFrame	RECORD	{A6Link},DECR
+StartParams		EQU	*
+drawingRgn		DS.L	1
+drawingProc		DS.L	1
+userData		DS.L	1
+flags			DS.L	1
+ParamSize		EQU		StartParams-*
+Return			DS.L	1
+A6Link			DS.L	1
+savedVis		DS.L	1
+localRect		DS.W	4
+callerRegs		DS.L	8
+visAndDrawRgn	DS.L	1
+LocalSize		EQU		*
+				ENDR
+
+		with	DeviceLoopFrame
+
+		link	A6, #LocalSize
+		movem.l	D3-D7/A2-A4, callerRegs(A6)	; save the callers registers
+
+		btst	#6, ROM85					; Color QuickDraw available?
+		bnz		@classicQD					; if not, handle old case
+
+		move.l	TheGDevice, D0				; Get the handle to the current GDevice
+		move.l	MainDevice, D1				; Get the handle to the main device
+		cmp.l	D0, D1						; if the two are not equal…
+		bne.s	@checkForOne				; we use TheGDevice to prime our device loop
+		move.l	DeviceList, D0				; otherwise, we use DeviceList
+
+@checkForOne
+		movea.l	D0, A0						; D0 here contains the first GDevice of the list we will use.
+		move.l	(A0), A0
+		tst.l	gdNextGD(A0)				; is there a second device?
+		beq		@oneDevice					; if not, quick exit
+
+		move.l	D0, A4						; put the beginning of the device list we are using in A4
+		move.l	(A5), A2					; point to QD globals
+		move.l	thePort(A2), A2				; point to current port
+		move.l	flags(A6), D0				; what are the current options?
+		btst	#allDevicesBit, D0			; are we ignoring drawingRgn?
+		bnz.s	@regionsReady				; if so, there’s no region work
+
+		move.l	visRgn(A2), savedVis(A6)	; save the untouched visRgn
+		subq	#4, SP						; room for region handle
+		_NewRgn
+		move.l	(SP)+, visRgn(A2)			; new working visRgn
+		subq	#4, SP						; room for region handle
+		_NewRgn
+		move.l	(SP)+, D4					; new device rect region
+		move.l	savedVis(A6), -(SP)			; current real visRgn
+		move.l	drawingRgn(A6), -(SP)		; caller’s drawing region
+		subq	#4, SP						; room for region handle
+		_NewRgn
+		move.l	(SP), visAndDrawRgn(A6)		; for intersection of vis and drawing regions
+		_SectRgn							; calculate clipped drawing region
+@regionsReady
+
+		moveq	#0, D5						; clear finished bitmap
+		moveq	#0, D3						; we’re starting with device 0
+@deviceIntersect
+		move.l	A4, D0						; is the GDHandle NIL?
+		beq		@noMore						; if so, no more devices
+		move.l	(A4), A3					; point at the GDevice record
+		bsr		TestAndIntersect			; is device good for drawing?
+		bz.s	@nextDevice					; if not, keep searching
+
+		move.l	flags(A6), D0				; get the caller’s options
+		btst	#allDevicesBit, D0			; are we ignoring regions?
+		bnz.s	@visRgnSetup				; if so, don’t change the visRgn
+
+		move.l	D4, -(SP)					; rectangle region handle
+		pea		localRect(A6)				; this device (local coords)
+		_RectRgn							; region = device rect (local)
+		move.l	D4, -(SP)					; device rect region (local)
+		move.l	visAndDrawRgn(A6), -(SP)	; ANDed with clipped drawing region
+		move.l	visRgn(A2), -(SP)			; turns into port’s visRgn
+		_SectRgn
+		move.l	(A4), A3					; fix GDevicePtr
+@visRgnSetup
+
+		move.l	gdPMap(A3), A0				; device’s PixMapHandle
+		move.l	(A0), A0					; device’s PixMapPtr
+		move.w	pmPixelSize(A0), D6			; device’s depth
+		swap	D6							; put depth high
+		move.w	gdFlags(A3), D6				; get device flags in low word
+		move.l	pmTable(A0), A0				; device’s color table handle
+		move.l	(A0), A0
+		move.l	ctSeed(A0), D7				; stash device’s ctab seed
+		move.l	flags(A6), D0				; get caller’s flags
+		btst	#singleDevicesBit, D0		; should we group devices?
+		bnz.s	@groupingDone				; if not, don’t call AddSimilar
+		bsr		AddSimilarDevices			; find all the like devices
+@groupingDone
+ 		movem.l	D3-D7/A2-A4/A6, -(SP)		; save OUR registers
+		swap	D6
+		move.l	D6, -(SP)					; pass depth and flags
+		move.l	A4, -(SP)					; and the GDHandle
+		move.l	userData(A6), -(SP)			; and finally the user’s long
+		move.l	drawingProc(A6), A0			; pointer to drawing procedure
+		movem.l	callerRegs(A6), D3-D7/A2-A4	; restore caller’s registers
+		move.l	A6Link(A6), A6				; and restore caller’s A6
+		jsr		(A0)						; call the drawing procedure
+		movem.l	(SP)+, D3-D7/A2-A4/A6		; get OUR register set back
+		move.l	(A4), A3					; fix GDevicePtr
+@nextDevice
+		move.l	gdNextGD(A3), A4			; get next device in chain
+		addq	#1, D3						; increment device number
+		bra.s	@deviceIntersect			; try this one
+
+@classicQD
+		move.l	A6, -(SP)					; save our stack frame ptr
+		move.w	#1, -(SP)					; pass depth (always 1)
+		move.w	#fakeDeviceFlags, -(SP)		; and gdflags (something reasonable)
+		clr.l	-(SP)						; NIL for GDHandle
+		bra.s	@simpleDeviceCommon
+
+@oneDevice
+		move.l	A6, -(SP)					; save our stack frame ptr
+		move.l	gdPMap(A0), A1				; PixMapHandle
+		move.l	(A1), A1					; PixMapPtr
+		move.w	pmPixelSize(A1), -(SP)		; pass depth
+		move.w	gdFlags(A0), -(SP)			; and gdflags
+		move.l	D0, -(SP)					; and the GDHandle
+
+@simpleDeviceCommon
+		move.l	userData(A6), -(SP)			; and the user’s long
+		move.l	drawingProc(A6), A0			; the procedure’s address
+		move.l	A6Link(A6), A6				; and restore caller’s A6
+		jsr		(A0)						; call the drawing code
+		move.l	(SP)+, A6					; restore access to our stack frame
+		bra.s	@exit
+
+@noMore
+		move.l	flags(A6), D0				; what are the current options?
+		btst	#allDevicesBit, D0			; are we ignoring drawingRgn?
+		bnz.s	@exit						; if so, no regions to clean up
+
+		move.l	visRgn(A2), -(SP)			; temp working visRgn
+		_DisposRgn
+		move.l	visAndDrawRgn(A6), -(SP)	; temp clipped drawingRgn
+		_DisposRgn
+		move.l	D4, -(SP)					; temp device rect rgn
+		_DisposRgn
+		move.l	savedVis(A6), visRgn(A2)	; put original visRgn back
+@exit
+		movem.l	callerRegs(A6), D3-D7/A2-A4	; restore regs
+		unlk	A6
+		move.l	(SP)+, A0					; clean stack and return
+		lea		ParamSize(SP), SP
+		jmp		(A0)
+
+
+AddSimilarDevices
+; Starting with gdNextGD(A3), find all the devices that:
+;	have the same depth as D6 (high word)
+;	have the same important flags as D6 (low word)
+;	optionally have the same ctSeed as D7
+;	haven’t yet been drawn to
+;	are active screens (automatic because the flag bit for active is in importantFlagsMask)
+;	intersect drawingRgn(A6)
+;
+; When such a device is found, do:
+;	visRgn(A2) := visRgn(A2) | (gdRect & clipped drawingRgn)
+;	mark doneDevices bitmap (D5.L) so we don’t do this one again
+
+		movem.l	A3-A4/D3/D6, -(SP)			; save original state
+		andi.w	#importantFlagsMask, D6		; keep only pertinent flags
+		move.l	gdNextGD(A3), A4			; start with next device
+		addq	#1, D3						; which is next in number, too
+@addLoop
+		move.l	A4, D0						; is there a GDHandle?
+		bz.s	@noMore						; if NIL, then we’re done
+
+		move.l	(A4), A3					; handle->ptr
+		bsr.s	TestAndIntersect			; see if device is okay by itself
+		bz.s	@nextDevice					; if not, try next one
+
+		move.w	gdFlags(A3), D0				; get device attributes
+		andi.w	#importantFlagsMask, D0		; strip unimportant ones
+		cmp.w	D0, D6						; is this device similar to test device?
+		bne.s	@nextDevice					; if not, don’t use it
+
+		move.l	gdPMap(A3), A0				; get device’s PixMapHandle
+		move.l	(A0), A0					; get device’s PixMapPtr
+		move.l	D6, D0						; get depth and flags
+		swap	D0							; get depth into low word
+		cmp.w	pmPixelSize(A0), D0			; save depth as test device?
+		bne.s	@nextDevice					; if not, don’t use it
+
+		move.l	flags(A6), D0				; get the option flags
+		btst	#dontMatchSeedsBit, D0		; should we check ctSeeds?
+		bnz.s	@seedsChecked				; if not, skip this next check
+		move.l	pmTable(A0), A0				; handle to color table
+		move.l	(A0), A0
+		cmp.l	ctSeed(A0), D7				; are the seeds the same?
+		bne.s	@nextDevice					; if not, don’t use this one
+@seedsChecked
+
+		move.l	flags(A6), D0				; what are the current options?
+		btst	#allDevicesBit, D0			; are we ignoring drawingRgn?
+		bnz.s	@visRgnSetup				; if so, no regions to setup
+
+		move.l	D4, -(SP)					; rectangle region handle
+		pea		localRect(A6)				; this device (local coords)
+		_RectRgn							; region = device rect (local)
+		move.l	D4, -(SP)					; device rect region (local)
+		move.l	visAndDrawRgn(A6), -(SP)	; ANDed with clipped drawing region
+		move.l	D4, -(SP)					; turns into intersected rect region
+		_SectRgn
+		move.l	D4, -(SP)					; intersected device rect region
+		move.l	visRgn(A2), -(SP)			; and previously setup visRgn
+		move.l	(SP), -(SP)					; get ORed together
+		_XorRgn								; XOr is a fast way to Union when guaranteed no overlap
+		move.l	(A4), A3					; fix GDevicePtr
+
+@visRgnSetup
+		bset.l	D3, D5						; mark this device done
+@nextDevice
+		move.l	gdNextGD(A3), A4			; get next device in chain
+		addq	#1, D3						; increment device number
+		bra.s	@addLoop					; try this one
+@noMore
+		movem.l	(SP)+, A3-A4/D3/D6			; restore caller’s state
+		rts
+
+
+TestAndIntersect
+; Inputs:
+;	A3	device to test (dereferenced GDHandle)
+;	D3	this device’s ordinal number
+; Outputs:
+;	CCs zero if not okay, non-zero if okay
+;	localRect(A6) is set to devices rectangle in local coordinates
+
+		btst.l	D3, D5						; this device already done?
+		bnz.s	@fail						; if so, it’s not okay
+		move.w	gdFlags(A3), D0				; get this device’s flags
+		andi.w	#activeScreenMask, D0		; extract screen & active bits
+		cmpi.w	#activeScreenMask, D0		; are both bits set?
+		bne.s	@fail						; if not, don’t use device
+		move.l	gdRect(A3), localRect(A6)	; copy topLeft of device rect
+		move.l	gdRect+4(A3), localRect+4(A6)	; and bottomRight
+		pea		localRect(A6)				; push address of copied device rect
+		_GlobalToLocal						; and convert it to local coords.
+		pea		localRect+bottom(A6)		; push address of copied device rect bottomRight
+		_GlobalToLocal						; and convert it to local coords.
+
+		move.l	flags(A6), D0				; get the options
+		btst	#allDevicesBit, D0			; should we accept all screens?
+		bnz.s	@exit						; if set, exit with CCs non-zero
+
+		subq	#2, SP						; room for boolean result
+		pea		localRect(A6)				; local version of GDRect
+		move.l	drawingRgn(A6), -(SP)		; region to test
+		_RectInRgn							; does device intersect region?
+		tst.b	(SP)+						; see if it does
+		bra.s	@exit
+@fail
+		moveq	#0, D0
+@exit
+		rts
+
+		END

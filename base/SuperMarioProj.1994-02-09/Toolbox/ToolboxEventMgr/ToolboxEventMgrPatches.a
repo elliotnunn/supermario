@@ -1,0 +1,333 @@
+;
+;	File:		ToolboxEventMgrPatches.a
+;
+;	Contains:	linked patches for the Toolbox Event Manager
+;
+;	Copyright:	© 1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <3>	 3/27/92	JSM		Moved this file to ToolboxEventMgr folder, keeping all the old
+;									revisions, to reflect current Reality structure.
+;		 <2>	  3/3/92	PN		Roll in DoSysErrorUpdates
+;		<12>	  4/2/91	DFH		dba, #86111: Added using32BitHeaps to the FixCheckActivate
+;									patch, so that apps (like MacWrite 5.0) that depend on the
+;									undocumented sys-vs-user-window event modifier will work, at
+;									least in 24-bit mode.
+;		<11>	 1/14/91	DC		rlc - Honor ScrDmpEnb on all machines. Currently implemented on
+;									the Plus. Fix Patches to SE and II. Add Patches for Portable and
+;									IIci.
+;		<10>	12/20/90	DFH		(dba) Changed GetNextEvent and EventAvail to look for highlevel
+;									events (with a higher priority than updates).
+;		 <9>	11/20/90	JSM		<dba> Add come-from patches on _GetResource inside
+;									GetNextEvent() for the Plus (to disable FKEYs from GNE) and the
+;									II and SE (to disable FKEYs from the keypad).  Moved here from
+;									Patch[PlusSEII]ROM.a.
+;		 <8>	 11/4/90	dba		save the port around the call to PaintBehind
+;		 <7>	10/23/90	dba		(with csd) fix patch to OSEventAvail; it does the wrong things
+;									with the stack
+;		 <6>	 9/22/90	dba		Ed Tecot meant well when he told us to do a PaintOne(RootLayer),
+;									but he really meant PaintBehind(RootLayer).
+;		 <5>	  8/1/90	dba		put in a hack to make the old DSWndUpdate thing work
+;		 <4>	  7/2/90	stb		Font fix
+;		 <3>	 6/24/90	DTY		Added come-from patch to _GetMouse, which sets the current port
+;									to the Window Manager port before calling _GetMouse.  This keeps
+;									the journal driver happy.
+;		 <2>	 4/26/90	dba		add patch to GetNextEvent and EventAvail on the IIci to fix a
+;									32-bit deactivation bug
+;		 <1>	 4/20/90	dba		first checked in
+;
+;	NOTE: These patches must be loaded *after* the Layer Mgr. since they call GetRootLayer.
+;
+
+		load 'StandardEqu.d'
+		include 'LinkedPatchMacros.a'
+		include 'LayerEqu.a'
+		include 'GestaltEqu.a'
+		include 'MFPrivate.a'
+
+AfterGetMouseInGetNextEvent				ROMBind		(Plus,$11136),(SE,$B724),(II,$F2E6),(Portable,$10224),(IIci,$15C04)
+AfterOSEventAvailInCheckActivate		ROMBind		(IIci,$15C28)
+AfterSystemUserWindowInCheckActivate	ROMBind		(IIci,$15C4A)
+AfterGetResourceInTryFKey				ROMBind		(Plus,$110F8),(SE,$B6B8),(II,$F27A),(Portable,$101B8),(IIci,$15B98)	; <9> <11>
+DoneGNE									ROMBind		(Plus,$1112C)							; <9>
+TrySysEvent								ROMBind		(SE,$B6EA),(II,$F2AC)					; <9>
+AfterOSEventAvailInGetNextEvent			ROMBind		(Plus,$1108A),(SE,$B656),(II,$F218),(Portable,$10144),(IIci,$15B2A)
+AfterGetOSEventInGetNextEvent			ROMBind		(Plus,$1108E),(SE,$B65A),(II,$F21C),(Portable,$10148),(IIci,$15B2E)
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetNextEvent — update windows when a disk switch dialog or other system error trashed the screen
+
+; There is some code (in all of our ROMs) that causes an update when a disk switch dialog has
+; appeared, but there was not enough room on the stack to save the bits behind the dialog.
+; There is a bug in this code (the high bit of the top coordinate was set, so we always painted
+; too much). Also, I needed the same mechanism to erase the space under the “forced quit” system
+; error dialog. In order to fix the bug and add a new feature, I introduced a new global (off of
+; ExpandMem) to contain a rectangle that needs to be updated. Anyone (in system software) can union
+; a rectangle into this global (even when the Memory Manager cannot be used) and the next
+; GetNextEvent call will take care of the updating. Patches to the file system’s disk switch
+; dialog code in FileSystemPatches.a cause it to union with this rectangle, so that it participates
+; in this scheme.
+
+; *** This does not take care of the case when the bits are scrolled or otherwise moved before
+; GetNextEvent is called, but neither did the old code, and I don’t have any ideas.
+
+DoSysErrorUpdates patchproc _GetNextEvent,(Plus,SE,II,Portable,IIci)
+
+		import	ClearSysErrorUpdateRect
+
+		BSET	#7,DSWndUpdate	; check if someone is trying to use the old update mechanism
+		bnz.s	@noUpdateNeeded
+
+		move.l	DSAlertRect+4,-(sp)
+		move.l	DSAlertRect,-(sp)
+		bclr	#7,(sp)			; clear the bit that is sometimes set here
+		move.l	sp,-(sp)		; copy of DSAlertRect without the high bit
+		move.l	ExpandMem,a0
+		pea		ExpandMemRec.SysErrorUpdateRect(a0)
+		move.l	(sp),-(sp)
+		_UnionRect
+		add		#8,sp			; get rid of the rectangle on the stack
+@noUpdateNeeded
+
+		TST.B	WWExist 		; does a window world exist?
+		BNE.S	@noWindowMgr	; no, one less world to worry about
+
+		subq	#2,sp			; make room for result
+		move.l	ExpandMem,a0
+		pea		ExpandMemRec.SysErrorUpdateRect(a0)
+		_EmptyRect
+		tst.b	(sp)+			; is it empty?
+		bnz.s	@rectIsEmpty
+
+		subq	#4,sp			; make room for saved port
+		move.l	sp,-(sp)
+		_GetPort
+
+		SUBQ	#4,SP			; get a region for PaintBehind
+		_NewRgn
+		MOVE.L	(SP),-(sp) 		; and set region to the deep squid window
+		move.l	ExpandMem,a0
+		pea		ExpandMemRec.SysErrorUpdateRect(a0)
+		_RectRgn
+		subq	#4,sp			; make room for root layer
+		_GetRootLayer
+		MOVE.L	4(sp),-(SP)		; clobber the whole region, from WindowList down!
+		_PaintBehind
+		_DisposRgn				; and then throw away the clobbered region
+
+		_SetPort				; restore the port
+
+		jsr		ClearSysErrorUpdateRect		; no more rectangle
+
+@rectIsEmpty
+@noWindowMgr
+	if forROM then
+		import	GetNextEvent	
+		jmp		GetNextEvent
+	else
+		jmpOld
+	endif
+		endproc
+
+ClearSysErrorUpdateRect installproc (Plus,SE,II,Portable,IIci)
+
+; Empty out the sysErrorUpdateRect, and make the coordinates such that UnionRect with any
+; rectangle will return that rectangle. UnionRect will do this if top and left are maximum
+; and bottom and right are minimum.
+
+		move.l	ExpandMem,a0
+		move.l	#$7FFF7FFF,ExpandMemRec.SysErrorUpdateRect+topLeft(a0)	; highest numbers
+		move.l	#$80008000,ExpandMemRec.SysErrorUpdateRect+botRight(a0)	; lowest numbers
+		rts
+
+		endproc
+		
+	if not forROM then
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetNextEvent/EventAvail — fix 32-bit activation bug
+
+; A bug occurs in the IIci ROM under 32-bit mode. The high bit of CurActivate and CurDeactivate
+; are used as flags to indicate that the events have already been sent. (0 in either also means that
+; the event was sent.) The problem is that the ROM code (written for 24-bit machines) refers to the
+; windowKind field without stripping off this high bit. Under some circumstances, this would cause
+; a bus error. Since the code that checks the window is only used to set the system/application bit
+; in the modifiers of the activate/deactivate event, and that bit was never documented in a released
+; version of Inside Mac. (and no one uses it), we can fix the bug by getting rid of the code that
+; sets the system/application bit. This patch to CheckActivate eliminates the code to set the
+; system/application bit.
+
+FixCheckActivate comefrompatchproc _OSEventAvail,AfterOSEventAvailInCheckActivate,(IIci,using32BitHeaps)
+
+		lea		ComeBackHere,a1				; after doing the OSEventAvail, come back here
+		move.l	a1,ReturnAddressDepth(sp)	; jam in that return address
+		jmpOld								; go do the OSEventAvail
+
+ComeBackHere
+		MOVE.W	#activateEvt,(A0)+			; flag it as (de)activate event
+		MOVE.L	D1,(A0) 					; the windowPtr is the message
+
+		jmpROM	AfterSystemUserWindowInCheckActivate
+
+		endproc
+	endif
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetNextEvent - Make sure current port is valid before calling _GetMouse
+
+; This is mostly for the sake of the journalling driver.  Before _GetNextEvent calls _GetMouse, check
+; to see if the Window Manager exists by checking WWExist.  (QDExist is also checked in the process, but
+; that’s fine.)  If the Window Manager exists, set the port to the Window Manager port before calling
+; _GetMouse.  If there’s no Window Manager, the call to _GetMouse is skipped.
+
+SetWindowMgrPort ComeFromPatchProc _GetMouse,AfterGetMouseInGetNextEvent,(Plus,SE,II,Portable,IIci)
+
+		tst.w	WWExist				; See if the Window Manager & QuickDraw exist
+		bne.s	@backToGetNextEvent	; If WMgr isn’t there, don’t call _GetMouse
+
+; Window Mananger exists.  Set the port to the Window Manager’s port before calling _GetMouse
+
+		sub.w	#4,sp
+		move.l	sp,-(sp)
+		_GetPort				; Save the current port on the stack
+
+		move.l	WMgrPort,-(sp)
+		_SetPort				; Set the port to the Window Manager’s port
+		move.l	8(sp),-(sp)		; Copy the original _GetMouse parameter
+		jsrOld					; Call _GetMouse
+
+		_SetPort				; Old port is already on the stack.
+
+@backToGetNextEvent
+		add.w	#8,sp			; Remove return address and parameter from stack
+		jmpROM	AfterGetMouseInGetNextEvent
+		ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _GetResource inside GetNextEvent to ignore FKEYs on the Mac Plus			<9>
+
+; If called from GetNextEvent trying to load an FKEY, abort out so that the
+; event record is passed to the application.  FKEYs are handled by SystemEvent on the Plus.
+
+; Note that this FKEY patch is rarely invoked, and only in bizarre circumstances.
+; Due to a bug in the Mac Plus ROM, a valid FKEY event always fails the range check (it
+; compares ASCII 0 through 9 (i.e. $30 to $39) to decimal 0 through 9), and GetNextEvent
+; never tries to invoke the FKEY.  However, it may try to load an FKEY when an invalid key
+; combination is held down. For example, shift-cmd-enter is really shift-cmd-$03, which because
+; of the range checking problem causes FKEY 3 to be loaded.  Someday we may want to reassess whether
+; this patch is more trouble than it's worth.
+
+LoadFKEYInGetNextEvent		ComeFromPatchProc	_GetResource,AfterGetResourceInTryFKey,(Plus)
+
+		LEA		14(SP), SP				; Clean off the stack
+		jmpROM	DoneGNE					; Go where we are supposed to
+		
+		endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _GetResource inside GetNextEvent to disable FKEYs from the keypad			<9>
+
+; Note that even though this is a come-from on the same label as LoadFKEYInGetNextEvent on
+; the Plus, it's doing different things.  On the Plus, FKEY handling was moved into SystemEvent.
+; On the SE and II, it was moved back out so that FKEY's are handled before calling SystemEvent.
+; So, it's valid for GetNextEvent to get an FKEY on the SE and II where it wasn't valid on the
+; Plus.
+
+KeypadFKEYInGetNextEvent	ComeFromPatchProc	_GetResource,AfterGetResourceInTryFKey,(SE,II)
+
+		TST.B	ScrDmpEnb				;	Check the ScrDmpEnb flag							<11>
+		BNE.S	moreChecks				;	if it is not false, do some more checks				<11>
+		MOVE.L	(SP)+, A0				;	otherwise, return NIL.								<11>
+		ADDQ.L	#6, SP					;														<11>
+		CLR.L	(SP)					;														<11>
+		JMP		(A0)					;														<11>
+
+moreChecks							;														<11>
+		MOVE.B	evtMessage+2(A3), D0	; Get the raw keycode
+		CMP.B	#$3F, D0				; Keyboard or Keypad?
+		blsOld							; Keyboard -- execute normally
+
+		LEA		14(SP), SP				; Clean off the stack
+		jmpROM	TrySysEvent				; Go where we are suppossed to
+		
+		endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Come-from patch on _GetResource inside GetNextEvent to honor ScrDmpEnb						<11>
+
+; The portable and IIci ROMS are fixed to do most of what KeypadFKEYInGetNextEvent does.  They only
+; require a fix to honor the ScrDmpEnable BOOLEAN in low-memory.
+
+CheckInhibitFKEYInGetNextEvent	ComeFromPatchProc	_GetResource,AfterGetResourceInTryFKey,(Portable,IIci)
+
+		TST.B	ScrDmpEnb				;	Check the ScrDmpEnb flag
+		bneOld							;	if it is not false, try to get the FKEY
+		MOVE.L	(SP)+, A0				;	otherwise, return NIL.
+		ADDQ.L	#6, SP
+		CLR.L	(SP)
+		JMP		(A0)
+		
+		endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetOSEvent/OSEventAvail -- change ROM GetNextEvent to look for high level (PPC) events.
+; This code should be rolled inline into GetNextEvent.  We use comefrom patches for
+; convenience only.
+
+HLEAvail		ComeFromPatchProc		_OSEventAvail,AfterOSEventAvailInGetNextEvent,(Plus,SE,II,Portable,IIci)
+		import	shareHLEPatch:CODE
+
+; must look for OS events before we waste any more time
+		jsrOld									; call through
+		jmp		shareHLEPatch					; go share code		
+							
+		EndProc									; HLEAvail
+
+GetNextHLE		ComeFromPatchProc		_GetOSEvent,AfterGetOSEventInGetNextEvent,(Plus,SE,II,Portable,IIci)
+		entry	shareHLEPatch:CODE
+
+; must try to get OS events before we waste any more time
+		jsrOld									; call through
+
+shareHLEPatch
+		tst.w	EvtNum(a3)						; find something?
+		bne.s	Return							; if so, get out without further ado
+
+; no OS events.  Should we look for high-level events?
+		move.w	12(a6),d0						; get the caller's event mask
+		btst	#highLevelEvtBit,d0				; high-level events requested?
+		beq.s	ReturnFalse						; if not, just go on
+		move.w	WeKnowProcMgrExists,d0			; do we know whether OSDispatch is OK?
+		bne.s	CallGetHLEvent					; if so, go do it right now
+
+; We need to check for high level events.  Determine whether Process Mgr is around yet.
+		move.l	#gestaltOSAttr,d0				; Gestalt implemented by Process Mgr
+		_Gestalt								; ask about Process Mgr
+		blt.s	ReturnFalse						; exit now if we're still too early
+		lea		WeKnowProcMgrExists,a0			; get address of cheater flag
+		st		(a0)							; remember not to check again
+
+; Ask the Process Mgr for a high level event.
+CallGetHLEvent
+		clr.w	-(sp)							; allocate result storage
+		move.w	12(a6),-(sp)					; pass event mask
+		move.l	a3,-(sp)						; pass address of event record
+		tst.w 	d3								; EventAvail or GetNextEvent?
+		seq		-(sp)							; pass Boolean: GNE - true, EA - false
+		_GetNextHighLevelEvent					; call Processs Mgr
+		move.w	(sp)+,d0						; pop result
+Return
+		rts
+
+; Exit where we have to restore d0 to say “false”
+ReturnFalse
+		moveq	#0,d0							; say false
+		bra.s	Return							; joint exit
+
+; Flag whether we know Process Mgr exists
+WeKnowProcMgrExists	dc.w	0
+
+		EndProc									; GetNextHLE
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		end

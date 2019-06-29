@@ -1,0 +1,1465 @@
+;
+;	File:		FPCtrl.a
+;
+;	Contains:	Floating Point Stuff
+;
+;	Written by:	Jerome T. Coonen
+;
+;	Copyright:	© 1982-1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:   Mac32
+;
+;	Change History (most recent first):
+;
+;		 <3>	 9/17/90	BG		Removed <2>. 040s are behaving more reliably now.
+;		 <2>	  7/4/90	BG		Added EclipseNOPs for flakey 040s.
+;	   <1.1>	11/11/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	   <1.0>	 2/12/88	BBM		Adding file for the first time into EASE…
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; old FPControl
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+;
+;-----------------------------------------------------------
+; 04JUL82: WRITTEN BY JEROME COONEN
+; 29AUG82: ACCESS TO STATE MADE EXPLICIT HERE. (JTC)
+; 12OCT82: CLEAR D0.W TO GET QUO IN REM; RND-UP BIT. (JTC)
+; 12DEC82: DON'T CLEAR D0.W HERE -- LET REM DO IT ALL (JTC)
+; 28DEC82: ADD LOGBX AND SCALBX (JTC).
+; 13APR83: ADD COMMENT ABOUT LABEL POP3 (JTC).
+; 29APR83: ADD CLASS (JTC).
+; 09MAY83: MAJOR CHANGES: SEE FPDRIVER. (JTC)
+; 25AUG83: Change to Lisa Sane_Environ (JTC).
+; 01NOV83: MOVE PRECISION CONTROL TO MODES (JTC).
+; 15APR84: SOME CODE MOVEMENT FOR LISABUG'S SAKE (JTC & DGH).
+; 14JAN85: MDS (JTC)
+; 26MAR85: COLLECT FPCONTROL, FPUNPACK, FPNANS, FPCOERCE, FPPACK!
+;			LISA ENVIRONMENT NAME = %%%ZENVIRON.
+; 03APR85: MODIFY CALL OUT TO HALT RTN USING ROMRSRC EQU. (JTC)
+; 31JUL85: BACK TO PORKSHOP.													<31JUL85>
+;
+;-----------------------------------------------------------
+
+
+			BLANKS		ON
+			STRING		ASIS
+
+			IF		 FPFORMAC+FPFORDEB THEN  ; PACKAGE HEADER MESSES UP LISABUG
+
+			BRA.S	FPBEGIN
+
+			DC.W	 $00				 ; MAC SPECIFIC STUFF
+			DC.L	 ('PACK')
+			DC.W	 $4
+			DC.W	$0002				; VERSION 2 							<26MAR85>
+
+			ENDIF
+
+;-----------------------------------------------------------
+; FOR TESTING, DEFINE STATEADRS RIGHT HERE
+;-----------------------------------------------------------
+			IF		 FPFORDEB THEN
+STATEADRS:
+			DC.W	 0
+			DC.W	 0
+			DC.W	 0
+			ENDIF
+
+;-----------------------------------------------------------
+; THIS IS THE SOLE ENTRY POINT OF THE PACKAGE.
+; THE STACK HAS THE FORM:
+;	<RET> <OPWORD> <ADRS1> <ADRS2> <ADRS3>
+; WHERE THE NUMBER OF ADDRESSES DEPENDS ON THE OPERATION.
+; MOST USE 2, SOME 1, ONLY BIN->DEC USES 3.
+;
+; FIRST GROW THE STACK TO HOLD: <TRAP VECTOR> <BYTE COUNT>
+; BELOW <RET> IN CASE A TRAP IS TAKEN.
+;
+; THEN SAVE REGISTERS D0-D7, A0-A4.
+;-----------------------------------------------------------
+FPBEGIN:
+			LINK	A6,#-2				; RESERVE CNT WORD
+			MOVEM.L D0-D7/A0-A4,-(SP)
+
+;-----------------------------------------------------------
+;
+; GET POINTER TO STATE AREA IN A0, USING SYSTEM CONVENTION.
+; SAMPLE USES ARE:
+;
+;	(DEBUGGING)
+;		LEA STATEADRS,A0
+;
+;	(LISA)
+;		Get state address from library routine.
+;
+;	(MACINTOSH)
+;		MOVEA.W #FPState,A0
+;			...WHERE FPState IS DEFINED IN
+;			TOOLEQU.TEXT, TO BE INCLUDED AT THE
+;			TOP OF THE PROGRAM IN FPDRIVER.TEXT
+;
+;
+;-----------------------------------------------------------
+			IF		 FPFORMAC THEN
+			MOVEA.W #FPState,A0
+			ENDIF
+
+			IF		 FPFORDEB THEN
+			LEA 	STATEADRS,A0
+			ENDIF
+
+			IF		 FPFORLISA THEN
+			SUBQ.L	#4,SP				; MAKE WAY FOR PTR
+
+			; THE FOLLOWING LABELS DELETED FOR MDS BUG							<26MAR85>
+			;	XREF	%%%ZEnviron 		; GOOFY LISA LABEL					<26Mar85>
+			;	JSR 	%%%ZEnviron 		; COMPUTE STATE ADRS				<26Mar85>
+
+			MOVEA.L (SP)+,A0
+			ENDIF
+
+			BRA.S	FPCOM				; NOW DO IT
+
+;-----------------------------------------------------------
+; THIS IS A TABLE OF INFORMATION BITS FOR THE VARIOUS
+; OPERATIONS.  SEE COMMENT BELOW FOR EXPLANATION
+;-----------------------------------------------------------
+OPMASKS:
+			DC.W	 $0E1				 ; ADD
+			DC.W	 $0E1				 ; SUB
+			DC.W	 $0E1				 ; MUL
+			DC.W	 $0E1				 ; DIV
+			DC.W	 $0C1				 ; CMP
+			DC.W	 $0C1				 ; CMPX
+			DC.W	 $0E1				 ; REM
+			DC.W	 $061				 ; 2EXT
+			DC.W	 $161				 ; EXT2
+			DC.W	 $0A0				 ; SQRT
+			DC.W	 $0A0				 ; RINT
+			DC.W	 $0A0				 ; TINT
+			DC.W	 $0A1				 ; SCALB -- LIKE SQRT, LEAVE INT
+			DC.W	 $0A0				 ; LOGB -- LIKE SQRT
+			DC.W	 $041				 ; CLASS -- SRC IN, INT PTR IS DST
+
+			IF		 FPFORlisa THEN
+			DEBUGEND	'FP68K          '
+			ENDIF
+
+;-----------------------------------------------------------
+; ALTERNATIVE ENTRY POINT TO BYPASS RECALC OF STATE PTR.
+;-----------------------------------------------------------
+REFP68K:
+			LINK	A6,#-2				; RESERVE CNT WORD
+			MOVEM.L D0-D7/A0-A4,-(SP)
+
+FPCOM:
+
+;-----------------------------------------------------------
+; GET OPWORD INTO D6.LO; AFTER DECODING, WILL GO TO D6.HI.
+;-----------------------------------------------------------
+			MOVE.W	LKOP(A6),D6
+
+;-----------------------------------------------------------
+; HANDLE ODD INSTRUCTIONS (STATE AND BIN-DEC) ELSEWHERE.
+;-----------------------------------------------------------
+			MOVEQ	#OPAMASK,D7 		; ISOLATE OP INDEX
+			AND.W	D6,D7
+
+			BCLR	#0,D6				; TEST AND CLEAR ODD BIT
+			BNE 	ODDBALL
+
+;-----------------------------------------------------------
+; FOR ARITHMETIC OPERATIONS, CLEAR ROUND INCREMENT BIT IN
+; LOW BYTE OF STATE WORD.
+;-----------------------------------------------------------
+			BCLR	#RNDINC,1(A0)
+
+;-----------------------------------------------------------
+; SAVE INDEX IN D7.LO FOR LATER JUMP.
+; PICK UP USEFUL INFO BITS FROM TABLE, AFTER WHICH HAVE:
+;	8000 - IF SINGLE OP
+;	4000 - IF DOUBLE OP
+;	3800 - "NONEXTENDED" OPERAND -- WILL BE SRC FORMAT
+;	0100 - IF "NONEXTENDED" IS DST
+;	0700 - WILL BE DST FORMAT
+;	0080 - IF DST IS INPUT
+;	0040 - IF SRC IS INPUT
+;	0020 - IF DST IS OUTPUT (IDENTIFIES COMPARISONS)
+;	001E - OP CODE
+;	0001 - IF 2 ADDRESSES ON STACK
+;-----------------------------------------------------------
+			IF		 PCOK THEN
+			OR.W	OPMASKS(PC,D7),D6
+			ELSE
+			OR.W	OPMASKS(D7),D6
+			ENDIF
+
+;-----------------------------------------------------------
+; TWO CASES MUST BE DISTINGUISHED:
+;	DST = EXTENDED, SRC = ANY	   (USUAL)
+;	DST = ANY	SRC = EXTENDED	   (CONVERSIONS)
+; THE "ANY" FORMAT IS IN BITS 3800 (SRC).  BIT 0100
+; DETERMINES WHETHER IT SHOULD BE DST IN BITS 0700.
+; AFTER TEST ABOVE HAVE FORMAT BITS ISOLATED IN D0.
+;
+; IF FORMAT GOVERNS DST OPERAND, IT OVERRIDES 2 LEADING
+; CONTROL BITS.  NOTE THAT EVEN EXTRANEOUS INTEGER BITS
+; OVERRIDE CONTROL BITS, BUT THEY HAVE NO EFFECT.
+;
+; IN ANY CASE, MOVE PRECISION CONTROL BITS TO HIGH BITS OF
+; D6.
+;-----------------------------------------------------------
+			MOVEQ	#PRECMSK,D0 		; GET ONLY PRECISION CONTROL
+			AND.B	1(A0),D0
+			ROR.W	#7,D0				; ALIGN $0060 AS $C000
+			OR.W	D0,D6
+
+			BTST	#8,D6
+			BEQ.S	@2
+
+			MOVE.W	D6,D0				; SAVE FORMAT BITS
+			ANDI.W	#$00FF,D6			; KILL ALL FORMAT BITS
+
+			ANDI.W	#$3800,D0			; ISOLATE FORMAT BITS
+			MOVE.W	D0,D1				; COPY FOR CONTROL BITS
+			LSL.W	#3,D1				; ALIGN 2 TRAILING BITS
+			ROR.W	#3,D0				; SRC -> DST POSITION
+			OR.W	D0,D6
+			OR.W	D1,D6
+@2:
+
+;-----------------------------------------------------------
+; PLACE OPWORD IN D6.HI WHERE IT WILL STAY.
+; INIT TO ZERO D2,3 = INDEXES FOR CASES,
+; D6.LO = FLAGS & SIGNS.
+; BY NOW, D7.HI = JUNK, D7.LO = OPERATION INDEX.
+;-----------------------------------------------------------
+			SWAP	D6
+			CLR.L	D2
+			MOVE.L	D2,D3
+			MOVE.W	D2,D6
+
+;-----------------------------------------------------------
+; POST-DECODE MILESTONE ++++++++++++++++++++++++++++++++++ .
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; NOW UNPACK OPERANDS, AS NEEDED.  DST, THEN SRC.
+; LAST OPERAND IS IN D4,5/A4/D6.B.#7
+; FIRST OPERAND, IF 2, IS IN A1,2/A3/D6.B.#6
+; UNPACK ROUTINE EXPECTS (FORMAT*2) IN DO AND ADRS IN A3.
+;-----------------------------------------------------------
+			BTST	#DSTIN+16,D6
+			BEQ.S	@3
+
+			MOVE.L	D6,D0				; GET OPWORD AND ALIGN DST
+			SWAP	D0
+			ROR.W	#7,D0
+			MOVEA.L LKADR1(A6),A3		; DST ADDRESS
+			BSR 	UNPACK
+@3:
+
+;-----------------------------------------------------------
+; IF SOURCE IN, MOVE DST OP OVER (EVEN IF NONE INPUT)
+; ALSO, BUMP INDEXES IN D2,D3.
+; IN ORDER TO USE A3 TO CALL UNPACK, MUST SAVE DST EXP (IN
+; A4) ACCROSS CALL, THEN RESTORE TO A3.
+;-----------------------------------------------------------
+			BTST	#SRCIN+16,D6
+			BEQ.S	@4
+
+			MOVEA.L D4,A1				; HI BITS
+			MOVEA.L D5,A2				; LO BITS
+			MOVE.L	A4,-(SP)			; SAVE EXP ON STACK FOR CALL
+			ROR.B	#1,D6				; SIGN
+
+			ADD.W	D2,D2				; NAN INDEX (NEG, 2, 4, 6)
+			MOVE.W	D3,D0				; NUM INDEX (0 - 16)
+			ADD.W	D3,D3
+			ADD.W	D0,D3
+
+			MOVE.L	D6,D0
+			SWAP	D0
+			ROL.W	#6,D0
+			MOVEA.L LKADR2(A6),A3		; SRC ADDRESS
+			BSR 	UNPACK
+			MOVEA.L (SP)+,A3			; RESTORE DST EXP
+@4:
+
+;-----------------------------------------------------------
+; CONVENIENT HERE TO PUT XOR OF SIGNS IN D6(#5).
+;-----------------------------------------------------------
+			ASL.B	#1,D6				; V = XOR OR SIGNS
+			BVC.S	@6
+			BSET	#6,D6
+@6:
+			ROXR.B	#1,D6
+
+;-----------------------------------------------------------
+; POST-UNPACK MILESTONE +++++++++++++++++++++++++++++++++++.
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; NOW PUSH A RETURN ADDRESS AND JUMP TO 3 CASES.
+; REMEMBER OPERATION INDEX IN D7, WHICH MUST BE ZEROED.
+;-----------------------------------------------------------
+			MOVE.W	D7,D0				; FREE D7 FOR INIT
+			CLR.L	D7
+
+			IF		 PCOK THEN
+			PEA 	PREPACK(PC) 		; WHERE TO COME BACK TO
+			ELSE
+			PEA 	PREPACK
+			ENDIF
+
+			TST.W	D2					; NANS DISCOVERED?
+			BNE 	NANS
+
+;-----------------------------------------------------------
+; DO-ARITHMETIC MILESTONE ++++++++++++++++++++++++++++++++ .
+;-----------------------------------------------------------
+
+ARITHOP:
+			IF		 PCOK THEN
+			MOVE.W	ARITHTAB(PC,D0),D0	; GET INDEX
+			JMP 	ARITHOP(PC,D0)
+			ELSE
+			MOVE.W	ARITHTAB(D0),D0
+			JMP 	ARITHOP(D0)
+			ENDIF
+
+;-----------------------------------------------------------
+; JUMP TO ARITHMETIC ROUTINE BASED ON INDEX SAVED IN D7.
+;-----------------------------------------------------------
+ARITHTAB:
+			DC.W	 ADDTOP-ARITHOP
+			DC.W	 SUBTOP-ARITHOP
+			DC.W	 MULTOP-ARITHOP
+			DC.W	 DIVTOP-ARITHOP
+			DC.W	 CMPTOP-ARITHOP
+			DC.W	 CMPTOP-ARITHOP 	 ; CMPX NOT  SPECIAL
+			DC.W	 REMTOP-ARITHOP
+			DC.W	 CVT2E-ARITHOP
+			DC.W	 CVTE2-ARITHOP
+			DC.W	 SQRTTOP-ARITHOP
+			DC.W	 RINT-ARITHOP
+			DC.W	 TINT-ARITHOP
+			DC.W	 SCALBTOP-ARITHOP
+			DC.W	 LOGBTOP-ARITHOP
+			DC.W	 CLASSTOP-ARITHOP
+
+
+;-----------------------------------------------------------
+; PRE-PACK MILESTONE +++++++++++++++++++++++++++++++++++++ .
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; PACK AND DELIVER IF OUTPUT OPERAND (SKIP COMPARES)
+;-----------------------------------------------------------
+PREPACK:
+			BTST	#DSTOUT+16,D6
+			BEQ.S	CHKERR
+
+			MOVE.L	D6,D0				; GET OPWORD AND ALIGN DST
+			SWAP	D0
+			ROR.W	#7,D0
+			BSR 	PACK
+
+;-----------------------------------------------------------
+; ALIGN CCR BITS FROM D7.HI TO D7.LO.
+; OR ERROR FLAGS INTO STATE WORD, STUFF STATE WORD, AND
+; CHECK FOR A TRAP.
+;-----------------------------------------------------------
+CHKERR:
+			SWAP	D7					; RIGHT ALIGN CCR BITS
+
+			MOVE.W	(A0),D0 			; GET STATE WORD
+			CLR.B	D6					; KILL SIGNS
+			OR.W	D6,D0
+			MOVE.W	D0,(A0)+			; BUMP ADRS TO VECTOR
+
+			ROR.W	#8,D6				; ALIGN BYTES
+			AND.W	D6,D0
+			BEQ.S	PASTHALT			; ZERO IF NO TRAP
+
+;-----------------------------------------------------------
+; TO SET UP FOR TRAP:
+;	HAVE D0 ON TOP OF STACK.
+;	PUSH CCR TO HAVE 3-WORD STRUCTURE
+;	PUSH ADDRESS OF 3-WORD STRUCTURE
+;	BLOCK MOVE	OPCODE < ADR1 < ADR2 < ADR3 < REGADR
+;	  TO STACK
+;	CALL HALT PROCEDURE, EXPECTING PASCAL CONVENTIONS TO
+;		BE HONORED.
+; THE BLOCK MOVE CAN BE DONE WITH A PAIR OF MOVEM'S SO LONG
+; AS AN EXTRA WORD IS COPIED (TO HAVE A WHOLE NUMBER OF
+; LONGS).
+;-----------------------------------------------------------
+
+
+			MOVE.W	D7,-(SP)			; SAVE CCR BELOW D0
+			MOVE.W	d0,-(sp)
+			PEA 	(SP)				; ADDRESS OF CCR/D0
+
+			MOVEM.L LKRET+2(A6),D0-D3
+			MOVEM.L D0-D3,-(SP)
+			ADDQ.L	#2,SP				; KILL EXTRA WORD
+
+;-----------------------------------------------------------
+; IN MAC ENVIRONMENT, MUST LOCK MATH PACKAGE BEFORE CALLING
+; EXTERNAL PROCEDURE THAT WILL EXPECT TO RETURN.
+;-----------------------------------------------------------
+
+			IF		 ROMRSRC THEN
+
+			MOVE.L	AppPacks+16,A4		; GET FP68K HANDLE
+			MOVE.B	(A4),D7 			; SAVE STATE OF LOCK BIT, CHANGED TO BYTE		<03APR85>
+			BSET	#Lock,(A4)			; FORCE LOCKING
+			MOVEA.L (A0),A0 			; GET VECTOR ADRS
+			JSR 	(A0)
+			MOVE.B	D7,(A4) 			; RESTORE LOCK BIT STATE, BYTE			<03APR85>
+
+			ELSE
+
+			MOVEA.L (A0),A0
+			JSR 	(A0)
+
+			ENDIF
+
+			MOVE.L	(SP)+,D7			; RESTORE CCR BITS
+
+;-----------------------------------------------------------
+; AFTER TRAP JUST RESTORE REGISTERS, KILL STACK STUFF, AND
+; RETURN.  TRICK: LOAD INCREMENT TO STACK JUST BELOW REGS,
+; SO ACCESSIBLE AFTER MOVEM.L.
+;-----------------------------------------------------------
+PASTHALT:
+			BTST	#TWOADRS+16,D6
+			BEQ.S	POP1
+POP2:
+			MOVEQ	#STKREM2,D0
+			MOVEQ	#LKADR2,D1
+			BRA.S	POPIT
+POP1:
+			MOVEQ	#STKREM1,D0
+			MOVEQ	#LKADR1,D1
+POPIT:
+			MOVE.W	D0,LKCNT(A6)		; KILL COUNT
+			MOVE.L	LKRET(A6),0(A6,D1)	; MOVE RETURN DOWN
+			MOVEA.L (A6),A6 			; UNLINK MANUALLY
+			MOVE	D7,CCR
+			MOVEM.L (SP)+,D0-D7/A0-A4
+			ADDA.W	(SP),SP
+			RTS
+
+;-----------------------------------------------------------
+; THE ONLY THREE-ADDRESS OPERATION IS BINARY TO DECIMAL
+; CONVERSION.  POP3 IS JUMPED TO FROM THE END OF THAT OP.
+; NOTE THAT BIN2DEC CANNOT ITSELF TRAP, SO THE CODE AFTER
+; @1 ABOVE IS IRRELEVANT.
+;-----------------------------------------------------------
+POP3:
+			MOVEQ	#STKREM3,D0
+			MOVEQ	#LKADR3,D1
+			BRA.S	POPIT
+
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; old FPUnpack...
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; 03JUL82: WRITTEN BY JEROME COONEN
+; 10AUG82: MINOR CLEANUPS (JTC)
+; 18JAN83: FORCE COMP NAN CODE ON UNPACK OF COMP64.
+; 29APR83: CLASS OPERATION NEEDS TO KNOW WHEN DENORM IS
+;	UNPACKED.  USE HI BIT OF HI WORD OF D3, THE REG
+;	HOLDING THE OPERAND TYPE INFO. (JTC)
+; 09JUN83: USE A3 FOR ADRS, RATHER THAN A5 (JTC).
+; 01NOV83: ALL NANS UNPACKED THE SAME; INVALID SET FOR SIGNALING (JTC).
+; 14JAN85: MDS (JTC)
+; 26MAR85: FIXED CLASS-COMP BUG AT LABEL UNPCUNR.  CHANGE STATE OF NAN BIT. 		<26MAR85>
+;
+; ASSUME REGISTER MASK: POST-DECODE, WITH DIRTY INDEX IN D0.
+; UNPACK DST, SRC IN TURN, IF INPUT, AND SET UP D2 WITH
+;	NAN INFORMATION, D3 WITH NUMBER INFORMATION.
+;
+;	D2:  2 --> LATTER OPERAND IS NAN
+;		 4 --> FIRST OF TWO OPERANDS IS NAN
+;		 6 --> BOTH NANS
+;
+;	D3:  0 --> BOTH ARE NUMS
+;		 2 --> FORMER IS NUM, LATTER IS 0
+;		 4 --> FORMER IS NUM, LATTER IS INF
+;		 6 --> FORMER IS 0,   LATTER IS NUM
+;		 8 --> BOTH ARE 0
+;		10 --> FORMER IS 0,   LATTER IS INF
+;		12 --> FORMER IS INF, LATTER IS NUM
+;		14 --> FORMER IS INF, LATTER IS 0
+;		16 --> BOTH ARE INF
+;
+; INPUT OPERAND ADDRESS IN A3.
+; UNPACK LEAVES SIGN IN HIGH BIT OF D6 BYTE, EXP IN A4, AND
+; DIGITS IN D4,5.  SINCE INPUT INTEGERS ARE ALWAYS CONVERTED
+; TO EXTENDED, LOAD AND NORMALIZE THEM.
+; UNPACKING IS DONE IN TWO STAGES; FIRST, UNPACK AS ABOVE
+; BUT LEAVE A WORD EXP IN D0; SECOND, SET THE CONTROL BITS
+; FOR SPECIAL CASES AND MOVE THE EXP TO A4.
+; THE ADDRESS IN A3 IS UNCHANGED, IN CASE IT'S NEEDED FOR
+; OUTPUT.
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; UNPACK-TOP MILESTONE +++++++++++++++++++++++++++++++++++ .
+;-----------------------------------------------------------
+
+UNPACK:
+;-----------------------------------------------------------
+; HANDY TO KILL SIGNIFICANT BITS AT OUTSET; ALREADY ROOM FOR
+; SIGN.
+;-----------------------------------------------------------
+			CLR.L	D4					; HANDY TO KILL BITS HERE
+			MOVE.L	D4,D5
+
+			ANDI.W	#$000E,D0			; KILL EXTRANEOUS BITS
+
+			IF		 PCOK THEN
+			MOVE.W	UNPCASE(PC,D0),D0
+			JMP 	UNPACK(PC,D0)
+			ELSE
+			MOVE.W	UNPCASE(D0),D0
+			JMP 	UNPACK(D0)
+			ENDIF
+
+UNPCASE:
+			DC.W	 UNPEXT-UNPACK
+			DC.W	 UNPDBL-UNPACK
+			DC.W	 UNPSGL-UNPACK
+			DC.W	 UNPEXT-UNPACK
+			DC.W	 UNPI16-UNPACK
+			DC.W	 UNPI32-UNPACK
+			DC.W	 UNPC64-UNPACK
+
+
+;-----------------------------------------------------------
+; INT16 HAS SPECIAL CASE 0, ELSE NORMALIZE AND GO.
+;-----------------------------------------------------------
+UNPI16:
+			MOVEQ	#15,D0				; SET EXP FOR INTEGER
+			MOVE.W	(A3),D4 			; GET OPERAND
+			SWAP	D4					; LEFT ALIGN
+			BRA.S	UNPIGEN
+
+;-----------------------------------------------------------
+; INT32 HAS SPECIAL CASE 0, ELSE NORMALIZE AND GO.
+;-----------------------------------------------------------
+UNPI32:
+			MOVEQ	#31,D0				; SET EXP FOR INTEGER
+			MOVE.L	(A3),D4 			; GET OPERAND
+			BRA.S	UNPIGEN
+
+;-----------------------------------------------------------
+; COMP64 HAS SPECIAL CASES 0 AND INF, ELSE NORMALIZE AND GO.
+;-----------------------------------------------------------
+UNPC64:
+			MOVEQ	#63,D0				; SET EXP FOR INTEGER
+			MOVE.L	(A3),D4 			; GET HI OPERAND
+			MOVE.L	4(A3),D5			; GET LO OPERAND
+			BEQ.S	@7					; HAVE REGULAR NUMBER
+
+			TST.L	D4
+			BRA.S	UNPCGEN
+@7:
+			CMPI.L	#$80000000,D4		; IS IT NAN?
+			BNE.S	UNPIGEN 			; IF NOT, MAY BE 0
+
+			MOVEA.W #$7FFF,A4			; SET THE EXPONENT
+			MOVEQ	#nancomp,d4 		; SET TO COMP NAN
+			SWAP	D4					; ALIGN BYTE
+			BSET	#QNANBIT,D4 		; MAKE IT QUIET!							<27MAR85>
+			BRA.S	UNPNAN				; AND GO...
+
+UNPIGEN:
+			TST.L	D4
+			BEQ.S	UNP0				; 0 IS SPECIAL CASE
+UNPCGEN:
+			BPL.S	@9
+
+			BSET	#7,D6				; SET MINUS SIGN
+			NEG.L	D5
+			NEGX.L	D4
+@9:
+			ADDI.W	#$3FFF,D0			; BIAS EXPONENT
+			TST.L	D4
+			BMI.S	UNPNRM
+			BRA.S	UNPCUNR 			; GO NORMALIZE, SANS SIGNAL 		<26MAR85>
+
+
+;-----------------------------------------------------------
+; UNPACK AN EXTENDED: JUST SEPARATE THE SIGN AND LOOK FOR
+; CASES.  NOTE THAT THIS CASE MAY FALL THROUGH TO UNPZUN.
+;-----------------------------------------------------------
+UNPEXT:
+			MOVE.W	(A3),D0 			; SIGN AND EXP
+			BPL.S	@13
+
+			BSET	#7,D6				; SET SIGN
+			BCLR	#15,D0				; CLEAR OPERAND SIGN
+@13:
+			MOVE.L	2(A3),D4			; LEAD SIG BITS
+			MOVE.L	6(A3),D5
+
+			CMPI.W	#$7FFF,D0			; MAX EXP?
+			BEQ.S	UNPNIN
+
+			TST.L	D4					; LOOK AT LEAD BITS
+			BMI.S	UNPNRM				; NORMALIZED CASE
+										; BPL.S FALLS THROUGH
+
+;-----------------------------------------------------------
+; HERE DISTINGUISH SPECIAL CASES AND SET BITS IN D2,D3.
+;-----------------------------------------------------------
+UNPZUN:
+			TST.L	D4					; LEAD DIGS = 0?
+			BNE.S	UNPUNR
+			TST.L	D5
+			BNE.S	UNPUNR
+UNP0:
+			SUBA.L	A4,A4				; EXP <- 0
+			ADDQ.W	#2,D3				; MARK AS ZERO
+			RTS
+
+;-----------------------------------------------------------
+; HI BIT OF D3 USED TO MARK UNNORMAL OPERAND.  WHEN USED AS
+; A JUMP TABLE INDEX, D3 IS ACCESSED AS A WORD.
+;-----------------------------------------------------------
+UNPUNR:
+			BSET	#31,D3				; SPECIAL UNNORM FLAG
+UNPCUNR:								; ENTRY POINT WHEN INTEGER IN					<26MAR85>
+			SUBQ.W	#1,D0				; DECREMENT EXP
+			ADD.L	D5,D5
+			ADDX.L	D4,D4
+			BPL.S	UNPCUNR 			; NEW LABEL TODAY								<26MAR85>
+
+UNPNRM:
+			EXT.L	D0
+			MOVEA.L D0,A4				; 32-BIT EXP
+			RTS
+UNPNIN:
+			MOVEA.W #$7FFF,A4			; MAX EXP
+			BCLR	#31,D4				; IGNORE INT BIT
+			TST.L	D4
+			BNE.S	UNPNAN
+			TST.L	D5
+			BNE.S	UNPNAN
+
+			ADDQ.W	#4,D3				; MARK INF
+			RTS
+;-----------------------------------------------------------
+; SET THE SIGNALING BIT (#30).	IF IT WAS CLEAR THEN SIGNAL
+; INVALID.
+;-----------------------------------------------------------
+UNPNAN:
+			BSET	#QNANBIT,D4 		; TEST IT, TOO								<26MAR85>
+			BNE.S	@1					; IF IT WAS ZERO, SIGNAL!					<26MAR85>
+			BSET	#ERRI+8,D6
+@1
+			ADDQ.W	#2,D2				; JUST A NAN
+			RTS
+
+
+
+;-----------------------------------------------------------
+; UNPACK A SINGLE.	NOTE THAT DENORMS ARE UNPACKED WITHOUT
+; THE LEADING BIT, SO EXPONENT MUST BE ADJUSTED.
+;-----------------------------------------------------------
+UNPSGL:
+			CLR.L	D0					; SET UP EXP
+
+			MOVE.L	(A3),D4 			; GET NUMBER
+			ADD.B	D6,D6				; UN-ALIGN SIGN WORD
+			ADD.L	D4,D4				; SHIFT SIGN OUT OF NUM...
+			ROXR.B	#1,D6				; AND INTO SIGN BYTE
+			ROL.L	#8,D4				; ALIGN EXPONENT
+			MOVE.B	D4,D0				; ISOLATE EXPONENT
+			BEQ.S	@21 				; HAVE 0 OR DENORM
+
+			MOVE.B	#1,D4				; CLEAR EXP BITS, THEN
+			ROR.L	#1,D4				; PLACE LEADING BIT
+			CMPI.B	#$0FF,D0			; MAX EXP?
+			BEQ.S	UNPNIN
+
+			ADDI.W	#$3F80,D0			; IT'S NORMALIZED
+			BRA.S	UNPNRM
+@21:
+			MOVE.W	#$3F81,D0			; ASSUME DENORMALIZED
+			ROR.L	#1,D4				; ALIGN BITS
+			BRA.S	UNPZUN				; AND GO TEST
+
+
+
+;-----------------------------------------------------------
+; UNPACKING A DOUBLE IS LIKE A SINGLE, BUT HARDER BECAUSE
+; OF THE SHIFT REQUIRED FOR ALIGNMENT.
+;-----------------------------------------------------------
+UNPDBL:
+			MOVE.L	(A3),D4 			; HI BITS
+			BPL.S	@25
+
+			BSET	#7,D6				; SET SIGN
+@25:
+			MOVE.L	4(A3),D5			; LO BITS
+
+;-----------------------------------------------------------
+; DOUBLE OPERANDS APPEAR AS:  (1) (11) (1 IMPLICIT) (53)
+; SO MUST ALIGN BITS LEFT BY 11 AND INSERT LEAD BIT.
+; FASTEST BY ROTATE AND MASK.
+;-----------------------------------------------------------
+			ROL.L	#8,D5				; MUST ALIGN BY 11 BITS
+			ROL.L	#3,D5
+
+			ROL.L	#8,D4				; ALIGN EXP AND LEAD DIGS
+			ROL.L	#4,D4				; BY 12 TO GET EXP RIGHT
+			MOVE.W	D4,D0				; SAVE EXP, WITH EXTRA BITS
+
+			LSR.L	#1,D4				; MAKE WAY FOR LEAD BIT
+			ANDI.W	#$0F800,D4			; CLEAR LO 11 BITS
+			MOVE.W	D5,D1
+			ANDI.W	#$07FF,D1			; GET REPLACEMENTS
+			OR.W	D1,D4
+			ANDI.W	#$0F800,D5			; CLEAR MOVED BITS
+
+			ANDI.W	#$07FF,D0			; ISOLATE EXP
+			BNE.S	@31
+
+			MOVE.W	#$3C01,D0
+			BRA 	UNPZUN				; ZERO OR DENORMALIZED ???? WAS BRA.S
+@31:
+			CMPI.W	#$07FF,D0			; MAX EXP?
+			BEQ 	UNPNIN				; ???? WAS BEQ.S
+
+			BSET	#31,D4				; SET LEAD BIT
+			ADDI.W	#$3C00,D0			; CORRECT EXP BIAS
+			BRA 	UNPNRM				; ???? WAS BRA.S
+
+
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; old FPNANS
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; 03JUL82: WRITTEN BY JEROME COONEN
+; 10AUG82: HAVE SINGLE JUMP POINT AGAIN. (JTC)
+; 28DEC82: DELIVER INTEGER NANS RIGHT HERE, NOT IN CVT (JTC)
+; 29APR83: CLASS FUNCTION ADDED, SO NEED A QUICK EXIT FROM
+;	NAN HANDLER TO CODE TO RETURN APPROPRIATE VALUE.
+;	SLEAZY TRICK: USE HI BIT OF OPCODE 001E TO
+;	DISTINGUISH THE TWO INSTRUCTIONS. (JTC)
+; 01NOV83: TREAT SIGNAL NAN AS ANY OTHER (JTC).
+; 14JAN85: MDS (JTC)
+; 26MAR85: CHANGE STATE OF QUIET NAN BIT. (JTC) 							<26MAR85>
+;
+; NAN HANDLER DEPENDS ON REGISTER MASK: POST-UNPACK.
+; ON ENTRY HAVE JUST TST'ED D2, THE NAN CODE REGISTER.
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; THIS IS TARGET OF ALL INVALID OPERATIONS FOUND DURING
+; OPERATIONS.  BITS IN D0 000000XX MUST GO TO 00XX0000.
+;-----------------------------------------------------------
+INVALIDOP:
+			BSET	#ERRI+8,D6
+			SWAP	D0					; ALIGN CODE BYTE
+			BSET	#QNANBIT,D0 		; MARK IT QUIET 					<26MAR85>
+			MOVE.L	D0,D4
+			CLR.L	D5					; CLEAR LO HALF
+			MOVEA.W #$7FFF,A4			; SET EXPONENT
+			BRA.S	NANCOERCE
+
+
+NANS:
+;-----------------------------------------------------------
+; ONE NAN: STUFF IT.  TWO NANS: TAKE ONE WITH LARGER
+; CODE, OR CONVENIENT (SRC) IF THE CODES ARE =.
+; D2: 2-SRC 4-DST 6-BOTH
+; MUST NOT DESTROY CODE IN D2.
+;-----------------------------------------------------------
+QNANS:
+			CMPI.W	#2,D2
+			BEQ.S	NANSRC
+			CMPI.W	#4,D2
+			BEQ.S	NANDST
+
+NANPRE:
+			MOVE.L	#$00FF0000,D0		; MASK FOR CODE
+			MOVE.L	A1,D1				; DST.HI
+			AND.L	D0,D1				; DST CODE BYTE
+			AND.L	D4,D0				; SRC CODE BYTE
+			CMP.L	D0,D1				; DST - SRC
+			BLE.S	NANSRC
+NANDST:
+			ROL.B	#1,D6				; SIGN
+			MOVEA.L A3,A4				; EXP
+			MOVE.L	A2,D5				; LO DIGS
+			MOVE.L	A1,D4				; HI DIGS
+NANSRC:
+
+
+;-----------------------------------------------------------
+; BE SURE NAN FITS IN DST, BY CHOPPING TRAILING BITS AND
+; STORING "ZERO NAN" IF NECESSARY.
+; FIRST, BRANCH OUT ON CMP, INTEGER CASES.	THE TRICK FOR
+; INTEGER RESULTS IS TO FORCE THE MAX COMP VALUE
+;-----------------------------------------------------------
+NANCOERCE:
+			BTST	#DSTINT+16,D6		; INTXX OR COMP64 RESULT?
+			BEQ.S	NANFLOAT			; FLOATING RESULT...
+
+;-----------------------------------------------------------
+; DELIVER A MAXINT IN EACH OF THE 3 INTEGER FORMATS.
+; SIGNAL INVALID FOR INT16 AND INT32 NAN RESULTS.
+; FOR COMP64, WANT SIGNAL ONLY IF SNAN, BUT ALREADY HAVE
+; SIGNAL FROM ABOVE SO DIFFERENCE IS IRRELEVANT HERE.
+; FORMAT CODES:  4-INT16  5-INT32  6-COMP64  IN D6.HI.
+; VALUES: INT16 -- 00000000 00008000
+;	  INT32 -- 00000000 80000000
+;	  COMP	-- 80000000 00000000
+;-----------------------------------------------------------
+			CLR.L	D4					; 0 --> D4
+			MOVEQ	#1,D5				; $80000000 --> D5
+			ROR.L	#1,D5
+
+			BTST	#DSTLO+16,D6		; BB1 --> INT32
+			BNE.S	@21
+			BTST	#DSTMD+16,D6		; B10 --> COMP64
+			BNE.S	@41
+
+			SWAP	D5
+@21:
+			BSET	#ERRI+8,D6
+			RTS
+@41:
+			EXG 	D4,D5
+			RTS
+
+
+;-----------------------------------------------------------
+; THE NON-INTEGER OPERATIONS ARE OF TWO TYPES: THOSE THAT
+; HAVE A FLOATING RESULT (THE USUAL) AND THOSE THAT DO NOT
+; (COMPARE AND CLASS).	DISTINGUISH THE LATTER ACCORDING TO
+; THE HI OPCODE BIT.  (0 FOR CMP, 1 FOR CLASS).
+;-----------------------------------------------------------
+NANFLOAT:
+			BTST	#DSTOUT+16,D6		; IS IT A CMP OR CLASS?
+			BNE.S	FPNANOUT
+
+;-----------------------------------------------------------
+;
+;-----------------------------------------------------------
+			BTST	#OPHIBIT+16,D6		; 0 = CMP
+			BNE.S	@5
+			MOVEQ	#CMPU,D0			; MARK UNORERED
+			BRA 	CMPFIN
+@5:
+			MOVEQ	#1,D0				; SNAN = 1, QNAN = 2
+			BCLR	#ERRI+8,D6			; INVALID SET -> SNAN
+			BNE.S	@7
+
+			ADDQ.W	#1,D0
+@7:
+			BRA 	CLASSFIN
+
+FPNANOUT:
+			BTST	#SPREC+16,D6		; CHECK FOR SINGLE
+			BEQ.S	@1
+
+			MOVEQ	#0,D5
+			MOVE.B	D5,D4
+			BRA.S	@2
+@1:
+			BTST	#DPREC+16,D6		; CHECK FOR DOUBLE
+			BEQ.S	@2
+
+			ANDI.W	#$0F800,D5
+
+;-----------------------------------------------------------
+; CLEAR QUIET BIT AND CHECK FOR ANY OTHERS NONZERO...
+;-----------------------------------------------------------
+@2:
+			MOVE.L	D4,D0				; CHECK FOR ALL 0
+			BCLR	#QNANBIT,D0 		; ...EXCEPT QNANBIT 					<26MAR85>
+			OR.L	D5,D0
+			BNE.S	@3
+
+			MOVEQ	#nanzero,D4 		; SPECIAL NAN
+			SWAP	D4
+			BSET	#QNANBIT,D4 		; MARK IT QUIET!						<26MAR85>
+@3:
+			RTS
+
+
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; old FPCOERCE
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; 03JUL82: WRITTEN BY JEROME COONEN
+; 11AUG82: CLEANUP
+; 01SEP82: RND MODE ENCODING CHANGED (JTC)
+; 12DEC82: UFLOW DEFINITION CHANGED TO SUPPRESS SIGNAL WHEN
+;	RESULT IS EXACT, EVEN IF TINY (JTC)
+; 13APR83: COMMENT OUT THE TRAP BYPASS CODES FOR OVERFLOW
+;	AND UNDERFLOW, SO DEFAULT RESULT IS ALWAYS DELIVERED.
+;							(JTC)
+; 4APR84: FIXED BUG IN DCOERCE (JTC)
+; 14JAN85: MDS (JTC)
+;
+; FOR LACK OF A BETTER PLACE, THESE FIRST UTILITIES ARE
+; STUCK WITH THE COERCION ROUTINES.
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; THESE ROUTINES HANDLE THE SPECIAL CASES IN OPERATIONS
+; WHEN ONE OR THE OTHER OF THE OPERANDS IS THE RESULT.
+; SUBCASES DEPEND ON WHETHER THE SIGN SHOULD BE
+; STUFFED TOO.	THE SRC-IS-RES IS ALWAYS TRIVIAL.
+;-----------------------------------------------------------
+RDSTSGN:
+			ADD.B	D6,D6				; SHIFT DST SIGN TO BIT #7
+RDST:
+			MOVE.L	A1,D4
+			MOVE.L	A2,D5
+			MOVEA.L A3,A4				; EXP TOO
+RSRCSGN:
+RSRC:
+			RTS
+
+
+;-----------------------------------------------------------
+; RTSHIFT MILESTONE ++++++++++++++++++++++++++++++++++++++ .
+;
+; THIS IS THE RIGHT SHIFTER USED IN ADD/SUB, DENORM,...
+; VARIANT SKIPS CHECK FOR SUPERFLUOUS SHIFTS OVER 66.
+;-----------------------------------------------------------
+
+RTSHIFT:
+			CMPI.W	#66,D0
+			BLS.S	QRTSHIFT
+			MOVE.W	#66,D0
+QRTSHIFT:
+			LSR.L	#1,D4				; SHIFT 0 IN
+			ROXR.L	#1,D5
+			ROXR.W	#1,D7
+			SCS 	D1					; SAVE C-OUT
+			OR.B	D1,D7
+			SUBQ.W	#1,D0
+			BNE.S	QRTSHIFT
+			RTS
+
+
+;-----------------------------------------------------------
+; ASSUME POST-OPERATION REGISTER MASK, WITH RESULT IN
+; D7.B, A4, D4,5.  COERCE ACCORDING TO BITS IN D6.W.
+;
+; USUALLY ASSUME OPERAND IS A NONZERO, FINITE NUMBER.
+; VARIANTS WILL NORMALIZE THE NUMBER, EVEN CHECKING
+; IT FOR ZERO FIRST.
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; CHECK VALUE FIRST, EXIT IF ZER0, WITH EXP FIX.
+;-----------------------------------------------------------
+ZNORMCOERCE:
+			TST.L	D4
+			BNE.S	NORMCOERCE
+			TST.L	D5
+			BNE.S	NORMCOERCE
+			TST.W	D7					; MAY BE JUST ROUND BITS
+			BNE.S	NORMCOERCE
+
+			SUBA.L	A4,A4				; SET EXP TO 0
+			RTS 						; NEVER COERCE 0
+
+;-----------------------------------------------------------
+; ASSUME, AS AFTER SUBTRACT THAT VALUE IS NONZERO.	USE 1ST
+; BRANCH TO SHORTEN ACTUAL LOOP BY A BRANCH.
+;-----------------------------------------------------------
+NORMCOERCE:
+			TST.L	D4					; CHECK FOR LEAD 1
+			BRA.S	@2
+@1:
+			SUBQ.L	#1,A4				; DECREMENT EXP
+			ADD.W	D7,D7				; SHIFT RND
+			ADDX.L	D5,D5				; LO BITS
+			ADDX.L	D4,D4
+@2:
+			BPL.S	@1					; WHEN NORM, FALL THROUGH
+
+;-----------------------------------------------------------
+; COERCE MILESTONE +++++++++++++++++++++++++++++++++++++++ .
+;
+; RUN SEPARATE SEQUENCES FOR EXT, SGL, DBL TO SAVE TESTS.
+; NOTE THAT FOR CONVENIENCE IN BRANCHING, THE SGL AND DBL
+; COERCE SEQUENCES FOLLOW THE COERCE ROUTINES.
+; SINCE OVERFLOW RESULTS IN A VALUE DEPENDING ON THE
+; PRECISION CONTROL BITS, RETURN CCR KEY FROM OFLOW:
+; EQ: OK  NE: HUGE
+;-----------------------------------------------------------
+COERCE:
+			TST.L	D6					; CHEAP SUBST FOR #SPREC+16
+			BMI 	SCOERCE
+			BTST	#DPREC+16,D6		; IS IT DOUBLE
+			BNE 	DCOERCE
+
+			SUBA.L	A3,A3				; EXT UFLOW THRESH
+			BSR.S	UFLOW
+
+			CLR.L	D1					; SET INCREMENT FOR RND
+			MOVEQ	#1,D2
+			BTST	#0,D5				; LSB = 1?
+			BSR.S	ROUND
+
+			MOVEA.W #$7FFE,A3			; OFLOW THRESH
+			BSR.S	OFLOW
+			BEQ.S	@1
+
+;-----------------------------------------------------------
+; STORE EXTENDED HUGE -- JUST A STRING OF 1'S.
+;-----------------------------------------------------------
+			MOVEA.L A3,A4				; MAX FINITE EXP
+			MOVEQ	#-1,D4
+			MOVE.L	D4,D5
+@1:
+			RTS
+
+
+
+;-----------------------------------------------------------
+; UFLOW MILESTONE ++++++++++++++++++++++++++++++++++++++++ .
+;
+; UNDERFLOW TEST -- DENORMALIZED REGARDLESS
+;-----------------------------------------------------------
+UFLOW:
+			MOVE.L	A3,D0				; COPY THRESHOLD
+			SUB.L	A4,D0				; THRESH - EXP
+			BGT.S	@1
+			RTS
+@1:
+			BSET	#ERRU+8,D6			; SIGNAL UNDERFLOW
+
+;-----------------------------------------------------------
+******** DELETED - NO IEEE TRAP SUPPORT
+;	 BTST	 #ERRU,1(A0)	 ; TRAP BITS IN STATE.LO
+;	 BEQ.S	 @3
+;	 RTS
+;@3:
+;-----------------------------------------------------------
+
+			MOVEA.L A3,A4				; EXP <- THRESH
+			BRA.S	RTSHIFT
+
+
+
+;-----------------------------------------------------------
+; ROUND MILESTONE ++++++++++++++++++++++++++++++++++++++++ .
+;
+; ROUND BASED ON GUARD AND STICKY IN D7.W AND LSB WHOSE
+; COMPLEMENT IS IN THE Z FLAG THANKS TO A BTST.
+; SUPPRESS UFLOW FLAG IF EXACT AND NONTRAPPING.
+;-----------------------------------------------------------
+ROUND:;-----------------------------------------------------------
+
+			SNE 	D0					; RECORD LSB
+
+			TST.W	D7					; ANY NONZERO BITS?
+			BNE.S	@1
+
+
+;-----------------------------------------------------------
+; IF NOT TRAPPING ON UFLOW, JUST SUPPRESS ANY UFLOW SIGNAL.
+; SINCE WE DON'T SUPPORT TRAPPING, ALWAYS SUPPRESS SIGNAL.
+;-----------------------------------------------------------
+;
+;	 BTST	 #ERRU,1(A0)	 ; TRAPPING <-- 1
+;	 BNE.S	 @101
+;-----------------------------------------------------------
+
+			BCLR	#ERRU+8,D6			; SUPPRESS UFLOW SIGNAL
+
+;-----------------------------------------------------------
+;@101:
+;-----------------------------------------------------------
+			RTS
+
+@1:
+			BSET	#ERRX+8,D6			; SIGNAL INEXACT
+			BTST	#RNDLO,(A0) 		; NEAREST & TOWARD -INF: X0
+			BEQ.S	@5					; LOOKING FOR 00 AND 10
+			BTST	#RNDHI,(A0) 		; CHOP: 11 TOWARD +INF: 01
+			BEQ.S	@3
+			RTS
+@3:
+			TST.B	D6					; PLUS?
+			BPL.S	ROUNDUP
+			RTS
+@5:
+			BTST	#RNDHI,(A0) 		; NEAR: 00	TOWARD -INF: 10
+			BNE.S	@7
+
+			CMPI.W	#$8000,D7			; 1/2 CASE?
+			BCC.S	@51
+			RTS 						; < 1/2
+@51:
+			BHI.S	ROUNDUP
+			TST.B	D0					; CHECK LSB
+			BNE.S	ROUNDUP
+			RTS
+@7:
+			TST.B	D6					; MINUS?
+			BMI.S	ROUNDUP
+			RTS
+
+;-----------------------------------------------------------
+; RECORD INCREMENT OF SIGNIFICAND.
+;-----------------------------------------------------------
+ROUNDUP:
+			BSET	#RNDINC,1(A0)
+
+			ADD.L	D2,D5
+			ADDX.L	D1,D4
+			BCC.S	@9
+
+			ROXR.L	#1,D4
+			ADDQ.L	#1,A4
+@9:
+			RTS
+
+
+;-----------------------------------------------------------
+; OFLOW MILESTONE ++++++++++++++++++++++++++++++++++++++++ .
+;
+; CHECK FOR OVERFLOW WITH THRESH IN A3, IF SO, STUFF INF
+; AND RETURN WITH CCR AS NE IF HUGE SHOULD BE STUFFED.
+;-----------------------------------------------------------
+OFLOW:
+			CMPA.L	A4,A3
+			BLT.S	@1
+			CLR.W	D0					; SET EQ
+			RTS
+@1:
+			BSET	#ERRO+8,D6			; SET FLAG REGARDLESS
+
+;-----------------------------------------------------------
+; REMOVE TRAP CODE TO BYPASS DEFAULT RESULT ON TRAP
+;
+;	 BTST	 #ERRO,1(A0)	 ; CHECK FOR TRAP
+;	 BEQ.S	 @10
+;
+;	 CLR.W	 D0 	 ; SET EQ
+;	 RTS
+;@10:
+;-----------------------------------------------------------
+
+			BSET	#ERRX+8,D6			; INEXACT, TOO
+
+;-----------------------------------------------------------
+; STORE INF WITH SIGN OF OVERFLOWED VALUE, THEN CHECK...
+;-----------------------------------------------------------
+			MOVEA.W #$7FFF,A4			; MAX EXP
+			CLR.L	D4					; MAKE INF
+			MOVE.L	D4,D5
+
+;-----------------------------------------------------------
+; SINCE NONTRAPPING, RESULT IS EITHER 'INF' OR 'HUGE'.
+; HAVE 'INF' ALREADY; RETURN WITH CCR SET TO 'NE' IF
+; 'HUGE' IS NEEDED.
+;
+; RETURN WITH EQ IFF NEAR, (+ & RNDUP), OR (- & RNDDN).
+;-----------------------------------------------------------
+			MOVE.B	(A0),D1
+			AND.B	#RNDMSK,D1
+			BNE.S	@2					; ASSUME 00-NEAR
+			RTS 						; RETURN WITH INF
+@2:
+;-----------------------------------------------------------
+; NOW USE TRICK TO RETURN WITH CCR SET JUST RIGHT.
+;-----------------------------------------------------------
+			CMPI.B	#RND0,D1			; CHOPPING?
+			BNE.S	@4
+			TST.B	D1					; TO SET NE -- ALWAYS HUGE
+			RTS
+@4:
+			TST.B	D6					; CHECK SIGN
+			BMI.S	@5
+
+			CMPI.B	#RNDUP,D1			; MUST BE EQ TO KEEP INF
+			RTS
+@5:
+			CMPI.B	#RNDDN,D1			; MUST BE EQ TO KEEP INF
+			RTS
+
+
+
+;-----------------------------------------------------------
+; THE SINGLE AND DOUBLE COERCE ROUTINES WERE PLACE DOWN
+; HERE SO THEY COULD ACCESS THE UTILITIES WITH SHORT BR'S.
+;-----------------------------------------------------------
+SCOERCE:
+			MOVEA.W #$3F81,A3			; SGL UFLOW THRESH
+			BSR 	UFLOW				; ???? WAS BSR.S
+
+			TST.L	D5					; ANY LO BITS?
+			SNE 	D0
+			OR.B	D0,D7				; SAVE AS STICKIES
+			ADD.B	D4,D4				; GUARD TO X
+			ROXR.W	#1,D7				; X TO GUARD
+			OR.B	D4,D7				; LAST STICKIES
+
+			CLR.L	D5					; CLEAR LO BITS
+			CLR.B	D4
+
+			MOVE.L	#$0100,D1			; SET INCREMENT FOR RND
+			CLR.L	D2
+
+			BTST	#8,D4				; LSB -> Z
+			BSR 	ROUND				; WAS BSR.S
+
+			MOVEA.W #$407E,A3			; OFLOW THRESH
+			BSR.S	OFLOW
+			BEQ.S	@3
+
+;-----------------------------------------------------------
+; STORE SINGLE HUGE -- 24 ONES WITH BIASED 7F EXP.
+;-----------------------------------------------------------
+			MOVEA.L A3,A4				; MAX SGL EXP
+			MOVEQ	#-1,D4
+			CLR.B	D4
+@3:
+			RTS
+
+
+DCOERCE:
+			MOVEA.W #$3C01,A3			; DBL UFLOW THRESH
+			BSR 	UFLOW				; WAS BSR.S
+
+			MOVE.W	#$07FF,D0			; MASK FOR LOW BITS
+			AND.W	D5,D0
+			ANDI.W	#$0F800,D5			; CLEAR LO BITS
+			LSL.W	#5,D0				; LEFT ALIGN
+			LSR.W	#1,D7				; MAKE WAY FOR GUARD
+			BCC.S	@1					; RECORD POSSIBLE STRAY STICKY BIT
+			BSET	#0,D7
+@1:
+			OR.W	D0,D7
+
+			CLR.L	D1					; SET INCREMENT FOR RND
+			MOVE.L	#$00000800,D2
+
+			BTST	#11,D5				; LSB -> Z
+			BSR 	ROUND				; WAS BSR.S
+
+			MOVEA.W #$43FE,A3			; OFLOW THRESH
+			BSR 	OFLOW				; WAS BSR.S
+			BEQ.S	@5
+
+;-----------------------------------------------------------
+; STORE DOUBLE HUGE -- 53 ONES WITH BIASED 3FF EXP.
+;-----------------------------------------------------------
+			MOVEA.L A3,A4
+			MOVEQ	#-1,D4				; LEAD 32 BITS
+			MOVE.L	#$FFFFF800,D5		; FINAL 21 BITS
+@5:
+			RTS
+
+
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; old FPPACK
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; 03JUL82: WRITTEN BY JEROME COONEN
+; 14JAN85: MDS (JTC)
+;
+; ASSUME REGISTER MASK: POST COERCE, WITH DIRTY INDEX IN D0
+; HAVE RESULT SIGN IN D7, EXP IN A4, DIGS IN D4,5
+; CRUCIAL THAT EXTRANEOUS SIGNIFICANT BITS BE CLEAR.
+; USE D3 FOR EXP COMPUTATIONS.
+;-----------------------------------------------------------
+
+PACK:
+			ANDI.W	#$000E,D0			; KILL EXTRANEOUS BITS
+
+			IF		 PCOK THEN
+			MOVE.W	PACKCASE(PC,D0),D0
+			ELSE
+			MOVE.W	PACKCASE(D0),D0
+			ENDIF
+
+			MOVEA.L LKADR1(A6),A3		; LOAD DST ADRS
+
+;-----------------------------------------------------------
+; USE TRICK TO SPARE SEVERAL COMPARISONS.
+;-----------------------------------------------------------
+			MOVE.W	A4,D3				; GET EXP
+			CMPI.W	#$7FFF,D3			; INF OR NAN?
+
+			IF		 PCOK THEN
+			JMP 	PACK(PC,D0)
+			ELSE
+			JMP 	PACK(D0)
+			ENDIF
+
+PACKCASE:
+			DC.W	 PACKEXT-PACK
+			DC.W	 PACKDBL-PACK
+			DC.W	 PACKSGL-PACK
+			DC.W	 0
+			DC.W	 PACKI16-PACK
+			DC.W	 PACKI32-PACK
+			DC.W	 PACKC64-PACK
+
+;-----------------------------------------------------------
+; INT16: JUST STORE.
+;-----------------------------------------------------------
+PACKI16:
+			MOVE.W	D5,(A3)
+			RTS
+
+
+;-----------------------------------------------------------
+; INT32: CHECK FOR MAX EXP TO STORE MAX NEG INT, WHILE
+;	SIGNALING INVALID.
+;-----------------------------------------------------------
+PACKI32:
+			MOVE.L	D5,(A3)
+			RTS
+
+;-----------------------------------------------------------
+; COMP64: CHECK FOR NAN CASE, BUT NO SIGNAL.
+;-----------------------------------------------------------
+PACKC64:
+			MOVE.L	D4,(A3)+
+			MOVE.L	D5,(A3)
+			RTS
+
+
+;-----------------------------------------------------------
+; NOT SO EASY TO PACK AN EXTENDED.	JUST STUFF THE SIGN;
+; BUT BE SURE TO NORMALIZE UNDERFLOWED S,D DENORMALS.
+;-----------------------------------------------------------
+PACKEXT:
+			BTST	#ERRU+8,D6			; UNDERFLOW
+			BEQ.S	@7					; OK IF NO UFLOW
+
+			TST.W	D3					; MIN EXP?
+			BEQ.S	@7					; IF 0, NO PROBLEM
+
+			TST.L	D4					; NORMALIZED OR NONZERO?
+			BNE.S	@5
+
+			TST.L	D5					; IF ZERO THEN FORCE 0
+			BNE.S	@1					; UNNORM BY > 32 BITS!
+
+			CLR.L	D3					; FORCE ZERO EXP
+			BRA.S	@7
+@1:
+			SUBQ.W	#1,D3				; DEC EXP
+			ADD.L	D5,D5
+			ADDX.L	D4,D4
+@5:
+			BPL.S	@1					; PLS -> UNNORM
+@7:
+			TST.B	D6					; NEGATIVE?
+			BPL.S	@11
+			ADDI.W	#$8000,D3			; STUFF NEG SIGN
+@11:
+			MOVE.W	D3,(A3)+
+			MOVE.L	D4,(A3)+
+			MOVE.L	D5,(A3)
+			RTS
+
+
+;-----------------------------------------------------------
+; PACK SINGLE: IF INF OR NAN PLACE TOO BIG EXP AND COUNT
+; ON LEAD BIT=0 TO FORCE EXP DECREMENT.
+;-----------------------------------------------------------
+PACKSGL:
+			BNE.S	@1					; NE -> INF OR NAN
+			MOVE.W	#$4080,D3			; EXP TOO BIG, WILL DEC
+			BRA.S	@5
+@1:
+			TST.W	D3					; EXP = 0?
+			BNE.S	@5
+			MOVE.W	#$3F81,D3
+@5:
+			SUBI.W	#$3F80,D3
+			ADD.L	D4,D4				; KILL LEAD BIT AND TEST
+			BCS.S	@7					; DEC EXP UNLESS NORMAL
+			SUBQ.W	#1,D3
+@7:
+			OR.W	D3,D4				; STUFF EXP IN LOW BITS
+			ROR.L	#8,D4
+			ADD.B	D6,D6				; GET SIGN INTO X
+			ROXR.L	#1,D4				; SHOVE SIGN
+			MOVE.L	D4,(A3)
+			RTS
+
+
+;-----------------------------------------------------------
+; PACK DOUBLE:
+;-----------------------------------------------------------
+PACKDBL:
+			BNE.S	@1					; NE -> INF OR NAN
+			MOVE.W	#$4400,D3			; EXP TOO BIG, WILL DEC
+			BRA.S	@5
+@1:
+			TST.W	D3					; EXP = 0?
+			BNE.S	@5
+			MOVE.W	#$3C01,D3
+@5:
+			SUBI.W	#$3C00,D3
+			TST.L	D4					; KILL LEAD BIT AND TEST
+			BMI.S	@7					; DEC EXP UNLESS NORMAL
+			SUBQ.W	#1,D3
+@7:
+
+;-----------------------------------------------------------
+; SET UP LOW 32 BITS WITH TRAILING 11 BITS FROM HI BITS.
+;-----------------------------------------------------------
+			MOVE.L	#$000007FF,D0		; MASK HI BITS OF 2ND HALF
+			AND.L	D4,D0
+			OR.L	D0,D5
+			ROR.L	#8,D5
+			ROR.L	#3,D5				; NOW LO 32 BITS READY
+
+			ANDI.W	#$0F800,D4			; CLEAR LO BITS JUST USED
+			ADD.L	D4,D4				; KILL LEAD BIT
+			OR.W	D3,D4				; PLACE EXP
+			ROR.L	#8,D4
+			ROR.L	#3,D4
+			ADD.B	D6,D6				; SIGN TO X
+			ROXR.L	#1,D4
+
+			MOVE.L	D4,(A3)+
+			MOVE.L	D5,(A3)
+			RTS
+
+

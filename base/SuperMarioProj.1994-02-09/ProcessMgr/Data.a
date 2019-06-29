@@ -1,0 +1,204 @@
+;
+;	File:			Data.a
+;
+;	Contains:		Assembly language information truly internal to Process Mgr
+;
+;	Written by:		David Harrison
+;
+;	Copyright:		© 1986-1991 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <5>	 1/28/91	DFH		JSM,#81425:Removed PopUpMenuSelect patch.
+;		 <3>	12/18/90	DFH		Added GetScrap patch.
+;		 <2>	12/17/90	DFH		Removed unused private OSDispatch information. Added xx macro.
+;		 <0>	10/12/90	DFH		New Today.
+;
+;--------------------------------------------------------------------
+
+	IF &TYPE('__IncludingData__') = 'UNDEFINED' THEN
+__IncludingData__	SET	1
+
+;__________________________________________________________________________________
+; Private equates
+;__________________________________________________________________________________
+
+; The ignorant masses know this as Twitcher2
+ProcessMgrGlobals	EQU		$B7C						; lomem pointer to our globals
+
+; Private OSDispatch dispatcher info
+KERNELLAUNCHID			EQU		$10						; selector for _KernelLaunch
+TWGETPRTYPESTRINGSID	EQU		$27						; selector for _TWGetPrTypeStrings
+
+	MACRO
+	_MFGetPrTypeStrings
+	MOVE.W #TWGETPRTYPESTRINGSID,-(SP)
+	_OSDispatch
+	ENDM
+
+;__________________________________________________________________________________
+; Handy extra definitions
+;__________________________________________________________________________________
+UNIMP				EQU		-1							; lomem value when "unimplemented"
+				
+;__________________________________________________________________________________
+; Assembly language version of the dispatch table we maintain.  Each entry contains the
+; original value so we can call through.  This definition must stay in synch with the
+; C language "OSDispatchEntry" in data.h.
+;__________________________________________________________________________________
+ 
+; OSDispatchTable is made of these
+OSDispatchEntry		RECORD	0
+dispatchAddr		DS.L	1
+dispatchDepth		DS.W	1
+dispatchRetSize		DS.W	1
+SizeOfElem			EQU		*
+					ENDR
+				
+;__________________________________________________________________________________
+; Assembly language version of the patch table we maintain.  Each entry contains the
+; original value so we can call through.  These definitions must stay in synch
+; with the C language "patchtraps" table defined in Data.c and Data.h.
+;__________________________________________________________________________________
+ 
+; Trap table entry
+TrapEntry			RECORD	0
+trapnum				DS.W	1
+traptype			DS.W	1
+newtrap				DS.L	1
+oldtrap				DS.L	1
+					ENDR
+
+; NOTE:  Changes here need to also happen to tables in data.h and data.c */
+; First define all traps that are in ROM 78 only
+Rom78PatchTable		RECORD	0
+HANDTOHAND			DS	TrapEntry
+					ENDR
+
+; Now define all ROM 75 traps
+Rom75PatchTable		RECORD	0
+ADDRESMENU			DS	TrapEntry
+CHECKLOAD			DS	TrapEntry
+CLOSE				DS	TrapEntry
+DISPOSHANDLE		DS	TrapEntry
+DRAWMENUBAR			DS	TrapEntry
+EJECT				DS	TrapEntry
+EVENTAVAIL			DS	TrapEntry
+EXITTOSHELL			DS	TrapEntry
+GETNAMEDRESOURCE	DS	TrapEntry
+GETNEXTEVENT		DS	TrapEntry
+GETRESATTRS			DS	TrapEntry
+GETRESOURCE			DS	TrapEntry
+GETSCRAP			DS	TrapEntry
+GETVOL				DS	TrapEntry
+GETVOLINFO			DS	TrapEntry
+HANDLEZONE			DS	TrapEntry
+HFSDISPATCH			DS	TrapEntry
+INITWINDOWS			DS	TrapEntry
+LAUNCH				DS	TrapEntry
+MENUKEY				DS	TrapEntry
+MENUSELECT			DS	TrapEntry
+MOUNTVOL			DS	TrapEntry
+NEWHANDLE			DS	TrapEntry
+OFFLINE				DS	TrapEntry
+OPEN				DS	TrapEntry
+OPENDESKACC			DS	TrapEntry
+OPENRF				DS	TrapEntry
+OSDISPATCH			DS	TrapEntry
+OSRESERVED			DS	TrapEntry
+PACK3				DS	TrapEntry
+POSTEVENT			DS	TrapEntry
+PUTSCRAP			DS	TrapEntry
+RDRVRINSTALL		DS	TrapEntry
+REALLOCHANDLE		DS	TrapEntry
+RECOVERHANDLE		DS	TrapEntry
+RELEASERESOURCE		DS	TrapEntry
+SETCURSOR			DS	TrapEntry
+SETGROWZONE			DS	TrapEntry
+SIZERSRC			DS	TrapEntry
+STILLDOWN			DS	TrapEntry
+SYSEDIT				DS	TrapEntry
+SYSERROR			DS	TrapEntry
+SYSTEMCLICK			DS	TrapEntry
+SYSTEMEVENT			DS	TrapEntry
+SYSTEMMENU			DS	TrapEntry
+SYSTEMTASK			DS	TrapEntry
+UNMOUNTVOL			DS	TrapEntry
+UPDATERESFILE		DS	TrapEntry
+WAITMOUSEUP			DS	TrapEntry
+WAITNEXTEVENT		DS	TrapEntry
+WAKEUP				DS	TrapEntry
+ZEROSCRAP			DS	TrapEntry
+
+; SetTrapAddress must be last so we don't use patched version when patching!!
+SETTRAPADDRESS		DS	TrapEntry
+					ENDR
+					
+RomAllPatchTable	RECORD	0
+Rom78Patches		DS	Rom78PatchTable
+Rom75Patches		DS	Rom75PatchTable
+					ENDR
+			
+;__________________________________________________________________________________
+; Context switching.  We maintain tables specifying which lomem to switch.  Each table
+; entry contains a word length (l) followed by a longword base address (a).  Bytes
+; a through a+l-1 are saved and restored across context switches.  The length must be
+; contained in the low 14 bits of the length word.  The upper two bits hold a descriptor
+; of how the longword is to be interpreted, as follows:
+;		00		Longword is the base address of a data to be switched
+;		10		Longword is the address of a (4 byte) pointer to data to be switched
+;		11		Longword is the address of a (4 byte) handle to data to be switched
+; If the 2 bits specify a pointer or handle address and the low 14 bits specify 0 length
+; then this means the length should be filled in later using a call to _GetPtrSize or
+; _GetHandleSize.  The table is terminated by a 0 length word (all 16 bits).
+;
+; There is one table for color machines, and another for non-color machines, since some
+; lomem exists in one but not in the other.
+;
+; NOTE: We currently have no use for the heap block type switching, so the types and the
+; code are conditionalized out to save time and memory.
+;__________________________________________________________________________________
+
+; values for entryType field
+LTDataAddr			EQU		$0000				; baseAddr is plain address
+					IF (&TYPE('SWITCH_MEMBLOCKS') <> 'UNDEFINED') THEN
+LTPtrAddr			EQU		$8000				; baseAddr is ptr block (not supported)
+LTHdlAddr			EQU		$C000				; baseAddr is handle (not supported)
+					ENDIF
+LTTabEnd			EQU		$0000				; end marker in type + length field
+					
+; max bytes in a range, since length is stored in a word, and we steal the two high bits
+LTMaxLength			EQU		$3FFF
+
+; macro to build a table entry
+					MACRO
+					_LomemTabEntry	&entryType, &baseAddr, &length
+					; Switch all bytes from &baseAddr to &baseAddr+&length-1
+					IF		&EVAL(&length) > LTMaxLength THEN
+						AERROR	&CONCAT('Length must be between 1 and ',&INTTOSTR(LTMaxLength))
+					ENDIF
+					DC.W	&entryType+&length
+					DC.L	&baseAddr
+					ENDM
+
+; macro to terminate the table			
+					MACRO
+					_LomemTabEnd
+					DC.W	LTTabEnd
+					ENDM
+			
+; Entries not yet in SysAllQk.D, remove when they are redundant...
+MacPgm				EQU		HpChk
+TrapTble			EQU		$80
+SwitchSnd			EQU		$278
+CurLayer			EQU		$A90
+AfterSaveSP			EQU		(SaveSP+4)
+SoundGlue			EQU		$AE8
+LastTGlobal			EQU		$AFC
+SwitchedBits		EQU		$B21
+LayerPalette		EQU		$DCC
+
+; BlockMove is fast with large chunks, but we can be faster when with smaller ones
+FastBMSize			EQU		16
+
+					ENDIF	; __IncludingData__

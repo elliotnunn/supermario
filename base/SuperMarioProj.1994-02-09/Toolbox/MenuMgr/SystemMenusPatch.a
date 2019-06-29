@@ -1,0 +1,307 @@
+;
+;	File:		SystemMenusPatch.a
+;
+;	Contains:	patches to the Menu Manager to support system menus
+;
+;	Written by:	Kevin S. MacDonell
+;
+;	Copyright:	© 1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<11>	 1/20/92	PN		Roll in patches into MenuMgr.a
+;		<10>	 10/8/90	dba		make simpler Munger call in GetMenuBar to shrink the code a bit;
+;									also fix potential bug where high word was not cleared
+;		 <9>	  9/6/90	KSM		System Menus are installed ONLY if (and whent) you install an
+;									Apple Menu. Get/SetMenuBar remove and insert System Menus,
+;									respectively. Insert patch calls _IsSystemMenu for consistency.
+;		 <8>	 7/10/90	KSM		Roll out Help Mgr setup code.
+;		 <7>	  7/9/90	KSM		Roll in HelpMgr menu setup code. Bug fix in system menu
+;									insertion code. Use new system menu range checking.
+;		 <6>	  6/8/90	KSM		Move equates to MenuMgrPriv.a and include here.
+;		 <5>	 4/29/90	KSM		Remove debug messages.
+;		 <4>	 4/29/90	KSM		Update the utilities.
+;		 <3>	 4/17/90	KSM		Commented out GetMenuBar Patch (*** need to just nuke this at
+;									some point!)
+;		 <2>	 4/10/90	KSM		Update GetMenuBar patch.
+;		 <1>	  4/9/90	dba		integrated with the new MBDF; checked in for the first time
+;				  4/6/90 	KSM		New today.
+;
+
+		load	'StandardEqu.d'
+		include	'LinkedPatchMacros.a'
+		include	'MenuMgrPriv.a'
+
+		MACRO
+			_DMSG	&msg
+			if &msg = '' then
+				_Debugger
+			else
+				PEA	@dbgStrBase
+				_DebugStr
+				BRA.S		@overstring
+				@dbgStrBase:
+					DC.B	&msg
+					ALIGN 2
+				@overstring:
+			endif
+		ENDM
+		
+		
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; InitSystemMenuList — Clear out system menu list global.
+
+InitSystemMenuList InstallProc (Plus,SE,II,Portable,IIci)
+
+				MOVE.L	SystemMenuList, A0					; Dump the switcherTpr table
+				_DisposPtr
+				MOVEQ	#InitMListSize, D0					; Get size of menuList
+				_NewHandle	,SYS,CLEAR						; Allocate it in system heap
+				MOVE.L	A0, SystemMenuList					; Save off the new handle
+
+				RTS
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; GetMenuBarDoesNotReturnSystemMenus — do not return system menus in the returned menu list
+
+GetMenuBarDoesNotReturnSystemMenus PatchProc _GetMenuBar,(Plus,SE,II,Portable,IIci)
+
+				IMPORT	FindFirstSystemMenu6BO
+				jsr		FindFirstSystemMenu6BO		; Are there any system menus?
+				beqOLD						; EQ means no system menus, do the original thing
+
+				MOVE.L	d3,-(SP)			; Save off a work register
+
+				MOVEQ	#0,D3
+				MOVE.W	D0,D3				; Save off index
+				SUBQ.L	#4,SP				; Make room for result
+				jsrOLD						; Call thru
+				MOVE.L	(SP)+,A0			; Get copy of menulist
+				MOVE.L	A0,8(SP)			; Return as result
+				BEQ.S	@done				; EQ means no menulist or memfull
+
+; Munger(menuH, d3, NIL, d1, POINTER(-1), 0);
+
+				MOVE.L	(A0),A1				; Get copymenulist ptr
+				moveq	#0,d1				; clear out high word								<10>
+				MOVE.W	lastMenu(A1),D1		; Offset to last menu (could be zero but we’ve chkd that)
+				ADDQ.W	#6,D1				; Offset past last menu entry
+				SUB.W	d3,D1				; D1 = Offset to last menu - Offset to 1st sysmenu
+											; (i.e., # bytes for system menus)
+				SUB.W	D1,lastMenu(A1)		; Set new count for the list
+
+				SUBQ.L	#4,SP				; Make room for Munger result
+				MOVE.L	A0,-(SP)			; Push the handle
+				MOVE.L	d3,-(SP)			; offset=first system menu offset
+				CLR.L	-(SP)				; ptr1=NIL											<10>
+				MOVE.L	D1,-(SP)			; len1=# of bytes to delete
+				MOVE.L	A0,-(SP)			; ptr2=anything non-nil will do
+				CLR.L	-(SP)				; len2=0 means delete
+				_Munger						; Rip out system menus
+				ADDQ.L	#4,SP				; ignore Munger result
+@done
+				MOVE.L	(SP)+,d3			; Restore work register
+				RTS
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; SetMenuBarAddsSystemMenus — SetMenuBar should add the system menus to the current menu list
+
+SetMenuBarAddsSystemMenus PatchProc _SetMenuBar,(Plus,SE,II,Portable,IIci)
+
+				MOVE.L	4(SP),-(SP)			; Copy params
+				jsrOLD						; Call old one, but come back here
+
+				MOVE.L	MenuList,D0			; Get result
+				BEQ.S	@done				; EQ means no menulist or memfull
+
+				; Call the MBDF to put in the system menus
+				MOVEQ	#2,D0				; set up for the menu-edge-calc msg
+				CLR.L	D1					; calc entire bar
+				IMPORT	CallMBarProc
+				jsr		CallMBarProc
+@done
+				MOVE.L	(SP)+,(SP)			; Eat param (handle)
+				RTS
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; PatchInsertMenu
+
+; When this patch sees a system menu (-16385 thru -32768), it adds it to the system menu bar.
+; If the system menu bar doen't exist, this patch creates it.
+; If the menu is not a system menu, ensure that the beforeID is modified so that the
+; menu is inserted before the system menu partition.
+
+PatchInsertMenu PatchProc _InsertMenu,(Plus,SE,II,Portable,IIci)
+
+				EXPORT	FindFirstSystemMenu6BO
+
+InsertStack		RECORD	{base},DECR
+	ParamBegin:	EQU		*			; start parameters after this point
+menuHdl			DS.L	1
+beforeID		DS.W	1
+	ParamSize:	EQU		ParamBegin-*
+retAddr			DS.L	1
+base			DS.W	0
+	LocalSize:	EQU		*
+				ENDR
+
+				WITH	InsertStack
+				CMP.W	#$FFFF, beforeID(SP)				; beforeID = -1 ==> H Menu
+				beqOld
+
+; If a system menu is being inserted, put it into the System Menu Bar
+
+				MOVE.L	menuHdl(SP), A0						; Get the MenuHandle
+				MOVE.L	(A0), A0							; dereference
+				SUBQ.L	#4,SP								; Make Room for result & VAR
+				MOVE.W	menuID(A0),-(SP)					; Push the menuID
+				PEA		4(SP)								; Point to VAR
+				_IsSystemMenu								; Do it the standard way
+				ADDQ.L	#2,SP								; Eat the result
+				TST.B	(SP)+								; Is it a system menu?
+				BNE.S	@DoSystemMenu						; EQ means it is a system menu
+
+; Menu for main list, be sure it is inserted before all the system menus
+				BSR		FindFirstSystemMenu6BO				; Find the system menu partition
+				beqOld										; Do old stuff if no system menus
+				MOVE.W	D0, D1								; Save off 6BO of 1st system menu
+				MOVE.W	beforeID(SP), D0					; Get the beforeID
+				BEQ.S	@forceBeforeSys						; branch if zero
+				BSR		Find6BOFromID						; Find its offset
+				BEQ.S	@forceBeforeSys						; branch if the beforeID not in list
+				CMP.W	D1, D0								; Is it after the system partition?
+				bleOld										; No, do as caller wanted
+				MOVE.W	D0, D1								; It is after the system partition
+
+@forceBeforeSys	; the beforeID must be changed to before the 1st system menu
+				MOVE.L	MenuList, A0						; get the menulist
+				MOVE.L	(A0), A0							; deref
+				MOVE.L	menuOH(A0,D1.W), A0					; get the menuhandle to insert before
+				MOVE.L	(A0), A0							; deref
+				MOVE.W	menuID(A0), beforeID(SP)			; Make beforeID be 1st system menu
+				braOld										; Now go do it
+
+@DoSystemMenu
+; If menuID already exists in system menulist, we're done!
+				MOVE.L	MenuList, A1						; Save Menulist
+				MOVE.L	SystemMenuList, MenuList			; Store system as menulist
+				BSR		Find6BOFromID						; Is this menuID already in the list?
+				MOVE.L	A1, MenuList						; Restore Menulist
+				TST.W	D0									; Was the menuID found?
+				BNE.S	@Done								; Don't double insert it, done.
+
+; Swap the two menu lists so this menu inserts into the system menu
+				MOVE.W	beforeID(SP), D0					; Get the beforeID
+				BEQ.S	@AddAtEnd							; Yes, branch
+				MOVE.L	MenuList, A1						; Save Menulist
+				MOVE.L	SystemMenuList, MenuList			; Store system as menulist
+				BSR.S	Find6BOFromID						; Look up the beforeID
+				MOVE.L	A1, MenuList						; Restore Menulist
+				TST.W	D0									; Was the menuID found?
+				BNE.S	@DoTheAdd
+@AddAtEnd
+				MOVE.L	SystemMenuList, A0					; Get system menulist
+				MOVE.L	(A0), A0							; deref
+				MOVE.W	lastMenu(A0), D0					; Get last menu
+				ADDQ.W	#6, D0								; Insert "before" the end
+@DoTheAdd
+				SUBQ.L	#4, SP								; Make room for result
+				MOVE.L	SystemMenuList, -(SP)				; handle
+				MOVE.W	D0, -(SP)							; Move the offset
+				CLR.W	-(SP)								; as a long with high cleared
+				CLR.L	-(SP)								; ptr1 = 0
+				CLR.L	-(SP)								; len1 = 0
+				PEA		6+20(SP)							; ptr2 = menuhandle parameter
+				MOVEQ.L	#6, D0
+				MOVE.L	D0, -(SP)							; len2 = 6
+				_Munger										; Munge away!  Left coord will be junk.
+				ADDQ.L	#4, SP								; Dump result
+				; Remember to update the lastMenu field
+				MOVE.L	SystemMenuList, A0					; Get system menulist
+				MOVE.L	(A0), A0							; handle -> ptr
+				ADDQ.W	#6, lastMenu(A0)					; Bump the count
+@Done
+				MOVE.L	(SP)+, A0							; Get the return address
+				ADDQ.L	#ParamSize, SP						; Cut back the parameters
+				JMP		(A0)
+
+;______________________________________________________________________________________________
+; Utility -- FindFirstSystemMenu6BO
+; Returns the 6B0 of the 1st system menu found in the menulist in D0 (conditions set).
+; Returns zero if no system menus are in the current menu bar.
+; All registers (except D0 of course) are preserved.
+
+; NOTE: We walk from last menu -> first since there usually are fewer system menus
+; and they are at the end of the menu list
+
+FFSMSaveReg		REG		A0/A1
+
+FindFirstSystemMenu6BO
+				MOVEM.L	FFSMSaveReg, -(SP)		; Save our regs
+				MOVE.L	MenuList, A0			; Get the current menulist
+				MOVE.L	(A0), A0				; dereference
+				MOVEQ	#0, D0					; Clear high word
+				MOVE.W	lastMenu(A0), D0		; Get the last menu offset
+				BEQ.S	@done					; If there are none, done
+@nextMenu
+				MOVE.L	menuOH(A0,D0.w), A1		; Get the menu handle
+				MOVE.L	(A1), A1				; dereference
+				CMP.W	#-16384, menuID(A1)		; IF menuID >= -16384 THEN
+				BGE.S	@pastSysMenus			; 	GOTO pastSysMenus
+				SUBQ	#6, D0					; point to the next one in the menulist
+				BNE.S	@nextMenu				; and continue
+				; Falling out of loop, D0=0 and 1st is system menu
+@bumpAndExit
+				ADDQ	#6, D0					; Bump D0 to point to next entry
+				BRA.S	@done					; And we’re outa here
+@pastSysMenus
+				CMP.W	lastMenu(A0), D0		; were there any system menus at all?
+				BLT.S	@bumpAndExit			; D0 moved, so we found at least 1 system menu
+				MOVEQ	#0,D0					; Show that there is no partition
+@done
+				MOVEM.L	(SP)+, FFSMSaveReg		; Restore our regs
+				RTS
+
+			EXPORT	FIND6BOFROMID
+;______________________________________________________________________________________________
+; Utility -- Find6BOFromID
+; Find and return six byte offset of menuID in D0.
+; Returns in D0 the 6B0 in D0 (with condition codes set) or zero if not found.
+; All registers (except D0 of course) are preserved.
+
+F6B0SaveReg		REG		D1/A0/A1
+
+Find6BOFromID
+				MOVEM.L	F6B0SaveReg, -(SP)		; Save our regs
+				MOVE.L	MenuList, A0			; Get the current menulist
+				MOVE.L	(A0), A0				; dereference
+				MOVE.W	D0, D1					; Save the item we’re looking for
+				MOVEQ	#0, D0					; Clear high word
+				MOVE.W	lastMenu(A0), D0		; Get the last menu offset
+				BEQ.S	@done					; If there are none, done
+
+@nextMenu
+				MOVE.L	menuOH(A0,D0.w), A1		; Get the menu handle
+				MOVE.L	(A1), A1				; dereference
+				CMP.W	menuID(A1), D1			; Is this the one?
+				BEQ.S	@foundIt				; Branch if it is.
+				SUBQ	#6, D0					; point to the next one in the menulist
+				BNE.S	@nextMenu					; If more menus, branch...
+@foundIt
+				TST.W	D0						; Return the 6B0 as promised (w/cond. codes)
+@done
+				MOVEM.L	(SP)+, F6B0SaveReg		; Restore our regs
+				RTS
+
+				EndProc
+
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		end

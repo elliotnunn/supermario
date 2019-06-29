@@ -1,0 +1,632 @@
+;
+;	File:		GetMgr.a
+;
+;	Contains:	This file contains a collection of simple resource interface routines for the Mac
+;  				toolBox to provide a simple way to use common system resources.  These include:
+;				GetPattern, GetCursor, GetString, GetIcon, GetPicture, GetNewWindow, GetNewCWindow
+;				GetNewControl, GetMenu, and GetNewMBar.
+;
+;	Written by:	Andy Hertzfeld	29-Dec-82
+;
+;	Copyright:	© 1981-1992 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM6>	11/20/92	RB		Patterns should be looked for in ROM first. The Control Panel
+;									actually makes a copy of them before they are modified by the
+;									user and then saved with a special id as the pattern of choice.
+;	   <SM5>	10/29/92	SWC		Changed PaletteEqu.a->Palettes.a.
+;	   <SM4>	10/22/92	CSS		Change some short branches to word branches.
+;	   <SM3>	 6/23/92	PN		Clean up patchGetResource in GetNewWindow
+;	   <SM2>	  4/2/92	PN		Roll in patchGetResource from WindowMgrPatches.a into
+;									GetNewwindow
+;		 <5>	 2/10/92	JSM		Moved this file to GetMgr folder, keeping all the old revisions.
+;		 <4>	 9/27/91	JSM		Cleanup header, don’t use hasCQD conditional since all future
+;									ROMs will have color QuickDraw.
+;		 <3>	 5/21/91	gbm		Nail a couple of warnings
+;		 <2>	 1/19/90	DVB		Include PalettePriv.a
+;	   <1.5>	11/13/89	KON		Changed GetNewCWindow to load a palette with the same ID as the
+;									window if the palette exists in the resource file.
+;	   <1.4>	 8/22/89	SES		Removed references to nFiles.
+;	   <1.3>	 7/15/89	CSL		Added missing line of code from ages back into GetMenu to set
+;									ROMMapInsert true before calling _GetResInfo.
+;	   <1.2>	 3/31/89	MSH		Get cursor goes the rom for the resource first.
+;	   <1.1>	11/10/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	   <1.2>	 11/2/88	GGD		Got rid of machine specific conditionals in favor of feature
+;									based conditionals.
+;	  <•1.1>	 9/23/88	CCH		Got rid of inc.sum.d and empty nFiles
+;	   <1.0>	 2/11/88	BBM		Adding file for the first time into EASE…
+;	  <C914>	10/29/87	rwh		Port to Modern Victorian
+;	  <C862>	 7/27/87	rwh		merged in DAF's <24Apr87> change from a wayward version of the
+;									source. His comment read "Fixed stack frame to be even-sized in
+;									GetNewControl"
+;	  <C702>	 1/27/87	FJL		Make changes to GetRMenu based on code review
+;	  <C687>	 1/25/87	DAF		Moved C678 change to WindowMgr3.a (SetWinColor) to make it
+;									easier to use
+;	  <C678>	 1/23/87	DAF		Made all GetCWindows with wctb's force window's backColor to
+;									contentColor
+;	  <C666>	 1/22/87	DAF		Evened out stack frame in GetNewWindow
+;	  <C645>	 1/15/87	DAF		Unlocked and purged WINDs and CNTLs
+;	  <C575>	12/30/86	DAF		GetNewWindow now posts activate events if the new window is the
+;									frontmost window.
+;	  <C491>	 12/8/86	DAF		Cleanup from code review. Set windows/controls visible before
+;									doing DrawXXX on nuMac. Removed ReleaseResources from windows,
+;									controls, and menubars.
+;	  <C460>	11/24/86	DAF		fixed some incorrect stack frame offsets in GetNewControl
+;	  <C417>	11/17/86	FJL		Changed bsr GetMenu to _GetRMenu, added color support to GetMenu
+;	  <C407>	11/13/86	DAF		fixed GetNewControl to confirm cctb handle before detaching
+;	  <A353>	 11/5/86	DAF		corrected small errors in GetNewWindow introduced in C314
+;	  <C314>	10/31/86	DAF		corrected resource usage in GetNewWindow/GetNewControl Adjusted
+;									GetNewWindow to eliminate color flash.
+;	  <C241>	10/17/86	DAF		Changed color toolbox resource types ('WCTB'/'CCTB') to lower
+;									case, as recommended by JTC.
+;	  <C206>	 10/9/86	bbm		Modified to mpw aincludes.
+;	  <C203>	 10/6/86	DAF		Modified GetNewWindow/GetNewCWindow/GetControl to load color
+;									information, if present, on nuMac.
+;	  <C169>	 9/23/86	JTC		Change BSET to HLock in 2 cases.
+;	  <C146>	  9/8/86	BBM		added colorequ.a
+;	  <C106>	  8/5/86	EHB		Added routine GetNewCWindow
+;				 2/19/86	BBM		Made some modifications to work under MPW
+;				 7/10/85	EHB		Load MDEF from ROM map in GetMenu
+;				 4/22/85	EHB		Restored CalcMenuSize to make Draw work (lisa strikes again!)
+;				 4/15/85	EHB		Made GetMenu check for existing resource.
+;				 4/11/85	EHB		Eliminated CalcMenuSize by dirtying the size instead.
+;				 1/23/85	LAK		Adapted for new equate files.
+;				  2/2/83	AJH		Made GetMenu measure the menu
+;				  1/2/83	AJH		Added icons and pictures, GetMenuBar
+;
+
+				BLANKS			ON
+				STRING			ASIS
+
+			LOAD		'StandardEqu.d'
+			INCLUDE		'ColorEqu.a'
+			INCLUDE		'palettes.a'
+			INCLUDE		'palettePriv.a'
+
+GMGR			PROC	  EXPORT
+
+;
+; routines defined in the "Get" manager
+;
+			   EXPORT	 GetPattern
+			   EXPORT	 GetCursor
+			   EXPORT	 GetString
+			   EXPORT	 GetIcon
+			   EXPORT	 GetPicture
+			   EXPORT	 GetNewWindow
+			   EXPORT	 GetNewControl
+			   EXPORT	 GetMenu
+			   EXPORT	 GetNewMBar
+			   EXPORT	 GetMgrEnd
+
+			   EXPORT	 GetNewCWindow
+
+;
+; FUNCTION GetPattern(patID: INTEGER): PatHandle;
+;
+;	 GetPattern returns a pattern handle when given a pattern ID
+;
+GetPattern
+			   MOVE.L	 #'PAT ',D0 		 ;remember the resource type
+			   MOVE.W	#MAPTrue,ROMMapInsert	; go to the rom for it			<SM6> rb
+GetCommon
+			   SUBQ 	 #4,SP				 ;make room for function result
+			   MOVE.L	 D0,-(SP)			 ;push the resource type
+			   MOVE.W	 12(SP),-(SP)		 ;push the ID
+			   _GetResource 				 ;get the handle
+			   MOVE.L	 (SP)+,D0			 ;keep it in D0
+
+			   MOVE.L	 (SP)+,A0			 ;get the return address
+			   ADDQ 	 #2,SP				 ;strip the parameter
+			   MOVE.L	 D0,(SP)			 ;move in the result
+			   JMP		 (A0)				 ;return to the caller
+
+;
+; FUNCTION GetCursor(cursorID: INTEGER): CursorHandle;
+;
+;	GetCursor returns a cursor handle given a cursor ID.  It shares a lot
+;  of code with GetPattern.
+;
+GetCursor
+			   MOVE.L	 #'CURS',D0 		 ;get the resource type
+			   MOVE.W	#MAPTrue,ROMMapInsert	; go to the rom for it
+			   BRA.S	 GetCommon			 ;let common code do the rest
+
+;
+; FUNCTION GetString(StringID: INTEGER): StringHandle;
+;
+;	GetString returns a string handle given a string ID.  It shares a lot
+;  of code with GetPattern.
+;
+GetString
+			   MOVE.L	 #'STR ',D0 		 ;get the resource type
+			   BRA.S	 GetCommon			 ;let common code do the rest
+
+;
+; FUNCTION GetIcon(IconID: INTEGER): IconHandle;
+;
+;	GetIcon returns a iconHandle given an icon ID.	It shares a lot
+;  of code with GetPattern.
+;
+GetIcon
+			   MOVE.L	 #'ICON',D0 		 ;get the resource type
+			   BRA.S	 GetCommon			 ;let common code do the rest
+
+;
+; FUNCTION GetPicture(PictureID: INTEGER): PicHandle;
+;
+;	GetPicture returns a picture handle given a picture ID.  It shares a lot
+;  of code with GetPattern.
+;
+GetPicture
+			   MOVE.L	 #'PICT',D0 		;get the resource type
+			   BRA.S	 GetCommon			 ;let common code do the rest
+
+
+;
+; FUNCTION GetNewWindow(windowID: INTEGER; wStorage: Ptr; behind: windowPtr):windowPtr;
+;
+;  GetNewWindow allocates a new window using the parameters contained
+;  in the "WIND" resource specified by the windowID
+;
+	
+result			EQU		18					; parameter equates
+winID			EQU		16
+wStor			EQU		12
+behind			EQU		8
+
+VisState		EQU		-1					; flag for resource's vis state			<C314/31Oct86> DAF	
+Align			EQU		-2					; another byte to re-align stack frame	<C666/22Jan87> DAF
+IsACPort		EQU		-4					; flag for color port
+	
+GetNewCWindow	LINK	A6,#IsACPort		; build stack frame					<C106 EHB>
+				MOVE	#-1,IsACPort(A6)	; flag the color port				<C106 EHB>
+				BRA.S	GNWShare			; =>dive into common code			<C106 EHB>
+					
+GetNewWindow	LINK	A6,#IsACPort		; build stack frame
+				CLR		IsACPort(A6)		; flag black and white port			<C106 EHB>
+GNWShare		MOVE.L	A3,-(SP)			; preserve a work register
+				CLR.L	result(A6)			; set result to NIL
+	
+				SUBQ	#4,SP				; make space for result
+				MOVE.L	#'WIND',-(SP)		; push resource class "WIND"
+				MOVE.W	winID(A6),-(SP)		; push window ID
+
+;;;;			_GetResource				; get the resource
+;Roll in patchGetResource from WindowMgrPatches  <SM2> <PN>
+				MOVEM.L		D7/A3/A4/A6, -(SP)	; Save some regs for temps <SM2> <PN>
+				MOVEA.L		A7, A6				; Save the current stack pointer <SM2> <PN>
+				SUBQ.L		#$4, A7				; Make some space for return value from GetResource <SM2> <PN>
+				MOVE.L		18(A6), -(SP)		; Re-push the arguments <SM2> <PN>
+				MOVE.W		16(A6), -(SP)
+				_GetResource
+				MOVEA.L		(SP), A3			; Save the Handle in a temp  <SM2> <PN>
+				TST.L		(SP)+				; check the return value  <SM2> <PN>
+				BEQ 		leavePatch			; If the Handle is NULL, run away <SM2> <PN> <SM4> CSS 
+				MOVEA.L		(A3), A4			; Store the pointer in another temp <SM2> <PN>
+				CMPI.W		#$7FFC, (A4)		; Check if this template has already been fixed <SM2> <PN>
+				BEQ 		leavePatch			; If it has then return it undisturbed. <SM2> <PN> <SM4> CSS 
+
+				; Check the size of the dialog
+
+				MOVEA.L		A3, A0				; Get Ready for a call to GetHandleSize <SM2> <PN>
+				_GetHandleSize					; put handle size in D0 for size check of template <SM2> <PN>
+				MOVE.L		D0, D7				; Save the value for later <SM2> <PN>
+				CMP.L		#'ALRT', 18(A6)		; if its an alert,..<SM2> <PN>
+				BNE.S		checkDLOG
+				SUB.L		#$C, D0				; ... subtract the old alert size from the handle size <SM2> <PN>
+				BRA.S		checkSize           ; <SM2> <PN>
+checkDLOG		MOVEQ.L		#0, D1
+				CMP.L		#'DLOG', 18(A6)		; if its a dialog,..<SM2> <PN>
+				BNE.S		doWIND				; <SM2> <PN>
+				SUB.L		#$15, D0			; ... subrtact out the old DLOG size (0x14) plus length byte <SM2> <PN>
+				MOVE.B		$0014(A4), D1		; get the length of a dialog's title <SM2> <PN>
+				BRA.S		subtractString
+doWIND			SUB.L		#$13, D0			; it must be a WIND so subtract out WIND size (0x12) plus length byte <SM2> <PN>
+				MOVE.B		$0012(A4), D1		; get the length of a window's title <SM2> <PN>
+subtractString	SUB.L		D1, D0				; subtract the title length from the handle size <SM2> <PN>
+checkSize		CMPI		#2, D0				; If the template is old, D0 will be 0, If it is new,... <SM2> <PN>
+				BLT.S		leavePatch			; ...it will be 2 (or more if an app is monkeying with the new template) <SM2> <PN>
+				SUB.L		D0, D7				; subract the size of the extra stuff from the length of the template <SM2> <PN>
+				BTST		#0, D7				; If this value is odd, it means that the string was of <SM2> <PN>
+				BEQ.S		addToAddr			; such a size as to require a byte filler for alignment <SM2> <PN>
+				ADDQ.L		#1, D7				; so we add one to D7 to allow for this <SM2> <PN>
+addToAddr		ADDA.L		D7, A4				; Advance the pointer to where the positioning word should be (will be even) <SM2> <PN>
+				MOVE.W		(A4), D1			; move the position word into D1 (D1's upper word is already zeroed) <SM2> <PN>
+				ANDI.W		#$7FF, D1			; get the position word's lower 11 bits. <SM2> <PN>
+				MOVEQ		#$A, D0				; move the signature into D0 <SM2> <PN>
+				CMP.W		D0, D1				; compare the signature to the lower 11 bits of positioning data <SM2> <PN>
+				BNE.S		leavePatch			; If they are not zero, this is someone's old-style, non-standard template. <SM2> <PN>
+
+				; We've decided that this is a good, automatically-positioned template.
+				; Now we're going to doctor it for NameAndPositionWindow.
+
+				MOVEA.L		(A3), A0			; Get a pointer to the template data. <SM2> <PN>
+
+				MOVE.W		(A0), D0			; put height into template.bounds.bottom <SM2> <PN>
+				SUB.W		D0, 4(A0)			;	<SM2> <PN>
+
+				MOVE.W		2(A0), D0			; put width into template.bounds.right <SM2> <PN>
+				SUB.W		D0, 6(A0)			;  <SM2> <PN>
+
+				MOVE.W		#$7FFC, (A0)		; Move "Magic Cookie" into template.bounds.top <SM2> <PN>
+				MOVE.W		(A4), 2(A0)			; Move position information into template.bounds.left <SM2> <PN>
+
+leavePatch		MOVE.L		A3, 22(A6)			; return the handle to the (possibly doctored) template <SM2> <PN>
+				MOVEM.L		(SP)+, D7/A3/A4/A6	; restore temps       <SM2> <PN>
+				ADDQ.L		#6, SP				; Adjust stackpointer <SM2> <PN>
+; end roll in  <SM2> <PN>
+	
+				MOVE.L	(SP)+,A3			; keep handle in A3
+				MOVE.L	A3,D0			 	; did we get one?
+				BEQ		NoGetNew1			; if not, don't allocate one
+
+				MOVE.L	(A3),A0				; keep pointer in A0
+;
+; OK, we got the parameter block so call NewWindow to allocate the window
+;
+				SUBQ	#4,SP				; make space for result
+				MOVE.L	wStor(A6),-(SP)		; push wStorage
+				MOVE.L	A0,-(SP)			; push pointer to boundsRect
+				PEA		18(A0) 			 	; push pointer to title
+			
+				MOVE.B	10(A0),VisState(A6) ; keep original vis state			<A353/05Nov86> DAF
+				CLR.W	-(SP)				; push vis FALSE					<A353/05Nov86> DAF
+				MOVE.W	8(A0),-(SP)			; push procID						<A353/05Nov86> DAF
+				MOVE.L	behind(A6),-(SP)	; push "behind"
+				MOVE.W	12(A0),-(SP)		; push GoAway flag
+				MOVE.L	14(A0),-(SP)		; push the refCon
+			
+				MOVEA.L	A3,A0				; handle							<C169>
+				_HLock						; trash D0							<C169>
+			
+				TST		 IsACPort(A6)		; is it a color port?				<C106 EHB>
+				BEQ.S	 BWWin				; =>no, do it the old way			<C106 EHB>
+				_NewCWindow					; allocate a color window			<C106 EHB>
+
+;------ start of 10Nov89 addition by KON ---------------------
+				clr.l	-(sp)				; make room for palette handle		<erich>
+				move	winID(a6),-(SP)		; push window ID					<erich>
+				_GetNewPalette				; fetchez la palette				<erich>
+				move.l	(sp)+,d0			; well?								<erich>
+
+				Beq.S	NoWindowPltt		; sorry, no automatic palette today			AWC.PB459
+				Move.L	D0,A0				; get the palette							AWC.PB459
+				Move.L	(A0),A0				; dereference it							AWC.PB459
+				Move	PmPrivate(A0),D1	; grab the update bits						AWC.PB459
+				Lsr		#1,D1				; put them in position						AWC.PB459
+				BSet	#NNewBit,D1			; use the new CUpdates format				AWC.PB459
+				BSet	#DisposeBit,PmPrivate(A0)	; set for automatic disposal		AWC.PB459
+
+				move.l	(sp),-(sp)			; push the window					<erich>
+				move.l	d0,-(sp)			; push the palette					<erich>
+				move	D1,-(sp)			; push cUpdates								AWC.PB459
+				_SetPalette					;									<erich>
+
+NoWindowPltt								;											AWC.PB459
+;------ end of10Nov89 addition by KON ---------------------
+
+				BRA.S	GetWDone			; window ptr on top of stack
+			
+BWWin			_NewWindow					; allocate a regular window
+
+GetWDone	 	MOVE.L	 (SP)+,result(A6)	; update function result
+			   
+; removed _ReleaseResource 						<C491/08Dec86> DAF
+				MOVE.L	A3,A0				; get WIND handle			<C645/15Jan87>
+				_HUnlock					; unlock the handle			<C645/15Jan87>
+				_HPurge						; and make it purgeable		<C645/15Jan87>
+			
+GetWCTB										; get the auxilliary color table, if present
+			   SUBQ 	#4,SP				; make space for result
+			   MOVE.L	#'wctb',-(SP)		; push resType (Window Color TaBle)		<C214/17Oct86> DAF
+			   MOVE.W	winID(A6),-(SP)		; WCTB's resID is the same as window's
+			   _GetResource 				; get the resource
+			   MOVE.L	(SP)+,D0			; get the resHandle
+			   BEQ.S	ShowIt				; no res present, so continue
+				
+			   MOVE.L	result(A6),-(SP)	; push windowPtr (from result field) for upcoming SetWinColor	<C678/23Jan87> DAF
+			   MOVE.L	D0,-(SP)			; push cTabHndl from resource			<C491/08Dec86> DAF
+			   _SetWinColor					; set it				
+ShowIt	  
+			  TST.B		VisState(A6)		; was the window supposed to be visible?<C314/31Oct86> DAF
+			  BEQ.S		@1					; no, so skip							<C314/31Oct86> DAF
+			  MOVE.L	result(A6),-(SP)	; push windowPtr						<C491/08Dec86> DAF
+			  CMP.L		#-1,behind(A6)		; if = -1 then do SelectWindow to post activate events	<C575/30Dec86> DAF 
+			  BEQ.S		@0					; 										<C575/30Dec86> DAF 
+			  MOVE.B	#1,-(SP)			; set visible true 						 <C491/08Dec86> DAF
+			  _ShowHide						; show it 								<C314/31Oct86> DAF
+			  BRA.S		@1					; and continue							<C575/30Dec86> DAF 
+@0			  _ShowWindow					; make it the highlighted front window	<C575/30Dec86> DAF 
+@1
+
+NoGetNew1	  
+			  MOVE.L	(SP)+,A3			; restore work register
+			  UNLK 	 	A6					; unbuild stack frame
+			  MOVE.L	(SP)+,A0			; get return address
+			  ADD		 #10,SP				; strip parameters
+			  JMP		 (A0)				; return to caller
+
+;
+; FUNCTION GetNewControl(controlID: INTEGER; owner: windowPtr): ControlHandle;
+;
+;  GetNewcontrol allocates a new control using the parameters contained
+;  in the "CTRL" resource specified by the controlID.  It associates
+;  the control with the owning window that is specified as a parameter.
+;
+GetNewControl
+
+VizState	EQU		-2					; control's vis state here	<24Apr87> DAF <C862>
+GNCLinkSz	EQU		VizState			; stack frame size
+		
+			LINK	A6,#GNCLinkSz		;build stack frame				<C460/24Nov86> DAF	
+			MOVE.L	A3,-(SP)			;preserve a work register
+			CLR.L	14(A6)				;return NIL
+
+			SUBQ	#4,SP				;make space for result
+			MOVE.L	#'CNTL',-(SP)		;push resource class "CNTL"
+			MOVE.W	12(A6),-(SP)		;push control ID
+			_GetResource				;get the resource
+
+			MOVE.L	(SP)+,A3			;keep handle in A3
+			MOVE.L	A3,D0				;did we get one?
+			BEQ.S	NoNew2				;if not, don't allocate
+
+			MOVE.L	(A3),A0				;keep pointer in A0
+;
+; OK, we got the parameter block so call NewControl to allocate the control
+;
+			SUBQ	#4,SP				;make space for result
+			MOVE.L	8(A6),-(SP)			;push owning window
+			MOVE.L	A0,-(SP)			;push pointer to boundsRect
+			PEA		22(A0)				;push ptr to title
+			
+			LEA		8(A0),A1			;get pointer to params
+
+			MOVE.B	2(A1),VizState(A6)	;get visFlag boolean				<C491/08Dec86> DAF
+			CLR.B	-(SP)				;push vis FALSE						<C491/08Dec86> DAF
+			MOVE.W	(A1),-(SP)			;push ctlValue						<C491/08Dec86> DAF
+			ADDQ	#4,A1				;move to next field					<C491/08Dec86> DAF
+			MOVE.L	(A1)+,-(SP)			;push min,max
+			MOVE.W	(A1)+,-(SP)			;push procID
+			MOVE.L	(A1)+,-(SP)			;push refCon
+			
+			MOVEA.L	A3,A0				; handle				<C169>
+			_HLock						;						<C169>
+			
+			_NewControl					;allocate the control
+			
+			MOVE.L	(SP)+,14(A6)		;update function result
+
+; removed _ReleaseResource 						<C491/08Dec86> DAF
+
+			MOVE.L	A3,A0				; get CNTL handle			<C645/15Jan87>
+			_HUnlock					; unlock the handle			<C645/15Jan87>
+			_HPurge						; and make it purgeable		<C645/15Jan87>
+			
+GetCCTB									; get the auxilliary color table, if present
+			SUBQ 	#4,SP				; make space for result
+			MOVE.L	#'cctb',-(SP)		; push resType (Control Color TaBle)		<C241/17Oct86> DAF
+			MOVE.W	12(A6),-(SP)		; CCTB's resID is the same as controls's	<C460/24Nov86> DAF
+			_GetResource 				; get the resource
+			MOVE.L	(SP)+,D0			; get the resHandle
+			BEQ.S	CtlViz				; no res present, so continue
+			MOVE.L	14(A6),-(SP)		; push controlHandle (from result field)	<C460/24Nov86> DAF
+			MOVE.L	D0,-(SP)			; push cTabHndl from resource
+			_SetCtlColor				; set it
+CtlViz
+			TST.B	VizState(A6)		; was it visible?				<C460/24Nov86> DAF
+			BEQ.S	@1					; no, so skip					<C460/24Nov86> DAF
+			MOVE.L	14(A6),-(SP)		; push control handle			<C491/08Dec86> DAF
+			_ShowControl				;								<C460/24Nov86> DAF
+@1
+
+NoNew2
+				
+			MOVE.L	(SP)+,A3			;restore work register
+			UNLK 	A6 					;unbuild stack frame
+			MOVE.L	(SP)+,A0			;get return address
+			ADDQ 	#6,SP				;strip parameters
+			JMP		(A0)				;return to caller
+
+
+;
+; FUNCTION GetMenu(menuID): menuHandle
+;
+;	GetMenu returns a menuHandle given a menuID.  If the menu cannot be loaded,
+;	it returns a NIL handle.
+
+;	Unlike GetNewWindow and
+;	GetNewControl, which allocate things, GetMenu is a "pure" resource
+;	in that it only allocates the handle the first time its called; subsequent
+;	calls will return the same handle.
+
+;	At great expense, this routine now check to see if it being called for a menu that
+;	has already been loaded.
+
+;	If the MENU is not found, return a NIL handle
+;
+;	Try to load a menu color table ('mctb') with the same ID and if so add its entries 	<FJL C408/C417>
+;	to the grand menu color table.														<FJL C408/C417>
+
+GetMenu
+			   LINK 	 A6,#0				 ; build stack frame
+			   MOVE.L	 A3,-(SP)			 ; preserve work registers
+
+			   MOVE.W	 ResLoad,-(SP)		 ; save resLoad on stack		<EHB 15-Apr-85>
+
+			   MOVEQ	 #0,D0				 ; set resLoad False			<EHB 15-Apr-85>
+			   BSR		 DoTheGet			 ; is the resource loaded yet?	<EHB 15-Apr-85>
+			   BEQ		 GetMDone			 ; => couldn't find it, punt    <EHB 15-Apr-85>
+
+			   MOVE.L	 (A3),D0			 ; is handle currently loaded?	<EHB 18-Apr-85>
+			   BEQ.S	 LoadMenu			 ; => no, load it in			<EHB 18-Apr-85>
+
+; now check for menu that was preloaded, but hasn't been initialized yet    <EHB 29-Apr-85>
+
+			   CLR.L	-(SP)					; make room for VAR theType
+			   MOVE.L	(A3),A0 				; get menu pointer
+			   MOVE.L	MenuDefHandle(A0),-(SP) ; assume it has a handle to an 'MDEF'
+			   CLR.L	-(SP)					; pass it a wildcard ID
+			   PEA		8(SP)					; point to VAR theType
+			   CLR.L	-(SP)					; pass it a wildcard name
+			   MOVE.W	#MapTRUE,ROMMapInsert  	; link in the rom map		<1.3><Cxxx FJL 22jan87>
+			   _GetResInfo
+			   MOVE.L	(SP)+,D0				; get the returned type
+			   CMP.L	#'MDEF',D0				; was it 'MDEF'?
+			   BEQ.S	GetMDone				; => yes, menuDef already loaded
+			   BRA.S	LoadMDEF				; => else go load 'MDEF'
+
+; load the menu for the first (and final) time
+
+LoadMenu
+			   MOVEQ	 #1,D0				 ; set resLoad True 			<EHB 15-Apr-85>
+			   BSR.S	 DoTheGet			 ; load resource (handle in A3) <EHB 15-Apr-85>
+			   BEQ.S	 GetMDone			 ; => couldn't load it, punt    <EHB 15-Apr-85>
+
+; all right, we have a virgin menu.  Now we have to install a menuDefHandle 	<EHB 29-Apr-85>
+
+LoadMDEF
+			   SUBQ 	 #4,SP				 ; make room for function result
+			   MOVE.L	 #'MDEF',-(SP)		 ; push the resource class "MDEF"
+			   MOVE.L	 (A3),A0			 ; get ptr to menu
+			   MOVE.W	 MenuDefHandle(A0),-(SP) ; push definition proc ID
+			   MOVE.W	 #MapTRUE,ROMMapInsert	 ; get the MDEF from the ROM map	<EHB 10 Jul 85>
+			   _GetResource 				 ; get it!
+
+			   MOVE.L	 (A3),A0			 ; get pointer to menu
+			   MOVE.L	 (SP)+,MenuDefHandle(A0) ; install the defProc handle (which may be NIL)
+
+			   MOVE.L	 A3,-(SP)			 ; push the menu handle
+			   _CalcMenuSize				 ; calculate the size of the menu
+
+;
+; Now try to load a menu color table with the same ID as the menu's					<FJL C408/C417>
+;
+				move.b	#1, -(sp)			; force Resource Load to true
+				_SetResLoad			
+				
+				subq	#4, sp				; make room for the result
+				move.l	#'mctb', -(sp)		; push resource type
+				move.w	8(a6), -(sp)		; push menuID
+				_GetResource				; get the resource
+				move.l	(sp)+, a3			; get the handle and save it in a3
+				move.l	a3, d0				; set z-flag
+				beq.s	GetMDone			; handle is nil, so no color table
+				
+				move.l	a3, a0				; get current state of resource			<FJL C702>
+				_HGetState
+				move.b	d0, -(sp)			; store state on the stack
+				_HLock						; lock it down temporarily
+
+				move.l	(a3), a0			; get ptr to resource
+				move	(a0), -(sp)			; push number of table entries
+				addq	#2, a0				; move past number of entries
+				move.l	a0, -(sp)			; push base address of table
+				_SetMCEntries				; call trap
+				
+				move.l	a3, a0				; put handle in a0						<FJL C702>
+				move.b	(sp)+, d0			; get previous state in d0
+				_HSetState					; set previous state
+
+GetMDone
+			   _SetResLoad					 ; old state on stack			<EHB 15-Apr-85>
+
+			   MOVE.L	 (SP)+,A3			 ; restore work register
+			   UNLK 	 A6 				 ; unbuild stack frame
+			   MOVE.L	 (SP)+,A0			 ; get return address
+			   ADDQ 	 #2,SP				 ; strip parameters
+			   JMP		 (A0)				 ; return to caller
+;
+;	 Utility DoTheGet
+;
+;	 DoTheGet loads the specified menu ID if ResLoad is TRUE.
+;	 The desired state of ResLoad is in D0.
+
+DoTheGet									 ; <EHB 15-Apr-85>
+			   MOVE.B	 D0,-(SP)			 ; push resLoad state
+			   _SetResLoad
+
+			   SUBQ 	 #4,SP				 ; make space for result
+			   MOVE.L	 #'MENU',-(SP)		 ; push resource type "MENU"
+			   MOVE.W	 8(A6),-(SP)		 ; push menu ID
+			   _GetResource 				 ; get the resource
+			   MOVE.L	 (SP)+,A3			 ; keep it in a register
+			   MOVE.L	 A3,10(A6)			 ; also return it as the result
+			   RTS							 ; EQ if resource not found
+
+;
+; FUNCTION GetNewMBar(menuBarID: INTEGER): MBarHandle;
+;
+;	GetNewMBar returns a menuBarHandle given a menuBarID.
+;
+GetNewMBar
+			   LINK 	 A6,#0				 ;set up a stack frame
+			   MOVEM.L	 D3/A3,-(SP)		 ;save some work registers
+			   CLR.L	 10(A6) 			 ;return NIL as default
+
+			   SUBQ 	 #4,SP				 ;make room for result
+			   _GetMenuBar					 ;remember the current menuBar
+			   _ClearMenuBar				 ;NIL out the current menuBar
+
+			   SUBQ 	 #4,SP				 ;make room for result
+			   MOVE.L	 #'MBAR',-(SP)		 ;push the resource type
+			   MOVE.W	 8(A6),-(SP)		 ;push the parameter
+			   _GetResource 				 ;get the mBar definition
+			   MOVE.L	 (SP)+,A3			 ;keep it in A3
+
+			   MOVE.L	 A3,D0				 ;got it?
+			   BEQ.S	 DoneGetMBar		 ;if not, skip
+
+			   MOVEQ	 #0,D3				 ;start with menu index 0
+
+; loop, getting and inserting one menu at a time
+
+GetMBLoop
+			   SUBQ 	 #4,SP				 ;make room for result
+			   MOVE.L	 (A3),A0			 ;get pointer to mBarDef
+			   MOVE 	 D3,D0				 ;copy current index
+			   ADD		 D0,D0				 ;double for word index
+			   MOVE.W	 2(A0,D0),-(SP) 	 ;push menu ID
+			   _GetRMenu					 ;get the menu							<FJL C417>
+
+			   CLR.W	 -(SP)				 ;insert at end of menuBar
+			   _InsertMenu
+
+			   MOVE.L	 (A3),A0			 ;get ptr to mBarDef
+			   ADDQ 	 #1,D3				 ;bump to next menu
+			   CMP		 (A0),D3			 ;done yet
+			   BLT.S	 GetMBLoop			 ;loop until done
+
+; we successfully read in the whole menuBar so return the current menuBar as
+; the result
+
+			   SUBQ 	 #4,SP				 ;make room
+			   _GetMenuBar					 ;get new menuBar
+			   MOVE.L	 (SP)+,10(A6)		 ;return it as the result
+
+; removed _ReleaseResource 						<C491/08Dec86> DAF
+
+; all done so restore the original menu bar
+
+DoneGetMBar
+			   MOVE.L	 (SP),-(SP) 		 ;copy the menuBar handle
+			   _SetMenuBar					 ;restore original menu bar
+
+			   MOVE.L	 (SP)+,A0			 ;get handle
+			   _DisposHandle				 ;de-allocate it
+
+; restore registers and return
+
+			   MOVEM.L	 (SP)+,D3/A3		 ;restore registers
+			   UNLK 	 A6 				 ;unbuild stack frame
+			   MOVE.L	 (SP)+,A0			 ;get return address
+			   ADDQ 	 #2,SP				 ;strip parameter
+			   JMP		 (A0)				 ;return to caller
+
+GetMgrEnd
+			   END
+
+

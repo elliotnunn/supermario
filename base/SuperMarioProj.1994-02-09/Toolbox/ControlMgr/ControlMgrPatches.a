@@ -1,0 +1,381 @@
+;
+;	File:		ControlMgrPatches.a
+;
+;	Contains:	linked patches to the Control Mgr.
+;
+;	Copyright:	© 1989-1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <9>	  7/1/92	JSM		Fix bug in one of the changes I made for TheFuture in the last
+;									revision, add comments about IIci patches that have been rolled
+;									into ControlMgr.a: FixNewControl32Bit,
+;									PatchDisposeControlForInvisibleControlsIIci,
+;									PatchDisposeControlForCorrectLayer, CheckMemErrInSetCTitle, and
+;									ThrottleScrollingSpeed.
+;		 <8>	 6/30/92	JSM		Move patch on _TrackControl for scroll speed throttling here
+;									from ScrollSpeedFix.a, add a MakeInstall for TheFuture to
+;									allocate globals in ExpandMem for this patch.
+;		 <7>	 4/22/92	pvh		Fix bug so that the right layer is switched in when we're
+;									disposing of a control (_DisposeControl patch). Added new patch
+;									to swap in the correct layer before calling real
+;									_DisposeControl.
+;		 <6>	 1/18/91	VL		<jsm> DrawThumbOutline should check whether it is coming from
+;									DragControl also. Otherwise, we may be accessing bogus
+;									ControlRecord.
+;		 <5>	 1/13/91	VL		<dba> Added a patch to FrameRect to draw a solid outline when
+;									dragging the thumb in 7.0 scroll bar (CDEF 1).
+;		 <4>	 11/8/90	dba		& gbm; move patch that does a system error if we can’t load a
+;									CDEF here from PTCH files; move patch that disables Plus check
+;									for control visible (for MacExpress) here from PatchPlusROM
+;		 <3>	10/24/90	KSM		<dba>Fix SetCTitle to check if SetHandleSize failed.
+;		 <2>	 10/8/90	dba		move the NewControl/contrlOwner bug fix here from
+;									WindowMgrPatches.a
+;		 <1>	 9/23/90	dba		Created today with two patches; NewControl heap scramble bug in
+;									32-bit mode, DisposeControl erasing invisible controls.
+;
+
+		load 'StandardEqu.d'
+		include 'LinkedPatchMacros.a'
+		include 'LayerEqu.a'
+		include	'ControlPriv.a'
+		
+; NOTE: patches to SetCtlColor and GetAuxCtl are found in WindowMgrPatches.a
+
+EraseControlInDisposeControl	ROMBind (Plus,$12E9C),(SE,$D4A0),(II,$11DC4),(Portable,$1270E),(IIci,$15F00)
+AfterEraseControlInDisposeControl ROMBind (Plus,$12E9E),(SE,$D4A2),(II,$11DC6),(Portable,$12710),(IIci,$15F02)
+AfterSetCtlColorInNewControl	ROMBind (II,$11C6A),(IIci,$15D84)
+
+AfterSetHandleSizeInSetCTitle	ROMBind (Plus,$13002),(SE,$D606),(II,$11F44),(IIci,$160C0),(Portable,$12874)
+GoTstVisInSetCTitle				ROMBind (Plus,$13010),(SE,$D614),(II,$11F52),(IIci,$160CE),(Portable,$12882)
+
+AfterLoadResourceInCallControl	ROMBind (Plus,$12E58),(SE,$0D45C),(II,$11D46)
+AfterSectRectInCallControl		ROMBind (Plus,$12E1E)
+
+AfterFrameRectInFastPaint		ROMBind	(II,$105B4),(IIci,$19492)
+GetCVariantInCallControl		ROMBind	(II,$11D2E),(IIci,$15E48)
+OwnerPortInROM					ROMBind	(II,$12084),(IIci,$16218)
+
+AfterDragTheRgnInDragControl	ROMBind	(II,$12044),(IIci,$161D8)
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; NewControl — also, SetCtlColor needs contrlOwner, so we need to set it up before calling
+;	fix bug where we have a dereferenced handle across SetCtlColor in 32-bit mode
+;
+; This patch has been rolled into ControlMgr.a.
+;
+
+FixNewControl32Bit ComeFromPatchProc _SetCtlColor,AfterSetCtlColorInNewControl,(II,IIci)
+
+				addq	#4,sp					; get rid of the return address
+				move.l	30(a6),contrlOwner(a2)	; copy the owner into the field
+				jsrOld							; call SetCtlColor
+				move.l	(a3),a2					; re-dereference the control handle
+				jmpROM	AfterSetCtlColorInNewControl
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; DisposeControl — fix bug where we erase controls even if they are invisible
+
+PatchDisposeControlForInvisibleControls PatchProc _DisposeControl,(Plus,SE,II,Portable)
+
+; Here we check to see if the control is invisible, and rejoin the ROM just before the routine that
+; does the erasing, if the control is visible, or just after if it is invisible.
+
+				MOVE.L	A3,-(SP)				;preserve a work register
+				MOVE.L	8(SP),A3				;get the control handle
+
+				move.l	(a3),a0
+				tst.b	contrlVis(A0)			;is the control visible?
+				beqROM	AfterEraseControlInDisposeControl	; no, skip erasing
+				jmpROM	EraseControlInDisposeControl		; yes, go erase
+
+				EndProc
+
+PatchDisposeControlForInvisibleControlsIIci PatchProc _DisposeControl,(IIci)
+
+; The IIci version of the control manager saves two registers instead of one.
+;
+; This patch has been rolled into ControlMgr.a.
+;
+
+				MOVEM.L	A2/A3,-(SP)				;preserve work registers
+				MOVE.L	12(SP),A3				;get the control handle
+
+				move.l	(a3),a0
+				tst.b	contrlVis(A0)			;is the control visible?
+				beqROM	AfterEraseControlInDisposeControl	; no, skip erasing
+				jmpROM	EraseControlInDisposeControl		; yes, go erase
+
+				EndProc
+
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; DisposeControl — fix bug so that the current layer is switched in when disposing the control				<7>
+;
+; This patch has been rolled into ControlMgr.a.
+;
+
+PatchDisposeControlForCorrectLayer PatchProc _DisposeControl,(Plus,SE,II,IIci,Portable)						; <7>
+
+				move.l	4(sp), d0				; get the control handle									<7>
+				move.l	d0, a0
+				beq.s	@failNil				; in case it's bogus										<7>
+				move.l	(a0), a0				; get pointer												<7>
+				subq.l	#4, sp					; room for result											<7>
+				subq.l	#4, sp					; room for result for _SwapCurLayer							<7>
+				move.l	contrlOwner(a0), -(sp)	; setup for _GetParent										<7>
+				_GetParent						
+				_SwapCurLayer					; swap for parent, leaves original layer on stack			<7>
+				move.l	8(sp), -(sp)			; repush control handle for old routine						<7>
+				jsrOld							; call old													<7>
+				_SetCurLayer					; original should be on stack waiting for us				<7>
+@failNil		move.l	(sp), a0				; get return address										<7>
+				addq.l	#8, sp					; remove address and control handle							<7>
+				jmp	(a0)						; return from whence we came								<7>
+				
+				EndProc																						; <7>
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; SetCTitle — Check MemError after SetHandleSize before BlockMoving new data
+;
+; This patch has been rolled into ControlMgr.a.
+;
+
+CheckMemErrInSetCTitle ComeFromPatchProc _SetHandleSize,AfterSetHandleSizeInSetCTitle,(Plus,SE,II,IIci,Portable)
+
+				LEA		AfterOSDispatcher, A1		; after doing the SetHandleSize, come back here
+				MOVE.L	A1, ReturnAddressDepth(sp)	; jam in that return address
+				jmpOld								; go do the SetHandleSize
+
+AfterOSDispatcher
+				beqROM	AfterSetHandleSizeInSetCTitle
+				ADDQ.W	#4, SP					; Pull the size off the stack
+				jmpROM	GoTstVisInSetCTitle		; And skip over BlockMove call
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; LoadResource — do a system error if we try to load a CDEF resource and fail
+
+SysErrorIfNoCDEF ComeFromPatchProc _LoadResource,AfterLoadResourceInCallControl,(Plus,SE,II)
+
+				addq	#4,sp				; get rid of the return address
+				jsrOld						; call LoadResource
+				tst.l	(a0)				; is the handle we just tried to load still empty?
+				bnzROM	AfterLoadResourceInCallControl	; no, go back to the ROM
+				moveq	#dsCDEFNotFound,D0	; get error code
+				_SysError
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; drawing controls — always draw controls, even if there rectangles are outside the portRect
+
+; The control manager on the Plus only drew controls whose rects lay within the portRect.
+; Unfortunately MacExpress does some strange mapping of coordinates into its split
+; view windows at the QuickDraw level (that is, after we have decided not to draw it).
+; This patch ignores the SectRect completely and returns that it should always be drawn.
+
+DontCheckControlRects ComeFromPatchProc _SectRect,AfterSectRectInCallControl,(Plus)
+
+				move.l	(sp)+,a0				; get return address
+				lea		12(sp),sp				; strip parameters
+				st		(sp)					; return true
+				jmp		(a0)					; and return to caller
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; FrameRect in FastPaint
+
+DrawThumbOutline	ComeFromPatchProc	_FrameRect,AfterFrameRectInFastPaint,(II,IIci)
+
+		tst.w	DragFlag						; are we drawing the thumb outline?
+		beqOld									; no => do the old stuff
+		
+		cmpROM	AfterDragTheRgnInDragControl,4(a6)	; do we come from DragControl?
+		bneOld									; no => do the old stuff
+		
+		move.l	-48(a6),a0						; get the control record
+		move.l	(a0),a0							; get the ptr to control record
+		move.l	contrlDefHandle(a0),a0			; get the CDEF handle
+		move.l	(a0),a0							; get the ptr to CDEF
+		cmp.l	#'CDEF',4(a0)					; Is this a CDEF?
+		bneOld									; No => FrameRect
+		btst	#0,3(a0)						; Can CDEF handle this message?	
+		beqOld									; No => FrameRect
+
+		move.l	a3,-(sp)						; save off a3
+		move.l	-48(a6),a3						; put the control record in a3 since ROM routines need it
+		pea		comeBackHere					; push an artificial return address
+		jsrROM	OwnerPortInROM					; get the old port		
+		clr.l	-(sp)							; result code
+		clr.w	-(sp)							; varCode
+		move.l	a3,-(sp)						; control handle
+		move.w	#drawThumbOutlineMsg,-(sp)		; message
+		move.l	28(sp),-(sp)					; put rect into parameter
+		subq.l	#2,sp							; room for results
+		move.l	a3,-(sp)						; control handle
+		jmpROM	GetCVariantInCallControl		; borrow CallControl from ROM to save code
+comeBackHere
+		move.l	(sp)+,a3						; restore a3
+
+		tst.l	d0								; did CDEF handle the drawing?
+		beqOld									; No => FrameRect
+		move.l	(sp)+,(sp)						; back from CallControl
+		rts										; return to DragControl
+		
+		EndProc
+
+	IF TheFuture THEN							; don’t put data in code space in the future
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; InitScrollSpeedGlobals - defined in ControlMgrExtensions.a
+;
+; allocate and initialize globals stored in emScrollSpeedGlobals
+;
+
+			import		InitScrollSpeedGlobals
+			MakeInstall	InitScrollSpeedGlobals,(Plus,SE,II,Portable,IIci)
+	
+	ENDIF										; TheFuture
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; ThrottleScrollingSpeed - formerly in ScrollSpeedFix.a
+;
+; We patch TrackControl to substitute in our "special" action proc.  In order to
+; communicate the old action proc, we need to store it in a PC relative place.
+; This makes TrackControl non-reentrant, but I don't think it ever was expected to be.
+;
+; This patch has been rolled into ControlMgr.a.
+;
+
+ThrottleScrollingSpeed	PatchProc	_TrackControl,(Plus,SE,II,Portable,IIci)
+				
+tcFrame			RECORD	0
+returnAddress	DS.L	1
+actionProc		DS.L	1
+startPoint		DS.L	1
+theControl		DS.L	1
+result			DS.W	1
+				ENDR
+
+			WITH	tcFrame
+
+			MOVE.L	actionProc(SP), D0		; Get the actionProc.
+			BEQ.S	@noAction				; Skip patch if none.
+			BTST	#0, D0					; Is it odd?
+			BNE.S	@noAction				; Skip patch if so.
+
+	IF TheFuture THEN
+			move.l	ExpandMem,a0
+			move.l	ExpandMemRec.emScrollSpeedGlobals(a0),a0
+			MOVE.L	D0,ScrollSpeedGlobals.saveAction(A0)		; Save the old actionProc.
+	ELSE
+			LEA		saveAction, A0
+			MOVE.L	D0, (A0)				; Save the old actionProc.
+	ENDIF
+
+			LEA		ScrollAction, A0
+			MOVE.L	A0, actionProc(SP)		; And replace it with mine.
+
+			SUBQ.L	#4, SP
+			_TickCount						; Get a time stamp.
+
+	IF TheFuture THEN
+			move.l	ExpandMem,a0
+			move.l	ExpandMemRec.emScrollSpeedGlobals(a0),a0
+			MOVE.L	(SP)+,ScrollSpeedGlobals.startTicks(A0)		; And save it.
+	ELSE
+			LEA		startTicks, A0
+			MOVE.L	(SP)+, (A0)				; And save it.
+	ENDIF
+
+@noAction
+			jmpOld							; Return to old _TrackControl
+			ENDWITH
+
+	IF NOT TheFuture THEN					; don’t put data in code space in the future
+
+saveAction		DS.L	1
+startTicks		DS.L	1
+actionTicks		DS.L	1
+saveReturn		DS.L	1					; must follow actionTicks
+
+	ENDIF									; NOT TheFuture
+
+ScrollAction
+saFrame			RECORD	0
+returnAddress	DS.L	1
+partCode		DS.W	1
+theControl		DS.L	1
+				ENDR
+
+			WITH	saFrame
+			MOVE.W	partCode(SP), D0		; Get the part code
+			CMP.W	#inUpButton, D0			; < up button?
+			BLT.S	@callAction				; Skip if so.
+			CMP.W	#inPageDown, D0			; > page down?
+			BGT.S	@callAction				; Skip if so.
+
+			SUBQ.L	#4, SP
+			_TickCount						; Get a time stamp.
+
+	IF TheFuture THEN
+			move.l	ExpandMem,a0
+			move.l	ExpandMemRec.emScrollSpeedGlobals(a0),a0
+			MOVE.L	(SP)+,ScrollSpeedGlobals.actionTicks(A0)	; Save it
+			MOVE.L	(SP)+,ScrollSpeedGlobals.saveReturn(A0)		; Copy the return address into a safe place.
+	ELSE
+			LEA		actionTicks, A0
+			MOVE.L	(SP)+, (A0)+			; Save it and have A0 point to saveReturn
+			MOVE.L	(SP)+, (A0)				; Copy the return address into a safe place.
+	ENDIF
+
+			BSR.S	@callAction				; Call the old action procedure.
+			ENDWITH
+
+			SUBQ.L	#2, SP					; Room for result.
+
+	IF TheFuture THEN
+			move.l	ExpandMem,a0
+			move.l	ExpandMemRec.emScrollSpeedGlobals(a0),a0
+			MOVE.L	ScrollSpeedGlobals.startTicks(a0), -(SP)
+			MOVE.L	ScrollSpeedGlobals.actionTicks(a0), -(SP)
+	ELSE
+			MOVE.L	startTicks(PC), -(SP)
+			MOVE.L	actionTicks(PC), -(SP)
+	ENDIF
+
+			CLR.W	-(SP)					; itemsVisible is unknown.
+			_ScrollDelay
+			ADDQ.L	#2, SP					; Toss result.
+
+	IF TheFuture THEN
+			move.l	ExpandMem,a0
+			move.l	ExpandMemRec.emScrollSpeedGlobals(a0),a0
+			move.l	ScrollSpeedGlobals.saveReturn(a0),a0
+	ELSE
+			MOVE.L	saveReturn(PC), A0
+	ENDIF
+
+			JMP		(A0)					; And return.
+
+@callAction
+
+	IF TheFuture THEN
+			move.l	ExpandMem,a0
+			move.l	ExpandMemRec.emScrollSpeedGlobals(a0),a0
+			move.l	ScrollSpeedGlobals.saveAction(a0),a0
+	ELSE
+			MOVE.L	saveAction(PC), A0
+	ENDIF
+
+			JMP		(A0)					; Just call the action proc normally.
+			ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		End

@@ -1,0 +1,379 @@
+;
+;	File:		IconLDEF.a
+;
+;	Contains:	A List Manager procedure definition which
+;				creates a scrollable list of icons.
+;
+;	Written by:	Steve Horowitz & Francis Stanbach
+;
+;	Copyright:	© 1986-1992 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM3>	 11/5/92	SWC		Changed PackMacs.a->Packages.a.
+;	   <SM2>	 11/3/92	SWC		Replaced INCLUDEs with a LOAD of StandardEqu.d.
+;		 <4>	  1/8/91	JDR		(dba) Private icon utilities are now in IconUtilsPriv.a
+;		 <3>	 9/25/90	fjs		add icon suite stuff for people who pass ICN#s to the list
+;									(Network & Startup Panels)
+;		 <2>	 6/22/90	fjs		add support for icon suites and do international truncation
+;				 6/21/90	fjs		add icon suite support, and truncstring
+; 				20jun86 	sad		preserve txFont, txFace, txSize and txMode
+;									_LoadResource if ICON handle seems to have been purged
+;									changed a couple lsr's into asr's
+;									reorganize to calc rects and truncate text just once per call
+;									handle cells w/o strings correctly
+;									handle ICONs w/o masks
+;  				8jun87		sad		set HiliteMode bit for color text hilighting
+;  				7nov89		fjs		looks for Asyms in the Objects Folder
+;
+
+	BLANKS  ON
+	STRING  ASIS
+
+	LOAD	'StandardEqu.d'
+
+	INCLUDE	'Packages.a'
+	include 'IconUtilsPriv.a'
+
+
+; Cell Format
+;cell	RECORD
+;cHand	ds.l	1			; Icon Handle
+;cFont	ds.w	1			; font number?
+;cFace	ds.w	1			; font style in low-order byte
+;cSize	ds.w	1			; font size
+;cName	ds.b	256			; Str255
+;	ENDR
+
+cMin	equ	4				; if cell length ≠ cMin it has text
+
+; Variables
+
+stack	RECORD	{a6link},decr
+lsMessage	ds.w 1			; What to do?
+filler		ds.b 1
+lsSelect	ds.b 1			; boolean
+lsRectp		ds.l 1			; ptr to Rectangle
+lsCell		ds.l 1			; point
+lsDataOffset	ds.w 1		; offset to desired data
+lsDataLen	ds.w 1			; data length
+lsHandle	ds.l 1			; listHandle
+return		ds.l 1
+a6link		ds.l 1
+fontinfo 	ds.w 4			; font info for text font
+lsWidth		ds.w 1			; width of lsRect
+iconRect	ds.l 2			; Rect to draw icon in
+textRect	ds.l 2			; Rect to draw text in
+bitMap		ds.b bitMapRec		; BitMap to draw icon with		
+		; --- copy of cell data
+text		ds.b 256
+textSize	ds.w 1
+textFace	ds.w 1
+textFont	ds.w 1
+iconHndl	ds.l 1
+cellCopy	equ	*
+localsize	equ	*
+	ENDR
+
+
+; IconLDEF
+; d5.w - cell width
+; d6.b - true iff there is text in this cell
+; a3.l - ptr to copy of text (gets truncated)
+; a4.l - Icon Handle
+
+
+IconLDEF	main		export
+			with		stack
+			link		a6,#localsize
+			movem.l		a3-a4/d3-d6,-(sp)	; preserve registers
+			
+			cmp.w		#lDrawMsg,lsMessage(a6)	; is it a draw message?
+			beq.s		DrawIcon			; if so then draw icon
+			cmp.w		#lHiliteMsg,lsMessage(a6) ; is it a hilite message?
+			beq.s		DrawIcon			; if so then invert icon state
+
+IconExit	movem.l		(sp)+,a3-a4/d3-d6	; restore registers
+			unlk		a6
+			move.l		(sp)+,a0
+			lea			stack-8(sp),sp
+			jmp			(a0)				; Exit
+
+DrawIcon	cmp.w		#lDrawMsg,lsMessage(a6)	; erase the cell if it is
+			bne.s		@1						; a draw message
+			
+			move.l		lsRectp(a6),-(sp)	; push cell rectangle
+			_EraseRect						; erase it
+@1
+			tst.w		lsDataLen(a6)		; is there any data?
+			bz.s		IconExit			; if not, leave
+
+; save cell width
+
+			move.l		lsRectp(a6),a0
+			move.w		right(a0),d5
+			sub.w		left(a0),d5
+
+; copy the cell data into our stack frame (aligning it)
+
+			move.l		lsHandle(a6),a0		; get handle to List
+			move.l		(a0),a0				; handle -> ptr
+			move.l		cells(a0),a0		; get dataHandle into a0
+			move.l		(a0),a0				; handle -> ptr
+			add.w		lsDataOffset(a6),a0	; put start of data in a0
+			lea			cellCopy(a6),a1		; a1 points to destination
+			move.l		#0,d0				; clear high word
+			move.w		lsDataLen(a6),d0	; number of bytes to move
+			_BlockMove
+				
+; calculate iconRect and textRect vertical
+			
+			lea			text(a6),a3			; get ptr to copy of text
+			moveq		#32,d4				; vertical size of Icon
+	
+; is there text?
+			
+			cmp			#cMin,lsDataLen(a6)
+			sne			d6					; true iff there is text
+			beq.s		@2					; skip this if no text
+
+; set up text Font, Face, Size and Mode
+
+			move.l		GrafGlobals(a5),a0	; get quickDraw globals ptr
+			move.l		thePort(a0),a0		; get thePort
+			move.l		txFont(a0),-(sp)	; save txFace, txFont
+			move.l		txMode(a0),-(sp)	; save txSize, txMode
+			move.l		textFont(a6),-(sp)	; push cell text Face, Font
+			_TextFont
+			_TextFace
+			move.w		#srcOr,-(sp)		; text transfer mode
+			_TextMode
+			move.w		textSize(a6),-(sp)	; push cell text Size
+			_TextSize
+			pea			fontinfo(a6)			; push ptr to fontInfo
+			_GetFontInfo
+			add.w		fontinfo+leading(a6),d4
+			add.w		fontinfo+ascent(a6),d4	; add up height of text
+			add.w		fontinfo+descent(a6),d4
+
+@2
+			move.l		lsRectp(a6),a0		; a0 points to Rect
+			move.w		bottom(a0),d1		; calculates height of Rect
+			sub.w		top(a0),d1			; rect height in d0
+			sub.w		d4,d1				; subtract icon height from rect
+			asr.w		#1,d1				; divide d0 by 2
+			add.w		top(a0),d1			; add original top
+			move.w		d1,iconRect+top(a6)	; assign rectTop
+			add.w		#32,d1
+			move.w		d1,iconRect+bottom(a6)	; assign rectBottom
+
+; calculate icon Rect width
+
+			move.w		d5,d0				; get cell width
+			sub.w		#32,d0				; subtract icon width
+			asr.w		#1,d0				; divide d1 by 2
+			add.w		left(a0),d0			; add original left
+			move.w		d0,iconRect+left(a6)	; assign rectLeft
+			add.w		#32,d0
+			move.w		d0,iconRect+right(a6)	; assign rectRight
+			tst.b		d6					; is there text?
+			bz.s		@6					; no, skip
+		
+			move.w		d1,textRect+top(a6)
+			add.w		fontinfo+leading(a6),d1
+			add.w		fontinfo+ascent(a6),d1	; add text height
+			add.w		fontinfo+descent(a6),d1
+			move.w		d1,textRect+bottom(a6)	; setup bottom of text rect
+
+; truncate text
+
+			move.w		d5,d4				; get cell width
+			sub.w		#2,d4				; don’t let text touch sides of cell
+			moveq		#0,d3				; clear d3
+			move.b		(a3),d3				; get length of string
+			add.b		#1,d3				; initial conditions
+			sub.l		#2,sp				; room for result of _StringWidths
+
+@3
+			move.l		a3,-(sp)			; push string
+			_StringWidth
+			cmp.w		(sp),d4				; is string too long? (no pop!)
+			bgt.s		@4					; no, continue
+
+; if the string is too long then truncate it
+
+			subq		#2,sp				; returns whether string truncated
+			move.w		d4,-(sp)			; width
+			move.l		a3,-(sp)			; StringPtr
+			move.w		#smTruncMiddle,-(sp) ; truncate in the middle
+			_TruncString
+			
+			addq		#2,sp				; ignore result
+	
+			move.l		a3,-(sp)			; push string
+			_StringWidth
+	
+@4
+			move.w		(sp)+,d3			; pop string width into d3
+
+; calculate textRect left and right
+	
+			move.w		d5,d0				; get cell width
+			sub.w		d3,d0				; subtract text width
+			asr.w		#1,d0				; divide d0 by 2
+			move.l		lsRectp(a6),a0		; a0 points to listRect
+			add.w		left(a0),d0			; add original left
+			move.w		d0,textRect+left(a6)	; setup left of text rect
+			add.w		d0,d3				; setup right of text rect
+			add.w		#1,d3
+			move.w		d3,textRect+right(a6)
+
+@6
+
+; set up bitmap for _CopyBits
+	
+			move.l		#0,bitmap+bounds+topLeft(a6)	; (0,0)
+			move.l		#$00200020,bitmap+bounds+botRight(a6)	; (32,32)
+			move.w		#4,bitmap+rowBytes(a6)	; set up rowBytes field
+			move.l		iconHndl(a6),a4			; get icon handle
+			
+; check to see if this is an icon suite
+
+			move.l		a4,a0
+			_GetHandleSize
+			cmp			#128,d0				; if it less than 64, it is an icon suite
+			blt			DoSuite
+			
+; ••• start
+
+			subq		#4,sp				; make space for suite handle
+			move.l		sp,a0				; pointer to space in a0
+			
+			tst.l		(a4)				; is it purged?
+			bnz.s		@5
+		
+			move.l		a4,-(sp)
+			_LoadResource					; preserves all regs
+
+
+; create the suite
+
+@5			subq		#2,sp				; make room for error
+			move.l		a0,-(sp)			; place for suite
+			_NewIconSuite					; create a suite
+			move.w		(sp)+,d0			; error in d0
+			move.l		(sp)+,a0			; suite in a0
+			bnz.s		@error				; IconExit
+			
+; add the icon
+
+			subq		#2,sp				; room for error
+			move.l		a4,-(sp)			; push the icon
+			move.l		a0,-(sp)			; push the suite
+			move.l		#'ICN#',-(sp)		; its a B & W Icon
+			
+			move.l		a0,a4				; save the suite before the trap is called
+
+			_AddIconToSuite
+			move.w		(sp)+,d0			; ignore error 
+			
+			bsr			SDrawIt				; draw the suite
+			
+; dispose the suite			
+			
+			subq		#2,sp				; room for result
+			move.l		a4,-(sp)			; icon suite
+			move.b		#0,-(sp)			; do not kill ICN#
+			_DisposeIconSuite
+			addq		#2,sp				; ignore
+			
+@error		bra			AfterSDrawit		; jump back in
+
+
+InvertText
+			tst.b		d6					; is there text?
+			bz			IconExit			; no, split
+		
+			bclr		#7,HiliteMode		; now in color! <8Jun87 sad>
+			pea			textRect(a6)		; push enclosing rectangle
+			_InverRect						; invert text
+
+TextExit
+
+; restore text Mode, Size, Font and Face and leave
+			
+			_TextMode
+			_TextSize
+			_TextFont
+			_TextFace
+			bra			IconExit
+
+
+; draw the text if it exists
+
+DrawTheText
+			tst.b		d6					; is there text?
+			bz.s		@1					; no
+		
+			move.w		textRect+left(a6),d0
+			add.w		#1,d0				; don’t touch left side of textRect
+			move.w		d0,-(sp)			; horiz
+			move.w		textRect+top(a6),d0
+			add.w		fontinfo+leading(a6),d0
+			add.w		fontinfo+ascent(a6),d0
+			move.w		d0,-(sp)			; vert
+			_MoveTo
+			move.l		a3,-(sp)			; push ptr to string
+			_DrawString						; draw it
+@1			
+			rts
+			
+;------------------------------
+
+DoSuite
+			
+			move.l		a4,d0					; is it there?
+			bz			IconExit
+		
+			bsr.s		SDrawIt				; always draw the icon
+
+AfterSDrawIt
+
+			cmp.w		#lDrawMsg,lsMessage(a6) ; is it a draw message?
+			bne			InvertText			; no, its a hilite message
+			
+SDoDrawMsg
+
+			bsr.s		DrawTheText
+
+			tst.b		lsSelect(a6)		; is it selected?
+			bnz			InvertText			; yes
+		
+			tst.b		d6					; is there text?
+			bz			IconExit			; no, split
+			bra			TextExit			; else, split with fonts
+	
+SDrawIt
+
+; draw the icon with the proper transform
+
+			move.w		#ttNone,d0			; assume no transform
+			tst.b		lsSelect(a6)		; is it selected?
+			bz.s		@plotSuite
+			move.w		#ttSelected,d0		; use selected transform
+			
+@plotSuite
+			subq		#2,sp				; return error
+			pea 		iconRect(a6)		; push the rect
+			move.w		#0,-(sp)			; no alignment
+			move.w		d0,-(sp)			; transform
+			move.l		a4,-(sp)			; push the suite
+			_PlotIconSuite					; thanks DC
+			move.w		(sp)+,d0			; get and ignore the error
+			
+			rts
+
+			endwith
+			
+			end
+

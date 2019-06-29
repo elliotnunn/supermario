@@ -1,0 +1,1927 @@
+;
+;	File:		DrawPicture32Patch.a
+;
+;	Contains:	This patch gets loaded on Classic QD machines
+;
+;	Written by:	Konstantin Othmer
+;
+;	Copyright:	© 1987-1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<12>	 3/23/91	KON		csd, WRKSHT#SAH-QD-58: ReduceD3D4 would hang because MapRatio
+;									would return a zero result. I removed calls to MapRatio (since
+;									ReduceD3D4 does the same work) and changed ReduceD3D4 so it
+;									won't hang.
+;		<11>	 1/14/91	KON		Reduce Numer and Denom by GCD when drawing a picture. These
+;									overflow on higher DPI devices. [CEL]
+;		<10>	 11/7/90	KON		Fix display of 16-bit pixmaps (were drawn as all black). [smc]
+;		 <9>	 9/21/90	KON		Added check for PICT2 header so we use the resolution adjusted
+;									rectangle for the header if the picture was created by
+;									openCPicture.
+;		 <8>	 9/17/90	dba		Fix loop case for unpacking bits when the rectangle has a 0
+;									height. This was crashing while printing in Claris applications.
+;		 <7>	 9/11/90	KON		Remove benign redefinition of pixmapTooDeepErr.
+;		 <6>	  8/2/90	gbm		fix more warnings
+;		 <5>	 7/20/90	gbm		get rid of excess equates
+;		 <4>	  4/4/90	KON		Make into a linked patch
+;		 <3>	 3/29/90	KON		Broke traps which load on all B&W machines to a new file
+;									AllB&WQDPatch.a. This makes the disk footprint much smaller.
+;		 <2>	 3/16/90	KON		Add gWorld calls to PLUS, SE, and portable.
+;	   <1.5>	 12/4/89	KON		Uses GrafTypes.m.a for include rather than ColorEqu.a.
+;	   <1.4>	11/15/89	KON		Now includes common file GetPMData.a and installs GetPMData as
+;									Trap $ABC4.
+;	   <1.3>	 11/9/89	KON		Patch BitMapRgn only on Plus and SE
+;	   <1.2>	 11/7/89	KON		Fixed font name/ID binding, added ptch for open picture and
+;									close picture
+;	   <1.1>	 11/7/89	BAL		Added Font Name/ID binding, draw picture now works in low memory
+;									situations
+;	   <1.0>	10/16/89	CCH		Adding to EASE.
+;				 8/25/89	KON		Added support for 16 & 32 bit picts for plus and SE
+;	PMAB270>	 9/13/87	FJL		Patch DrawPicture to first check for valid picture handle and
+;									pointer, then do GetState, make it non-purgeable, and SetState
+;									on return. At the request of Sheila, Phil and Scott.
+;	<PMA207>	 7/16/87	EHB		If device color table found, fill in pixel values
+;	<PMA157>	 3/30/87	DBG		Fixed bug where color table was freed even if there wasn't one.
+;	  <S072>	 2/27/87	DBG		Added support for interpolated colors
+;	  <S051>	 2/19/87	DBG		Fixed bug in interpretation of color table
+;
+
+
+;INITFILE		EQU		0		;set to 1 for standalone install, 0 for ptchInstall
+;withFonts		EQU		1		;set to 1 to build with font name/ID binding
+;wholeErrors   	EQU 	1
+
+
+;;		INCLUDE	'SysErr.a'
+;		INCLUDE 'Traps.a'
+;		INCLUDE	'QuickEqu.a'
+;		INCLUDE	'SysEqu.a'
+;		INCLUDE	'GrafTypes.m.a'
+;		INCLUDE	'LinkedPatchMacros.a'
+
+; RomBinds were here			
+			
+PStdBits_SE_Portable	EQU	$0E00+(4*$EB)
+PStdBits_Plus			EQU	$0C00+(4*$EB)
+
+PStdGetPic_SE_Portable		EQU		$0E00+(4*$EE)
+PStdGetPic_Plus				EQU		$0C00+(4*$EE)
+
+		IF		(&TYPE('onMac') = 'UNDEFINED') THEN 
+onMac	EQU		0
+		ENDIF
+		IF		(&TYPE('onMacPP') = 'UNDEFINED') THEN 
+onMacPP	EQU		0
+		ENDIF
+noROM	EQU		0
+
+
+
+StdOpcodeProc	PROC  EXPORT 	
+			IMPORT GETWORD, GetLong,GetPicdata
+;------------------------------------------------------------------
+;
+;  PROCEDURE StdOpcode(fromRect,toRect: Rect; opcode,version: INTEGER);
+;
+;					Fix File	Date			Patch#		Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	DrawPicturePatch.a	01Jan1904		#???		(StdOpcode) 		(StdOpcode)		
+;
+;  GETS CALLED FOR OPCODE VALUES $0100-$FFFF
+;
+;  OPCODE:	$0100-$01FF		2 BYTES DATA
+;			$0200-$02FF		4 BYTES DATA
+;			...
+;			$7F00-$7FFF		254 BYTES DATA
+; 			$8000-$80FF		0 BYTES DATA
+;			$8100-$FFFF		4 BYTES SIZE + SIZE BYTES DATA
+;
+;  THIS PROCEDURE READS THE OPCODE'S DATA AND IGNORES IT unless it's the header
+;	from a PICT 2 created by OpenCPicture. <20Sept90 KON>
+;
+;--------------------------------------------
+;
+;  OFFSETS WITHIN A PICTURE PLAY STATE RECORD:
+;
+THERECT 		EQU 	0						;RECT
+PENLOC			EQU 	THERECT+8				;POINT
+TEXTLOC 		EQU 	PENLOC+4				;POINT
+OVALSIZES		EQU 	TEXTLOC+4				;POINT
+FROMRECT		EQU 	OVALSIZES+4				;RECT
+TORECT			EQU 	FROMRECT+8				;RECT
+NUMER			EQU 	TORECT+8				;POINT
+DENOM			EQU 	NUMER+4 				;POINT
+THECLIP 		EQU 	DENOM+4 				;RGNHANDLE
+USERCLIP		EQU 	THECLIP+4				;RGNHANDLE
+PLAYVERSION		EQU		USERCLIP+4				;PICTURE VERSION
+TXHFRAC			EQU		PLAYVERSION+2			;FRACTIONAL TEXT POSITION
+NEWHFRAC		EQU		TXHFRAC+2				;UPDATED FRACTION RECIEVED
+TEMPPIXPAT		EQU		NEWHFRAC+2				;PIXPAT FOR PLAYING NEW PICS IN OLD PORTS
+FontMappingTbl 	EQU 	TEMPPIXPAT+4			;Handle to array of old,new font id pairs
+PSreserve1 		EQU 	FontMappingTbl+4		;reserved
+PSreserve2 		EQU 	PSreserve1+4			;reserved
+PLAYREC 		EQU 	PSreserve2+4			;TOTAL SIZE
+
+;------------------------------------------------------
+;
+;  New offsets in a PICT2 header record:
+;
+hdrVersion 		EQU 	0					;Word (=-2)
+hdrReserved 	EQU 	hdrVersion+2		;Word
+hdrHRes			EQU 	hdrReserved+2		;Fixed
+hdrVRes			EQU 	hdrHRes+4 			;Fixed
+hdrSrcRect		EQU 	hdrVRes+4			;Rect
+hdrReserved2	EQU 	hdrSrcRect+8		;Long
+picHdrSize		EQU 	hdrReserved2+4		;size of a PICT2 header record
+
+;------------------------------------------------------------------
+;
+;  PROCEDURE StdOpcode(fromRect,toRect: Rect; opcode,version: INTEGER);
+;
+;  GETS CALLED FOR OPCODE VALUES $0100-$FFFF
+;
+;  OPCODE:	$0100-$01FF		2 BYTES DATA
+;			$0200-$02FF		4 BYTES DATA
+;			...
+;			$7F00-$7FFF		254 BYTES DATA
+; 			$8000-$80FF		0 BYTES DATA
+;			$8100-$FFFF		4 BYTES SIZE + SIZE BYTES DATA
+;
+;  THIS PROCEDURE READS THE OPCODE'S DATA AND IGNORES IT
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+PARAMSIZE		EQU 	12
+pFROMRECT		EQU 	PARAMSIZE+8-4			;LONG
+pTORECT			EQU 	pFROMRECT-4				;LONG
+OPCODE			EQU 	pTORECT-2				;WORD
+VERSION			EQU 	OPCODE-2				;WORD
+
+		LINK	A6,#0							;NO LOCAL VARS
+		MOVEM.L	D6/D7,-(SP)						;SAVE WORK REGISTERS
+		MOVE.L	#256,D6							;GET USEFUL NUMBER
+		SUB.L	D6,SP							;ALLOCATE STACK BUFFER
+
+		MOVE	OPCODE(A6),D0					;GET THE OPCODE
+		BMI.S	GETSIZE							;=>OP CONTAINS SIZE
+		LSR		#8,D0							;GET SIZE/2 IN LOW NIBBLE
+		ADD		D0,D0							;CALC SIZE
+		EXT.L	D0								;MAKE IT LONG
+		BRA.S	SHARE							;=>USE COMMON CODE
+GETSIZE	AND		#$7F00,D0						;MASK THE OPCODE
+		BEQ.S	DONE							;=>NO DATA BYTES
+		JSR		GETLONG							;READ IN SIZE
+SHARE	MOVE.L	D0,D7							;SAVE WHOLE SIZE
+NXTCHNK	MOVE	D6,D0							;ASSUME SIZE >= 256
+		CMP.L	D6,D7							;IS SIZE >= 256?
+		BGE.S	SIZEOK							;=>YES, SKIP 256 BYTES
+		MOVE	D7,D0							;ELSE SKIP REMAINING BYTES
+SIZEOK	MOVE.L	SP,-(SP)						;PUSH BUFFER POINTER
+		MOVE	D0,-(SP)						;PUSH BYTECOUNT
+		JSR		GETPICDATA						;READ DATA INTO BUFFER
+		SUB.L	D6,D7							;SUBTRACT BUFSIZE FROM COUNT
+		BGT.S	NXTCHNK							;=>GO SKIP NEXT CHUNK
+		
+;
+; This stuff is taken from Pictures.a <20Sept90 KON>
+;
+		cmp.w	#ngHeaderOp,OPCODE(a6)			;pict2 header opcode?		<18Jan90 KON>
+		bne.s	done							;not a pict2 header opcode	<18Jan90 KON>
+		cmp.w	#$fffe,(sp)						;is it version -2 header?	<18Jan90 KON>
+		bne.s	done							;<27nov89 KON>				<18Jan90 KON>
+		move.l	pFromRect(a6),a1				;point to playstate's FromRect
+		lea 	hdrSrcRect(sp),a0				;point to sourceRect stored in header record
+		MOVE	RIGHT(A0),D0
+		SUB 	LEFT(A0),D0 					;CALC SRC WIDTH
+		MOVE	D0,DENOM+H-FromRect(A1)			;DENOM.H := SRC WIDTH
+		MOVE	BOTTOM(A0),D0
+		SUB 	TOP(A0),D0						;CALC SRC HEIGHT
+		MOVE	D0,DENOM+V-FromRect(A1)			;DENOM.V := SRC HEIGHT
+		MOVE.L	(A0)+,(A1)+
+		MOVE.L	(A0)+,(A1)+ 					;FROMRECT := PICFRAME
+;
+; end <20Sept90 KON>
+;
+DONE	ADD.L	D6,SP							;STRIP BUFFER
+		MOVEM.L	(SP)+,D6/D7						;RESTORE WORK REGISTERS
+		UNLINK	PARAMSIZE,'STDPICPR'			;destroys condition codes
+
+		ENDPROC
+
+;=========================================================================================
+;=========================================================================================
+;
+;	Add routines to calculate to reduce numer and denom by GCD
+;
+;	These are called by DrawPicture and PicItem1
+;
+;=========================================================================================
+;=========================================================================================
+CalcGCD		PROC EXPORT
+; Routine returns GCD( d0, d1 ) using Euclidean method
+; On Entry: D0 and D1 contain word size values to reduce
+; On Exit: D0 and D1 both contain GCD
+;
+		cmp.l	d0,d1							;while d0 != d1 (unsigned word compare)
+		beq.s	@FoundGCD
+		bgt.s	@D1isBigger						;  if( d1 < d0 )
+		exg		d0,d1							;    swap( d1, d0 )
+@D1isBigger
+		sub		d0,d1							;  d1 = d1 - d0
+		bra.s	CalcGCD							;end while
+@FoundGCD
+		rts										;d0 and d1 contain GCD
+		ENDPROC
+		
+ReduceD3D4		PROC EXPORT
+			IMPORT	CalcGCD
+; Routine returns ReduceD3D4( d3, d4 ) reduces d3.w and d4.w by GCD for
+;	both the low and high words
+;
+; On Entry: D3 and D4 contain two word size values to reduce
+; On Exit: 	D3 and D4 contain reduced values
+;
+;
+; Divide Numer and Denom for width and height by GCD to prevent overflow.  
+;
+		moveq	#0,d0							;make sure high word is zero for next 2 divides
+		move.l	d0,d1							;CalcGCD exchanges regs, so both need to be cleared
+		move.w	d3,d0							;D0 has denom.v, d1 has numer.v
+		beq.s	@Done							;abort if zero.
+		move.w	d4,d1							;D0 has denom.v, d1 has numer.v
+		beq.s	@Done							;abort if zero.
+		jsr		CalcGCD							;returns GCD in d0
+		move.w	d3,d1							;D0 has denom.v, d1 has numer.v
+		divu.w	d0,d1							;dividing by GCD should never leave remainder
+		move.w	d1,d3							;save reduced numer.v
+		move.w	d4,d1							;D0 has denom.v, d1 has numer.v
+		divu.w	d0,d1
+		move.w	d1,d4							;save reduced denom.v
+;
+; Now do width:  Could have different scale factor than height did
+;
+		swap	d3								;operate on high word
+		swap	d4
+		move.w	d3,d0							;D0 has denom.h, d1 has numer.h
+		beq.s	@DoneSwap						;abort if zero.
+		move.w	d4,d1							;D0 has denom.h, d1 has numer.h
+		beq.s	@DoneSwap						;abort if zero.
+		jsr		CalcGCD							;returns GCD in d0
+		move.w	d3,d1							;D0 has denom.h, d1 has numer.h
+		divu.w	d0,d1							;dividing by GCD should never leave remainder
+		move.w	d1,d3							;save reduced numer.h
+		move.w	d4,d1							;D0 has denom.h, d1 has numer.h
+		divu.w	d0,d1
+		move.w	d1,d4							;save reduced denom.h
+@DoneSwap
+		swap	d3								;put things back
+		swap	d4
+@Done
+		rts										;all done
+;		
+; End <KON 7/1/91>
+;
+		ENDPROC
+
+		INCLUDE	'DrawPicturePlusSE.a'
+		INCLUDE	'DrawPicturePortable.a'
+
+;---------- broke out local procs from picItem1 for code sharing ------------
+
+
+GETSBYTE	FUNC	EXPORT
+			IMPORT	GetPicData
+
+;------------------------------------------------------
+;
+;  LOCAL PROCEDURE TO GET A SIGNED BYTE INTO D0 FROM PICTURE
+;
+		CLR.B	 -(SP)							;ALLOCATE TEMP
+		MOVE.L	SP,-(SP)						;PUSH ADDR OF TEMP
+		MOVE	#1,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET DATA FROM THEPIC
+		MOVE.B	(SP)+,D0						;POP RESULT
+		EXT.W	D0								;SIGN EXTEND TO WORD
+		RTS
+		
+				
+;-----------------End of breaking out local procs-----------------------------
+
+
+GETLONG FUNC	EXPORT
+		IMPORT	GetPicData
+;----------------------------------------------------------
+;
+;  LOCAL PROCEDURE TO GET A LONG FROM PICTURE INTO D0
+;
+		CLR.L	-(SP)							;ALLOCATE TEMP
+		MOVE.L	SP,-(SP)						;PUSH ADDR OF TEMP
+		MOVE	#4,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET DATA FROM THEPIC
+		MOVE.L	(SP)+,D0						;RETURN ANSWER IN D0
+		RTS
+
+
+MAPMODE	FUNC	EXPORT
+;----------------------------------------------------------
+;
+;  LOCAL PROCEDURE TO MAP COLOR QUICKDRAW MODES TO OLD MODES
+;
+		CMP.W	#$1F,D0							;OLD MODE, OR UNKNOWN?
+		BLS.S	DONEMODE						;SKIP OUT
+		CMP.W	#$2F,D0							;WITHIN CORRECT RANGE?
+		BLS.S	@MAPIT							;SKIP IF SO
+		CMP.W	#$32,D0							;HILITE?
+		BEQ.S	@MAPIT							;SKIP IF SO
+		CMP.W	#$3A,D0							;HILITE?
+		BNE.S	DONEMODE						;NO, PASS THROUGH
+@MAPIT
+		AND.W	#7,D0							;EXTRACT LOW 3 BITS
+		MOVE.B	arithMode(D0.W),D0				;GET EQUIVALENT MODE
+DONEMODE
+		RTS										;QUIT
+
+; [This table extracted from utils.a]
+arithMode
+				;				 hilite
+				;avg	 addPin	 addOver subPin	 trans  max	    subOver min
+		DC.B	srcCopy, srcBic, srcXor, srcOr,  srcOr, srcBic, srcXor, srcOr
+
+
+SkipPicData	PROC	EXPORT
+			IMPORT	GETPICDATA
+;----------------------------------------------------------
+;
+;  LOCAL PROCEDURE TO SKIP D0.L BYTES IN THE PICTURE
+;
+			MOVEM.L	D6/D7,-(SP)						;SAVE WORK REGISTERS
+			MOVE.L	#256,D6							;GET USEFUL NUMBER
+			SUB.L	D6,SP							;ALLOCATE STACK BUFFER
+	
+			MOVE.L	D0,D7							;SAVE WHOLE SIZE
+			BEQ.S	IGDONE							;=>NO DATA, JUST RETURN
+NXTCHNK		MOVE	D6,D0							;ASSUME SIZE >= 256
+			CMP.L	D6,D7							;IS SIZE >= 256?
+			BGE.S	IGSIZEOK						;=>YES, SKIP 256 BYTES
+			MOVE	D7,D0							;ELSE SKIP REMAINING BYTES
+IGSIZEOK	MOVE.L	SP,-(SP)						;PUSH BUFFER POINTER
+			MOVE	D0,-(SP)						;PUSH BYTECOUNT
+			JSR		GETPICDATA						;READ DATA INTO BUFFER
+			SUB.L	D6,D7							;SUBTRACT BUFSIZE FROM COUNT
+			BGT.S	NXTCHNK							;=>GO SKIP NEXT CHUNK
+			
+IGDONE		ADD.L	D6,SP							;STRIP BUFFER
+			MOVEM.L	(SP)+,D6/D7						;RESTORE WORK REGISTERS
+			RTS
+
+
+GetPicTable PROC	EXPORT	
+			IMPORT	GetPicData,GETLONG
+;------------------------------------------------------
+;
+;  PROCEDURE GetPicTable(CTabHandle);
+;					Fix File	Date			Patch#		Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	DrawPicturePatch.a	01Jan1904		#???		(GetPicTable) 		(GetPicTable)		
+;
+;
+		JSR		GETLONG							;GET SEED INTO D0
+		MOVE.L	D0,-(SP)						;SAVE SEED
+		JSR		GETLONG							;GET TRANSINDEX, SIZE INTO D0
+		MOVE.L	D0,-(SP)						;SAVE TRANSINDEX,SIZE
+		MOVE	D0,D2							;GET SIZE INTO D2
+		ADDQ	#1,D2							;MAKE IT ONE BASED
+		MULU	#CTENTRYSIZE,D2					;GET SIZE OF TABLE
+		MOVE.L	D2,D0							;SAVE SIZE OF TABLE
+		ADD		#CTREC,D0						;ADD SIZE OF HEADER
+		MOVE.L	12(SP),A0						;GET HANDLE
+		_SETHANDLESIZE							;RESIZE IT
+		BEQ.S	@1								;Skip if OK
+		MOVEQ	#25, D0							;Sayonara, sweetheart
+		_SysError
+; ??? Should really be able to do better than this.  Maybe if this fails,
+; we should do an _EmptyHandle as a signal to the caller that we flopped???
+@1
+		_HLock									;LOCK IT
+		MOVE.L	(A0),A0							;POINT TO CTAB
+		MOVE.L	(SP)+,D0						;GET TRANSINDEX,SIZE
+		MOVE.L	(SP)+,(A0)+						;COPY SEED TO CTAB
+		MOVE.L	D0,(A0)+						;COPY TRANSINDEX,SIZE
+		MOVE.L	A0,-(SP)						;PUSH DST POINTER
+		MOVE	D2,-(SP)						;PUSH BYTECOUNT
+		JSR  	GETPICDATA						;READ DATA FROM PICTURE
+		MOVE.L	4(SP),A0						;GET HANDLE
+		_HUnlock								;UNLOCK IT
+
+		MOVE.L	(A0),A0							;point to table					<PMA207>
+		TST		transIndex(A0)					;device color table?			<PMA207>
+		BPL.S	@done							;=>no, just return				<PMA207>
+		MOVE	ctSize(A0),D0					;get size of table				<PMA207>
+		MOVEQ	#0,D1							;get first pixel value			<PMA207>
+		ADDQ	#ctRec,A0						;point to first entry			<PMA207>
+@2		MOVE	D1,(A0)							;stuff a pixel					<PMA207>
+		ADDQ	#ctEntrySize,A0					;bump to next entry				<PMA207>
+		ADDQ	#1,D1							;bump to next pixel value		<PMA207>
+		DBRA	D0,@2							;repeat for all entries			<PMA207>
+
+@done	MOVE.L	(SP)+,(SP)						;STRIP PARAM
+		RTS 									;AND RETURN
+
+;
+; GetPicData, getubyte, getword also appear in DrawPicture32Patch.a.  They should
+; only appear in one place xxxxx
+;
+
+GetPicData PROC  EXPORT
+;------------------------------------------------------------------
+;
+;  PROCEDURE GetPicData(dataPtr: QDPtr; byteCount: INTEGER);
+;					Fix File	Date			Patch#		Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	DrawPicturePatch.a	01Jan1904		#???		(GetPicData) 		(GetPicData)		
+;
+;
+		MOVE.L	6(SP),-(SP)						;COPY DATAPTR
+		MOVE.W	8(SP),-(SP)						;COPY BYTECOUNT
+		MOVE.L	GRAFGLOBALS(A5),A0				;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A0					;GET CURRENT GRAFPORT
+		MOVE.L	GRAFPROCS(A0),D0				;IS GRAFPROCS NIL ?
+
+		MOVE.L	PStdGetPic_SE_Portable,A0		;get piece of trap table (SE or Portable)
+		ENTRY	GetPicDataStdGetPic
+GetPicDataStdGetPic		equ		* - 2			;fix the word in the above instruction on Plus
+
+		BEQ.S	USESTD							;yes, use std proc
+		MOVE.L	D0,A0
+		MOVE.L	GETPICPROC(A0),A0				;NO, GET GET PROC PTR
+USESTD	JSR 	(A0)							;AND CALL IT
+		MOVEQ	#0,D0							;CLEAR HIGH WORD
+		MOVE.W	4(SP),D0						;GET BYTECOUNT
+		MOVE.L	GRAFGLOBALS(A5),A0				;POINT TO QUICKDRAW GLOBALS
+		ADD.L	D0,PLAYINDEX(A0)				;BUMP PLAYINDEX
+		MOVE.L	(SP)+,A0						;RETURN ADDRESS
+		ADDQ	#6,SP							;STRIP PARAMS
+		JMP		(A0)							;RETURN
+
+		ENDPROC
+
+FixStdGetPicInGetPicData	INSTALLPROC		(Plus)
+		IMPORT	GetPicDataStdGetPic
+
+		lea		GetPicDataStdGetPic,a0			;point at above code
+		move.w	#PStdGetPic_Plus,(a0)			;jam in the correct vector for the Mac. Plus
+		rts
+
+		ENDPROC
+
+GETUBYTE	FUNC	EXPORT
+			IMPORT	GetPicData
+;------------------------------------------------------
+;
+;  LOCAL PROCEDURE TO GET AN UNSIGNED BYTE INTO D0 FROM PICTURE
+;
+		CLR.B	 -(SP)							;ALLOCATE TEMP
+		MOVE.L	SP,-(SP)						;PUSH ADDR OF TEMP
+		MOVE	#1,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET DATA FROM THEPIC
+		CLR 	D0								;GET READY FOR BYTE
+		MOVE.B	(SP)+,D0						;POP RESULT INTO LO BYTE
+		RTS
+
+
+GETWORD		FUNC	EXPORT
+			IMPORT	GetPicData
+;------------------------------------------------------
+;
+;  LOCAL PROCEDURE TO GET A WORD FROM PICTURE INTO D0
+;
+		CLR.W	-(SP)							;ALLOCATE TEMP
+		MOVE.L	SP,-(SP)						;PUSH ADDR OF TEMP
+		MOVE	#2,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;GET DATA FROM THEPIC
+		MOVE	(SP)+,D0						;RETURN ANSWER IN D0
+		RTS
+
+
+GetPicPixPat 	PROC	EXPORT	
+				IMPORT 	GetWord,GETPICDATA
+				IMPORT	RGB2Pat,GETLONG,GetUByte
+;------------------------------------------------------
+;
+;  PROCEDURE GetPicPixPat(PatPtr);
+;					Fix File	Date			Patch#		Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	DrawPicturePatch.a	01Jan1904		#???		(GetPicPixPat) 		(GetPicPixPat)		
+;
+;
+
+; GET TYPE AND ONE BIT PATTERN FROM THE PICTURE
+
+		MOVEQ	#10,D0							;GET NUMBER OF BYTES
+		SUB		D0,SP							;MAKE ROOM FOR TYPE, PATTERN
+		MOVE.L	SP,-(SP)						;PUSH POINTER
+		MOVE	D0,-(SP)						;PUSH BYTE COUNT
+		JSR		GETPICDATA						;READ IN 10 BYTES
+		MOVE.L	14(SP),A0						;GET PTR TO PATTERN
+		MOVE	(SP)+,D1						;GET TYPE
+		MOVE.L	(SP)+,(A0)+						;SAVE 1ST HALF PATTERN
+		MOVE.L	(SP)+,(A0)						;SAVE 2ND HALF PATTERN
+		CMP.W	#ditherPat,D1					;IS IT A DITHER PATTERN?
+		BNE.S	@1								;No, just use pattern data
+		MOVEQ	#6,D0							;Size of RGB buffer
+		SUB.L	D0,SP							;MAKE ROOM FOR RGB ON STACK
+		MOVE.L	SP,-(SP)						;BUFFER ADDRESS
+		MOVE	D0,-(SP)						;LENGTH
+		jsr		GetPicData						;GET R, G, B
+		MOVE.L	SP,A1							;Point at RGB
+		JSR		RGB2Pat							;Get pattern
+		ADDQ	#6,SP							;Blow off RGB
+		MOVE.L	4(SP),A1						;GET PAT PTR
+		MOVE.L	D0,(A1)+						;Copy gray pattern
+		MOVE.L	D0,(A1)
+		BRA.S	PATDONE							;No pixmap to skip
+@1
+
+; GET PIXMAP FROM THE PICTURE
+		MOVEQ	#PMREC-4,D0						;Size of record
+		SUB.W	D0,SP							;Make handy buffer
+		MOVE.L	SP,-(SP)						;Push PIXMAP pointer
+		MOVE.W	D0,-(SP)						;Push length
+		JSR		GetPicData						;Get the information
+
+; SKIP THE COLOR TABLE.
+		JSR		GETLONG							;Skip the seed
+		JSR		GETLONG							;Get TRANSINDEX, SIZE
+		ADDQ	#1,D0							;Make size 1-based
+		MULU	#CTENTRYSIZE,D0					;Get size of table
+		JSR		SkipPicData						;Skip the rest of the table
+
+; SKIP PIXMAP DATA FROM PICTURE
+
+		LEA		-4(SP),A1						;GET PIXMAP POINTER
+		MOVE	BOUNDS+BOTTOM(A1),D1			;GET TOP OF PIXMAP
+		SUB		BOUNDS+TOP(A1),D1				;CALC HEIGHT OF PIXMAP
+		MOVE	ROWBYTES(A1),D0					;GET WIDTH OF PIXMAP
+		AND		#RBMASK,D0						;MASK OFF FLAG BITS
+		CMP		#8,D0							;IS ROWBYTES < 8
+		BLT.S	@NOPACK							;=>YES, DON'T UNPACK
+		MOVEM.L	D3-D4,-(SP)						;SAVE WORK REGS
+		MOVE	D0,D3							;SAVE ROWBYTES
+		MOVE	D1,D4							;SAVE HEIGHT
+		BRA.S	@START1							;GO TO LOOP START
+@MORE1
+		CMP		#250,D3							;IS ROWBYTES > 250
+		BGT.S	@3								;=>YES, GET WORD
+		JSR		GetUByte						;ELSE GET A BYTE INTO D0
+		BRA.S	@2								;=>AND GO GET DATA
+@3		JSR		GETWORD							;GET A WORD INTO D0
+@2
+		SWAP	D0								;HIGH WORD
+		CLR.W	D0								;MAKE SURE IT'S 0
+		SWAP	D0								;GET BACK IN RIGHT ORDER
+		JSR		SkipPicData						;Skip that much
+@START1
+		DBRA	D4,@MORE1						;LOOP HEIGHT ROWS
+		MOVEM.L	(SP)+,D3-D4						;RESTORE WORK REGS
+		BRA.S	@PIXDONE						;CONTINUE
+;
+;	ROWBYTES < 8, DON'T USE PACKING
+;
+@NOPACK
+		MULU	D1,D0							;GET DATA SIZE
+		JSR		SkipPicData						;Skip that much
+@PIXDONE
+		ADD		#PMREC-4,SP						;POP PIXMAP
+PATDONE
+		MOVE.L	(SP)+,(SP)						;STRIP PARAM
+		RTS 									;AND RETURN
+
+
+GetPM1Deep 	PROC	EXPORT	
+			IMPORT 	GetUByte,GetWord,GetPicData, patTBL
+;------------------------------------------------------
+;
+;  PROCEDURE GetPM1Deep(myDst: Ptr; xTab: Ptr; myData: Handle; targetRB: SHORT; mode SHORT); <19Feb87 DBG>
+;
+;					Fix File	Date			Patch#		Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	DrawPicturePatch.a	01Jan1904		#???		(GetPM1Deep) 		(GetPM1Deep)		
+;
+;  HANDLE SIZE IS SET TO ROWBYTES*(BOUNDS.BOTTOM-BOUNDS.TOP) EXTERNALLY
+;
+PARAMSIZE		EQU		16
+MYDST			EQU		PARAMSIZE+8-4			;DST PIXMAP POINTER
+XTAB			EQU		MYDST-4					;TRANSLATE TABLE POINTER <19Feb87 DBG>
+MYDATA			EQU		XTAB-4					;DST DATA HANDLE <19Feb87 DBG>
+TARGETRB		EQU		MYDATA-2				;TARGET ROWBYTES
+MODE			EQU		TARGETRB-2				;copybits copy mode (64 means dither)
+
+SrcHndl			EQU		-4						;VAR POINTER TO SOURCE
+DSTPTR			EQU		SrcHndl-4				;VAR POINTER TO DST
+PACKBUF			EQU		DSTPTR-4				;POINTER TO PACKING BUFFER
+SAVEDSP			EQU		PACKBUF-4				;PRESERVE STACK POINTER
+BITSDST			EQU		SAVEDSP-4				;CURRENT OUTPUT POINTER
+MUSTMAP			EQU		BITSDST-2				;NEED TO MAP?
+LastError		EQU		MustMap-2				;luminance error value
+Direction		EQU		LastError-2				;alternate directions for dither
+VARSIZE			EQU		Direction
+
+		LINK	A6,#VARSIZE						;MAKE A STACK FRAME
+		MOVEM.L	D3-D7/A2-A4,-(SP)				;SAVE WORK REGISTERS
+		
+		MOVE.L	SP,SAVEDSP(A6)					;PRESERVE STACK POINTER
+		MOVE.L 	MYDST(A6),A2					;POINT TO PIXMAP
+		MOVE.L	MYDATA(A6),A0					;GET DATA HANDLE
+;		_HLOCK									;LOCK IT DOWN
+		MOVE.L	(A0),BITSDST(A6)				;GET DATA POINTER IN BITSDST
+		
+		MOVE	BOUNDS+BOTTOM(A2),D7
+		SUB 	BOUNDS+TOP(A2),D7				;HEIGHT := BOUNDS BOT - TOP
+
+		MOVE	ROWBYTES(A2),D5					;GET ROWBYTES
+		SMI		MUSTMAP(A6)						;SET FLAG IFF PIXMAP
+		AND		#RBMASK,D5						;CLEAR OFF FLAG BITS
+;
+; Here we calculate ROWBYTES + ROWBYTES/64, rounded up to an even number.
+; The worst-case expansion from _PackBits is one extra byte for every
+; 127 bytes of data.  Rather than divide by 127, we divide by 64, the next
+; lowest power of 2.
+;
+		MOVE	D5,D6							;COPY ROWBYTES
+		ADD		#63,D6							;MAKE SURE TO ROUND UP!
+		LSR.W	#6,D6							;GET CEIL(ROWBYTES/64)
+		ADDQ.W	#1,D6							;ROUND UP...
+		BCLR	#0,D6							;...TO EVEN NUMBER
+		ADD		D5,D6							;SIZE OF PACKED BUFFER
+		CMP		#8,D5							;ROWBYTES < 8?
+		BGE.S	@DOUNPACK						;=>NO, GO DO UNPACK
+		TST		ROWBYTES(A2)					;BITMAP, NOT PIXMAP?
+		BPL		NOPACK							;GO READ IT STRAIGHT IN
+		
+@DOUNPACK
+		TST.B	MUSTMAP(A6)						;PIXMAP?
+		BEQ.S	@GetRow							;=>NO, BITMAP
+		MOVE	PIXELSIZE(A2),D4				;=>YES, PIXMAP: GET BITS/PIXEL
+		cmp		#32,d4							;32 bit/pixel?
+		beq		@getrow							;if so, skip get mask stuff
+		MOVE	D4,D0							;COPY IT
+		LSL.W	#1,D0							;DOUBLE IT
+		NEG.W	D0								;NEGATE IT
+; ??? 64K ROM problem. Need to do LEA on 64K ROM. ???
+		_GetMaskTable							;GET MASK TABLE ADDRESS
+		MOVE	(16*2*2)(A0,D0.W),D3			;GET MASK FOR PIXEL
+		MOVE.L	XTAB(A6),A4						;XLATE TABLE POINTER <19Feb87 DBG>
+		CMP.W	#1,D4							;TEST BITS/PIXEL
+		BNE.S	@GetRow							;IF <>1, MUST MAP
+		CMP.W	#$0001,(A4)						;MAPPING NEEDED? <19Feb87 DBG>
+		SNE		MUSTMAP(A6)						;IF NOT $0001, MUST MAP
+
+;----------------------------------------------------------------
+;
+;  Get unpacked data one row at a time
+;
+@GetRow
+;
+;	Allocate handle for one row of source information
+;		and initialize various dither parameters
+;
+		move.w	#-127, LastError(a6)			;init luminance error (8-bit)
+		cmp.w	#16,d4
+		bne		@1
+		move.w	#-15, LastError(a6)				;5-bit luminance error init	
+@1
+		move.w	#0, direction(a6)
+		move	RowBytes(A2),d0
+		and		#RBMASK,d0
+		_NewHandle								;allocate handle for row of source info
+		bne.s	ExitGetPM1Deep					;Exit with not equal set	<Halloween89 KON>
+
+		move.l	a0, SrcHndl(a6)
+		_HLock
+;
+; Do one row at a time
+;
+		move	Bounds+bottom(a2), d5				;Save old bounds.bottom
+		move	Bounds+top(a2), Bounds+bottom(a2)	;make bit/pix map ...
+		addq	#1, Bounds+bottom(a2)				;...one row high
+		bra.s	START1								;start off the loop				<8 dba>
+
+GetRow1
+		move.l	a2,-(sp)							;push source pixmap data
+		MOVE.L	SrcHndl(A6),-(SP)					;put row of data here
+	IF	INITFILE THEN
+		dc.w	$A8F3						;Test with open picture trap num
+	ELSE
+		dc.w	$ABC4								;_GetPMData
+	ENDIF
+;		JSR		GETPMDATA							;AND READ IN PIXMAP DATA
+		move.l	SrcHndl(a6),a0
+		move.l	(a0),a0
+		JSR		MapRow							;Map the row and place 1 bit/pixel in dst
+		
+START1	DBRA	D7,GetRow1						;LOOP HEIGHT ROWS
+;----------------------------------------------------------------
+;
+;	Dispose row handle and set bounds back
+;
+		move	d5, Bounds+bottom(a2)		;bounds.top was unchanged
+		move.l	SrcHndl(a6),a0
+		_DisposHandle
+		BRA.S	DONE							;CONTINUE
+
+;----------------------------------------------------------------
+;  ROWBYTES < 8 and it's a bitmap, DON'T USE PACKING
+;	OR it's already 1 bit/pixel
+;
+NOPACK	MULU	D7,D5							;BYTECOUNT := HEIGHT * WIDTH
+		MOVE.L	BITSDST(A6),-(SP)				;PUSH DATA POINTER
+		MOVE	D5,-(SP)						;PUSH BYTECOUNT
+		JSR 	GetPicData						;READ BITMAP DATA BITS
+Done
+		move	#0, d0							;successfully created 1-bit bitmap	<Halloween89 KON>
+		bra.s	PMDone
+ExitGetPM1Deep									;Error exit branches here			<Halloween89 KON>
+		move	#1, d0							;d0 != 0 indicates error
+PMDone	MOVE.L	SAVEDSP(A6),SP					;RESTORE STACK POINTER
+		MOVEM.L	(SP)+,D3-D7/A2-A4				;RESTORE WORK REGISTERS
+		UNLINK	PARAMSIZE,'GETPMDAT'			;destroys condition codes
+
+;-----------------------------------------------
+;
+; MapRow - internal utility to map a row to a one-bit-deep row
+;			and copy it into the target bitmap.
+;	Uses up-level stack frame.  Source ptr passed in a0, destination in bitsdst
+;		d4.w has bits/pixel
+MapRow
+;
+; Now it's time to actually shrink the bits.
+; We build up a word of output at a time (since rowbytes is even, it doesn't
+; matter if we convert a slop byte), then write it out.  We have two loops:
+; An outer one over words of output, and an inner one over words of input.
+; In the interests of patch compactness, the only special case we make is
+; if the number of colors is <= 32, in which case we keep the color mapping
+; bitmap in D6 for speed.
+;
+		MOVEM.W	D4-D7/a3,-(SP)					;SAVE REGISTERS
+		MOVE	BOUNDS+RIGHT(A2),D7				;GET BOUNDS.RIGHT
+		SUB		BOUNDS+LEFT(A2),D7				;CALC WIDTH
+		MOVE.L	BITSDST(A6),A1					;Destination pointer
+		tst.b	MustMap(a6)
+		bne.s	MapRow1							;need to map the row
+;
+; No mapping needed:  copy bits to destination buffer
+;
+		move.w	rowbytes(a2),d7
+		and		#RBMask, d7
+		sub		#1, d7					;zero base loop
+@LOOP
+		move.b	(a0)+,(a1)+
+		dbra	d7,@loop	
+		
+		MOVE	TARGETRB(A6),D0					;GET TARGET ROWBYTES (HIWRD CLR)
+		and.l	#$FFFF,d0
+		ADD.l	D0,BITSDST(A6)					;NEXT SCAN LINE
+		bra		Shrunk
+		
+MapRow1
+		CMP.W	#8,D4							;8 BITS/PIXEL?
+		BEQ.S	EIGHTLOOP						;=>YES, USE CUSTOM LOOP
+		cmp.w	#32,d4
+		beq		ThirtyTwoLOOP					;Use custom loop for 32bits/pixel <28AUG89 KON>
+		cmp.w	#16,d4
+		beq		SixteenBitLOOP					;Use custom loop for 16bits/pixel <28AUG89 KON>
+;
+; Start of the shrinking loop.  A0 is source, A1 is destination, a4 points to translation table.
+; We assume an even number of pixels per 16-bit word.  They are isolated,
+; one by one, and a one or zero or'd in to the output word we're building up.
+;
+@NEXTOUTWORD
+		MOVEQ	#16,D6							;BITS/OUTPUT WORD
+		MOVEQ	#0,D2							;OUTPUT WORD
+@NEXTINWORD
+		MOVEQ	#16,D1							;BITS IN INPUT WORD
+		MOVE	(A0)+,D5						;GET NEXT INPUT WORD
+@NEXTPIX
+		ROL.W	D4,D5							;ISOLATE NEXT PIXEL
+		MOVE	D5,D0							;GET COPY
+		AND		D3,D0							;GET PIXEL
+		LSL.W	#1,D2							;MAKE ROOM FOR NEW PIXEL
+		OR.B	(A4,D0.W),D2					;GET NEW PIXEL <19Feb87 DBG>
+		SUBQ	#1,D7							;ONE LESS PIXEL
+		SUBQ	#1,D6							;ONE LESS OUTPUT PIXEL
+		SUB		D4,D1							;BITS LEFT IN INPUT WORD
+		BGT.S	@NEXTPIX						;IF SOME LEFT, GET NEXT PIX
+		TST		D7								;ANY INPUT LEFT?
+		BLE.S	@1								;NO, DONE WITH LINE
+		TST		D6								;ANY OUTPUT ROOM LEFT?
+		BGT.S	@NEXTINWORD						;YES, GET NEXT INPUT WORD
+		MOVE	D2,(A1)+						;WRITE AN OUTPUT WORD
+		BRA.S	@NEXTOUTWORD
+@1
+		LSL.W	D6,D2							;LEFT JUSTIFY LAST WORD
+		MOVE	D2,(A1)+						;WRITE AN OUTPUT WORD
+		MOVEQ	#0,D0							;CLEAR OUT LONG
+		MOVE	TARGETRB(A6),D0					;GET TARGET ROWBYTES
+		and.l	#$ffff,d0							;clear hi word
+		ADD.L	D0,BITSDST(A6)					;NEXT SCAN LINE
+		BRA		SHRUNK							;EXIT
+;
+; Here is the custom loop for eight bit pixels.  Principle is
+; the same as the previous loop.
+;
+EIGHTLOOP
+		MOVEQ	#0,D0							;CLEAR PIXEL BUFFER/ROWBYTES
+@NEXTOUTWORD
+		MOVEQ	#15,D6							;BITS/OUTPUT WORD (-1)
+		MOVEQ	#0,D2							;OUTPUT WORD
+@NEXTPIX
+		MOVE.B	(A0)+,D0						;GET NEXT INPUT BYTE
+		LSL.W	#1,D2							;MAKE ROOM FOR NEW PIXEL
+		OR.B	(A4,D0.W),D2					;GET IT <19Feb87 DBG>
+		SUBQ	#1,D7							;ONE LESS PIXEL
+		BLE.S	@1								;IF NONE LEFT, DONE WITH ROW
+		DBRA	D6,@NEXTPIX						;LOOP FOR NEXT PIXEL
+		MOVE	D2,(A1)+						;WRITE AN OUTPUT WORD
+		BRA.S	@NEXTOUTWORD
+@1
+		LSL.W	D6,D2							;LEFT JUSTIFY LAST WORD
+		MOVE	D2,(A1)+						;WRITE LAST OUTPUT WORD
+		MOVE	TARGETRB(A6),D0					;GET TARGET ROWBYTES 
+		and.l	#$ffff,d0							;clear hi word
+		ADD.L	D0,BITSDST(A6)					;NEXT SCAN LINE
+		bra		SHRUNK							;exit	<28AUG89 KON>
+
+;------------------------------------------------------------------
+;
+;  SCALES A SCANLINE OF PIXELS FROM 32 BIT DIRECT TO A B/W BitMap
+;  ASSUMES SRC IS COMPOSED OF FOUR BYTES OF THE FORM 'XRGB'
+;
+;			D7:		Number of pixels to convert
+;			A0:		SRC BUFFER
+;			A1:		DST BUFFER
+
+ThirtyTwoLOOP
+
+		move.l	#$80000000,d5				;init offset into dst
+		moveq	#0,d0						; d0-d2 hold r,g,b values...
+		moveq	#0,d1						;...when calculating luminance... 
+		moveq	#0,d2						;...and only low byte is used.
+
+		move.w	LastError(a6),d3			;get luminance error from last line
+		btst	#6, mode+1(a6)				;do dithering?
+		beq.s	NewOutputLong				;no
+		eori.w	#1, direction(a6)			;if we dither, we scan ...
+		beq.s	DoReverseThirtyTwoLoop		;... backwards every other time
+NewOutputLong
+		moveq	#0,	d6						;assume output value will be white
+		move.l	#$80000000,d5				; rotating mask
+
+NextInputLong 		
+		move.l	(a0)+,d4					;get next long of src
+
+		move.b	d4,d2						; get the blue component
+		lsr.l	#8,d4						; get red,green in low word
+		move.b	d4,d1						; get the green component
+		lsr.w	#8,d4						; get red in low byte
+		move.b	d4,d0						; get the red component
+		
+; Compute Luminance = ((((((r+g)/2)+b)/2+r)/2)+g)/2
+
+		add.w	d1,d4
+		add.w	d2,d4
+		add.w	d2,d4
+		lsr.w	#2,d4
+		add.w	d0,d4
+		add.w	d1,d4
+		add.w	d1,d4
+		lsr.w	#2,d4
+		btst	#6, mode+1(a6)
+		beq.s	NoDither
+
+;
+; add luminance to current error and compare to threshold 
+; if lum + err <= 0 then pixel is set.
+;	
+		add.w	d4,d3					;add luminance to error (slop)
+		ble.s	SetBit
+		sub.w	#255,d3
+		bra.s	SetBitDone		
+;
+; No Dithering:  Use 50% theshold
+NoDither		
+		tst.b	d4						; check high bit of luminance
+		bmi.s	SetBitDone				; if set, pixel is white (0), so skip
+SetBit
+		or.l	d5,D6					; set pixel value
+SetBitDone
+		sub		#1, d7					;done enough pixels?
+		beq.s	@rowdone				;
+		lsr.l	#1,d5					;BUMP TO NEXT DST PIXEL
+		bne.s	NextInputLong
+		move.l	d6,(a1)+				;save destination pixel values
+		bra.s	NewOutputLong
+		
+@rowdone
+		MOVE.L	D6,(A1)+				;done: save current output value
+		MOVE	TARGETRB(A6),D0			;GET TARGET ROWBYTES
+		and.l	#$ffff,d0				;clear hi word
+		ADD.L	D0,BITSDST(A6)			;NEXT SCAN LINE
+		move.w	d3, LastError(a6)		;save luminance error for next line
+		bra		shrunk
+;
+; Scan line in reverse direction
+;
+DoReverseThirtyTwoLoop
+
+		moveq	#0,d4						;clear high word of temp pixel count
+		move.w	d7, d4						;pixel count to temp register
+		lsl.l	#2, d4						;convert to long
+		add.l	d4, a0						;move to end of source
+		add.l	#31<<2,d4					;31<<2
+		lsr.l	#5, d4						;/4 to convert XRGB to pixels...
+											;... and /32 because 32 pixels/long...
+											;... and *4 because we 4 bytes/long
+		and.w	#$fffc,d4					;must end on word boundry
+		add.l	d4, a1						;move to end of destination
+
+		move	d7, d4						;find starting pixel position
+		sub.w	#1, d4
+		and.w	#$1f, d4					;get pixel count mod 32
+		move.l	#$80000000,d5
+		lsr.l	d4, d5						;move to starting pixel position
+		moveq	#0, d6
+		bra.s	ReverseNextInputLong
+
+ReverseNewOutputLong
+		moveq	#0,d6						;assume output value will be white
+		moveq	#$00000001,d5				; rotating mask: start on right...
+											;...and move left
+
+ReverseNextInputLong 		
+		move.l	-(a0),d4					;get long of src
+
+		move.b	d4,d2						; get the blue component
+		lsr.l	#8,d4						; get red,green in low word
+		move.b	d4,d1						; get the green component
+		lsr.w	#8,d4						; get red in low byte
+		move.b	d4,d0						; get the red component
+		
+; Compute Luminance = ((((((r+g)/2)+b)/2+r)/2)+g)/2
+
+		add.w	d1,d4
+		add.w	d2,d4
+		add.w	d2,d4
+		lsr.w	#2,d4
+		add.w	d0,d4
+		add.w	d1,d4
+		add.w	d1,d4
+		lsr.w	#2,d4
+
+		add.w	d4,d3						;add luminance to error (slop)
+		bpl.s	ReverseDitherSetBitDone
+		or.l	d5,D6						; set pixel value
+		bra.s	ReverseSetBitDone
+ReverseDitherSetBitDone
+		sub.w	#255,d3
+
+ReverseSetBitDone
+		sub		#1, d7						;done enough pixels?
+		beq.s	@rowdone					;
+		lsl.l	#1, d5						;BUMP TO NEXT DST PIXEL
+		bne.s	ReverseNextInputLong
+		move.l	d6,-(a1)					;save destination pixel values
+		bra.s	ReverseNewOutputLong
+		
+@rowdone
+		MOVE.L	D6,-(A1)					;done: save current output value
+		MOVE	TARGETRB(A6),D0				;GET TARGET ROWBYTES
+		and.l	#$ffff,d0					;clear hi word
+		ADD.L	D0,BITSDST(A6)				;NEXT SCAN LINE
+		move.w	d3, LastError(a6)			;save luminance error for next line
+		bra		shrunk
+
+;------------------------------------------------------------------
+;
+;  SCALES A SCANLINE OF PIXELS FROM 16 BIT DIRECT TO A B/W BitMap
+;  ASSUMES SRC IS COMPOSED OF one word OF THE FORM 'XRRRRRGGGGGBBBBB'
+;
+;			D7:		Number of pixels to convert
+;			A0:		SRC BUFFER
+;			A1:		DST BUFFER
+
+SixteenBitLOOP
+
+		move.l	#$80000000,d5				;init offset into dst
+		moveq	#0,d0						; zero luninance rgb values
+		moveq	#0,d1						; 
+		moveq	#0,d2						; 
+
+		move.w	LastError(a6),d3			;get luminance error from last line
+		btst	#6, mode+1(a6)				;do dithering?
+		beq.s	NewOutputLong16				;no
+		eori.w	#1, direction(a6)			;if we dither, we scan ...
+		beq.s	DoReverse16Loop				;... backwards every other time
+		
+NewOutputLong16
+		move.l	#0,	d6						;assume output value will be white
+		move.l	#$80000000,d5				; rotating mask
+
+NextInputWord16 		
+		move.w	(a0)+,d4					;get first word of src
+
+		move.b	d4,d2						; get the blue component
+		and.b	#$1F,d2		;save only bottom 5 bits
+		lsr.l	#5,d4						; get red,green in low word
+		move.b	d4,d1						; get the green component
+		and.b	#$1F,d1		;save only bottom 5 bits
+		lsr.w	#5,d4						; get red in low byte
+		move.b	d4,d0						; get the red component
+		and.b	#$1F,d0		;save only bottom 5 bits
+		
+; Compute Luminance = ((((((r+g)/2)+b)/2+r)/2)+g)/2
+
+		add.w	d1,d4
+		add.w	d2,d4
+		add.w	d2,d4
+		lsr.w	#2,d4
+		add.w	d0,d4
+		add.w	d1,d4
+		add.w	d1,d4
+		lsr.w	#2,d4
+		btst	#6, mode+1(a6)
+		beq.s	NoDither16
+;
+; Do dithering
+;
+		add.w	d4,d3					;add luminance to error (slop)
+		ble.s	SetBit16
+		sub.w	#$1F,d3					;reset error (max luminance for five bits)
+		bra.s	SetBitDone16		
+;
+; No Dithering:  Use 50% theshold
+;
+NoDither16		
+		btst	#4,d4						; check bit 4 (high bit of luminance for 16 bit)	<KON 2NOV90>
+		bne.s	SetBitDone16				; if set, pixel is white (0), so skip
+SetBit16
+		or.l	d5,D6						; set pixel value
+SetBitDone16
+		sub		#1, d7						;done enough pixels?
+		beq.s	@rowdone					;
+		lsr.l	#1,d5						;BUMP TO NEXT DST PIXEL
+		bne.s	NextInputWord16
+		move.l	d6,(a1)+					;save destination pixel values
+		bra.s	NewOutputLong16
+		
+@rowdone
+		MOVE.L	D6,(A1)+					;done: save current output value
+		MOVE	TARGETRB(A6),D0				;GET TARGET ROWBYTES
+		and.l	#$ffff,d0					;clear hi word
+		ADD.L	D0,BITSDST(A6)				;NEXT SCAN LINE
+		move.w	d3, LastError(a6)		;save luminance error for next line
+		bra		shrunk
+;
+; Scan line in reverse direction
+;
+DoReverse16Loop
+		
+		moveq	#0,d4							;clear high word of temp pixel count
+		move.w	d7, d4						;pixel count to temp register
+		lsl.l	#1, d4						;convert to number of words
+		add.l	d4, a0						;move to end of source
+		add.l	#15<<2,d4					;adjust to round up
+		lsr.l	#4, d4						;/2 to convert 16 bit to number of pixels...
+											;... and /32 because 32 pixels/long...
+											;... and *2 because 2 bytes/word
+		and.w	#$fffc,d4					;must end on word boundry
+		add.l	d4, a1						;move to end of destination
+
+		move	d7, d4						;find starting pixel position
+		sub.w	#1, d4
+		and.w	#$1f, d4					;get pixel count mod 32
+		move.l	#$80000000,d5
+		lsr.l	d4, d5						;move to starting pixel position
+		moveq	#0, d6
+		bra.s	ReverseNextInputLong16
+
+ReverseNewOutputLong16
+		moveq	#0,	d6						;assume output value will be white
+		moveq	#$00000001,d5				; rotating mask: start on right...
+											;...and move left
+
+ReverseNextInputLong16 		
+		move.w	-(a0),d4					;get word of src
+
+		move.b	d4,d2						; get the blue component
+		and.b	#$1F,d2		;save only bottom 5 bits
+		lsr.l	#5,d4						; get red,green in low word
+		move.b	d4,d1						; get the green component
+		and.b	#$1F,d1		;save only bottom 5 bits
+		lsr.w	#5,d4						; get red in low byte
+		move.b	d4,d0						; get the red component
+		and.b	#$1F,d0		;save only bottom 5 bits
+		
+; Compute Luminance = ((((((r+g)/2)+b)/2+r)/2)+g)/2
+
+		add.w	d1,d4
+		add.w	d2,d4
+		add.w	d2,d4
+		lsr.w	#2,d4
+		add.w	d0,d4
+		add.w	d1,d4
+		add.w	d1,d4
+		lsr.w	#2,d4
+
+		add.w	d4,d3						;add luminance to error (slop)
+		bpl.s	ReverseDitherSetBitDone16
+		or.l	d5,D6						; set pixel value
+		bra.s	ReverseSetBitDone16
+		
+ReverseDitherSetBitDone16
+		sub.w	#$1F,d3
+
+ReverseSetBitDone16
+		sub		#1, d7						;done enough pixels?
+		beq.s	@rowdone					;
+		lsl.l	#1, d5						;BUMP TO NEXT DST PIXEL
+		bne		ReverseNextInputLong16
+		move.l	d6,-(a1)					;save destination pixel values
+		bra.s	ReverseNewOutputLong16
+		
+@rowdone
+		MOVE.L	D6,-(A1)					;done: save current output value
+		MOVE	TARGETRB(A6),D0				;GET TARGET ROWBYTES
+		and.l	#$ffff,d0					;clear hi word
+		ADD.L	D0,BITSDST(A6)				;NEXT SCAN LINE
+		move.w	d3, LastError(a6)			;save luminance error for next line
+
+SHRUNK
+		MOVEM.W	(SP)+,D4-D7/a3						;Restore registers
+		RTS										;EXIT
+
+		ENDPROC
+
+RGB2OLD	PROC	EXPORT
+;-----------------------------------------------
+;
+; UTILITY TO CONVERT AN RGB (POINTED TO BY A1) VALUE
+; TO AN OLD STYLE COLOR VALUE.  RETURNS VALUE IN D0.  CLOBBERS D0,D1
+;
+; USES HIGH BIT OF EACH COMPONENT TO SELECT RGB OFF (0) OR ON (1)
+
+		MOVEQ		#0,D1						; clear out D1
+		MOVE		(A1)+,D1					; get red
+		LSL.L		#1,D1						; get high bit
+		MOVE		(A1)+,D1					; get green
+		LSL.L		#1,D1						; get high bit
+		MOVE		(A1)+,D1					; get blue
+		LSL.L		#1,D1						; get high bit
+		SWAP		D1							; get RGB index
+		LSL.W		#1,D1						; Make a word index
+		MOVEQ		#0,D0						; clear out target
+		MOVE.W		MapTBL(D1.W),D0				; convert to planar value
+		RTS										; => all done
+		
+; TABLE TO MAP FROM 3 BIT RGB TO OLD-STYLE COLOR INDICES
+
+MapTBL	DC.W		blackColor					; RBG = 0,0,0 -> black
+		DC.W		blueColor					; RBG = 0,0,1 -> blue
+		DC.W		greenColor					; RBG = 0,1,0 -> green
+		DC.W		cyanColor					; RBG = 0,1,1 -> cyan
+		DC.W		redColor					; RBG = 1,0,0 -> red
+		DC.W		magentaColor				; RBG = 1,0,1 -> magenta
+		DC.W		yellowColor					; RBG = 1,1,0 -> yellow
+		DC.W		whiteColor					; RBG = 1,1,1 -> white
+
+RGB2Pat	PROC		EXPORT
+		ENTRY		RGB2Pixel
+		EXPORT		PatTBL
+;-----------------------------------------------
+;
+; UTILITY TO CONVERT AN RGB (POINTED TO BY A1) VALUE
+; TO AN OLD STYLE GRAY PATTERN.  RETURNS HALF-PATTERN IN D0.  CLOBBERS D1.
+;
+;					Fix File	Date			Patch#		Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	DrawPicturePatch.a	01Jan1904		#???		(RGB2Pat) 		(RGB2Pat)		
+;
+; USES COMPUTED GRAY LEVEL TO SELECT A PATTERN
+		MOVE		(A1)+,D1					; Get Red
+		MULU		#$4CCC,D1					; Weight for Red
+		MOVE		(A1)+,D0					; Get Green
+		MULU		#$970A,D0					; Weight for Green
+		ADD.L		D0,D1						; Add in
+		MOVE		(A1)+,D0					; Get Blue
+		MULU		#$1C28,D0					; Weight for Blue
+		ADD.L		D0,D1						; Get sum: luminance of RGB
+		CLR			D1							; Clear low word
+		ROL.L		#3,D1						; Get high three bits (0-7)
+		LSL.W		#2,D1						; Get long offset
+		MOVE.L		PatTBL(D1.W),D0				; Get half-pattern
+		RTS
+PatTBL
+		DC.L		$FFFFFFFF					; Gray = 0 -> black
+		DC.L		$DDFF77FF					; Gray = 1 -> 7/8 gray
+		DC.L		$FF55FF55					; Gray = 2 -> 3/4 gray
+		DC.L		$EE55BB55					; Gray = 3 -> 5/8 gray
+		DC.L		$AA55AA55					; Gray = 4 -> 1/2 gray
+		DC.L		$88552255					; Gray = 5 -> 3/8 gray
+		DC.L		$88002200					; Gray = 6 -> 1/8 gray
+		DC.L		$00000000					; Gray = 7 -> white
+
+;-----------------------------------------------
+;
+; UTILITY TO CONVERT AN RGB (POINTED TO BY A0) VALUE	<19Feb87 DBG>
+; TO A SINGLE PIXEL.  RETURNS VALUE IN D0.B.  CLOBBERS D1.
+;
+;					Fix File	Date			Patch#		Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	DrawPicturePatch.a	01Jan1904		#???		(RGB2Pixel) 		(RGB2Pixel)		
+;
+; USES COMPUTED GRAY LEVEL TO SELECT A PATTERN
+RGB2Pixel
+		MOVEQ		#0,D1						; Clear out
+		MOVE		(A0)+,D1					; Get Red <19Feb87 DBG>
+		MOVEQ		#0,D0						; Clear out
+		MOVE		(A0)+,D0					; Get Green <19Feb87 DBG>
+		ADD.L		D0,D1						; Add in
+		MOVE		(A0)+,D0					; Get Blue <19Feb87 DBG>
+		ADD.L		D0,D1						; Get sum
+		DIVU		#3,D1						; Compute unweighted Gray value
+		SGE			D0							; Should be 1 (black) if <$8000
+		NEG.B		D0							; Make single bit
+		RTS
+
+MapRatio PROC  EXPORT
+;-------------------------------------------------------------
+;
+;  PROCEDURE MapRatio(VAR numer, denom: Point;  fromRect: Rect);
+;
+;					Fix File	Date			Patch#		Fix Routine(s)		Routine(s) Fixed
+;AppleSystemPatch 	DrawPicturePatch.a	01Jan1904		#???		(MapRatio) 			(MapRatio)		
+;
+;  Map ratio so that denom.h/.v = height/width of fromRect.
+;  This is so that later scaling of the numerator will have some
+;  range to work within.
+;
+;  NOTE:  Only necessary because fractional numer, denom not used
+;
+;  numer.h :=  numer.h * fromWidth / denom.h
+;  denom.h :=  fromWidth
+;  numer.v :=  numer.v * fromHeight / denom.v
+;  denom.v :=  fromHeight
+
+PARAMSIZE		EQU 	12						; TOTAL BYTES OF PARAMS
+NUMER			EQU 	PARAMSIZE+8-4			; LONG, ADDR OF POINT
+DENOM			EQU 	NUMER-4					; LONG, ADDR OF POINT
+FROMRECT		EQU 	DENOM-4					; LONG, ADDR OF RECT
+
+		LINK	A6,#0							; NO LOCALS
+		MOVEM.L D0-D1/A0-A2,-(SP)				; SAVE REGS
+		MOVE.L	NUMER(A6),A0					; point to numer
+		MOVE.L	DENOM(A6),A1 					; point to denom
+		MOVE.L	FROMRECT(A6),A2					; point to fromRect
+		
+		MOVE.W	right(A2),D0					; get fromRect right
+		SUB.W	left(A2),D0						; get fromWidth
+		MOVE.W	h(A0),D1						; get numer.h
+		MULU	D0,D1							; multiply by fromWidth
+		DIVU	h(A1),D1						; divide by denom.h
+		MOVE.W	D1,h(A0)						; update numer.h
+		MOVE.W	D0,h(A1)						; update denom.h
+		
+		MOVE.W	bottom(A2),D0					; get fromRect bottom
+		SUB.W	top(A2),D0						; get fromHeight
+		MOVE.W	v(A0),D1						; get numer.v
+		MULU	D0,D1							; multiply by fromHeight
+		DIVU	v(A1),D1						; divide by denom.v
+		MOVE.W	D1,v(A0)						; update numer.v
+		MOVE.W	D0,v(A1)						; update denom.v
+		
+DONE	MOVEM.L (SP)+,D0-D1/A0-A2				; RESTORE REGS
+		UNLINK	PARAMSIZE,'MAPRATIO'			;destroys condition codes
+
+		ENDPROC 
+
+;--------- BitMap to Region Added by KON 11/6/89 for Plus and SE only -----------
+
+;________________________________________________________________________________
+;
+; 		FUNCTION BitMapRgn(region:RgnHandle; bMap:BitMap): OSErr; INLINE $A8D7;
+;			(BHogToRegion is debugging memory hog version)
+;
+; 		Given a region and bitmap, BitMapRgn makes the region a bounding
+;		region for the 'map. If it can't get memory it will return a
+;		Memory Manager-type error and an empty region gibbley. Note that
+;		the region might also be empty with no error (if the bounds is an
+;		empty rectangle or there are no 1 bits in the bitmap). Lastly,
+;		if the region would have to exceed 32K it returns a result of
+;		-500 (rgnTooBigErr).
+;
+;		The bMap parameter may be a pointer to a bitmap, a pointer to a 
+;		pixmap, or a pointer to a portBits field in a color grafport.
+;		In the latter two cases, if the pixmap is not 1-bit deep, an error
+;		result of -148 (pixmapTooDeepErr) is returned.
+;
+; 		(the nibble state machine idea is from the Finder MaskToRgn routine)
+;
+;	History
+;		2/19/88	 RBB	changed to take in washing and handle rect. & empties properly
+;						also now finds minimum rectangle to enclose region
+;		*** version of 2/22/88 ***
+;		2/23/88	 RBB	putting in numerous optimizations recommended by Darin
+;		4/4/88   RBB	trying to re-do lost work from March
+;		         DBA
+;		3/28/89	 CSD	adjusted setup to know about pixmaps and portBits
+;		5/18/89	 BAL	made classic QD friendly
+;
+;________________________________________________________________________________
+;
+;Theory
+;		We scan each line of the bitmap and pump inversion points (ip's) into the region
+;		to put the areas with ones in the bitmap into the region and the areas
+;		with zeroes outside the region.
+;
+;		In order to keep track of where we are in "inversion land" we use two
+;		techniques:
+
+;		The first is a scanline buffer which records the changes
+;		(zeroes to ones and vice versa) as we go. Wherever a change occurs (a
+;		1 next to a 0 in the buffer) we need to put out an inversion point.
+
+;		The second is a togglin' flag which tells us whether we are "inverted" or not.
+;		Since we use a state machine in the innermost (nibble) loop to churn out
+;		ip's, the input to the state machine must be complemented if the flag is set.
+
+;		The loop stuff looks like this:
+;			outer line loop (grows handle in anticipation of worst case for next line)
+;			longword loop for current line (puts out inter-long ip's as needed)
+;			loop for 4 nibbles in current long (calls state maching for each nibble)
+;
+;________________________________________________________________________________
+
+
+BitMapRgnptch	PROC	EXPORT
+
+BMFrame		RECORD	{A6Link},DECR
+result		DS.W	1
+
+paramTop	EQU		*
+
+regionH		DS.L	1
+bMapPtr		DS.L	1
+
+paramSize	EQU		paramTop-*
+
+return		DS.L	1
+A6Link		DS.L	1
+
+rowLongs	DS.L	1							;number of longwords per line
+rightMask	DS.L	1							;mask for rightmost long of each line
+slHandle	DS.L	1							;handle to scanline buffer
+numLines	DS.W	1							;number of lines in bitmap
+rowNumBytes	DS.W	1							;rowbytes from the bitmap
+startSize	DS.W	1							;size of region at start of line
+lastLineH	DS.L	1							;last line (zeroes) handle
+
+handSize	DS.L	1							;size of handle (avoid calls to GetHandleSize)
+max2Add		DS.L	1							;worst case for bytes we could add for next line
+
+localSize	EQU		*
+			ENDR
+
+		WITH	BMFrame
+		LINK	A6,#localSize
+		MOVEM.L	A2-A5/D3-D7,-(SP)				;save work registers
+
+		CLR.L	slHandle(A6)					;no scanline handle, yet
+		CLR.W	result(A6)						;function result presumed zero at start
+
+		MOVE.L	regionH(A6),A0
+		MOVE.L	(A0),A2
+		MOVEQ	#0,D0
+		MOVE.W	(A2),D0							;get size of region
+		MOVE.L	D0,handSize(A6)					;save it long
+
+;get boundary rectangle so we can tell how to process the bitmap
+
+		MOVE.L	bMapPtr(A6),A1					;get bitmap pointer
+		MOVE.W	rowBytes(A1), D0				;rowbytes
+		
+	if hasCQD then
+	
+		BPL.S	@1								;it's a bitmap so go ahead
+		BTST	#isCPort, D0					;is this a ptr to portBits?
+		BEQ.S	@2								;nope; it's a ptr to a pixmap
+		MOVE.L	baseAddr(A1), A0				;get the PixMapHandle
+		MOVE.L	(A0), A1						;and get the real ptr to pixmap
+@2
+		CMP.W	#1, pmPixelSize(A1)				;is it 1 bit per pixel deep?
+		BEQ.S	@1								;if yes, we're fine
+		MOVE.W	#pixmapTooDeepErr, D0			;return an error otherwise
+		BRA		BMRBadEmpty						;clean up and bail out
+@1
+		MOVE.W	rowBytes(A1), rowNumBytes(A6)	;get the rowbytes from the bit/pixmap
+		ANDI.W	#$7FFF, rowNumBytes(A6)			;mask off pixmap flag
+		
+	else
+
+		MOVE.W	rowBytes(A1), rowNumBytes(A6)	;get the rowbytes from the bit/pixmap
+
+	endif	;hasCQD
+	
+		MOVE.L	bounds+topLeft(A1),D2			;get topLeft
+		MOVE.W	bounds+right(A1),D0				;get right
+
+;figure the number of longs per row (according to width, not rowbytes)
+;so we can get a scanline buffer
+		SUB.W	D2,D0							;right - left
+		BLE		BMREmptyOut						;if empty rect. then empty region
+		EXT.L	D0
+		MOVE.L	D0,D4
+		ADD.L	D4,D4							;double width for 2 bytes/ip
+		ADDQ.L	#4+2,D4							;add 4 bytes for y value and $7FFF word
+												;add 2 more for the $7FFF if the last line
+		ADD.L	D4,D4							;double, just 'cause I feel like it!
+		MOVE.L	D4,max2Add(A6)					;save max. bytes for a given line
+
+		MOVEQ	#32,D7							;(side effect: clear high word of D7)
+		DIVU	D7,D0							;number of longs = width/32
+
+;get a mask for the rightmost long into rightMask
+		MOVE.L	D0,D3							;save remainder(hi word)
+		SWAP	D3								;get remainder from width/32
+		MOVEQ	#-1,D1							;default rightmost long mask
+		TST.W	D3								;zero remainder?
+		BEQ.S	@0								;yes, $FFFF is a good mask
+		ADDQ.W	#1,D0							;we need one more long
+		SUB.W	D3,D7							;32 - remainder = zero bits to shift in
+		ASL.L	D7,D1							;get proper mask
+@0		MOVE.L	D1,rightMask(A6)
+		EXT.L	D0
+		MOVE.L	D0,rowLongs(A6)					;save # of longs
+		ASL.L	#2,D0							;longs => bytes
+
+;get the scanline buffer (D0 = number of bytes per line)
+		_NewHandle clear 						;get a scanline buffer (of zeroes)
+		BNE		BMRBadEmpty						;if we failed then return a NIL handle
+
+		MOVE.L	A0,slHandle(A6)					;save buffer handle
+
+;figure the number of lines
+		MOVE.L	D2,D3
+		SWAP	D3								;get top
+		MOVE.W	bounds+bottom(A1),D0			;get bottom
+		SUB.W	D3,D0							;bottom - top
+		BLE		BMREmptyOut						;if empty rect. then empty region
+
+		MOVE.W	D0,numLines(A6)					;number of lines
+		MOVE.L	baseAddr(A1),A4					;point to start of map
+		MOVE.W	#rgnData,D7						;initial region size
+
+;OK, now we start the loops.
+;	A1 will point to the bitmap long,
+;	A2 to the region.
+;	A3 points to the current scanline buffer long.
+;	A4 will point to the row in the map.
+;	A5 points to the current word (= size + A2)
+;	D1 holds the current long (modified).
+;	D2 holds the leftmost coordinate of bitmap.bounds.
+;	D3 has the y coordinate, and
+;	D4 the x coordinate (high word stays clear!).
+;	D5 has number of longs remaining for current line.
+;	D6 holds the (on or off) value of the "beam" (for the line).
+;	D7 holds the size outside the longword loop (used as scratch while nibbling).
+;	   (we assume at the very end that D7's high word has remained clear)
+
+BMRHScramLine
+		MOVE.L	regionH(A6),A2
+		MOVE.L	(A2),A2							;point to start of region
+
+BMRLineLoop
+  		LEA		(A2,D7.W),A5					;point to new region start + size
+
+		MOVE.L	handSize(A6),D1					;get handle size
+		SUB.W	D7,D1							;handle size - region size
+		CMP.L	max2Add(A6),D1					;is there enough for worst case on next line?
+		BGE.S	@1								;skippy if so
+
+		MOVE.L	handSize(A6),D0					;get handle size
+		ADD.L	max2Add(A6),D0					;add more than enough for worst case on next line
+		MOVE.L	D0,handSize(A6)					;save new size
+		MOVE.L	regionH(A6),A0					;region handle
+		_SetHandleSize
+		BNE		BMRBadEmpty						;if we failed then return a NIL handle
+		BRA.S	BMRHScramLine					;rederef. handle and recompute current pointer
+@1
+
+		MOVE.W	D2,D4							;get current x coordinate from left
+		MOVEQ	#0,D6							;beam initially off
+		MOVE.L	A4,A1							;start of current line into map pointer
+		MOVE.L	rowLongs(A6),D5					;longs remaining for current line
+		MOVE.L	slHandle(A6),A3					;A3 points to the current "differences" long
+		MOVE.L	(A3),A3
+
+; Note: within this loop we assume that nothing will be done to move the heap
+
+		MOVE.W	D3,D0							;get y position
+		BSR		OutputRgnWord					;output y pos to region
+
+		MOVE.W	D7,startSize(A6)				;save size at line start (a la Derwood)
+		BRA		NextBMRLong						;enter the long loop
+
+BMRLongLoop
+		MOVE.L	(A1)+,D0						;fetch the next long for this line
+BMRLastLEntry
+		MOVE.L	(A3),D1							;get differences long
+
+		EOR.L	D0,D1							;compute the differences
+		BNE		BMRDiff							;if not the same, skip ahead
+
+BMRSame
+;since we want to skip this long (it matches the previous line) we need to
+;put out an ip if the beam is on
+ 		TST.B	D6								;beam on?
+ 		BEQ.S	@1								;skip if not
+ 		MOVE.W	D4,(A5)+						;pump it out
+ 		MOVEQ	#0,D6							;beam off
+
+@1
+		ADD.W	#32,D4							;slip to next long's x coordinate
+@2 		ADDQ.W	#4,A3							;to next changes buffer long
+		BRA		NextBMRLong
+
+;----------------------------------------------------------------------------------------
+
+; Start of State Machine
+
+; Handle state 0001
+
+BMRState1
+		ADDQ.W	#3,D4							;bump x by 3
+State1Common
+		MOVE.W	D4,(A5)+						;generate one
+;Tog1StateDone
+		ADDQ.W	#1,D4							;bump x by one more
+TogStateDone
+		NOT.B	D6								;toggle state
+		RTS
+
+; Handle state 0010
+
+BMRState2
+		ADDQ.W	#2,D4							;bump x by 2
+		MOVE.W	D4,(A5)+						;generate one
+Gen1BumpBy1
+		BSR.S	Gen1InvPoint					;and another one
+BumpBy1
+		ADDQ.W	#1,D4							;bump once more
+		RTS										;state doesn't change
+
+; Handle state 0011
+
+BMRState3
+		ADDQ.W	#2,D4							;bump x by 2
+		MOVE.W	D4,(A5)+						;generate one
+		ADDQ.W	#2,D4							;bump
+		BRA.S	TogStateDone					;toggle the state
+
+; Handle state 0100
+
+BMRState4
+		BSR.S	Gen1InvPoint
+		BSR.S	Gen1InvPoint
+BumpBy2
+		ADDQ.W	#2,D4
+		RTS
+
+; Handle state 0101
+
+BMRState5
+		BSR.S	BMRState4						;start out as state 4
+		SUBQ	#1,D4
+		BRA.S	State1Common					;use common code
+
+; Handle state 0110
+
+BMRState6
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#1,D4
+		BRA.S	Gen1BumpBy1
+
+; Handle state 0111
+
+BMRState7
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#3,D4
+		BRA.S	TogStateDone
+
+; Gen1InvPoint bumps x by one and then generates a horizontal inversion point
+
+Gen1InvPoint
+		ADDQ.W	#1,D4							;bump by 1, first
+		MOVE.W	D4,(A5)+						;add x value (ip) to region
+		RTS
+
+; Handle State 1000
+
+BMRState8
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#3,D4
+		RTS
+
+; Handle State 1001
+
+BMRState9
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#2,D4
+		BRA.S	State1Common
+
+; Handle State 1010 (most complicated case)
+
+BMRState10
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		BSR.S	Gen1InvPoint
+		BRA.S	Gen1BumpBy1
+
+; Handle State 1011
+
+BMRState11
+		MOVE.W	D4,(A5)+
+		BSR.S	Gen1InvPoint
+		BSR.S	Gen1InvPoint
+		ADDQ.W	#2,D4
+		BRA.S	TogStateDone
+
+; Handle State 1100
+
+BMRState12
+		MOVE.W	D4,(A5)+
+		ADDQ.W	#2,D4
+		MOVE.W	D4,(A5)+
+		BRA.S	BumpBy2
+
+; Handle State 1101
+
+BMRState13
+		BSR.S	BMRState12
+		SUBQ	#1,D4
+		BRA.S	State1Common
+
+; Handle State 1110
+
+BMRState14
+		MOVE.W	D4,(A5)+
+		ADDQ.W	#3,D4
+		MOVE.W	D4,(A5)+
+		BRA.S	BumpBy1
+
+; State table
+
+BMRHandler
+		BRA.S	BMRState0
+		BRA.S	BMRState1
+		BRA.S	BMRState2
+		BRA.S	BMRState3
+
+		BRA.S	BMRState4
+		BRA.S	BMRState5
+		BRA.S	BMRState6
+		BRA.S	BMRState7
+
+		BRA.S	BMRState8
+		BRA.S	BMRState9
+		BRA.S	BMRState10
+		BRA.S	BMRState11
+
+		BRA.S	BMRState12
+		BRA.S	BMRState13
+		BRA.S	BMRState14
+
+; Handle State 15 or 1111
+
+BMRState15
+		MOVE.W	D4,(A5)+						;generate one now
+		NOT.B	D6								;toggle the state
+
+; Handle State 0 or 0000
+
+BMRState0
+		ADDQ.W	#4,D4
+		RTS
+
+; End of the State Guys
+
+;----------------------------------------------------------------------------------------
+
+BMRDiff
+		MOVE.L	D0,(A3)+						;fix up scanline buffer for next time
+
+; this long is different from the last one, so output a bunch
+; of inversion points by pumping it through the state machine, a nibble
+; at a time.
+
+		MOVEQ	#3,D7							;4 bytes to process (D7 high word clear)
+		MOVEQ	#0,D0							;prevent need to mask for first nibble
+
+; here is the loop where we feed it through a nibble at a time.
+; it's worth it to special case a whole byte of 0
+
+BMRByteLoop
+		ROL.L	#8,D1							;get next (topmost) byte
+		TST.B	D1								;is it zero?
+		BNE.S	BMRNibble						;if not, 4 bits at a time
+
+		TST.B	D6
+		BNE.S	BMRNibble						;if beam on, must pass through
+
+;the top 8 are zero, so we can save some time
+
+		ADDQ.W	#8,D4							;bump x
+		BRA.S	BMRNextByte
+
+;take care of the rightmost long for a line
+
+BMRLastLong
+		MOVE.L	(A1),D0							;fetch the long from the bitmap
+		AND.L	rightMask(A6),D0				;mask off right bits that aren't in map
+		BRA		BMRLastLEntry					;go process this long
+
+; handle the first nibble
+
+BMRNibble
+		MOVE.B	D1,D0							;get byte
+		EOR.B	D6,D0							;invert nibble when beam is on
+		LSR.B	#4,D0							;get 1st nibble
+		ADD.W	D0,D0							;double for word index
+
+		JSR		BMRHandler(D0.W)				;invoke the handler
+
+; handle the second nibble
+
+		MOVE.B	D1,D0							;get byte again
+		EOR.B	D6,D0							;invert nibble when beam is on
+		AND.W	#%1111,D0						;mask to it
+		ADD.W	D0,D0							;double for word index
+
+		JSR		BMRHandler(D0.W)				;invoke the handler
+
+BMRNextByte
+		DBRA	D7,BMRByteLoop					;loop for all 8 nibbles
+
+; bump to the next long
+
+NextBMRLong
+		SUBQ.W	#1,D5							;decrement longword index
+		BGT		BMRLongLoop						;not at end, loop for whole line
+		BEQ.S	BMRLastLong						;process last long for this line
+
+; we've reached the end of the (this) line
+BMREOL
+		MOVE.W	A5,D7							;current region pointer
+		SUB.W	A2,D7							;figga region size
+		CMP.W	startSize(A6),D7				;did we add inv. pts to this line?
+		BEQ.S	BMRNoLine						;br = no, so back up
+		BLT		BMR32KErr						;if the size decreased, we overflowed
+
+; if the state is on, generate one last inversion point
+
+		TST.B	D6
+		BEQ.S	@1
+
+		MOVE.W	D4,(A5)+						;generate a last one
+		ADDQ.W	#2,D7							;keep sizable advantage
+@1
+
+; end the scan line with the traditional $7FFF
+
+		BSR.S	OutputLastRgnWord
+
+BMREOL2
+		ADDQ.W	#1,D3							;bump y position
+		MOVE.W	D2,D4							;start x at left again
+		ADD.W	rowNumBytes(A6),A4				;bump to next row in map
+		SUBQ.W	#1,numLines(A6)
+		BGT		BMRLineLoop						;if we're not done then do next line
+		BLT.S	BMRFinis						;br if really done
+
+; as the last line process an imaginary line of zeroes to end the region…
+		MOVE.L	rowLongs(A6),D0
+		ASL.L	#2,D0							;longs => bytes
+		_NewHandle clear						;get a full line of zero bits
+		BNE.S	BMRBadEmpty						;if we failed then return a NIL handle
+		MOVE.L	A0,lastLineH(A6)				;save handle
+		MOVE.L	(A0),A4							;start of current line
+		BRA		BMRHScramLine					;do this last one (and rederef handle)
+
+BMRNoLine
+		SUBQ.L	#2,A5							;back up pointer
+		SUBQ.W	#2,D7							;back down size
+		BRA.S	BMREOL2							;go for next line
+
+; Append the "end of line" token to the region
+
+OutputLastRgnWord
+		MOVE.W	#$7FFF,D0
+
+; OutputRgnWord takes the word in D0, appends it to the region,
+; and leaves the condition codes set for ADDQ.W D7 (which contains the length)
+
+OutputRgnWord
+		MOVE.W	D0,(A5)+						;put a word to the region
+		ADDQ.W	#2,D7							;ink the size
+		RTS
+
+
+; all done so clean up, output the final $7FFF
+BMRFinis
+		MOVE.L	lastLineH(A6),A0
+		_DisposHandle						;get rid of that last line of zeroes
+
+		CMP.W	#10,D7							;is region empty of inversion points?
+		BEQ.S	BMREmptyOut						;skip if so (it's an empty region)
+
+		BSR.S	OutputLastRgnWord				;put End-O-Region ($7FFF) word
+		BMI.S	BMR32KErr						;if we went negative, we overflowed!
+
+; find the smallest rectangle that encompasses all the inversion points
+; A0 will point to the current region word, A1 to the start of the line
+; D1 will have the smallest x, D2 the largest x, D4 will contain $7FFF
+; D3 gets the smallest y value (which we know at the start)
+
+		LEA		rgnData(A2),A0					;point A0 past the rgnBBox
+		MOVE.W	#$7FFF,D4
+		MOVE.W	D4,D1							;smallest x so far = $7FFF
+		MOVE.W	#$8000,D2						;largest x so far = -32768
+		MOVE.W	(A0),D3							;smallest y there is
+		BRA.S	BMRPackStart					;enter loop
+
+BMRPackY
+		MOVE.L	A0,A1							;remember where the y value is (sort of)
+
+		CMP.W	(A0)+,D1						;less than smallest x so far?
+		BLE.S	@1								;skip if not
+		MOVE.W	-2(A0),D1						;new smallest x
+
+@1		CMP.W	(A0)+,D4						;end of line?
+		BNE.S	@1								;if not then keep looking
+
+		CMP.W	-4(A0),D2						;last x greater than largest x so far?
+		BGE.S	BMRPackStart					;skip if not
+		MOVE.W	-4(A0),D2						;new largest x
+
+BMRPackStart
+		MOVE.W	(A0)+,D0						;get next word (y value or $7FFF)
+		CMP.W	D4,D0							;if $7FFF then we're done
+		BNE.S	BMRPackY						;otherwise loop
+
+		SWAP	D3								;top into top word
+		MOVE.W	D1,D3							;left into bottom word
+		MOVE.W	-2(A1),D4						;bottom (from last y at start of line)
+		SWAP	D4								;move bottom to high word
+		MOVE.W	D2,D4							;get right
+
+		CMP.W	#28,D7							;size = 28? (do we have a rect. region?)
+		BEQ.S	BMRRect							;skip if so
+
+		BRA.S	BMROut							;return complex region
+
+;the region would exceed 32K, so we have to error out, man
+BMR32KErr
+		MOVE.W	#rgnTooBigErr,D0				;if >32K needed return error
+
+;we come here after failing a SetHandleSize (or NewHandle)
+BMRBadEmpty
+		MOVE.W	D0,result(A6)					;OSErr function result
+
+; emptify the region on errors (or when it should be empty with no error)
+BMREmptyOut
+		MOVE.L	regionH(A6),A0					;handle to region
+		MOVE.L	(A0),A2							;point to it
+		CLR.L	D3								;(0, 0) to topLeft
+		CLR.L	D4								;(0, 0) to botRight
+
+BMRRect
+		MOVEQ	#10,D7							;the size of the region = 10
+
+;output the region with size (longword, high word clear) in D7
+;D3 comes in with topLeft, D4 with botRight
+BMROut
+		MOVE.W	D7,(A2)+						;the size of the region
+		MOVE.L	D3,(A2)+						;topLeft to rgnBBox
+		MOVE.L	D4,(A2)							;botRight to rgnBBox
+		MOVE.L	D7,D0							;size
+		MOVE.L	regionH(A6),A0					;handle to region
+		_SetHandleSize
+
+BMRDspSL
+		MOVE.L	slHandle(A6),A0
+		_DisposHandle						;get rid of the scanline buffer (even if NIL)
+
+BMRDone
+		MOVEM.L	(SP)+,A2-A5/D3-D7				;restore work registers
+		UNLK	A6
+		MOVE.L	(SP)+,A0						;pop return address
+		ADD 	#paramSize,SP					;pop params
+		JMP 	(A0)
+		ENDWITH
+
+;-------------End of BitMap to Region Code Addition 11/6/89 --------------
+

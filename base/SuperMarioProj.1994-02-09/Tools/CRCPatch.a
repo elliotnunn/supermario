@@ -1,0 +1,131 @@
+;
+;	File:		CRCPatch.a
+;
+;	Contains:	This file does the CRC calculation.
+;
+;	Written by:	George Norman - 7/30/86
+;
+;	Copyright:	© 1986-1992 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM4>	 11/5/92	SWC		Changed SlotEqu.a->Slots.a.
+;	   <SM3>	 5/29/92	KW		(jmp,H3) Made sure the crcCalc is not performed on zero-sized
+;	   <SM2>	 5/29/92	kc		Fix CalcCRC to allow decldata larger than 64k.
+;		 <1>	 1/31/92	JSM		first checked in
+;
+				INCLUDE	'SysEQU.a'
+				INCLUDE	'ROMEqu.a'		;Declaration ROM EQU's				
+				include 'Slots.a'
+
+;=====================================================================
+; _CalcCRC : Calculate CRC
+;
+; PROCEDURE _CalcCRC(SizeCode,DataPtr,crc);
+;=====================================================================
+_CalcCRC		PROC	EXPORT
+
+;VAR
+RetnAddr$a		EQU		A0
+DataPtr$a		EQU		A1
+crcAdrL$a		EQU		A2
+crcAdrH$a		EQU		A3
+Temp$a			EQU		A4
+TopOfData$a		EQU		A5
+
+SizeCode$d		EQU		D0
+crcPos$d		EQU		D1
+crc$d			EQU		D2
+Temp$d			EQU		D3
+Index$d			EQU		D4
+
+;  Define stack-frame
+StackFrame		RECORD {A6Link},DECR
+SizeCode		DS.L	1			;size of code
+DataPtr			DS.L	1			;pointer to data
+crc@			DS.L	1			;VAR crc:longint
+Return			DS.L	1			;Return address
+A6Link			DS.L	1			;Old A6
+				ENDR
+
+;  Other
+dataPtr   		EQU 		$4    					; [handle]	<SM3>
+
+;----------------------------------------------------------------------
+; _CalcCRC
+;----------------------------------------------------------------------
+;BEGIN 
+					WITH	FHeaderRec, StackFrame
+					
+;  Allocate local vars
+				LINK	A6,#0
+				MOVEM.L	A2-A5/D3-D4,-(SP)				;Save registers
+
+
+;  Calculate the address of the crc value.
+				MOVE.L	SizeCode(A6),TopOfData$a		;TopOfData$a := Top of data
+				ADD.L	DataPtr(A6),TopOfData$a
+
+				MOVE.L	TopOfData$a,crcAdrL$a			;crcAdrL$a := TopOfData$a - (fhBlockSize-FH_crc)  {Addr of crc MSB}
+				SUB.L	#fhBlockSize-fhCRC,crcAdrL$a
+				MOVE.L	crcAdrL$a,crcAdrH$a
+				ADD.L	#3,crcAdrH$a					;Addr of crc LSB
+
+
+;  Determine the size of the declaration data to be checked.
+				MOVE.L	TopOfData$a,Temp$a				;Temp$a := TopOfData$a - (fhBlockSize-FH_Length)  {Addr of Length field}
+				SUB.L	#fhBlockSize-fhLength,Temp$a	;Index := length of crc data.
+				MOVE.L	(Temp$a),Index$d				;If there’s nothing to do (i.e., Index == 0),			<SM3>			
+				BEQ.S	theEnd							;	then just leave.									<SM3>
+
+				MOVEQ	#0,crc$d						;crc$d := 0
+				MOVE.L	DataPtr(A6),DataPtr$a			;DataPtr$a := pointer to data
+
+				MOVE.L	SizeCode(A6),Temp$d				;Adjust DataPtr$a
+				SUB.L	Index$d,Temp$d
+				ADD.L	Temp$d,DataPtr$a
+				
+				
+;  Calc the crc value.
+				MOVEQ	#0,Temp$d						;Temp$d := 0
+
+														;REPEAT
+Repeat			ROL.L	#1,crc$d						;  Rotate-left the crc value.
+
+				CMP.L	crcAdrL$a,DataPtr$a				;  IF DataPtr$a IN [crcAdrL$a..crcAdrH$a] THEN
+				BLT.S	C10
+				CMP.L	crcAdrH$a,DataPtr$a
+				BGT.S	C10
+
+				ADDQ.L	#1,DataPtr$a					;    DataPtr$a := DataPtr$a + 1 {Do not include crc in calculation}
+				BRA.S	Until
+														;  ELSE
+C10				MOVE.B	(DataPtr$a)+,Temp$d				;    Temp$d := DataPtr$a^; DataPtr$a := DataPtr$a + 1
+				ADD.L	Temp$d,crc$d					;    crc$d := crc$d + Temp$d
+
+Until			Subq.l	#1,Index$d						;					<SM3>
+				Bne.s	Repeat							;					<SM3>
+														;UNTIL Index$d < 0	
+
+
+;  Patch in the crc result.
+				MOVE.L	crc$d,(crcAdrL$a)
+
+
+;  Move crc result to calling routine.
+				MOVE.L	crc@(A6),Temp$a
+				MOVE.L	crc$d,(Temp$a)
+				
+
+;  Restore globals, cleanup stack & return		
+theEnd			MOVEM.L	(SP)+,A2-A5/D3-D4				;Restore registers					<SM3>
+				UNLK	A6								;Clear stack frame of local vars
+				MOVE.L	(SP)+,RetnAddr$a				;Remove return address
+				ADD.L	#12,SP							;Clear stack-frame of parameters
+				JMP		(RetnAddr$a)					;Return
+
+				ENDWITH
+
+				ENDP
+
+				END

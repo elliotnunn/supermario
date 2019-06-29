@@ -1,0 +1,448 @@
+;
+;	File:			Switch.a
+;
+;	Contains:		Assembler support routines required for process switching.
+;
+;	Written by:		Erich Ringewald
+;
+;	Copyright:		© 1986-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <8>	10/28/92	DTY		It turns out that going through the trap dispatcher is really
+;									expensive, so go back to calling the BlockMove routine directly.
+;									However, set up D1 with the BlockMoveData trap word so that the
+;									cache doesn’t get flushed.  Add a conditional compile so that
+;									_BlockMove is used when building PsychicTV, so the emulator can
+;									still catch BlockMove.
+;		 <7>	10/27/92	DTY		Call BlockMoveData through the dispatcher instead of calling the
+;									BlockMove routine directly.  This gets us two wins:  1)  If we
+;									run under Gary’s emulator, BlockMove is done natively.  2)  On
+;									68K machines, the cache won’t get flushed because we call
+;									BlockMoveData.
+;		 <6>	 3/22/91	DFH		csd,#85216: Don’t disable interrupts while neutralizing VBL
+;									tasks, because it leaves interrupts off too long. Instead, set
+;									the inVBL bit to keep the vertical retrace code from messing
+;									with the queue.
+;		 <5>	 1/14/91	DFH		(JDR) Conditionalize out AUX support.
+;		 <3>	12/14/90	DFH		SwitchAllRegs now is careful to restore the SR before the SP.
+;									This is so things go smoothly when restoring the SR transitions
+;									us between supervisor and user modes.
+;		 <2>	 12/5/90	DFH		Integrated AUX support.
+;		 <0>	 x/xx/86	ELR		New Today.
+;
+;--------------------------------------------------------------------
+
+				CASE	OBJECT
+				LOAD	'ProcessMgrIncludes.D'
+				INCLUDE	'data.a'
+				
+				SEG		'kernel_segment'
+
+;-------------------------------------------------------------------------------
+; void InitializeProcess.  The first code that a process ever executes.
+InitializeProcess	PROC	EXPORT
+				IMPORT	BeginApplication:CODE
+		
+				jsr		BeginApplication				; initialize TB & OS
+				rts
+				
+				ENDPROC									; InitializeProcess
+		
+;-------------------------------------------------------------------------------
+; void FPInit(void)
+; Clear out the initial FPU state for this process
+FPInit			PROC	EXPORT
+		  
+				MC68881									; using the damn FPU!
+				
+				moveq.l	#0,d0
+				move.l	d0,-(sp)						; push null state frame
+				frestore	(sp)+						; and use it to reset FPU state
+				rts
+				
+				ENDPROC									; FPInit
+		
+;-------------------------------------------------------------------------------
+; 
+; SwitchAllRegs.  This is the machine level context switch routine.  It is preferred
+; over SwitchCPURegs when a Floating Point Unit (FPU) is present.  pOldSP points to the
+; stack where the current application's machine context should be saved.  pNewSP points
+; the stack where the incoming application's machine context is stored.
+; Call:
+;
+;	void	SwitchAllRegs(StackPtr pOldSP, StackPtr pNewSP);
+;
+SwitchAllRegs	PROC	EXPORT
+				
+				IMPORT	SwitchCPURegs:CODE
+SaveRegs		REG		d0/d1							; working registers
+SaveRegsSize	EQU		2*4
+pOldSP			EQU		4+SaveRegsSize					; first parameter
+pNewSP			EQU		8+SaveRegsSize					; second parameter
+
+				MC68881									; using the damn FPU!
+				
+				movem.l	SaveRegs,-(sp)					; save working registers
+				move.l	pOldSP(sp),d0					; address of old save area			
+				move.l	pNewSP(sp),d1					; address of new save area
+
+; save the floating point registers of the outgoing process
+				fsave	-(sp)							; save fpu context
+				tst.b	(sp)							; need user regs?
+				beq.s	FPRegsSaved						; nope
+				fmovem	fp0-fp7,-(sp)					; save data regs
+				fmovem	fpcr/fpsr/fpiar,-(sp)			; and control
+				st		-(sp)							; push 'full' flag
+FPRegsSaved
+
+; switch the regular CPU regs (in new process after this call!)
+				move.l	d1,-(sp)						; pass new area for SwitchCPURegs
+				move.l	d0,-(sp)						; pass old area for SwitchCPURegs
+				jsr		SwitchCPURegs					; go context switch
+				addq	#8,sp							; skip these parameters
+
+; restore floating point registers of incoming process			
+				tst.b	(sp)							; check for null or not-null
+				beq.s	FPUserRegsOK					; no user areas
+				addq.l	#2,sp							; throw away not-null flag
+				fmovem	(sp)+,fpcr/fpsr/fpiar			; restore part of user FP regs
+				fmovem	(sp)+,fp0-fp7					; restore remainder
+FPUserRegsOK
+				frestore	(sp)+						; restore normal FP regs
+				movem.l	(sp)+,SaveRegs					; restore working registers
+				rts
+				
+				ENDPROC									; SwitchAllRegs
+		
+;__________________________________________________________________________________
+;
+; SwitchCPURegs.  This is the machine level context switch routine.  It is preferred
+; over SwitchAllRegs when a Floating Point Unit (FPU) is *not* present.  pOldSP points
+; to the stack where the current application's machine context should be saved.  pNewSP
+; points the stack where the incoming application's machine context is stored.
+; Call:
+;
+;	void	SwitchCPURegs(StackPtr pOldSP, StackPtr pNewSP);
+;
+
+pOldSP			EQU		4								; first parameter
+pNewSP			EQU		8								; second parameter
+
+RegsToSwitch	REG		d2-d7/a2-a6						; regs that we need to switch
+SizeOfRegSwitch	EQU		(11*4) + 2						; bytes in RegsToSwitch and sr
+
+SwitchCPURegs	PROC	EXPORT
+
+; save old state on the old stack (PC is already there, from JSR to this routine)
+				move.l	pOldSP(sp),a0					; get ptr to PEntry->p_sp from stack
+				move	sr,-(sp)						; save old sr
+				movem.l	RegsToSwitch,-(sp)				; save old regs
+				cmpa	#0,a0							; have place to save resulting sp?
+				beq.s	noSave							; jump if not
+				move.l	sp,(a0)							; save old sp into PEntry
+noSave
+
+; set new stack pointer, then the rest of the registers (PC restored via RTS)
+				move.l	SizeOfRegSwitch+pNewSP(sp),a0	; get new guy's sp
+				movem.l	(a0)+,RegsToSwitch				; set up his saved regs
+				move.w	(a0)+,sr						; restore his sr
+				movea.l	a0,sp							; restore stack ptr after sr
+				rts										; and return (to new process)
+				
+				ENDPROC									; SwitchCPURegs
+
+		
+;__________________________________________________________________________________
+; disable.  Turn off interrupts except for the NMI.  Return the interrupt level that
+; we wiped.  spl is our buddy.
+disable			PROC	EXPORT
+
+				moveq	#0,d0
+				move	sr,d0							; get current priority
+				lsr		#8,d0							; shift into low bytes
+				andi	#7,d0							; mask trace/supervisor
+				ori		#$0700,sr						; force to level 7
+				rts
+				
+				ENDPROC									; disable
+				
+;__________________________________________________________________________________
+; spl.  Set the CPU interrupt level to the given value.  Companion of disable.
+spl				PROC	EXPORT
+
+				move	sr,d0							; get current setting
+				move	6(sp),d1						; get desired level
+				lsl		#8,d1							; up into top byte
+				andi	#$F8FF,d0						; down to level 0
+				or		d1,d0							; set our level bits
+				move	d0,sr							; this is our new sr
+				rts
+				
+				ENDPROC									; spl
+
+;__________________________________________________________________________________
+; AtomicVBLSave.   Neutralizes VBLs whose routine address is located between lowAddr and
+; highAddr.  Saves restoration information in specified handle.  Does this with
+; interrupts off so that we're not fouled up by VBLs that alter the VBL queue.
+; Call:
+;
+; 	void		AtomicVBLSave(Handle saveArea, unsigned long lowAddr, unsigned long highAddr);
+;
+AtomicVBLSave	PROC	EXPORT
+
+				IMPORT	disable, spl, dummyvbl:CODE
+				IF (&TYPE('HAS_AUX_PROCESSMGR') <> 'UNDEFINED') THEN
+				IMPORT	AUXIsPresent:DATA
+				ENDIF
+				
+SaveRegs		REG		a2-a3							; registers we need to save and restore
+SaveRegSize		EQU		2*4								; size of registers we save on stack
+saveArea		EQU		4+SaveRegSize					; first parameter
+lowAddr			EQU		8+SaveRegSize					; second parameter
+highAddr		EQU		12+SaveRegSize					; third parameter
+				
+				movem.l	SaveRegs,-(sp)					; save regs we use
+				bset.b	#inVBL, qFlags+VBLQueue			; we own the queue now
+				
+				movea.l	lowAddr(sp),a2					; get low end of range
+				movea.l	highAddr(sp),a3					; get high end of range
+				movea.l	qHead+VBLQueue,a1				; get address of first VBL
+				move.l	sp,d2							; remember stack pointer
+
+; first -- loop to neutralize VBLs, saving their state on the stack (temporarily)				
+infoLoop
+				move.l	a1,d0							; all done?
+				beq.s	saveInfo						; jump if so
+				
+				move.l	vblAddr(a1),d0					; get routine address
+				_StripAddress							; strip it!
+				cmp.l	d0,a2							; is it above the base?
+				bhi.s	nextVBL							; jump if not
+				cmp.l	d0,a3							; is it below the bound?
+				IF (&TYPE('HAS_AUX_PROCESSMGR') <> 'UNDEFINED') THEN
+				bhi.s	saveVBL							; jump if so, switch this VBL
+
+; VBLs owned by AUX coffs can also be above PhysMemTop
+				tst.w	AUXIsPresent					; running under AUX?
+				beq.s	nextVBL							; if not, check is not valid
+				cmp.l	PhysMemTop,d0					; is VBL address above PhysMemTop?
+				bcs.s	nextVBL							; if not, VBL needn't be switched
+				ELSE
+				bls.s	nextVBL							; if not, VBL needn't be switched
+				ENDIF
+
+; save info in format of a VBLDesc
+saveVBL
+				move.w	vblCount(a1),-(sp)				; save count
+				move.l	vblAddr(a1),-(sp)				; save (unstripped) routine address
+				move.l	a1,-(sp)						; save VBL address
+	
+; neutralize this VBL
+				move	#$7FFF,vblCount(a1)				; VERY large count
+				lea		dummyvbl,a0						; address of dummy VBL
+				move.l	a0,vblAddr(a1)					; route VBL there
+
+nextVBL
+				movea.l	vblink(a1),a1					; move to next VBL
+				bra.s	infoLoop						; and repeat
+				
+; second - copy VBL state info into the handle
+saveInfo
+				bclr.b	#inVBL, qFlags+VBLQueue			; free the queue for use
+				
+				movea.l	d2,a1							; get original stack pointer
+				movea.l	saveArea(a1),a0					; get the handle
+				move.l	d2,d0							; original stack pointer
+				sub.l	sp,d0							; size we'll need
+				move.l	d0,d1							; save it for block move
+				_SetHandleSize							; adjust the size
+				bne.s	leaveNow						; jump if it didn't work
+				
+				move.l	d1,d0							; (count) size we'll need
+				beq.s	leaveNow						; jump if we found nothing
+				movea.l	saveArea(a1),a1					; get the handle
+				movea.l	(a1),a1							; (destination) get pointer heap block
+				movea.l	sp,a0							; (source) get pointer to stacked info
+				_BlockMoveData							; copy the data
+
+; cleanup up and leave
+leaveNow
+				move.l	d2,sp							; restore stack pointer
+				movem.l	(sp)+,SaveRegs					; restore regs we used
+				rts
+				
+				ENDPROC									; AtomicVBLSave
+
+; dummyvbl.  The routine address we stuff in a VBL descriptor that belongs to
+; a switched out process.  Just resets the counter.  This keeps the VBL around.
+dummyvbl		PROC	EXPORT
+
+				move	#$7FFF,vblCount(a0)				; reset the swapped out vbl.
+				rts
+				
+				ENDPROC									; dummyvbl
+
+;__________________________________________________________________________________
+; save_lmemtab.  Copy the switchable lomem into a safe area.
+save_lmemtab	PROC	EXPORT
+				IMPORT	(switchTabPtr, blockTrapAddr):DATA
+SaveRegs		REG		a2-a4/d1-d2
+SaveRegSize		EQU		5*4
+
+				movem.l	SaveRegs,-(sp)					; save work registers
+				move.l	SaveRegSize+4(sp),a4			; get pointer to PCB storage
+				move.l	switchTabPtr,a2					; set up ptr to switch tab
+				move.l	blockTrapAddr,a3
+				
+; major loop - save all the ranges of lomem we care about
+SaveAllLoop
+				moveq.l	#0,d0							; because _BlockMove takes a longword
+				move.w	(a2)+,d0						; get length word
+				beq.s	AllSaved						; 0 terminates table
+				move.l	(a2)+,a0						; get address longword
+				
+				IF (&TYPE('SWITCH_MEMBLOCKS') <> 'UNDEFINED') THEN
+; support for saving contents of handles or pointers -- not needed!!	
+; NOTE: What if handle is purged??
+				bclr	#15,d0							; clear top bit
+				beq.s	SaveRange						; branch if wasn't already set
+
+				move.l	(a0),a0							; deref once for ptr
+				bclr	#14,d0							; clear next bit
+				beq.s	SavePtrBlock					; branch if wasn't already set
+				
+				move.l	(a0),a0							; deref again for handle
+				tst.w	d0								; is count known?
+				bne.s	SaveRange						; if so, go do it
+				_GetHandleSize							; set d0 to switch entire handle
+				bra.s	SaveRange						; and go do transfer
+		
+SavePtrBlock
+				tst.w	d0								; is count known?
+				bne.s	SaveRange						; if so, go do it
+				_GetPtrSize								; set d0 to switch entire ptr
+SaveRange
+				ENDIF
+				
+; have source, count, and destination -- decide whether to call BlockMove or to do it by hand	
+				cmp.w	#FastBMSize,d0					; enough for _BlockMove to be efficient?
+				bge.s	UseBlockMove					; if so, branch
+		
+
+; minor loop -- move the bytes ourselves, since it'll be faster than BlockMove
+				subq.w	#1,d0							; alias it to zero-based
+SaveOneLoop
+				move.b	(a0)+,(a4)+						; move the byte
+				dbra	d0,SaveOneLoop					; and loop
+				
+				bra.s	SaveAllLoop						; now get next entry
+
+; call _BlockMove, since it's faster for larger chunks
+;
+; <8> Going through the trap dispatcher is more expensive than I thought.  Go back
+;	to calling the BlockMove routine directly.  However, set up D1 so that the caches
+;	still don’t get flushed.  We still want to call the trap for PsychicTV however, so
+;	that the emulator can do it’s native BlockMove.
+
+UseBlockMove		
+				move.l	a4,a1							; a1 = destination
+				add.l	d0,a4							; update our storage address
+	if not(PsychicTV) then
+				move.w	#$A22E,d1						; <8>
+				jsr		(a3)
+	else
+				_BlockMove								; <8>
+	endif
+				
+				bra.s	SaveAllLoop						; now get next entry
+
+; cleanup and leave	
+AllSaved		
+				movem.l	(sp)+,SaveRegs					; restore work registers
+				rts
+				
+				ENDPROC									; save_lmemtab
+
+;__________________________________________________________________________________
+; restore_lmemtab.  Copy the saved switchable lomem back into lomem.
+restore_lmemtab	PROC	EXPORT
+				IMPORT	(switchTabPtr, blockTrapAddr):DATA
+SaveRegs		REG		a2-a4/d1-d2
+SaveRegSize		EQU		5*4
+
+				movem.l	SaveRegs,-(sp)					; save work registers
+				move.l	SaveRegSize+4(sp),a4			; get pointer to PCB storage
+				move.l	switchTabPtr,a2					; set up dest register
+				move.l	blockTrapAddr,a3
+				
+; major loop - restore all the ranges of lomem we care about
+RestoreAllLoop
+				moveq.l	#0,d0							; because _BlockMove takes a longword
+				move.w	(a2)+,d0						; get length word
+				beq.s	AllRestored						; 0 terminates table
+				move.l	(a2)+,a1						; get address longword
+
+				IF (&TYPE('SWITCH_MEMBLOCKS') <> 'UNDEFINED') THEN
+; support for saving contents of handles or pointers -- not needed!!			
+; NOTE: What if handle is purged??
+				bclr	#15,d0							; clear top bit
+				beq.s	RestoreRange					; branch if wasn't already set
+				
+				move.l	(a1),a1							; deref once for ptr
+				bclr	#14,d0							; clear next bit
+				beq.s	RestorePtrBlock					; branch if wasn't already set
+				
+				move.l	(a1),a1							; deref again for hdl
+				tst.w	d0								; is it 0?
+				bne.s	RestoreRange					; if not done
+				_GetHandleSize
+				bra.s	RestoreRange					; and go do transfer
+		
+RestorePtrBlock
+				tst.w	d0								; is it 0?
+				bne.s	RestoreRange					; if not done
+				_GetPtrSize
+		
+RestoreRange
+				ENDIF
+
+; have source, count, and destination -- decide whether to call BlockMove or to do it by hand	
+				cmp.w	#FastBMSize,d0					; is it big enough to use _BlockMove?
+				bge.s	UseBlockMove					; if so, branch
+		
+; minor loop -- move the bytes ourselves, since it'll be faster than BlockMove
+				subq.w	#1,d0							; alias it to zero-based
+RestoreOneLoop
+				move.b	(a4)+,(a1)+						; move the byte
+				dbra	d0,RestoreOneLoop				; and loop
+				bra.s	RestoreAllLoop					; now get next entry
+		
+; call _BlockMove, since it's faster for larger chunks
+;
+; <8> Going through the trap dispatcher is more expensive than I thought.  Go back
+;	to calling the BlockMove routine directly.  However, set up D1 so that the caches
+;	still don’t get flushed.  We still want to call the trap for PsychicTV however, so
+;	that the emulator can do it’s native BlockMove.
+;
+
+UseBlockMove		
+				move.l	a4,a0							; setup source pointer for blockmove
+				add		d0,a4							; and increment pointer by count
+	if not(PsychicTV) then
+				move.w	#$A22E,d1						; <8>
+				jsr		(a3)
+	else
+				_BlockMove								; <8>
+	endif
+				
+				bra.s	RestoreAllLoop					; now get next entry
+		
+; cleanup and leave	
+AllRestored		
+				movem.l	(sp)+,SaveRegs					; restore work registers
+				rts
+
+				ENDPROC									; restore_lmemtab
+				
+				END

@@ -1,0 +1,1411 @@
+;EASE$$$ READ ONLY COPY of file “POLYGONS.m.a”
+; 1.2	cv 03/23/1989  Adding code corresponding to patch PMA361.  It incorporates
+; the routines from QuickPolysClassicPatch.a and speeds up polygons.
+; 1.1	CCH 11/11/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.2	CCH 10/12/1988 Changed “m.GrafType.a” to “GrafType.m.a”.
+; 1.1	MSH 5/18/88 Changed inclides to use m.GRAPHTYPES to work under EASE.
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+
+
+		BLANKS	ON
+		STRING	ASIS
+
+		INCLUDE  'GRAFTYPES.m.a'
+ 		INCLUDE  'traps.a'			;<1.2/15mar89>
+;--------------------------------------------------------------
+;
+;
+;	  ****	  ***	*	 *	 *	 ***	***   *   *   ***
+;	  *   *  *	 *	*	  * *	*	*  *   *  *   *  *	 *
+;	  *   *  *	 *	*	   *	*	   *   *  **  *  *
+;	  ****	 *	 *	*	   *	*  **  *   *  * * *   ***
+;	  * 	 *	 *	*	   *	*	*  *   *  *  **  *
+;	  * 	 *	 *	*	   *	*	*  *   *  *   *  *	 *
+;	  * 	  ***	*****  *	 ***	***   *   *   ***
+;
+;
+
+; <1.2/15mar89> This is the revision history for the old polygons.m.a file prior to rolling
+; 				in the new code from QuickPolysClassicPatch.a.  
+;_______________________________________________________________________________________
+;  This code replaces StdPoly with a version that has two important features.  It does
+;  not use QuickDraw regions, and so does not blow up.  In addition, for screen sized
+;  polygons it performs about 4 times faster than QuickDraw polygons.
+;_______________________________________________________________________________________
+;
+; modification history
+;
+; <18Jan88>		 	AWC		MacPlus/SE rom patch installed this date
+; <24Mar88>	PMAB440	AWC		Fixed sorting problem to make QuickPolys match Classic QuickDraw
+; <26Mar88>	PMAB444	AWC		Fixed nil NewHandle bug in QuickPolys; refixed save A0 across _FixRatio
+; <31Mar88>	PMAB451	AWC		Fixed a bug in PMAB440 above and saved registers across FixRatio
+; <25Jul88>	PMAB543	BAL/JDB	Implemented fast case for rectangular filled polys.
+;
+
+;-------------------------------------------------------------
+;
+; Definition of the VectorRec structure
+;
+YVector		Equ		0
+XVector		Equ		2
+YDelta		Equ		4
+XDelta		Equ		6
+VectorSize	Equ		8
+
+;-------------------------------------------------------------
+;
+; Definition of the EdgeRec structure
+;
+
+NextEdge 	Equ		0					; pointer to next edge
+PrevEdge	Equ		NextEdge+4			; pointer to previous edge
+XValue		Equ		PrevEdge+4			; current x position (Fixed)
+XSlope		Equ		XValue+4			; slope of the line (Fixed)
+LastY		Equ		XSlope+4			; end of the edge
+Sign		Equ		LastY+2				; sign of the vector (+1 or -1)
+EdgeRecSize	Equ		Sign+2				; size of the EdgeRec structure (20)
+
+;-------------------------------------------------------------
+; Flag to switch between the old polygons and new quickpolys rtns
+;
+QuickPolys		EQU		1
+
+;-------------------------------------------------------------
+;
+
+StdPoly PROC	EXPORT	
+		IMPORT	CheckPic,PutPicVerb,DPutPicByte,PutPicRgn
+		IMPORT	PushVerb,FrPoly,RSect,DrawPoly
+
+
+;---------------------------------------------------------------
+;
+;  PROCEDURE StdPoly(verb: GrafVerb; poly: PolyHandle);
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	6
+VERB			EQU 	PARAMSIZE+8-2	;GRAFVERB
+POLY			EQU 	VERB-4			;LONG, PolyHandle
+
+MINRECT 		EQU 	-8				;RECT
+VARSIZE 		EQU 	MINRECT 		;TOTAL BYTES OF LOCALS
+
+		LINK	A6,#VARSIZE 			;ALLOCATE STACK FRAME
+		MOVEM.L D5-D7/A2-A4,-(SP)		;SAVE REGS
+		MOVE.B	VERB(A6),D7 			;GET VERB
+		JSR 	CHECKPIC				;SET UP A4,A3 AND CHECK PICSAVE
+		BLE.S	NOTPIC					;BRANCH IF NOT PICSAVE
+
+		MOVE.B	D7,-(SP)
+		JSR 	PutPicVerb				;PUT ADDIONAL PARAMS TO THEPIC
+		MOVEQ	#$70,D0 				;PUT POLYNOUN IN HI NIBBLE
+		ADD 	D7,D0					;PUT VERB IN LO NIBBLE
+		JSR 	DPutPicByte 			;PUT OPCODE TO THEPIC
+		MOVE.L	POLY(A6),-(SP)			;PUSH POLYHANDLE
+		JSR 	PutPicRgn				;TREAT SAME AS A REGION
+
+NOTPIC	MOVE.L	POLY(A6),A2 			;GET POLYHANDLE
+		TST.B	D7						;IS VERB FRAME ?
+		BNE.S	NOTFR					;NO, CONTINUE
+		MOVE.L	A2,-(SP)				;PUSH POLYHANDLE
+		JSR 	FrPoly					;FrPoly(poly);
+		BRA.S	GOHOME					;AND QUIT
+
+NOTFR	MOVE.L	(A2),A0 				;DE-REFERANCE POLYHANDLE
+		PEA 	POLYBBOX(A0)			;PUSH POLYBBOX
+		MOVE.L	VISRGN(A3),A0			;GET VISRGN HANDLE
+		MOVE.L	(A0),A0 				;DE-REFERENCE HANDLE
+		PEA 	RGNBBOX(A0) 			;PUSH VISRGN BBOX
+		MOVE.L	CLIPRGN(A3),A0			;GET CLIPRGN HANDLE
+		MOVE.L	(A0),A0 				;DE-REFERENCE HANDLE
+		PEA 	RGNBBOX(A0) 			;PUSH CLIPRGN BBOX
+		MOVE	#3,-(SP)				;PUSH NRECTS = 3
+		PEA 	MINRECT(A6) 			;PUT RESULT IN MINRECT
+		JSR 	RSECT					;CALC INTERSECTION
+		BEQ.S	GOHOME					;QUIT IF NO INTERSECT
+
+		MOVE.L	A2,-(SP)				;PUSH POLYHANDLE
+		JSR 	PushVerb				;PUSH MODE AND PATTERN
+		JSR 	DrawPoly				;DrawPoly(poly,mode,pat);
+
+GOHOME	MOVEM.L (SP)+,D5-D7/A2-A4		;RESTORE REGS
+		UNLINK	PARAMSIZE,'STDPOLY '
+
+
+FramePoly PROC	 EXPORT 	
+		EXPORT CallPoly,PaintPoly,ErasePoly,InvertPoly,FillPoly
+;-----------------------------------------------------
+;
+;  PROCEDURE FramePoly(* poly: PolyHandle *);
+;
+		MOVEQ	#FRAME,D0				;VERB = FRAME
+		BRA.S	CallPoly				;SHARE COMMON CODE
+
+
+
+;-----------------------------------------------------
+;
+;  PROCEDURE PaintPoly(* poly: PolyHandle *);
+;
+PaintPoly
+		MOVEQ	#PAINT,D0				;VERB = PAINT
+		BRA.S	CallPoly				;SHARE COMMON CODE
+
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE ErasePoly(* poly: PolyHandle *);
+;
+ErasePoly
+		MOVEQ	#ERASE,D0				;VERB = ERASE
+		BRA.S	CallPoly				;SHARE COMMON CODE
+
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE InvertPoly(* poly: PolyHandle *);
+;
+InvertPoly
+		MOVEQ	#INVERT,D0				;VERB = INVERT
+		BRA.S	CallPoly				;SHARE COMMON CODE
+
+
+
+;--------------------------------------------------------
+;
+;  PROCEDURE FillPoly(* poly: PolyHandle; pat: Pattern *);
+;
+FillPoly
+		MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		MOVE.L	(SP)+,A1				;POP ADDR OF PATTERN
+		MOVE.L	A0,-(SP)				;PUT RETURN ADDR BACK
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		LEA 	FILLPAT(A0),A0				;POINT TO FILLPAT
+		MOVE.L	(A1)+,(A0)+ 			;COPY PAT INTO FILLPAT
+		MOVE.L	(A1)+,(A0)+ 			;ALL EIGHT BYTES
+		MOVEQ	#FILL,D0				;VERB = FILL
+		BRA.S	CallPoly				;SHARE COMMON CODE
+
+
+
+;---------------------------------------------------------------
+;
+;  PROCEDURE CallPoly(poly: PolyHandle);
+;
+;  code shared by FramePoly, PaintPoly, ErasePoly, InvertPoly, and FillPoly.
+;  enter with verb in D0.
+;
+CallPoly
+		MOVE.L	(SP)+,A0				;POP RETURN ADDR
+		MOVE.L	(SP)+,A1				;POP POLY
+		MOVE.B	D0,-(SP)				;PUSH VERB
+		MOVE.L	A1,-(SP)				;PUSH POLY
+		MOVE.L	A0,-(SP)				;RESTORE RETURN ADDR
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE.L	GRAFPROCS(A0),D0			;IS GRAFPROCS NIL ?
+		MOVE.L	JStdPoly,A0 			;get piece of trap table
+		BEQ.S	USESTD					;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	POLYPROC(A0),A0 			;NO, GET PROC PTR
+USESTD	JMP 	(A0)					;GO TO IT
+
+
+
+OpenPoly FUNC	 EXPORT 
+		IMPORT	HidePen,NewHandle
+;---------------------------------------------------------------
+;
+;  FUNCTION OpenPoly: PolyHandle;
+;
+STARTSIZE		EQU 	138 			;ENOUGH FOR 32 POINTS
+
+		JSR 	HidePen 				;TURN OFF DRAWING
+		CLR.L	-(SP)					;MAKE ROOM FOR FCN RESULT
+		MOVE	#STARTSIZE,-(SP)			;PUSH BYTE COUNT = STARTSIZE
+		JSR 	NEWHANDLE				;ALLOCATE NEWHANDLE
+		MOVE.L	(SP)+,A1				;POP RESULTING HANDLE
+		MOVE.L	A1,4(SP)				;PUT HANDLE IN FCN RESULT
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	A1,THEPOLY(A0)				;REMEMBER HANDLE IN THEPOLY
+		MOVE	#STARTSIZE,POLYMAX(A0)			;POLYMAX := STARTSIZE;
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVEQ	#1,D0
+		MOVE.L	D0,POLYSAVE(A0) 			;POLYSAVE := TRUE
+		MOVE.L	(A1),A1 				;DE-REFERENCE HANDLE
+		MOVE	#10,(A1)+				;INSTALL POLYSIZE = 10
+		CLR.L	(A1)+					;ZERO OUT POLYBBOX
+		CLR.L	(A1)+
+		RTS 					;RETURN
+
+
+
+ClosePoly PROC	  EXPORT	
+		IMPORT	SETHSIZE,ShowPen
+;---------------------------------------------------------------
+;
+;  PROCEDURE ClosePoly;
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+		MOVEM.L D3-D7/A4,-(SP)				;SAVE REGS
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A0				;GET CURRENT GRAFPORT
+		CLR.L	POLYSAVE(A0)				;POLYSAVE := FALSE
+		MOVE.L	THEPOLY(A4),A4				;GET THEPOLY HANDLE
+		MOVE.L	(A4),A0 				;DE-REFERENCE THEPOLY
+		MOVE	(A0)+,D7				;GET POLYSIZE
+		CLR.L	(A0)+					;ZERO OUT POLYBBOX
+		CLR.L	(A0)+
+		MOVE	D7,D6
+		SUB 	#10,D6
+		LSR 	#2,D6					;NPOINTS = (SIZE-10) DIV 4
+		BEQ.S	EMPTY					;QUIT IF NO POINTS
+
+
+;-----------------------------------------------------
+;
+;  SCAN FOR BOUNDING BOX OF POLYGON
+;
+		MOVE	(A0)+,D1				;TOP := FIRST POINT VERT
+		MOVE	D1,D2					;BOTTOM := FIRST POINT VERT
+		MOVE	(A0)+,D3				;LEFT := FIRST POINT HORIZ
+		MOVE	D3,D4					;RIGHT := FIRST POINT HORIZ
+		SUB 	#1,D6					;DECREMENT POINT COUNT
+		BRA.S	RIGHTOK 				;GO TO LOOP START
+NEXTPT	MOVE	(A0)+,D0				;GET VERT COORD
+		CMP 	D1,D0					;IS VERT < BBOX TOP ?
+		BGE.S	TOPOK					;NO, CONTINUE
+		MOVE	D0,D1					;YES, UPDATE BBOX TOP
+TOPOK	CMP 	D2,D0					;IS VERT > BBOX BOTTOM ?
+		BLE.S	BOTOK					;NO, CONTINUE
+		MOVE	D0,D2					;YES, UPDATE BBOX BOTTOM
+BOTOK	MOVE	(A0)+,D0				;GET HORIZ COORD
+		CMP 	D3,D0					;IS HORIZ < BBOX LEFT ?
+		BGE.S	LEFTOK					;NO, CONTINUE
+		MOVE	D0,D3					;YES, UPDATE BBOX LEFT
+LEFTOK	CMP 	D4,D0					;IS HORIZ > BBOX RIGHT ?
+		BLE.S	RIGHTOK 				;NO, CONTINUE
+		MOVE	D0,D4					;YES, UPDATE BBOX RIGHT
+RIGHTOK DBRA	D6,NEXTPT				;LOOP ALL POINTS
+		MOVE.L	(A4),A0 				;DE-REFERENCE THEPOLY
+		LEA 	POLYBBOX(A0),A0 			;POINT TO POLYBBOX
+		MOVE	D1,(A0)+				;INSTALL BBOX TOP
+		MOVE	D3,(A0)+				;INSTALL BBOX LEFT
+		MOVE	D2,(A0)+				;INSTALL BBOX BOTTOM
+		MOVE	D4,(A0)+				;INSTALL BBOX RIGHT
+
+
+;--------------------------------------------------------
+;
+;  TRIM THEPOLY TO FINAL SIZE, SHOW PEN AND QUIT
+;
+EMPTY	MOVE.L	A4,-(SP)				;PUSH THEPOLY HANDLE
+		MOVE	D7,-(SP)				;PUSH BYTECOUNT = POLYSIZE
+		JSR 	SETHSIZE 				;TRIM TO MINIMUM SIZE
+		JSR 	SHOWPEN 				;RESTORE PNVIS
+		MOVEM.L (SP)+,D3-D7/A4				;RESTORE REGS
+		RTS 					;AND RETURN
+
+
+
+KillPoly PROC	 EXPORT 
+;---------------------------------------------------
+;
+;  PROCEDURE KillPoly(poly: PolyHandle);
+;
+		MOVE.L	(SP)+,A1				;pop return addr
+		MOVE.L	(SP)+,A0				;pop handle
+		_DisposHandle					;discard it
+		JMP 	(A1)					;and return
+
+
+
+
+OffsetPoly PROC    EXPORT	
+;---------------------------------------------------
+;
+;  PROCEDURE OffsetPoly(poly: PolyHandle; dh,dv: INTEGER);
+;
+		MOVE.L	(SP)+,A0				;POP RETURN ADDRESS
+		MOVE	(SP)+,D0				;POP DV
+		MOVE	(SP)+,D1				;POP DH
+		MOVE.L	(SP)+,A1				;POP POLYHANDLE
+		MOVE.L	(A1),A1 				;DE-REFERENCE POLYHANDLE
+		MOVE	(A1)+,D2				;GET POLYSIZE
+		SUB 	#2,D2					;CALC TOTAL # POINTS, INCL BBOX
+		LSR 	#2,D2					; # POINTS = (SIZE-2) DIV 4
+		SUB 	#1,D2					;INIT DBRA COUNT
+NEXTPT	ADD 	D0,(A1)+				;OFFSET VERT COORD
+		ADD 	D1,(A1)+				;OFFSET HORIZ COORD
+		DBRA	D2,NEXTPT				;LOOP FOR ALL POINTS
+		JMP 	(A0)					;AND RETURN
+
+
+
+MapPoly PROC  EXPORT
+		IMPORT MapPt,MapRect
+;-------------------------------------------------------------
+;
+;  PROCEDURE MapPoly(poly: PolyHandle; fromRect,toRect: Rect);
+;
+;  A6 OFFSETS OF PARAMETERS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	12
+POLY			EQU 	PARAMSIZE+8-4			;LONG, RGNHANDLE
+FROMRECT		EQU 	POLY-4				;LONG, ADDR OF RECT
+TORECT			EQU 	FROMRECT-4			;LONG, ADDR OF RECT
+
+		LINK	A6,#0					;ALLOCATE STACK FRAME
+		MOVEM.L D7/A2-A4,-(SP)				;SAVE REGS
+;
+; QUIT FAST IF FROMRECT = TORECT
+;
+		MOVE.L	FROMRECT(A6),A2 			;POINT TO FROMRECT
+		MOVE.L	TORECT(A6),A3				;POINT TO TORECT
+		MOVE.L	(A2),D0
+		CMP.L	(A3),D0 				;IS TOPLEFT SAME ?
+		BNE.S	NOTSAME 				;NO, CONTINUE
+		MOVE.L	4(A2),D0
+		CMP.L	4(A3),D0				;YES, IS BOTRIGHT SAME TOO ?
+		BEQ.S	DONE					;IF SO, JUST QUIT
+
+NOTSAME MOVE.L	POLY(A6),A4 			;GET POLYHANDLE
+		MOVE.L	(A4),A4 				;DE-REFERENCE POLYHANDLE
+		PEA 	POLYBBOX(A4)				;PUSH ADDR OF BBOX
+		MOVE.L	A2,-(SP)				;PUSH FROMRECT
+		MOVE.L	A3,-(SP)				;PUSH TORECT
+		JSR 	MAPRECT 				;MAP POLYBBOX
+
+		MOVEQ	#10,D0
+		MOVE	POLYSIZE(A4),D7 			;GET POLYSIZE
+		SUB 	D0,D7
+		LSR 	#2,D7					;NPOINTS = (POLYSIZE-10) DIV 4
+		ADD 	D0,A4					;POINT TO FIRST POINT
+		BRA.S	START					;GO TO LOOP START
+NEXTPT	MOVE.L	A4,-(SP)				;PUSH ADDR OF POINT
+		MOVE.L	A2,-(SP)				;PUSH FROMRECT
+		MOVE.L	A3,-(SP)				;PUSH TORECT
+		JSR 	MAPPT					;MAP THIS POINT
+		ADD 	#4,A4					;BUMP TO NEXT POINT
+START	DBRA	D7,NEXTPT				;LOOP ALL POINTS IN POLY
+
+DONE	MOVEM.L (SP)+,D7/A2-A4				;RESTORE REGS
+		UNLINK	PARAMSIZE,'MAPPOLY '
+
+
+
+FrPoly	PROC   EXPORT
+		IMPORT MoveTo,DoLine
+;--------------------------------------------------------
+;
+;  PROCEDURE FrPoly(poly: PolyHandle);
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	4
+POLY			EQU 	PARAMSIZE+8-4			;LONG, POLYHANDLE
+
+		LINK	A6,#0					;ALLOCATE STACK FRAME
+		MOVEM.L D6-D7/A4,-(SP)				;SAVE REGS
+		MOVE.L	POLY(A6),A4 			;GET POLYHANDLE
+		MOVE.L	(A4),A0 				;DE-REFERENCE IT
+		MOVE	(A0),D7 				;GET POLYSIZE
+		SUB 	#10,D7
+		LSR 	#2,D7					;NPOINTS = (SIZE-10) DIV 4
+		BEQ.S	DONE					;QUIT IF EMPTY POLYGON
+		MOVE.L	10(A0),-(SP)				;PUSH FIRST POINT
+		JSR 	MOVETO					;MOVETO(FIRST POINT)
+		MOVE.L	#14,D6					;INIT BYTE OFFSET
+		SUB 	#1,D7					;DECREMENT COUNT
+		BRA.S	START					;GOT TO LOOP START
+NEXTPT	MOVE.L	(A4),A0 				;DE-REFERENCE POLYHANDLE
+		MOVE.L	0(A0,D6),-(SP)				;PUSH NEXT POINT
+		ADD 	#4,D6					;BUMP BYTE OFFSET
+		JSR 	DOLINE					;DOLINE(PT)
+START	DBRA	D7,NEXTPT				;LOOP FOR ALL POINTS
+DONE	MOVEM.L (SP)+,D6-D7/A4				;RESTORE REGS
+		UNLINK	PARAMSIZE,'FRPOLY  '
+
+
+;-------------------------------------------------------------
+; <1.2/15mar89> This flag is used so that the old code could be
+; 				kept around in case we need to use it at at later
+;				date.  Now we always use the new quickpolybw code.
+;				A new Drawpoly routine has been developed along 
+; 				with supporting code.
+
+	IF QuickPolys  THEN	
+;-------------------------------------------------------------
+;
+;  PROCEDURE SortVectors(Vectors: Ptr; VCount: integer);
+;
+;	SortVectors performs a non-recursive QuickSort on an array of
+;	vectors (y,x,dy,dx).  The vectors are sorted first on y and second
+;	on x.  The differential values are not examined.  This code is
+;	a modified version of SortPoints, found in the QuickDraw ROM.
+;	The vectors are placed in increasing Y.X order.  See the source
+;	reference "Algorithms + Data Structures = Programs, p. 80"
+
+SortVectors PROC	EXPORT
+
+ParamSize	Equ 	6
+Vectors		Equ 	ParamSize+8-4
+VCount		Equ 	Vectors-2
+
+VarSize		Equ 0
+
+			Link	A6,#VarSize			; no local variables
+			MoveM.L D3-D4/A2-A4,-(SP)	; save registers
+			Move.L	Vectors(A6),A3		; LeftPtr := start of point array
+			Move	A3,D3				; set up low bits for sort
+			And 	#7,D3				; AWC - #3 => #7
+			MoveQ	#0,D0				; clear high word
+			Move	VCount(A6),D0		; get VCount
+			Ble.S	GoHome				; do nothing if no vectors
+			Lsl.L	#3,D0				; AWC - #2 => #3; LineCount * 8 for bytes
+			Move.L	A3,A4
+			Add.L	D0,A4				; add to DstStart
+			SubQ.L 	#8,A4				; AWC - #4 => #8; RightPtr := DstEnd - 8
+			Move.L	SP,D4				; remember stack marker
+			MoveM.L A3/A4,-(SP) 		; push LeftPtr and RightPtr
+RePartition	MoveM.L (SP)+,A3/A4 		; pop LeftPtr and RightPtr
+Split		Move.L	A3,A1				; IPtr := LeftPtr
+			Move.L	A4,A2				; JPtr := RightPtr
+
+;  Calculate MidPtr and MidPt
+
+			Move.L	A3,D0				; D0 := LeftPtr + RightPtr
+			Add.L	A4,D0
+			RoxR.L	#1,D0				; divide by 2 for MidPtr
+			And 	#$FFF8,D0			; AWC - #$FFFC => #$FFF8; truncate to multiple of 8 bytes
+			Or		D3,D0				; OR in low bits for vector boundary
+			Move.L	D0,A0				; put MidPtr into A0
+			Move	XVector(A0),D1		; D1 := MidPt.X
+			Move	YVector(A0),D2		; D2 := MidPt.Y
+			Bra.S	IScan
+
+; while IPtr^ < MidPt do IPtr := IPtr + 8
+
+NextIPtr 	AddQ.L 	#8,A1				; AWC - #4 => #8; bump IPtr to "right"
+IScan 		Cmp 	YVector(A1),D2		; is MidPt.Y > IPtr^.Y?
+			Bgt.S	NextIPtr			; yes => continue bumping
+			Blt.S	JScan				; MidPt.Y < IPtr^.Y? yes => done with IPtr
+			Cmp 	XVector(A1),D1		; sort on X - is MidPt.X > IPtr^.X?
+			Bgt.S	NextIPtr			; yes => continue bumping
+			Bra.S	JScan				; go to loop start
+
+; while JPtr^ > MidPt do JPtr := JPtr - 8
+
+NextJPtr	SubQ.L	#8,A2				; AWC - #4 => #8; decrement JPtr
+JScan		Cmp 	YVector(A2),D2		; is JPtr^.Y > MidPt.Y?
+			Blt.S 	NextJPtr			; yes => look at the next JPtr
+			Bgt.S	EndScan 			; is JPtr^.Y < MidPt.Y? yes => this partition is done
+			Cmp 	XVector(A2),D1		; is JPtr^.X > MidPt.X?
+			Blt.S	NextJPtr			; yes => look at the next JPtr
+
+;  if IPtr <= JPtr then swap IPtr^ and JPtr^, and bump both pointers
+
+EndScan		Cmp.L	A2,A1				; is IPtr > JPtr?
+			Bgt.S	NoSwap				; yes => all done
+			Move.L	(A1),D0				; D0 := IPtr^
+			Move.L	(A2),(A1)			; IPtr^ := JPtr^
+			Move.L	D0,(A2) 			; JPtr^ := D0
+			Move.L	4(A1),D0			; D0 := IPtr^.dy
+			Move.L	4(A2),4(A1)			; IPtr^.dy := JPtr^.dy
+			Move.L	D0,4(A2) 			; JPtr^.dy := D0
+			AddQ.L	#8,A1				; IPtr := IPtr + 8
+			SubQ.L	#8,A2				; JPtr := JPtr - 8		
+
+;  repeat until this partitioning is complete, IPtr > JPtr
+
+NoSwap		CmpA.L	A2,A1				; is IPtr > JPtr
+			Bls.S	IScan				; no => loop again
+
+;  if IPtr < RightPtr then stack request to sort right partition
+
+			CmpA.L	A4,A1				; is IPtr < RightPtr?
+			Bhs.S	RightOkay 			; yes => continue
+			MoveM.L A1/A4,-(SP) 		; no => PushPartition(IPtr,RightPtr)
+
+RightOkay	Move.L	A2,A4				; RightPtr := JPtr
+			CmpA.L	A4,A3				; is LeftPtr >= RightPtr?
+			Blo.S 	Split				; no => partition again
+			CmpA.L	D4,SP				; is stack empty yet?
+			Bne.S 	RePartition			; no => loop for more
+
+GoHome		MoveM.L	(SP)+,D3-D4/A2-A4	; restore registers
+			UNLINK	PARAMSIZE,'SORTVECT'
+
+;---------------------------------------------------
+;
+;	PROCEDURE PaintVector(Vector:VectorArray; VCount:integer; EoFill:boolean;
+;				 VectRect:Rect; Mode:integer; Pat:Pattern);
+;
+
+PaintVector	PROC	EXPORT
+	IMPORT	ShowCursor,ShieldCursor,MaskTab,PatExpand,ColorMap,XorSlab
+	IMPORT	DrawSlab,SlabMode,FastSlabMode,RSect,TrimRect
+	IMPORT	InitRgn,SeekRgn
+
+ParamSize	Equ 	18
+Vector		Equ 	ParamSize+8-4
+VCount		Equ		Vector-2
+EoFill		Equ 	VCount-2
+VectRect	Equ		EoFill-4
+Mode		Equ		VectRect-2
+Pat			Equ		Mode-4
+
+
+;-------------------------------------------------
+;
+;  A6 OFFSETS OF LOCAL VARIABLES AFTER LINK:
+;
+EXPAT			EQU 	-64 				;16 LONGS
+MINRECT 		EQU 	EXPAT-8 			;RECT
+STATEA			EQU 	MINRECT-RGNREC		;RGN STATE RECORD
+STATEB			EQU 	STATEA-RGNREC		;RGN STATE RECORD
+STATEC			EQU 	STATEB-RGNREC		;RGN STATE RECORD
+SAVESTK 		EQU 	STATEC-4			;LONG
+RECTFLAG		EQU 	SAVESTK-2			;WORD
+MASKBUF 		EQU 	RECTFLAG-4			;LONG
+BUFLEFT 		EQU 	MASKBUF-2			;WORD
+BUFSIZE 		EQU 	BUFLEFT-2			;WORD
+MODECASE		EQU 	BUFSIZE-4			;LONG
+DSTLEFT 		EQU 	MODECASE-4			;LONG
+SAVEA5			EQU 	DSTLEFT-4			;LONG
+PORT			EQU 	SAVEA5-4			;LONG
+FASTFLAG		EQU 	PORT-2				;BYTE
+TEMPRECT		EQU 	FASTFLAG-8			;RECT
+PATINDEX		EQU 	TEMPRECT-2			;WORD
+
+; Stack frame variables used only in DrawPoly
+
+FreeList	Equ		PatIndex-4
+StackLimit	Equ		FreeList-4
+ActiveList	Equ		StackLimit-4
+VarSize		Equ		ActiveList
+
+		LINK	A6,#VARSIZE 				;ALLOCATE LOCAL VARS
+		MOVEM.L D0-D7/A1-A5,-(SP)			;SAVE REGS
+		MOVE.L	SP,SAVESTK(A6)				;REMEMBER STACK FOR LATER
+		MOVE.L	A5,SAVEA5(A6)				;REMEMBER GLOBAL PTR
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A3				;GET CURRENT GRAFPORT
+		TST 	PNVIS(A3)					;IS PNVIS NEG ?
+		BLT 	GOHOME						;YES, QUIT
+		MOVE.L	A3,PORT(A6) 				;SAVE CURRENT GRAFPORT
+
+;-------------------------------------------------------
+;
+;  QUIT IF MODE NOT IN 8..15
+;
+		MOVEQ	#-8,D0					;MASK TO KILL BOTTOM 3 BITS
+		AND 	MODE(A6),D0 			;GET ALL BUT 3 BITS OF MODE
+		CMP 	#8,D0					;IS PEN MODE 8..15 ?
+		BNE 	GOHOME					;NO, QUIT
+
+
+;----------------------------------------------------------------
+;
+;  ADJUST MODE AND PATTERN IF COLOR FILTERING.
+;
+		TST 	COLRBIT(A3) 			;IS COLORBIT NEG ?
+		BMI.S	NOCOLOR 				;YES, DON'T MAP
+		MOVE	MODE(A6),-(SP)			;PUSH INPUT MODE
+		MOVE.L	PAT(A6),-(SP)			;PUSH ADDR OF INPUT PATTERN
+		JSR 	COLORMAP				;ALTER BY THECOLOR, THEFILTER
+		MOVE.L	(SP)+,PAT(A6)			;GET (ALTERED) PATTERN
+		MOVE	(SP)+,MODE(A6)			;GET (ALTERED) MODE
+NOCOLOR MOVE.L	A3,A5					;PUT GRAFPORT IN A5
+
+
+;---------------------------------------------------------
+;
+;  GET CLIPRGN AND VISRGN HANDLES AND DE-REFERENCE THEM
+;
+		MOVE.L	CLIPRGN(A5),A2			;GET CLIPRGN HANDLE
+		MOVE.L	(A2),A2 				;GET CLIPRGN POINTER
+		MOVE.L	VISRGN(A5),A3			;GET VISRGN HANDLE
+		MOVE.L	(A3),A3 				;GET VISRGN POINTER
+
+
+;-----------------------------------------------------------------------
+;
+;  CALC MINRECT, THE INTERSECTION OF DSTRECT, BITMAP BOUNDS,
+;  CLIPRGN BBOX, AND VISRGN BBOX.  QUIT IF NO INTERSECTION.
+;
+		MOVE.L	VectRect(A6),-(SP)		;PUSH DSTRECT
+		PEA 	PORTBITS+BOUNDS(A5) 	;PUSH BITMAP BOUNDS
+		PEA 	RGNBBOX(A2) 			;PUSH CLIPRGN BBOX
+		PEA 	RGNBBOX(A3) 			;PUSH VISRGN BBOX
+		MOVE	#4,-(SP)				;PUSH NRECTS=4
+		PEA 	MINRECT(A6) 			;PUSH DST ADDR
+		JSR 	RSECT					;CALC INTERSECTION
+		BEQ 	GOHOME					;QUIT IF NO INTERSECT
+
+;
+;  CHECK FOR BOTH VISRGN AND CLIPRGN RECTANGULAR
+;
+		CLR.B	FASTFLAG(A6)			;FASTFLAG := FALSE
+		CMP 	#10,RGNSIZE(A2) 		;IS CLIPRGN RECTANGULAR ?
+		BNE.S	FLAGOK					;NO, CONTINUE
+		CMP 	#10,RGNSIZE(A3) 		;IS VISRGN RECTANGULAR ?
+		BEQ.S	CKPAT					;YES, CONTINUE
+;
+;  If only visRgn is non-rectangular, then check if
+;  its intersection with minrect would be rectangular.
+;  IF TrimRect(visRgn,minRect) then treat as rectangular.
+;
+		MOVE.L	visRgn(A5),-(SP)		;push rgnHandle
+		PEA 	minRect(A6) 			;push addr of minRect
+		JSR 	TrimRect				;call trimRect
+		BLT 	GOHOME					;quit if intersection empty
+		BGT.S	FLAGOK					;continue if non-rectangular
+;
+;  CHECK FOR BLACK OR WHITE PATTERN
+;
+CKPAT	MOVE.L	PAT(A6),A0				;POINT TO PATTERN
+		MOVE.L	(A0)+,D0				;GET 1ST HALF OF PATTERN
+		CMP.L	(A0)+,D0				;IS IT SAME AS 2ND HALF ?
+		BNE.S	FLAGOK					;NO, CONTINUE
+		NOT.L	D0						;IS PATTERN BLACK ?
+		BEQ.S	YESFLAG 				;YES, WE MADE IT
+		NOT.L	D0						;IS PATTERN WHITE ?
+		BNE.S	FLAGOK					;NO, CONTINUE
+		EOR 	#4,MODE(A6) 			;YES, ALTER MODE AS IF BLACK
+YESFLAG ST		FASTFLAG(A6)			;REMEMBER RECT CLIPPED AND BLACK
+;
+;  fast case: map mode into  black,xor,white, or do-nothing
+;
+		MOVEQ	#7,D0					;GET 3 BIT MASK
+		AND 	MODE(A6),D0 			;GET 3 BITS OF MODE
+		MOVE.B	MODEMAP(D0),D0			;MAP TO BLACK,XOR,WHITE,NOP
+		BMI 	GOHOME					;QUIT IF DO-NOTHING MODE
+		MOVE	D0,MODE(A6) 			;UPDATE MODE
+		BRA.S	FLAGOK					;AND CONTINUE
+MODEMAP DC.B	0,0,1,2,2,255,255,255
+FLAGOK
+
+
+;----------------------------------------------------------------
+;
+;  HIDE CURSOR IF CURSOR INTERSECTS MINRECT.
+;
+		PEA 	MINRECT(A6)							;PUSH SHIELDRECT PARAMETER
+		MOVE.L	PORTBITS+BOUNDS+TOPLEFT(A5),-(SP)	;PUSH DELTA TO CONVERT TO GLOBAL
+		MOVE.L	SAVEA5(A6),A5			  			;GET GLOBAL PTR
+		JSR 	SHIELDCURSOR			  			;HIDE CURSOR IF IT INTERSECTS
+		MOVE.L	PORT(A6),A5 		  				;RESTORE GRAFPORT IN A5
+
+
+;------------------------------------
+;
+;  CALC BUFLEFT
+;
+		MOVE	MINRECT+LEFT(A6),D2 				;GET MINRECT LEFT
+		SUB 	PORTBITS+BOUNDS+LEFT(A5),D2 		;CONVERT TO GLOBAL COORDS
+		AND 	#$FFF0,D2							;TRUNC TO MULT OF 16
+		ADD 	PORTBITS+BOUNDS+LEFT(A5),D2 		;CONVERT BACK TO GLOBAL
+		MOVE	D2,BUFLEFT(A6)						;SAVE AS BUFLEFT
+;
+;  IF FASTFLAG, THEN SKIP REGION SETUP
+;
+		TST.B	FASTFLAG(A6)						;RECT CLIPPED AND BLACK ?
+		BNE 	SKIPSETUP							;YES, DON'T WASTE TIME WITH SETUP
+;
+;  CALC BUFSIZE
+;
+		MOVE	MINRECT+RIGHT(A6),D0				;GET MINRECT RIGHT
+		SUB 	D2,D0								;CALC MAXH-BUFLEFT
+		LSR 	#5,D0								;DIV BY 32 FOR LONGS
+		MOVE	D0,BUFSIZE(A6)						;BUFSIZE = # LONGS - 1
+
+
+;-------------------------------------------------------------------------
+;
+;  ALLOCATE AND CLEAR A SCANLINE BUFFER FOR THE COMPOSITE MASK
+;
+CLRMASK CLR.L	-(SP)								;ALLOCATE AND CLEAR ONE LONG
+		DBRA	D0,CLRMASK							;LOOP TILL DONE
+		MOVE.L	SP,MASKBUF(A6)						;REMEMBER WHERE MASKBUF IS
+
+
+;-------------------------------------------------------------------------
+;
+;  INIT STATE RECORDS AND ALLOCATE BUFFERS FOR EACH NON-RECTANGULAR REGION
+;
+		CLR 	D5									;INIT BOTH ARE RECT
+		MOVE	#-32767,STATEA+THISV(A6)			;INIT REGION STATEA
+		MOVE	#32767,STATEA+NEXTV(A6) 			;TO HARMLESS IN CASE RECT
+		CMP 	#10,RGNSIZE(A2) 					;IS CLIPRGN RECTANGULAR ?
+		BEQ.S	ARECT								;YES, CONTINUE
+		ADD 	#2,D5								;NO, SET ITS FLAG
+		MOVE.L	A2,A0								;POINT TO CLIPRGN
+		LEA 	STATEA(A6),A1						;POINT TO STATE RECORD A
+		BSR.S	INITONE 							;INIT STATE, ALLOC BUFFER
+ARECT
+		MOVE	#-32767,STATEB+THISV(A6)			;INIT REGION STATEB
+		MOVE	#32767,STATEB+NEXTV(A6) 			;TO HARMLESS IN CASE RECT
+		CMP 	#10,RGNSIZE(A3) 					;IS VISRGN RECTANGULAR ?
+		BEQ.S	BRECT								;YES, CONTINUE
+		ADD 	#4,D5								;NO, SET ITS FLAG
+		MOVE.L	A3,A0								;POINT TO VISRGN
+		LEA 	STATEB(A6),A1						;POINT TO STATE RECORD B
+		PEA 	BRECT								;PUSH FAKE RETURN ADDR
+INITONE MOVE	MINRECT+LEFT(A6),D0 				;GET MINH
+		MOVE	MINRECT+RIGHT(A6),D1				;GET MAXH
+		MOVE	BUFLEFT(A6),D2						;GET BUFLEFT
+		JMP 	INITRGN 							;INIT STATE, ALLOC BUFFER
+BRECT
+
+
+;--------------------------------------------------------------------
+;
+;  IF BOTH REGIONS ARE RECTANGULAR, THEN DRAW MINRECT INTO MASK BUFFER
+;
+		MOVE.W	D5,RECTFLAG(A6) 					;ARE ALL RGNS RECT ?
+		BNE.S	NOTRECT 							;NO, CONTNUE
+		MOVE.L	MASKBUF(A6),A0						;YES, POINT TO MASK BUFFER
+		MOVE	MINRECT+LEFT(A6),D3 				;SET UP LEFT
+		SUB 	BUFLEFT(A6),D3						;MAKE IT BUFFER RELATIVE
+		MOVE	MINRECT+RIGHT(A6),D4				;SET UP RIGHT
+		SUB 	BUFLEFT(A6),D4						;MAKE IT BUFFER RELATIVE
+		JSR 	XorSlab 							;AND XOR BETWEEN THEM
+NOTRECT
+
+SKIPSETUP
+
+
+;------------------------------------
+;
+;  CALC STARTING DSTLEFT
+;
+		MOVE	MINRECT+TOP(A6),D1			;GET MINRECT TOP
+		SUB 	PORTBITS+BOUNDS+TOP(A5),D1	;CONVERT TO GLOBAL COORDS
+		MULU	PORTBITS+ROWBYTES(A5),D1	;MULT BY DST ROWBYTES
+		ADD.L	PORTBITS+BASEADDR(A5),D1	;ADD START OF BITMAP
+		SUB 	PORTBITS+BOUNDS+LEFT(A5),D2 ;CONVERT BUFLEFT TO GLOBAL
+		LSR 	#3,D2						;CALC BUFLEFT DIV 8
+		EXT.L	D2							;CLR HI WORD
+		ADD.L	D2,D1						;ADD HORIZ BYTE OFFSET
+		MOVE.L	D1,DSTLEFT(A6)				;SAVE AS DSTLEFT
+
+
+;----------------------------------------------------
+;
+;  MAKE ALL HORIZONTAL COORDINATES RELATIVE TO BUFFER
+;
+		MOVE	BUFLEFT(A6),D1
+		SUB 	D1,MINRECT+LEFT(A6)
+		SUB 	D1,MINRECT+RIGHT(A6)
+
+;---------------------------------------------------
+;
+;  SET UP CASE JUMP BASED ON MODE AND FASTFLAG
+;
+		MOVE	MODE(A6),D2 				;GET (ALTERED) PEN MODE
+		TST.B	FastFlag(A6)				;Rect clipoped and black ?
+		BEQ.S	@1							;no, use slow drawslab loop
+		JSR 	FastSlabMode				;yes, get fast modeCase in A4
+		MOVE.L	A4,MODECASE(A6) 			;SAVE FOR LATER
+		CLR 	PATINDEX(A6)				;MAKE UNUSED PATINDEX EVEN
+		BRA.S 	GOFORIT 					;SKIP PATTERN STUFF
+@1		JSR 	SlabMode					;get slow modeCase in A4
+		MOVE.L	A4,MODECASE(A6) 			;SAVE FOR LATER
+
+
+;------------------------------------------------------------------
+;
+;  EXPAND 8 BYTE PATTERN TO 16 LONGS AND INIT PATTERN SELECTOR
+;
+		CLR.L	D7							;SAY NOT INVERTED
+		MOVE	MODE(A6),D2 				;GET MODE
+		BCLR	#2,D2						;TEST AND CLR INVERT BIT
+		BEQ.S	NOTINV						;SKIP IF NOT INVERTED
+		NOT.L	D7							;INVERTED; D7 GETS ALL 1'S
+NOTINV	MOVE	PORTBITS+BOUNDS+LEFT(A5),D2 ;GET GLOBAL-LOCAL OFFSET
+		MOVE.L	PAT(A6),A0					;POINT TO BYTE WIDE PATTERN
+		LEA 	EXPAT(A6),A1				;POINT TO EXPANDED PATTERN
+		MOVE.L	SAVEA5(A6),A5				;GET GLOBAL PTR
+		JSR 	PATEXPAND					;EXPAND 8 BYTE PATTERN TO 16 LONGS
+		MOVE.L	PORT(A6),A5 				;RESTORE GRAFPORT IN A5
+		MOVEQ	#$F,D0						;TREAT COORD MOD 16
+		AND 	MINRECT+TOP(A6),D0			;GET TOP VERT LOCAL COORD
+		LSL 	#2,D0						;QUAD FOR 4 BYTE PATTERNS
+		MOVE	D0,PATINDEX(A6) 			;SET UP PATTERN INDEX
+
+
+;;;;; End of sicko code from DrawArc
+
+GoForIt		Clr.L	FreeList(A6)		; FreeList := nil;
+			Clr.L	ActiveList(A6)		; ActiveList := nil;
+			_StackSpace					; how much stack is available
+			Move.L	SP,D1				; grab current stack
+			Sub.L	D0,D1				; calculate the maximum stack limit
+			Add.L	#$100,D1			; give us some spare room
+			Move.L	D1,StackLimit(A6)	; save it
+			Move.L	Vector(A6),A3		; get pointer to VectorArray
+			Move	(A3),D7				; get CurrentY
+			Move	VCount(A6),D3		; get number of edges
+ActiveLoop	MoveQ	#Nil,A0				; NewEdges := nil
+			MoveQ	#Nil,A1				; CurrentEdge := nil
+
+; while (Vector < VCount) & (CurrentY = Vectors[Vector+1].YVector) do begin
+
+			Tst		D3					; any new edges left?
+			Beq		NoNewEdges			; no => don't add any new
+NewEdgeLoop	Cmp		(A3),D7				; does CurrentY = NextY?
+			Bne		NoNewEdges			; no => don't add any at the moment
+			Move.L	FreeList(A6),A2		; grab the FreeList
+			Move.L	A2,D0				; CmpA #Nil,A2; can we get an edge from the free list?
+			Bne.S	FreeAndEasy			; yes => good enough
+			SubA.L	#EdgeRecSize,SP		; make room for daddy
+			Move.L	SP,A2				; and create a new edge on the stack (gross)
+			CmpA.L	StackLimit(A6),A2	; have we bombed
+			Bge.S	StackEdge			; no => keep trucking
+			Bra		NoMorePoly			; yes => get out of here
+			
+FreeAndEasy	Move.L	(A2),FreeList(A6)	; FreeList := FreeList^.NextEdge
+StackEdge	MoveM.L	A0-A1,-(SP)			; save registers across the FixRatio			AWC.PMAB451
+			Clr.L	-(SP)				; FixRatio result								AWC.PMAB440
+			Move.L	YDelta(A3),-(SP)	; push numerator and denominator for FixRatio
+			_FixRatio					; calculate it
+
+; The following few lines are excerpted from the PutLine code of Quickdraw so we can match
+; the old polygon code precisely in terms of pixels rendered.
+
+			Move.L	(SP)+,D2			; D2 := slope
+			MoveM.L	(SP)+,A0-A1			; restore registers								AWC.PMAB451
+			Move	XVector(A3),D1		; HiWord(D1) := XVector
+			Sub		BufLeft(A6),D1		; adjust to global coordinates
+			Swap	D1					; put the coordinate in the high word
+			Move	#$8000,D1			; LoWord(XVector) := 1/2
+			Move.L	D2,D0				; D0 := slope
+			Asr.L	#1,D0				; D0 := slope/2
+			Add.L	D0,D1				; XValue := XValue + Slope/2
+			Move.L	#$10000,D0			; D0 := 1.0000 fixed
+			Tst.L	D2					; is slope negative?
+			Bmi.S	NegSlope			; yes => continue
+			Cmp.L	D0,D2				; is slope < 1.0000?
+			Bge.S	SlopeOkay			; no => continue
+			Add.L	D2,D1				; XValue := XValue + Slope
+			Bra.S	SlopeOkay			; continue
+
+NegSlope	Cmp.L	#$FFFF0000,D2		; is slope > -1.0000?
+			Bge.S	SlopeOkay			; yes => continue
+			Add.L	D0,D1				; XValue := XValue + 1.0000
+
+SlopeOkay	Move.L	D1,XValue(A2)		; XValue := D1
+			Move.L	D2,XSlope(A2)		; XSlope := FixRatio(XVector,YVector)
+			MoveQ	#1,D1				; Sign := 1
+			Move	YDelta(A3),D0		; D0 := abs(YDelta)
+			Bpl.S	SignOkay			; don't negate it
+			Neg		D0					; abs(YDelta)
+			Neg		D1					; Sign := -1
+SignOkay	Add		D7,D0				; D0 := CurrentY + abs(YDelta)
+			Move	D0,LastY(A2)		; Edge^.LastY := CurrentY + abs(YDelta)
+			Tst.B	EoFill(A6)			; are we EoFill'ing?
+			Beq.S	Winder				; no => leave sign alone
+			MoveQ	#0,D1				; Sign := 0
+Winder		Move	D1,Sign(A2)			; save Sign
+
+			Move.L	A0,D0				; CmpA.L #Nil,A0; is NewEdges nil?				AWC.PMAB440
+			Bne.S	InsertMid			; no => insert this new edge in the list		AWC.PMAB440
+			Move.L	A2,A0				; NewEdges := Edge								AWC.PMAB440
+			Move.L	A2,A1				; CurrentEdge := Edge							AWC.PMAB440
+			Clr.L	NextEdge(A2)		; end of list									AWC.PMAB440
+			Clr.L	PrevEdge(A2)		; beginning of list, too						AWC.PMAB440
+			Bra.S	InsertDone			; continue										AWC.PMAB440
+
+InsertMid	Move.L	A1,A4				; InsertPt := CurrentEdge						AWC.PMAB440
+			Move.L	XValue(A2),D0		; grab our compare value						AWC.PMAB440
+InsertNext	Cmp.L	XValue(A4),D0		; D0 - InsertPt^.XValue							AWC.PMAB440
+			Bge.S	InsertIt			; if greater or equal, insert it				AWC.PMAB440
+			Move.L	PrevEdge(A4),A4		; InsertPt := InsertPt^.NextEdge				AWC.PMAB440
+			Move.L	A4,D1				; is the next edge nil?							AWC.PMAB440
+			Bne.S	InsertNext			; no => keep looking							AWC.PMAB440
+			Move.L	A0,NextEdge(A2)		; Edge^.NextEdge := NewEdges					AWC.PMAB440
+			Move.L	A2,PrevEdge(A0)		; NewEdges^.PrevEdge := Edge					AWC.PMAB440
+			Clr.L	PrevEdge(A2)		; Edge^.PrevEdge := nil							AWC.PMAB440
+			Move.L	A2,A0				; NewEdges := Edge								AWC.PMAB440
+			Bra.S	InsertDone			; continue										AWC.PMAB440
+
+InsertIt	CmpA.L	A1,A4				; at the end of the list?						AWC.PMAB440
+			Beq.S	InsertEnd			; yes => insert this edge at the end of list	AWC.PMAB440
+			Move.L	A4,PrevEdge(A2)		; Edge^.PrevEdge := InsertPt					AWC.PMAB440
+			Move.L	NextEdge(A4),D0		; save InsertPt^.NextEdge						AWC.PMAB440
+			Move.L	A2,NextEdge(A4)		; InsertPt^.NextEdge := Edge					AWC.PMAB451
+			Move.L	D0,NextEdge(A2)		; Edge^.NextEdge := InsertPt^.NextEdge			AWC.PMAB440
+			Move.L	D0,A4				; InsertPt := InsertPt^.NextEdge				AWC.PMAB440
+			Move.L	A2,PrevEdge(A4)		; InsertPt^.NextEdge^.PrevEdge := Edge			AWC.PMAB440
+			Bra.S	InsertDone			; continue										AWC.PMAB440
+
+InsertEnd	Move.L	A2,NextEdge(A1)		; CurrentEdge^.NextEdge := Edge					AWC.PMAB440
+			Move.L	A1,PrevEdge(A2)		; Edge^.PrevEdge := CurrentEdge					AWC.PMAB440
+			Clr.L	NextEdge(A2)		; Edge^.NextEdge := nil							AWC.PMAB440
+			Move.L	A2,A1				; CurrentEdge := Edge							AWC.PMAB440
+InsertDone	AddA.L	#VectorSize,A3		; bump A3 to the next vector					AWC.PMAB440
+			SubQ	#1,D3				; VCount := VCount - 1
+			Bgt		NewEdgeLoop			; check for more edges
+
+; Merge the NewEdges with the ActiveList
+
+NoNewEdges	Move.L	#Nil,A1				; CurrentEdge := nil
+			Move.L	ActiveList(A6),A4	; NextActive := ActiveList
+MergeLoop	Move.L	A4,D0				; CmpA.L #Nil,A4; is NextActive nil?
+			Bne.S	NextOrMerge			; no => merge edges
+			Move.L	A0,D0				; CmpA.L #Nil,A0; is NewEdges nil?
+			Beq.S	Merged				; yes => don't merge edges
+
+; NextActive = nil; NewEdges <> nil
+
+			Move.L	A1,PrevEdge(A0)		; NewEdges^.PrevEdge := CurrentEdge; is CurrentEdge nil?
+			Bne.S	C1					; no => fix up CurrentEdge^.NextEdge
+			Move.L	A0,ActiveList(A6)	; ActiveList := NewEdges
+			Bra.S	Merged				; continue
+
+C1			Move.L	A0,NextEdge(A1)		; CurrentEdge^.NextEdge := NewEdges
+			Bra.S	Merged				; continue
+
+; else if NewEdges = nil { and therefore NextActive <> nil } then begin
+
+NextOrMerge	Move.L	A0,D0				; CmpA.L #Nil,A0; is NewEdges nil?
+			Bne.S	MergeEdges			; no => merge edges
+			Move.L	A1,PrevEdge(A4)		; NextActive^.PrevEdge := CurrentEdge; is CurrentEdge nil?
+			Bne.S	C2					; no => append NextActive to the list
+			Move.L	A4,ActiveList(A6)	; ActiveList := NextActive
+			Bra.S	Merged				; continue
+
+C2			Move.L	A4,NextEdge(A1)		; CurrentEdge^.NextEdge := NextActive
+			Bra.S	Merged				; continue
+
+; else { both are still active so } begin
+
+MergeEdges	Move.L	XValue(A4),D0		; get NextActive^.XValue
+			Cmp.L	XValue(A0),D0		; is NextActive^.XValue > NewEdges^.XValue?
+			Ble.S	C3					; no => select NextActive
+			Move.L	A0,A2				; Edge := NewEdges
+			Move.L	NextEdge(A2),A0		; NewEdges := Edge^.NextEdge
+			Bra.S	C4					; continue
+
+C3			Move.L	A4,A2				; Edge := NextActive
+			Move.L	NextEdge(A2),A4		; NextActive := Edge^.NextEdge
+C4			Move.L	A1,PrevEdge(A2)		; Edge^.PrevEdge := CurrentEdge; is CurrentEdge nil?
+			Bne.S	C5					; no => patch CurrentEdge
+			Move.L	A2,ActiveList(A6)	; ActiveList := Edge
+			Bra.S	C6					; continue
+
+C5			Move.L	A2,NextEdge(A1)		; CurrentEdge^.NextEdge := Edge
+C6			Clr.L	NextEdge(A2)		; Edge^.NextEdge := nil
+			Move.L	A2,A1				; CurrentEdge := Edge
+			Bra.S	MergeLoop			; continue
+
+Merged
+
+;;;;; More DrawArc craziness
+
+		CMP 	MINRECT+TOP(A6),D7			;IS CURRENT VERT < MINV ?
+		BLT.S 	NoMask						;YES, DON'T DRAW
+
+;  SEEK MASK TO THE CURRENT VERTICAL
+
+		TST.B	FASTFLAG(A6)				;RECT CLIPPED AND BLACK ?
+		BNE.S	NOMASK						;YES, DON'T BOTHER WITH MASK
+
+			Jsr		SeekMask					; make MaskBuf Current
+		
+NoMask		Move.L	ActiveList(A6),A4	; NextActive := ActiveList
+			MoveQ	#0,D5				; LineFlag := false or WrapCount := 0
+SlabLoop	Move.L	A4,A1				; CurrentEdge := NextActive
+			Move.L	NextEdge(A1),A4		; NextActive := CurrentEdge^.NextEdge
+			Cmp		LastY(A1),D7		; is LastY <= CurrentY?
+			Bge		RemoveEdge			; yes => go remove the edge
+			Move	Sign(A1),D0			; grab the sign
+			Beq.S	DoToggle1			; if zero then EoFill; toggle the flag
+			Tst		D5					; is current wrapcount 0?
+			Bne.S	NoWrapMove			; no => don't establish WrapMove
+			Move	XValue(A1),D6		; save wrapmove
+NoWrapMove	Add		D0,D5				; WrapCount += Sign; is it 0?
+			Bne.S	BumpX				; no => don't draw a line
+NoLineMove	Move	XValue(A1),D0		; grab current value
+			Cmp		D6,D0				; is line XValue.HiWord > move XValue.HiWord?
+			Bgt.S	DrawLine			; yes => draw a line
+			Bra.S	BumpX				; continue
+
+DoToggle1	Eor		#1,D5				; toggle D5 
+			Beq.S	NoLineMove			; yes => go draw the line
+			Move	XValue(A1),D6		; save line mvoe
+			Bra.S	BumpX				; continue
+
+ONESLAB		MOVEQ	#$3F,D6 			;GET WRAP-AROUND MASK
+			AND 	PATINDEX(A6),D6 	;GET PATINDEX MOD 64
+			MOVE.L	EXPAT(A6,D6),D6 	;GET THIS ROW'S PATTERN
+			LEA 	MaskTab,A0			;POINT TO MASK TABLE
+			MOVE.L	DSTLEFT(A6),A1		;INIT DSTPTR TO LEFT
+			MOVE.L	MASKBUF(A6),A2		;INIT MASKPTR TO LEFT
+			LEA 	MINRECT(A6),A3		;POINT TO MINRECT
+			MOVE.L	MODECASE(A6),A4 	;GET MODE CASE JUMP
+			JMP 	DrawSlab
+
+DrawLine	CMP 	MINRECT+TOP(A6),D7	;IS CURRENT VERT < MINV ?
+			Blt.S 	BumpX				;YES, DON'T DRAW
+			Move	D6,D1				; get start of slab
+			Move	D0,D2				; get end of slab
+			MoveM.L	D3-D6/A1-A4,-(SP)	; save everything
+			Bsr.S	OneSlab				; jump to ROM calling routine
+			MoveM.L	(SP)+,D3-D6/A1-A4			; restore everything
+			
+BumpX		Move.L	XValue(A1),D0				; grab current XValue
+			Add.L	XSlope(A1),D0				; bump it to the next value
+			Move.L	D0,XValue(A1)				; XValue := XValue + XSlope
+			Move.L	PrevEdge(A1),A2				; Edge := CurrentEdge^.PrevEdge
+			Move.L	A2,D1						; CmpA.L #Nil,A2; is Edge = nil?
+			Beq.S	CheckEdge					; yes => sorting order is okay
+			Cmp.L	XValue(A2),D0				; is PrevEdge^.XValue <= CurrentEdge^.XValue?
+			Bge.S	CheckEdge					; yes => sorting order is okay
+			Move.L	NextEdge(A1),NextEdge(A2)	; PrevEdge^.NextEdge := CurrentEdge^.NextEdge; nil?
+			Beq.S	NextIsNil					; yes => don't bother setting backlink
+			Move.L	NextEdge(A1),A0				; grab the next edge
+			Move.L	A2,PrevEdge(A0)				; NextEdge^.PrevEdge := CurrentEdge^.PrevEdge
+
+NextIsNil	Move.L	PrevEdge(A2),A2		; Edge := Edge^.PrevEdge
+			Move.L	A2,D1				; CmpA.L #Nil,A2; is it nil?
+			Bne.S	CheckCross			; no => check for crossing
+			Move.L	ActiveList(A6),A2	; get NextEdge
+			Move.L	A2,NextEdge(A1)		; CurrentEdge^.NextEdge := ActiveList
+			Clr.L	PrevEdge(A1)		; PrevEdge := nil
+			Move.L	A1,PrevEdge(A2)		; NextEdge^.PrevEdge := CurrentEdge
+			Move.L	A1,ActiveList(A6)	; ActiveList := CurrentEdge
+			Bra.S	CheckEdge			; continue
+			
+CheckCross	Cmp.L	XValue(A2),D0		; is Edge^.XValue <=CurrentEdge^.XValue?
+			Blt.S	NextIsNil			; no => continue searching
+			Move.L	NextEdge(A2),A0		; grab NextEdge
+			Move.L	A0,NextEdge(A1)		; CurrentEdge^.NextEdge := Edge^.NextEdge
+			Move.L	A2,PrevEdge(A1)		; CurrentEdge^.PrevEdge := Edge
+			Move.L	A1,PrevEdge(A0)		; CurrentEdge^.NextEdge^.PrevEdge := CurrentEdge
+			Move.L	A1,NextEdge(A2)		; Edge^.NextEdge := CurrentEdge
+			Bra.S	CheckEdge			; continue
+
+RemoveEdge	Move.L	PrevEdge(A1),A0				; grab PrevEdge
+			Move.L	A0,D0						; CmpA.L #Nil,A0; is PrevEdge nil?
+			Bne.S	PrevNotNil					; no => remove from middle
+			Move.L	NextEdge(A1),ActiveList(A6)	; ActiveList := CurrentEdge^.NextEdge
+			Bra.S	PrevWasNil					; continue
+
+PrevNotNil	Move.L	NextEdge(A1),NextEdge(A0)	; PrevEdge^.NextEdge := CurrentEdge^.NextEdge
+PrevWasNil	Beq.S	NextWasNil					; if NextEdge is nil, don't patch back pointer
+			Move.L	NextEdge(A1),A2				; grab NextEdge
+			Move.L	A0,PrevEdge(A2)				; NextEdge^.PrevEdge := CurrentEdge^.PrevEdge
+NextWasNil	Move.L	FreeList(A6),NextEdge(A1)	; CurrentEdge^.NextEdge := FreeList
+			Move.L	A1,FreeList(A6)				; FreeList := CurrentEdge
+			Move.L	A0,A1						; CurrentEdge := CurrentEdge^.PrevEdge
+
+CheckEdge	Move.L	A4,D0						; CmpA.L #Nil,A4; is NextActive nil?
+			Bne		SlabLoop					; no => do another edge
+
+			CMP 	MINRECT+TOP(A6),D7			;IS CURRENT VERT < MINV ?
+			Blt.S	BumpY						;YES, DON'T DRAW
+
+;-------------------------------------------------------------------
+;
+;  BUMP DESTINATION VERTICALLY AND LOOP FOR ALL SCAN LINES
+;
+NEXTPAT 	ADD 	#4,PATINDEX(A6) 				;BUMP PATTERN INDEX
+			MOVE	PORTBITS+ROWBYTES(A5),D0		;GET DST ROWBYTES
+			EXT.L	D0								;MAKE IT LONG
+			ADD.L	D0,DSTLEFT(A6)					;BUMP DST TO NEXT ROW
+
+BumpY		AddQ	#1,D7					; CurrentY += 1
+			Cmp		MinRect+Bottom(A6),D7	; have we reached the bottom?
+			Bge.S	NoMorePoly				; yes => shut down ahead of schedule
+
+			Tst.L	ActiveList(A6)		; does the ActiveList contain edges?
+			Bne		ActiveLoop			; yes => loop
+			Tst		D3					; any new edges left?
+			Bne		ActiveLoop			; yes => loop
+
+NoMorePoly	_ShowCursor					; restore cursor
+GoHome		Move.L	SaveStk(A6),SP		; clean up the free list and strip buffer
+			MoveM.L	(SP)+,D0-D7/A1-A5	; restore registers
+			UNLINK	PARAMSIZE,'PAINTVEC'
+
+;-----------------------------------------------------------------------------
+; <1.2/15mar89> Seekmask code copied from DrawArc which is what QuickPolys used.			
+
+;-----------------------------------------------------------------------------
+;
+;  LOCAL ROUTINE TO UPDATE THE MASK BUFFER
+;  BASED ON WHICH REGIONS ARE RECTANGULAR
+;
+SEEKMASK MOVE	D7,D0					;GET CURRENT VERT COORD
+		 MOVE	RECTFLAG(A6),D1 			;GET RECTFLAG = 0,2,4
+		 MOVE	RECTJMP(D1),D1				;GET OFFSET FROM TABLE
+		 JMP	RECTJMP(D1) 			;TAKE CASE JUMP
+
+RECTJMP DC.W	IGNORE-RECTJMP				;DO NOTHING IF BOTH RECT
+		DC.W	A-RECTJMP
+		DC.W	B-RECTJMP
+		DC.W	AB-RECTJMP
+
+;
+;  ONLY REGION A IS NON RECTANGULAR.  UPDATE IT AND USE IT AS THE MASK
+;
+A		LEA 	STATEA(A6),A1
+JSRSEEK JSR 	SEEKRGN
+		MOVE.L	SCANBUF(A1),MASKBUF(A6)
+IGNORE	RTS
+
+
+;
+;  ONLY REGION B IS NON RECTANGULAR.  UPDATE IT AND USE IT AS THE MASK
+;
+B		LEA 	STATEB(A6),A1
+		BRA.S	JSRSEEK
+
+;
+;  REGIONS A AND B ARE NON-RECTANGULAR. UPDATE EACH,
+;  THEN FORM INTERSECTION IN THE MASK BUFFER.
+;
+AB		LEA 	STATEA(A6),A1
+		JSR 	SEEKRGN
+		LEA 	STATEB(A6),A1
+		JSR 	SEEKRGN
+		MOVE.L	STATEA+SCANBUF(A6),A0
+		MOVE.L	STATEB+SCANBUF(A6),A1
+		MOVE.L	MASKBUF(A6),A2
+		MOVE	BUFSIZE(A6),D1
+ABLOOP	MOVE.L	(A0)+,D0
+		AND.L	(A1)+,D0
+		MOVE.L	D0,(A2)+
+		DBRA	D1,ABLOOP
+		RTS
+
+
+;---------------------------------------------------
+;
+;	PROCEDURE DrawPoly(poly: PolyHandle; mode: integer; VAR pat: Pattern);
+;
+
+DrawPoly	PROC	EXPORT
+	IMPORT	DrawRect
+
+ParamSize	Equ 	10
+Poly		Equ 	ParamSize+8-4
+Mode		Equ		Poly-2
+Pat			Equ		Mode-4
+
+PolyRect	Equ		-8
+VarSize		Equ 	PolyRect
+
+; <25Jul88>	PMAB543	BAL/JDB	Implemented fast case for rectangular filled polys.
+			Link	A6,#VarSize			; no local variables
+
+			move.l	Poly(a6),a0			; pick up polyhdl					<Begin	PMAB543  BAL/JDB>
+			move.l	(a0),a0				; deref to polyptr			
+			move	(a0)+,d0			; pick up byte count
+			cmp		#4*5+10,d0			; quadrilateral?
+			bne.s	@chk4pt				; no, take general case
+			move.l	8+4*4(a0),d1		; pick up last pnt
+			cmp.l	8(a0),d1			; cmpare with first pnt
+			bne.s	@notRect			;
+			bra.s	@4Pnts
+			
+@chk4pt		cmp		#4*4+10,d0			; quadrilateral?
+			bne.s	@notRect			; no, take general case
+@4Pnts		moveq	#2,d0				; force to 4 points
+			addq	#8,a0				; bump past rect
+			lea		4(a0),a1			; point to next point
+@nxtPnt		cmp		(a0)+,(a1)+			; cmp h's
+			seq		d1					; remember equality
+			cmp		(a0)+,(a1)+			; cmp v's
+			seq		d2					; remember equality
+			or.b	d1,d2				; compute h1=h2 | v1=v2
+			beq.s	@notRect			; no, not rect
+			dbra	d0,@nxtPnt
+			
+			lea		-12(a0),a1			; point to first point
+			cmp		(a0)+,(a1)+			; cmp h's
+			seq		d1					; remember equality
+			cmp		(a0)+,(a1)+			; cmp v's
+			seq		d2					; remember equality
+			or.b	d1,d2				; compute h1=h2 | v1=v2
+			beq.s	@notRect			; no, not rect
+			lea		PolyRect(A6),a0		; point to rect
+			move.l	-12(a1),(a0)+		; save top left
+			move.l	-8(a1),(a0)			; save bot rght
+			pea		PolyRect(A6)		; push ptr to rect
+			move	Mode(A6),-(SP)		; push mode
+			move.l	Pat(A6),-(SP)		; push pattern
+			jsr		DrawRect			; go so incredibly blindingly fast	<End 	PMAB543  BAL/JDB>
+			bra		GoHome2				; get out of here, undoing the link
+			
+@notRect	
+
+			MoveM.L D3-D5/A2,-(SP)		; save registers
+			Move.L	GrafGlobals(A5),A0	; point to QuickDraw globals
+			Move.L	ThePort(A0),A0		; get current port
+			Tst 	PnVis(A0)			; is PnVis neg ?
+			Bmi		GoHome				; yes, quit										AWC.PMAB444
+			Move.L	Poly(A6),A0			; get the poly handle
+			Move.L	A0,D0				; CmpA.L #Nil,A0; is it real?
+			Beq		GoHome				; no => punt									AWC.PMAB444
+			_HLock						; lock it down
+			Move.L	(A0),A0				; dereference poly
+			Move.L	2(A0),PolyRect(A6)		; move Top.Left
+			Move.L	6(A0),PolyRect+4(A6)	; move Bottom.Right
+			Move	(A0),D4				; get the length of the data
+			Sub		#10,D4				; remove the length word and the bounding box rect
+			Lsr		#2,D4				; D4 is temporarily the point count
+			MoveQ	#0,D0				; clear the high word
+			Move	D4,D0				; copy the number of points
+			AddQ.L	#1,D0				; bump it for the closing edge, maybe
+			Asl.L	#3,D0				; multiply by 8 bytes per edge
+			_NewHandle					; get a new handle
+			Tst		D0					; was there an error?							AWC.PMAB444
+			Bne		TempError			; yes => cleanup and get out of here			AWC.PMAB444
+			Move.L	A0,A2				; copy it
+			_HLock						; lock it down
+			MoveQ	#0,D3				; clear VCount
+			Move.L	Poly(A6),A1			; get the handle again
+			Move.L	(A1),A1				; redereference it
+			AddA.L	#polyPoints,A1		; bump A1 to the first point
+			Move.L	(A1)+,D5			; get h and v for "old" position
+			Move	D4,D2				; copy loop counter to D2
+			SubQ.L	#1,D2				; remove the first point
+			Move.L	(A2),A0				; dereference the sorted edge list
+			Bra.S	PolyEnd				; jump into the loop
+			
+PolyLoop	Move.L	D5,D4				; copy current to old
+			Move.L	(A1)+,D5			; get next point
+			Move.L	D4,D0				; get the old point
+			Move.L	D5,D1				; copy the new point
+			Sub		D0,D1				; calculate XDelta
+			Swap	D0					; y1 is in D0.Low
+			Swap	D1					; y2 is in D1.Low
+			Sub		D0,D1				; calculate YDelta; does dy = 0?
+			Beq.S	PolyEnd				; yes => ignore horizontal vectors
+			Bmi.S	Upwards				; negative => save the new point
+			Move.L	D4,(A0)+			; save the old point
+			Bra.S	IncVCount			; and continue
+
+Upwards		Move.L	D5,(A0)+			; save the new point
+IncVCount	AddQ	#1,D3				; bump VCount (D3)
+			Swap	D1					; XDelta:YDelta => YDelta:XDelta
+			Move.L	D1,(A0)+			; save YDelta:XDelta
+PolyEnd		DBra	D2,PolyLoop			; loop for another poly point
+
+			Move.L	D5,D4				; save the new point to old
+			Move.L	Poly(A6),A1			; get poly handle again
+			Move.L	(A1),A1				; dereference it again
+			Move.L	polyPoints(A1),D5	; grab the first point again
+			Cmp.L	D4,D5				; did we end where we began?
+			Beq.S	PolyDone			; yes => don't close it
+			
+			Move.L	D4,D0				; get the old point
+			Move.L	D5,D1				; copy the new point
+			Sub		D0,D1				; calculate XDelta
+			Swap	D0					; y1 is in D0.Low
+			Swap	D1					; y2 is in D1.Low
+			Sub		D0,D1				; calculate YDelta; does dy = 0?
+			Beq.S	PolyDone			; yes => ignore horizontal vectors
+			Bmi.S	Upwards2			; positive => use the old point
+			Move.L	D4,(A0)+			; save the old point
+			Bra.S	IncVCount2			; and continue
+
+Upwards2	Move.L	D5,(A0)+			; save the new point
+IncVCount2	AddQ	#1,D3				; bump VCount (D4)
+			Swap	D1					; XDelta:YDelta => YDelta:XDelta
+			Move.L	D1,(A0)+			; save deltas
+PolyDone	Move.L	Poly(A6),A0			; grab poly handle
+			_HUnlock					; unlock it
+			Move.L	(A2),-(SP)			; push vectors pointer
+			Move	D3,-(SP)			; push VCount
+			Jsr		SortVectors			; sort them vectors
+			Move.L	(A2),-(SP)			; push vectors pointer
+			Move	D3,-(SP)			; push VCount
+;			Tst.B	WnFill(A6)			; are we winding-number filling?
+;			Seq		-(SP)				; push (not WnFill)
+			St		-(SP)				; push EoFill
+			Pea		PolyRect(A6)		; push rect
+			Move	Mode(A6),-(SP)		; repush mode
+			Move.L	Pat(A6),-(SP)		; repush pat
+			Jsr		PaintVector			; go paint it
+			Move.L	A2,A0				; grab vectors handle
+			_HUnlock					; unlock it
+			Move.L	A2,A0				; grab it again
+			_DisposHandle				; dump it
+			Bra.S	GoHome				; continue									AWC.PMAB444
+
+TempError	Move.L	Poly(A6),A0			; grab poly handle							AWC.PMAB444
+			_HUnlock					; unlock it									AWC.PMAB444
+GoHome		MoveM.L	(SP)+,D3-D5/A2		; restore registers							AWC.PMAB444
+GoHome2		UNLINK	PARAMSIZE,'DRAWPOLY'
+
+
+
+
+	ELSE								; <1.2/15mar89> Use original DrawPoly rtn
+;--------------------------------------------------------		
+; <1.2/15mar89> THIS IS THE ORIGINAL DrawPoly CODE
+
+DrawPoly PROC  EXPORT	
+		IMPORT OpenRgn,FrPoly,DoLine,NewRgn,CloseRgn,DrawRgn
+;--------------------------------------------------------
+;
+;  PROCEDURE DrawPoly(poly: PolyHandle; mode: INTEGER; VAR pat: Pattern);
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	10
+POLY			EQU 	PARAMSIZE+8-4	;LONG, POLYHANDLE
+MODE			EQU 	POLY-2			;WORD
+PAT 			EQU 	MODE-4			;LONG, ADDR OF PATTERN
+
+		LINK	A6,#0					;NO LOCAL VARS
+		MOVE.L	A4,-(SP)				;SAVE REG
+		MOVE.L	GRAFGLOBALS(A5),A0		;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A0			;GET CURRENT PORT
+		TST 	PNVIS(A0)				;IS PNVIS NEG ?
+		BMI.S	DONE					;YES, QUIT
+		JSR 	OPENRGN 				;OpenRgn
+		MOVE.L	POLY(A6),-(SP)
+		JSR 	FRPOLY					;FrPoly(poly);
+		MOVE.L	POLY(A6),A0
+		MOVE.L	(A0),A0
+		MOVE.L	10(A0),-(SP)			;PUSH FIRST POINT
+		JSR 	DOLINE					;MAKE SURE IT CLOSES
+		CLR.L	-(SP)					;ROOM FOR FCN RESULT
+		JSR 	NEWRGN					;ALLOCATE TEMPRGN
+		MOVE.L	(SP),A4 				;PUT TEMPRGN IN A4
+		JSR 	CLOSERGN				;CLOSERGN(TEMPRGN)
+		MOVE.L	A4,-(SP)
+		MOVE	MODE(A6),-(SP)
+		MOVE.L	PAT(A6),-(SP)
+		JSR 	DRAWRGN 				;DrawRgn(tempRgn,mode,pat);
+		MOVE.L	A4,A0					;get tempRgn
+		_DisposHandle					;DISCARD IT
+DONE	MOVEM.L (SP)+,A4				;RESTORE REG
+		UNLINK	PARAMSIZE,'DRAWPOLY'
+
+	ENDIF 								;<1.2/15mar89> QuickPolys
+
+
+
+		END 
+
+
+
+
+
+
+
+

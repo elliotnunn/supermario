@@ -1,0 +1,1287 @@
+;
+;	File:		PictWhap.a
+;
+;	Contains:	This is an FKEY that will save the screen as a PICT file, for use by all other programs
+;				as data files. 
+;
+;	Written by:	Bo3b Johnson
+;
+;	Copyright:	© 1988-1991 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <5>	 8/23/91	JSM		Remove benign redefinition of FALSE, which is now defined by the
+;									build script.
+;		 <3>	 1/21/91	csd			& PKE: Use SANE and the Script Manager to build the file name.
+;									This will let us localize the file name so that it works for all of the
+;									various script cases, i.e. right to left text in Hebrew.
+;		 <2>	 9/25/90	dba			Check in Bo3b’s change to use D7 instead of D2. This caused a crash in
+;									32-bit mode.
+;		 <1>	 1/17/90	fjs			Recover from stupid mistakes
+;
+
+; PICTWhap.a;
+;
+;	For best viewing, use Palatino 12.
+;
+;	Copyright © 1988, 1989, 1990, 1991 Apple Computer, Inc.
+;	All rights reserved.
+;
+;	This is an FKEY that will save the screen as a PICT file, for use by all other programs
+;	as data files.   The PICT file is the Apple standard for transferring graphics between
+;	programs.  
+;
+;	Bo3b Johnson: 9/21/88
+;
+;
+; Build using the PictWhap.make file, and the standard build menu.
+;
+;---------------------------------------------------------------
+;	*** bugs list:
+;		Bus Error during ClosePicture, DisposCCursor, if Heap Scramble is on.
+;			Unlikely to be in this code.
+;---------------------------------------------------------------
+;
+;	9/26/88:
+;		Fixed the problem with overwriting the header of the PICT, now leaving space
+;		for the header before starting the spooling.
+;		Killed the SetGDevice/GetGDevice stuff as Darin noted it isn’t necessary.
+;	9/27/88:
+;		Skip the buffer finding operation, the spooling is sufficiently fast to make it
+;		unnecessary, even on floppies.  Timing results with Kong:  about 5 seconds
+;		with floppy using bottlenecks, 4 seconds straight buffer.  On Mac+ with old
+;		HD20, 2 seconds with BN, 1.5 seconds without.  On Mac II HD, 1.5 second with
+;		BN, 0.5 without.  There is thus little incentive to make the code more complicated.
+;	9/28/88:
+;		Add the jShieldCursor hack to make the cursor appear in the saved image.
+;		As per a Darin suggestion to avoid having to go find the cursor data and CopyBits.
+;	3/29/89:
+;		About to release it for D1 BigBang.  Change the creator of the PICT files to
+;		'View' to match the PAT/Viewer program.  Added the asm/link lines in the
+;		docs below so it can be done the same each time.  Set the place to create the
+;		files as the root directory of the startup volume, instead of default.  Also
+;		change the other file system calls to find the file in the root.  This makes it
+;		HFS only.
+;	5/1/89:
+;		Change the use of globals in the FKEY code block to a StackFrame instead.  The
+;		PictWriter globals are still stored in the code block however.  Killed the use of
+; 		MyNum2String in deference to the ROM based Pack for _NumToString.
+;		Changed the use of BootDrive into the sysVRefNum field from SysEnvirons, since 
+;		we need to call SysEnvirons to determine color QD or not anyway.
+;		Change the creator to 'TTxt' for TeachText to be the owner instead.  
+;	5/7/89:
+;		Added the code to make it do all available screens, not just main screen.  Uses the
+;		GrayRgn to get to all the devices in the world. 
+;		Change the CrsrCouple low memory global to keep mouse from moving while we
+;		snapshot.  Added code to save the registers we trash around both the FKEY proc
+;		itself, as well as the PictWriter routine.  
+;	5/10/89:
+;		Clearing the incredibly mindless ioFFlType for HFS since it is a swine and
+;		sets us up for the big fall.  If this isn't cleared too, then Standard file will barf on
+;		the file, and not display it in the list.  Notably there is also ioFileType which must
+;		be cleared too.  Neither are used by the file system, or the Mac, but we still have
+;		to do this.  Thank you HFS. 
+;	5/11/89:
+;		Finalizing the code.   Changed the init code to clear all the variables in a big loop,
+;		added a few comment lines in PB blocks to show all parameters expected for each
+;		call.  Verified each call to be sure each field is cleared in advance, or explicitly set.
+;		Removed the code that would handle a missing STR resource, check for error instead.
+;	5/19/89:
+;		Calling it 1.0B2 now, since it is essentially complete.  Change creator one more time,
+;		to 'ttxt' to have TeachText open the files.  (lower case is it?, Hah!  tricked myself.)
+;		Added change to have it use A5 as the pointer to QD globals, as per a Darin™ concept.
+;		This also makes it possible to remove the global in the code.
+;	10/26/89:
+;		Version 1.0B3, and changed to DC.L for the 'FKEY' string.  Also made big changes 
+;		to make it do banding in low RAM/Big Ass screen situations.  The banding is done
+; 		in a simple fashion to make it easy to write/debug, and relies on QD returning from
+; 		the CopyBits with no change in the picture size, or setting QDError.
+;	10/30/89:
+;		Numerous minor fixes that were suggested in code reviews.  Things like MOVEQ
+;		instead of CLR and so on.  Up the version number to 1.0B4 since I half released B3.
+;	11/13/89:
+;		More fixes related to code review.  Set up string to be 'Picture ^0' so we can Munger
+;		in the file number, killed MyConCat.  Changed the cursor protection stuff to set
+;		CrsrVis to false, and decrement the cursor state.  This freezes the mouse, as well
+;		as keeping it on the screen.  No more ShieldCursor hack, nor CrsrCouple.  
+;	11/14/89:
+;		Set up a hard coded string to handle the case where the STR resource may get lost.
+;		The 'Picture ^0' is thus in the code, turned into a StringHandle in case we can't
+;		get the STR.  This is unlikely, but may happen, and we can handle it easily.
+;	8/20/90:
+;		Added the code to SndPlay a camera noise when we start up.  This gives immediate
+;		feedback that it is doing something, then goes on to do the saving.  If we get an error,
+;		you get a beep as well as the camera click.  Also fixed a bug where it would bail
+;		out to DeathCity in the middle of the device loop, causing the mouse to remain
+;		frozen in place.  Moved the mousefreeze and state save to early on, and restore
+;		the state in CloseNClean.
+;	9/3/90:
+;		Fixed a bug introduced by system build, where the file name as a string was bigger
+;		than the length byte, so GetHandleSize was adding that extra pad byte to names.
+;		Now it uses the length bytes and does all the math to get string length.  Change
+;		build file so that the resources don't have any names, as desired by build guys.
+;	9/25/90:
+;		Fixed stupid bug where SndPlay would trash register D2 in 32-bit mode.  I was being
+;		dumb using a scary register.  I moved it to use D7 instead, and save and restore D7.
+;	1/21/91:
+;		Changed the way that the picture file name is generated by making the number
+;		calculation and appending code use the Script Manager. This required: 1) Using
+;		SANE to increment an extended number, 2) using the script manager routine
+;		FormatX2Str to convert it to a string, and 3) using the script manager routine
+;		ReplaceText instead of Munger to merge the base name and the calculated number.
+;
+; Strategy:
+;	The FKEY 3 is intended to take a snapshot of the screen when invoked, saving the image
+;	into a file for editing/printing by an appropriate graphic editor.
+;	Codewise the basic idea behind the FKEY is that when invoked it will do a CopyBits call using
+;	the screen as the source and the destination, while an OpenPicture is under way.  The screen
+;	is obviously the source, but it is also the destination to avoid having to create some huge old
+;	buffer to copy the bits into.  This approach will still save the bits as long as a Picture is
+;	Open.  The bits get saved, and we can write the bits out as a file with the right header in it to 
+;	make it a PICT file.  The sequence it will use is:
+;	1) Create and open the file to use.  This will use a string out of the system file, to allow
+;	for localization of the generated files.  The numbers will be appended to the name, starting
+;	at 1, and going up.
+;	2) We will use the bottlenecks in QuickDraw to spool the data out line by line.  This is 
+;	sort of slow but takes no RAM.
+;	3) We create a new port that we can play with, using OpenPort.  This port will be changed
+;	in size, as well as installing bottlenecks in the PutPicProc.
+;	4) After the bottlenecks are set up we can do the OpenPicture to create a new picture.
+;	5) Do the CopyBits (main, main, ...) to write the bits through our proc with the bottlenecks.
+;	6) As CopyBits runs, it will call our proc to have the bits written to the disk as it goes along.
+;	7) Do each monitor in turn, if we are on colorQD machines.
+;	8) Close the file.
+;	9) Close the port we created.
+;	10) Split.
+;
+;  Some overall observations:  
+;	There appeared to be a dependancy on A0 or A1, causing crashes, so just to be extra safe
+; 	we will save all registers we use, even though we shouldn't have to save A0-A1/D0-D2.  
+;	For a long, disk writing routine like this, it won't hurt to be extra robust.  All registers
+;	are thus preserved around both the FKEY itself, and the PictWriter routine, since it is
+;	not clear what can be trashed as part of a bottleneck routine.  The philosophy here is to
+;	be extra safe, to save development time.
+;
+;	I looked into setting up the parameter block we use in A2, then using that throughout
+;	the FKEY, but it didn't appear to be worth it.  It would save only two lines of code, at the
+;	expense of making it harder to figure out, and more prone to bugs when modified.  The
+;	current approach is to load A0 with the address of the block each time it is required.
+;
+;	In keeping with the goal of trying to keep it small, the spurious lines of initialization
+;	for parameter blocks have been commented out.  They are left there as a notice that
+; 	those lines are required for an unknown parameter block, but that we know they were
+;	cleared or set immediately before.  Thus, it should be clear what is required for the 
+;	call, without taking up code space to actually do it.  This is in contrast to my normal
+;	approach of explicity setting each field used, to minimize copy/paste errors.
+;
+;	We don't preflight for space on the disk to write the file.  We have to handle any write
+;	errors later in the code anyway, and DiskFull is just another form of a write error,
+;	so there seems to be little point in taking the extra code to preflight.  Since the files are
+;	of non-obvious lengths (they are packed with PackBits), we couldn't do a good job
+;	preflighting, even if we wanted to.
+;
+;	Error checking and handling on all possible calls. The DeathCity error handler 
+;	can be called at anytime, and it will do the right thing in terms of closing the port,
+;	killing the picture, closing the file and so on, as long as the variables are cleared
+;	before the first possible error.
+;
+;	If I get an error during creating, naming or preflighting the file I can’t finish
+;	the job, so I need to clean up and split.  A SysBeep is wimpy user feedback on 
+;	errors, but there isn't a whole lot better.  It doesn't really seem appropriate to
+;	put up a dialog from an FKEY either.  The only Expected error is DiskFull.
+;
+;	Any errors during the Write or during the bottleneck Writes will be handled
+;	similarly.  This makes it possible to error out in the bottleneck, and avoid getting
+; 	recurring errors.
+;
+; 	The Lone Ranger in the form of Darin showed up to get around the problem of
+;	needing to access our globals from the PictWriter bottleneck routine.  The solution
+;	is to set A5 to point into our global space like usual, and to set the contents
+;	of that first location to point to the current QD globals.  This way we use the
+;	A5 world of whoever we are invoked within, and thus the PictWriter can get
+;	to our globals via A5 (the only register we can rely on there, other than PC).
+;	This is preferable to storing a pointer in the code block and doing a PC relative
+;	move during the bottleneck routine.  The setup for the A5 is a little funky but
+;	it should be possible to understand it without too much work.  Of course, if I
+;	had pictures I'd show you stack frames and A5's pointing around and so on,
+;	but until then, we'll just have to make do with words.  I can't bring myself to 
+; 	use NoRes graphics after all this time.
+;
+;	HFS is a pig.  It is poorly documented and the interface is clunky and hard to use.
+;	When doing all HFS calls, I would expect things to be more lucid.  There are two
+;	file version number parameters, one for Create, and one for SetFileInfo it would
+;	appear.  These are not documented, with the exception of two technotes, one talking
+;	about one flag, the other talking about the second.  HGetFileInfo will return me a
+;	bogus number in ioFFlType, thank you very much.  This number if then applied via
+;	SetFileInfo will then make the file not show up in StdFile.  Another particularly fine
+;	approach.  If these numbers are used by anybody, then why does StdFile filter them?
+;	Should StdFile be fixed to not care?  What this also points out is that the documentation
+;	is not sufficient to use HFS.  A better approach will always be to clear the full 
+;	parameter block in a loop, and not try to be accurate about what needs to be set and
+;	what doesn't.  In fact, I'm going to change this code to do that instead.
+;
+;	Given the poor shape of the HFS interface and documentation, we will now adopt the
+;	philosophy of clearing the parameter block before we start, and not explicitly set 
+;	any of the fields in the block, knowing they are zeroed.  This will buy us a little 
+;	code savings, and should be a more robust approach.  HFS seems to be pretty consistent
+;	about expecting zero for unused, or unknown, fields.  This is less than optimal, since
+;	it would be better to know what exactly is necessary, and set those specific fields. 
+;	But, since we are in doubt, it is better to play it safe and overkill.  It is more 
+;	important to be robust than accurate.  Thus all our globals on the stack will be 
+;	cleared in a single loop, where we will walk through the entire stack frame.  This will
+;	set all our variables to zero, as well as the parameter block.  (Notably, this is what
+;	Andy Hertzfeld did in RMaker...  are you scared yet?)  In keeping with HFS paranoia,
+;	we will set all fields in the parameter block, whether it is an HFS version of the call
+;	or not.  The documentation is not clear if this is necessary, but The Debugger indicates
+;	it is, so better safe than spending hours tracking down something bogus.
+;
+;	We are going to save and restore A5 around the FKEY, and will modify it from inside
+;	the FKEY.  This will allow us to have no globals stored in the code, and PictWriter as
+; 	the bottleneck will still be able to get to our globals.  This way we avoid the self-modifying
+;	code in order to store PC relative variables.  The QD globals still need to be accessed
+;	by QD however, so we still have to provide that path.  The way to do that here,
+; 	is to copy the 0(A5) pointer that QD uses to hunt down the globals, and store it in
+;	our variables block, keeping the same link.
+;
+;	Another change here that seems to be dictated by 32-bit QD, and old systems.  We want
+;	to band the image in the cases where there is not enough RAM.  Under 32-bit QD, a 
+;	big buffer might need to be made to copy the bits into before saving them in the picture.
+;	For a two-page screen this may be megs of data, causing us to create an empty picture,
+;	which is lame.  Instead, we will look for the failing condition, and chop the image
+;	up into small pieces (bands).  The technique we will use here will just keep shrinking
+;	the rect that we use as the source and destination.  If it gets too small we'll bail out and
+;	signal an error.  Otherwise we will keep a copyHeight that will be used to size each band
+;	vertically.  Each time we fail during a CopyBits, we will divide the copyHeight by two,
+; 	until it either succeeds or we get too small (like a single horizontal row of pixels).
+;	Part of the trouble is that a color table gets saved for each band, but we don't
+;	really expect to have to do that many bands.  Also, it seems better to make a bigger 
+;	banded picture (on disk), than to fail from too little RAM.   In system 6.0 there is a patch
+; 	that handles the source and destination both being the screen, and if so it will not
+;	create a buffer.  It appears that we cannot necessarily rely on that, due to the problem 
+;	of needing to access 32 bit screens.  32 bit QD handles the drawing, but the OpenPicture
+;	can't do it directly, and needs a buffer.  It may be fixed in the future, and this approach
+;	will cleanly default to a no buffer/single copybits situation.  This banding will be done
+; 	on a per device basis.  The only slightly skanky aspect of doing it this way means that
+;	we need to look at the picture size after the CopyBits call, and if it didn't change size,
+;	we know it failed.  We'll also check QDError to be safer, but it is a implementation
+;	detail of the picture mechanism.  Another possible approach would be to do the 
+;	buffer allocation ourselves, knowing about the various depths and so on, which seems
+;	excessively complicated, and requires even more knowledge of the QD model, like
+;	pixelSize.  The algorithmic pseudo-code is like:
+;
+;		copyHeight = screenRect.b-screenRect.t
+;		copyRect = screenRect
+;		copyTop = screenRect.t
+;	Copy:
+;		copyRect.t = copyTop
+;		copyRect.b = copyTop + copyHeight
+;		If copyRect.b > screenRect.b Then copyRect.b = screenRect.b
+;		gWroteBits = false
+;		CopyBits (screen, screen, copyRect, copyRect, scrCopy, nil)
+;		If NOT gWroteBits or QDError Then
+;			copyHeight = copyHeight / 2
+;			If copyHeight < 2 Then Failure
+;			Goto Copy
+;		copyTop = copyTop + copyHeight
+;		If copyTop < screenRect.b Then Goto Copy
+;
+;	Also remember that the banding loop is surrounded by the device loop for color QD,
+;	so they are nested.  
+;
+; A little info about the sound.  I looked into doing a 3:1 compression on the sound, to save
+;	disk space, but it doesn't seem to be worth it.  The sound is already sampled at 11K, 
+;	which seems the best compromise.  At 3:1, that is 3:1 off of the 22K sample, so it is
+;	still 2/3 the size of the 11K sound.  It is not a big savings, and the sound is worsened.
+;	In addition, the compression jazz doesn't work in 6x systems, in case this gets copied
+;	over there.  At 6:1 compression, it is totally gross.  The compression seems really lame,
+;	and not an advantage over just going down in sample speed.   Trying some more
+;	tests, the 3:1 compression actually does sound better than 11K sample, so it would
+;	be preferred, but it isn't a huge win, so the lack of 6x compatibility wins out.
+;
+;
+; Some changes suggested via Code Review:
+; 	Another minor change, the string that defines the file name is now 'Picture ^0' to start
+; 	with, and can be changed at will for internationalization reasons.  The ^0 is replaced
+;	at run time with the current file number string (from Num2String).  This is easy to 
+;	do using Munger and took about the same amount of code as my old ConCat routine,
+;	but is better for localizing.
+;
+;	Rather than setting the CrsrVis flag specifically when we are done, I will save 
+;	and restore the old value, in case it is more sophisticated in the future.
+;
+;	I changed the code to decrement the CrsrState, set the CrsrVis to false,
+;	then do the CopyBits.  This freezes the mouse, keeps it on the screen, and
+;	allows it to be restarted after the CopyBits, so we capture the bits of the cursor in the
+;	picture as well.  Previously I was doing a fake jShieldCursor, which was too sick, and
+;	this approach seems to have the same effect, whilst merely futzing with low memory
+;	globals.  Unfortunately, I have slightly more confidence that the vector will behave 
+;	the same way in the future, but am unconvinced that the low memory globals even 
+;	work as they are described.  Just how screwed up is the cursor code anyway?
+;	This appears to work fine, but if there is any compatibility risk in this code, that's it.
+;
+;
+;	Yes, I realize some of the comments get a little redundant, but you know, I'd rather say
+;	it twice than to not say it once...
+;
+;
+; 	Open Questions:
+;		1) Should we do the menu down snapshots?  This is pretty tough to do, will make
+;		it bigger, and risk more compatibility.  Is it worth the effort?  The proposed approach
+;		is to create our own heap block when invoked, turn it into a heap only we use, set
+;		up our own A5 world and QD world in this heap, start up a Time Manager task to
+;		call us back later, wait 3 seconds or so, when called by TM, change to our heap which
+;		will be valid at interrupt time, swap out QD globals that need it (unknown list, to date),
+;		do the CopyBits with bottleneck spooling, close file, set up a Deferred Task Manager
+;		task to call us back, at DTM time (which is GNE time) dispose the heap block we
+;		created.  So... Technically challenging, but feasible.  Again, is it worth it?
+;		-- answer: not.  Do it in the system.
+;		2) Is it too sick to use GrayRgn?  To dangerous?  Any better way to do it?
+;		3) This only runs on the latest system.  It will only be shipped with that system,
+;		but if anyone copies and pastes it around, it won't work.  System 6.0.3 is required
+;		in order to have the multiple monitor part work.  The CopyBits bug is fixed in
+;		that version.  Is it bad to require the newest (I prefer to make it live with anything).
+;		Requires HFS too.
+;		-- answer: no biggy.  works now on system 4.2 with banding, HFS is OK.  
+;		4) This saving of the picture will create a PICT 2 type picture, even if the current
+;		color depth is only 1 bit deep.  Is this bad?  Will it make pictures that are hard for
+;		Mac+ to read?  If I remember correctly, the Mac+ system patches allow it to read
+;		PICT 2, and extract the picts if they are B&W...
+;		5) If the string for the file name isn't available in the system we will bail out with
+;		an error.  Is this reasonable?  Should we try to be more robust here with a default
+;		string?
+;		-- answer: added the change to make it default to 'Pic ' as the name.
+
+
+	PRINT		PUSH,OFF						; don't print any of the headers.
+	INCLUDE 		'Traps.a'
+	INCLUDE 		'PackMacs.a'
+	INCLUDE 		'ToolEqu.a'
+	INCLUDE 		'QuickEqu.a'
+	INCLUDE 		'SaneMacs.a'
+	INCLUDE 		'ScriptEqu.a'
+	INCLUDE 		'SysEqu.a'
+	INCLUDE 		'SysErr.a'
+	PRINT		POP							; restore the PRINT options
+
+
+; Constants that are defined here instead of putting them in the code.
+
+headerSize		EQU		512					; 512 bytes in PICT files for header info.
+fileNameId		EQU		-16385				; resource ID number for 'Picture' string.
+pFileType		EQU		'PICT'				; file type we create.
+pFileCreator		EQU		'ttxt'				; file creator for teachtext.
+pSoundType	EQU		'snd '				; resource type for sound resources.
+cameraId		EQU		-16504				; resource Id of camera noise.
+
+PICTWhap		PROC
+
+
+; The StackFrame we are using here is just for local variables for the FKEY.  They
+; would be globals, but FKEY's can't have globals, and this puts them on the stack,
+; instead of in the code.  The QDglobalPtr is to be the 0th location in the list, so that
+; 0(A5) will be that pointer.  This is the way QD expects it.  Thus baseName will be
+; -4(A5), baseNum is -8(A5) and so on.
+
+FkeyGlobals		RECORD	{QDglobalPtr},DECR	; build a stack frame record
+
+;------------------------------------------------------------------
+;------------------------------------------------------------------
+
+; Here I define all the variables that are used.  These are
+; used in a global variable fashion, even though they are allocated on the stack.
+; FKEYs can’t have global vars though, so this is a reasonable way out.
+; RA5 will still be used to point to our globals, so we set up the first element of 
+; our globals to be the pointer to the QD variables as QD expects.  This is relatively
+; complicated, so peruse the Segment loader and Memory manager chapters to see
+; how all the variables are to be set up, or take my word for it.
+; Our globals will still be referenced as some negative number off of A5.
+; A6 is not used as such, except to give us a handy frame easily.
+; It is possible to use a straight Link A5, but the sequence of code is thus critical,
+; since we need to pull out the old 0(A5) before we change A5.  Rather than make it
+; extra tricky, hard to read, hard to modify, and hard to maintain, in order to save 2 
+; lines of code; I left it as LINK A6.
+
+QDglobalPtr		DS.L		1					; pointer to QD globals, so QD can still work.
+
+baseName		DS.L		1					; This will become a StringHandle to the name.
+copyBaseName	DS.L		1					; copy of the handle, will be modified.
+baseNum		DS.B		10					; an 80-bit extended, SANE compatible
+baseNumString	DS.B		32					; smaller than Str255, to save unused space.
+hBaseNumString	DS.L	1					; handle to copy of the number string.
+fileName		DS.B		32
+filePB			DS.B		ioFQElSize			; big enough for the SetFileInfo too.
+newGrafs		DS.B		cqdProcsRec
+picPort			DS.B		portRec
+portIsValid		DS.W		1
+oldCrsrVis		DS.W		1					; saved value from CrsrVis.
+currPort			DS.L		1
+sysInfo			DS			SysEnvRec			; for colorQD test, and boot volume refnum. 
+maxRect		DS.W		4					; big rect containing all monitors.
+nextGD			DS.L		1					; handle for current GDevice when doing Mac II
+
+; The next few variables are for the banding operation.  These are used on a per device basis,
+; and only really change in really low RAM situations, or Big Ass monitors.  All these variables
+; are defined on a per band basis.  One band can be the entire device though.
+
+copyHeight		DS.W		1					; the height used for each CopyBits band.
+copyRect		DS.W		4					; the rectangle used for each band.
+copyTop		DS.W		1					; the starting location of a given band.
+
+; These next few are used by the PictWriter routine directly.
+
+gPictRefNum	DS.W		1
+gPictSize		DS.W		1
+gPictError		DS.W		1
+gPictHandle		DS.L		1
+gWroteBits		DS.W		1					; for memory full checking.
+
+; Here we have some variables which are used while doing file name construction in an
+; international-friendly manner.
+
+itlHandle		DS.L		1					; handle to itl resource with the NumberPartsTable
+numPartsOffset	DS.L		1					; offset into the itl of the NumberPartsTable
+itlState			DS.W		1					; so we can save/restore the state of the handle
+tableLength		DS.L		1					; length of the table (not used)
+
+; The end of the Stack Frame as our globals.  This LocalSize will thus be subtracted from the 
+; stack to store the variables.
+
+				ALIGN	4						; make sure we stop at a nice 4 byte boundary.
+												; This is so we can clear the whole block easily.
+GlobalSize		EQU 		*-FkeyGlobals		; size of all the local variables
+				ENDR
+
+
+	WITH		FkeyGlobals						; use our 'global' stack frame
+
+;------------------------------------------------------------------
+;------------------------------------------------------------------
+
+	
+; The start of the FKEY, with the conventional FKEY header on it to identify it and the
+; current version of this little wag.
+
+Start
+	BRA.S		@0								; skip over the text, obviously.
+	
+	STRING	ASIS							; turn off length byte. 
+	DC.L		'FKEY'							; a hunk of data in the code.
+	DC.W		$0003							; FKey 3 for the hex viewer.
+	DC.W		'1.0B6'							; version number.
+	
+; Set up some of our variables to initial values.   And save off the current gDevice
+; and port.  In case of errors, we can restore the environment to what it was.  
+; Call SysEnvirons to determine if color QD is here or not, since that determines
+; the use of gDevices or not.
+
+@0
+	LINK		A6,#GlobalSize					; allocate our local stack frame 'globals'.
+	MOVEM.L	A0-A2/A5/D0-D2/D7,-(SP)		; save registers we trash.   (9/25/90)
+	
+; Since we don't trust HFS, or anybody else, including ourselves, we will clear all of the
+; global data space to zero.  This starts us in a nice known condition, a welcome change of
+; pace.  Do all the variables in a big loop, 4 bytes at a time.  The number stowed in D0 is
+; a positive DBRA count of the number of longwords in our global area.  GlobalSize is a 
+; negative number, so we invert it before dividing by 4, then subtracting 1 to make it DBRA.
+
+	MOVEQ	#(-GlobalSize/4)-1,D0			; total size of our space, in longwords, DBRA count.
+	MOVE.L	A6,A0							; the start of the global space.
+@1
+	CLR.L		-(A0)							; clear the next 4 bytes.  A6 offsets are negative.
+	DBRA		D0,@1							; until we got them all.
+
+; Now set up the globals pointer in A5.  This will point to our block on the stack, but we will
+; use A5 to get there.  We also save off the QD link, so we can use some one else's QD world for
+; our picture creation.
+	
+	MOVE.L	(A5),A0							; save off the link.
+	MOVE.L	A6,A5							; swap globals over to our space,
+	SUBQ		#4,A5							; make it so 0(A5) is QDGlobalPtr.
+	MOVE.L	A0,QDGlobalPtr(A5)				; set the link back so QD is all set.
+
+; 8/17/90: B3B:
+; Before we start the show, make the noise of a camera so that they know
+; that something happened.  If we get an error somewhere inside, we'll get a beep as well,
+; but it doesn't come out too bad.  We handle the case of the sound being missing, by
+; just skipping the attemp.  It won't cause a problem.  We lock the sound handle just to
+; be extra safe.  We shouldn't have to, but the sound manager has a sordid history, and
+; it is preferable to be safe, rather than explicitly correct.  We want to
+; do it async, but can't really do that since we might error out somewhere in the middle,
+; giving a weird noise effect.  Also, we can't leave until the sound is done, and don't 
+; want to screw around trying to find out if it is done or not.
+
+	CLR.L		-(SP)							; room for handle result.
+	MOVE.L	#pSoundType,-(SP)				; the type of resource, sound.
+	MOVE.W	#cameraID,-(SP)					; the resource ID of the camera noise.	
+	_GetResource								; get the sound as a resource.
+	MOVE.L	(SP)+,D7						; retrieve the handle to the sound. (9/25/90)
+	BEQ.S		GetSysInfo						; if it is gone, skip making a sound.
+	
+	MOVE.L	D7,A0							; the handle to the sound. (9/25/90)
+	_HLock										; lock it down while we play.
+	
+	CLR.W		-(SP)							; room for function result.
+	CLR.L		-(SP)							; no sound channel from us,
+	MOVE.L	D7,-(SP)							; the handle to the noise, locked. (9/25/90)
+	MOVE.W	#False,-(SP)						; and do it is synchronously.
+	_SndPlay									; play that camera noise.
+	MOVE.W	(SP)+,D0						; get the result code, but ignore it.
+	
+	MOVE.L	D7,A0							; retrieve the handle to the sound, (9/25/90)
+	_HUnLock									; and unlock it, so it can be purged.
+	
+; GetSysInfo:
+;	We need to determine if colorQD exists on the machine or not, so call SysEnvirons
+; to find out.  This also gets the boot volume vRefNum, which is more robust than the
+; BootDrive low memory global.  We don’t link with the glue here since we know that
+; the trap has to exist on machines where this FKEY will run.  We can always expect
+; Version 1 to exist, and thus don't check the error code on return.
+
+GetSysInfo
+	LEA		sysInfo(A5),A0					; address of the record.
+	MOVEQ	#1,D0							; version 1 record, and info desired.
+	_SysEnvirons								; fill the environment record on stack.
+
+; Save the current port so we can restore it at the end.
+
+	PEA		currPort(A5)						; the var to set,
+	_GetPort									; save off the current port
+
+; Now we need to do a sick thing.  This is to make the cursor visible in the pict, once it
+; is saved off.  The problem is that CopyBits will ShieldCursor in order to make it not 
+; appear in an offscreen picture.  We need it there in order to make it a real screen
+; snapshot.  We will mark the cursor as Invisible so that QD will think that it doesn't
+; have to ShieldCursor.  We do this by setting it invisible, and decrementing the CrsrState.
+; We also want to freeze the mouse while this goes on, since we don't want the mouse to
+; change around during the save.  It takes long enough that we can get multiple smashed
+; copies of the cursor.  The mouse is frozen by the CrsrState change.  This has to be done
+; before the first possible DeathCity, so that we can be sure to restore the state properly.
+
+	MOVE.B	CrsrVis,oldCrsrVis(A5)			; save the old value.
+	SF			CrsrVis							; Pretend cursor is invisible.
+	SUB.B		#1,CrsrState						; Turn cursor off.
+	
+; Now try to get the STR resource for the name of the file we want to use.
+
+	CLR.W		-(SP)							; returned refnum, will be left here.
+	_CurResFile									; where are we currently?  (save this place.)
+	
+	CLR.W		-(SP)							; switch to the system file.
+	_UseResFile									; use the system file, to avoid getting wrong string.
+	
+	CLR.L		-(SP)							; the handle result.
+	MOVE.W	#fileNameId,-(SP)				; the rez id for it.
+	_GetString									; get it if we can.
+	MOVE.L	(SP)+,baseName(A5)				; save handle to the string.
+	
+												; the refnum is still on the stack.
+	_UseResFile									; return resource chain to how it was.
+	
+; Get the international table for number parts so we can use it when building
+; the file name.
+
+	MOVE.W	#iuSystemScript, -(SP)			; desktop items are in the System script
+	MOVE.W	#iuNumberPartsTable, -(SP)		; we need the number parts table
+	PEA		itlHandle(A5)					; place to store the itl4 handle
+	PEA		numPartsOffset(A5)				; offset into the itl4 of the NumberPartsTable
+	PEA		tableLength(A5)					; somewhere to put this, not used by us
+	_IUGetItlTable								; try to get the number parts table
+	MOVE.L	itlHandle(A5), D0				; did we get the table?
+	BEQ		DeathCity						; if not, probably low on memory
+	MOVE.L	D0, A0							; the itl4 resource handle
+	_HGetState									; remember its present state
+	MOVE.B	D0, itlState(A5)					; save it for a later restore
+	_HLock										; don’t let it go anywhere (or get purged)
+	
+; We have the handle to the STR resource.  Make sure it is valid.
+
+	TST.L		baseName(A5)					; is it non-nil?
+	BNE.S		TryFileName					; if it is valid, go ahead and use it.
+	
+; For the case where we couldn't find the string, a silly case arguably, but one we want to
+; allow them the option of making, let's hard code a file name that will be used instead
+; of the string.  Turn this hardcoded string into a handle, and store the handle.
+
+	CLR.L		-(SP)							; returned handle result.
+	PEA		hardName(PC)					; address of string in code,
+	_NewString									; turn it into a handle,
+	MOVE.L	(SP)+,baseName(A5)				; save off this handle instead.
+	BEQ		DeathCity						; if it is nil, bail out, no ram.
+
+; If there are files there already, I want to keep upping the number to
+; find an unused file name.  There is not much point in stopping at 9,
+; so I’ll just keep trying until it fails, or I get  an OK file name. 
+; We have a valid handle to the string, which starts as 'Picture ^0'.  Make a copy of it so we
+; can change the handle with ReplaceText.  We do this each time through the TryFileName
+; loop so we can start with a fresh 'Picture ^0' each time.  We copy the handle instead
+; of using the resource, to avoid having to hit the disk each time we try a new name.
+
+TryFileName
+	MOVEQ	#0, D0							; start with a clean register
+	MOVE.L	baseName(A5),A0				; the handle to current string,
+	MOVE.L	(A0), A1							; point to the current string
+	MOVE.B	(A1), D0							; get the length of the string
+	_NewHandle								; try to make a handle of the right size
+	BNE		DeathCity						; get out if we run out of memory
+	MOVE.L	A0, copyBaseName(A5)			; save this handle so we can nuke it later
+	MOVE.L	(A0), A0							; point to the handle data
+	MOVEQ	#0, D0							; start with a clean register
+	MOVE.B	(A1)+, D0						; get the length to copy & point to first charater
+	EXG		A0, A1							; make source & dest registers correct
+	_BlockMove
+	
+; Increment our number by one. We use SANE because we don’t want this code to
+; know about the extended type implementation. Also, since we’re going to use the
+; international utilities to convert this to a string, and they call SANE, there’s no
+; extra hit because we call SANE here. Finally, SANE in ROM is likely to be used,
+; saving us from loading it in any case.
+
+	PEA		extendedOne					; the constant value 1
+	PEA		baseNum(A5)					; our local counter
+	FADDX										; baseNum := baseNum + 1
+
+; Now convert the number to a string so we can hook it into the picture string.
+; We use the script manager to be completely international-friendly. This will almost
+; certainly cause a RAM hit, unfortunately.
+
+	PEA		baseNum(A5)					; the number to convert
+	PEA		numFormat						; how to format the number
+	MOVE.L	itlHandle(A5), A0				; handle to itl4 resource
+	MOVE.L	(A0), A0							; pointer to the (locked) itl4 resource
+	ADDA.L	numPartsOffset(A5), A0			; adjust pointer to point at table
+	MOVE.L	A0, -(SP)						; push the NumberPartsTablePtr
+	PEA		baseNumString(A5)				; where to put the formatted string
+	_FormatX2Str								; script manager-friendly NumToString
+
+; Now combine the two strings, the name, plus the number as a string to build a
+; file name to try.  We will build the string using ReplaceText, to replace the ^0 in the 
+; string with the current baseNumString. Since ReplaceText requires two handles, we have
+; to first copy the number string into a handle.
+
+	MOVEQ	#0, D0							; start with a clean register
+	MOVE.B	baseNumString(A5), D0			; get the length byte
+	_NewHandle								; try to make a handle to hold it
+	BNE		DeathCity						; if we get an error, just leave
+	MOVE.L	A0, hBaseNumString(A5)		; save the handle for later
+	MOVE.L	(A0), A1							; point to the new handle data
+	MOVEQ	#0, D0							; start with a clean register
+	LEA		baseNumString(A5), A0			; point at our copy of the string
+	MOVE.B	(A0)+, D0						; get the length & point at the first character
+	_BlockMove								; copy the string into the handle
+	
+	CLR.W		-(SP)							; return result from ReplaceText
+	MOVE.L	copyBaseName(A5), -(SP)			; the handle to the copy of the file name
+	MOVE.L	hBaseNumString(A5), -(SP)		; the handle to the number string
+	PEA		upSnick0Str(PC)					; the key to replace
+	_ReplaceText								; substitute the number for ^0
+												; function result removed below
+												
+; Throw away the handle which contained a copy of the number string
+
+	MOVE.L	hBaseNumString(A5), A0
+	_DisposHandle								; kill it
+	
+; Set the length byte for this new string, using the length of the handle resulting from
+; the ReplaceText call. Then copy the string data from the handle into our local file
+; name string.
+
+	MOVE.L	copyBaseName(A5), A0			; handle to complete file name
+	_GetHandleSize								; how many bytes?
+	MOVE.L	(A0), A0							; point at data
+	LEA		fileName(A5), A1				; point at local file name string
+	MOVE.B	D0, (A1)+						; move the length byte & point past it
+	_BlockMove								; copy the rest of the file name
+	
+; Now we have a copy of the next name to try, kill the string handle, since we have to start
+; with the resource in order  to get the ^0 in the string.
+
+	MOVE.L	copyBaseName(A5),A0			; the handle to string,
+	_DisposHandle								; kill it.
+	
+; Now we have cleaned up the handle, see if ReplaceText worked or not.  If it didn't, it
+; couldn't find the ^0 in the string which would imply something very bad happened.
+; We do this sort of late here, so that we can blow away the StringHandle without
+; having to worry about it in the error handler.
+
+	MOVE.W	(SP)+,D0						; get result from ReplaceText,
+	BMI		DeathCity						; if couldn't find it, something is wrong.
+
+; Now try to create the file based on that file name, on the current volume.
+; The parameter block is set up for both Create and Open. 
+; Create the file in the root of the startup volume.  The rest of the parameter block
+; is zeroed, from above, just in case.
+
+	LEA		filePB(A5),A0					; the file parameter block,
+	LEA		fileName(A5),A1				; the address of the file name string,
+	MOVE.L	A1,ioFileName(A0)				; set up parameter,
+	MOVE.W	sysInfo.sysVRefNum(A5),ioVRefNum(A0) ; use startup volume.
+;	CLR.B		ioFVersNum(A0)				; clear file type, of course.
+	MOVE.L	#fsRtDirId,ioDirID(A0)			; create in the root directory.
+	_HCreate									; try to create that file.
+
+; If we have an error other than dupFNErr, then we are toast and have to exit.
+; If it is a dupFNErr, then we need to up the file name/number by one and 
+; try again.
+
+	CMP.W		#dupFNErr,D0					; is it a duplicate file name?
+	BEQ		TryFileName					; if so, try next one.
+	TST.W		D0								; was result OK?
+	BNE		DeathCity						; If not, we must die.
+
+; The file is valid, set the file information so that it is marked as a PICT file.  Start
+; with a GetFileInfo to set up all the junk we don't need to fool with.  Recall that we
+; comment out the lines that aren't specifically required in this location in the code,
+; but leave the lines there to remind you that they are required for the call.  They
+; are already set up by the above HCreate call, or by the clearing process at the start
+; of the code.
+
+;	LEA		filePB(A5),A0					; the file parameter block,
+;	LEA		fileName(A5),A1				; the address of the file name string,
+;	MOVE.L	A1,ioFileName(A0)				; set up parameter,
+;	MOVE.W	sysInfo.sysVRefNum(A5),ioVRefNum(A0) ; use startup volume,
+;	CLR.W		ioFileType(A0)					; no version number, any permission.
+;	CLR.W		ioFDirIndex(A0)					; use name and vRefNum.
+;	MOVE.L	#fsRtDirId,ioDirID(A0)			; get in the root directory.
+	_HGetFileInfo								; get the info on the slime.
+	BNE		DeathCity						; everything OK?
+	
+; Now change the file type and creator and Set the info.
+
+;	LEA		filePB(A5),A0					; the file parameter block,
+;	LEA		fileName(A5),A1				; the address of the file name string,
+;	MOVE.L	A1,ioFileName(A0)				; set up parameter,
+;	MOVE.W	sysInfo.sysVRefNum(A5),ioVRefNum(A0) ; use startup volume,
+;	CLR.W		ioFileType(A0)					; no version number, any permission.
+;	CLR.B		ioFFlType(A0)					; and the other file type Must be cleared too.
+	MOVE.L	#pFileType,ioFLUsrWds+fdType(A0) ; change file type to PICT.
+	MOVE.L	#pFileCreator,ioFLUsrWds+fdCreator(A0) ; and the file creator to 'ttxt' for TeachText
+												; Creation and ModDates are set in block,
+												; from the GetFileInfo.
+	MOVE.L	#fsRtDirId,ioDirID(A0)			; set in the root directory. (HGetFileInfo pounds
+												; the dirId on the way back.)
+	_HSetFileInfo								; Set the info on the slime.
+	BNE		DeathCity						; everything OK?
+	
+; We have a valid file name, and the file has been created on the default volume.
+; So... it is time to open the slime dog.  We use the 'write' permission, but there are
+; a couple of other stupid things in the file system, like not reporting an error here if
+; the disk is write protected.  We get that later in the Write call, so we'll handle a
+; no write access error there too.  If everything is OK, we'll just get Rd/Wr permission
+; back by default.  This is fsWrPerm though, just to be explicit.
+
+;	LEA		filePB(A5),A0					; the file parameter block,
+;	LEA		fileName(A5),A1				; the address of the file name string,
+;	MOVE.L	A1,ioFileName(A0)				; set up parameter,
+;	MOVE.W	sysInfo.sysVRefNum(A5),ioVRefNum(A0) ; use startup volume,
+	MOVE.B	#fsWrPerm,ioPermssn(A0)		; desire Write permission to file.
+;	CLR.B		ioFileType(A0)					; clear the, worse than useless, version #.
+;	CLR.L		ioOwnBuf(A0)					; use standard buffer.
+;	MOVE.L	#fsRtDirId,ioDirID(A0)			; open in the root directory.
+	_HOpen									; open the file for writing.
+	BNE		DeathCity						; if it cannot be opened, we cannot continue.
+
+	MOVE.W	ioRefNum(A0),gPictRefNum(A5)	; saved off for future use.
+
+; Now write the header information into the file, so that it is a PICT file.   It is actually
+; 512+10 bytes long, since we throw in the picture header as well.  The space needs to
+; be allocated in the file, although it will be updated after the picture is done.
+; This is kind of a cheater approach to writing an empty header, but serves two purposes.
+; It will get clear block we can write at one shot to clear the header on the file, and it also
+; has to get 522 bytes of storage or we die here.  Since QD will crash on no memory for 
+; the upcoming OpenPort, this is a minor preflight to be sure we won't die when we try
+; to open the port, or open the picture.  OK, so I'm a slacker, but I really just wanted to
+; use the Clear bit.
+
+	MOVE.L	#headerSize+picData,D0			; size of the block.
+	_NewHandle	CLEAR						; make a block of zeros.
+	BNE		DeathCity						; are we so low we can't get 512 bytes?
+
+	MOVE.L	A0,A2							; save off the handle for later disposal.
+	LEA		filePB(A5),A0					; the parameter block again,
+;	MOVE.W	gPictRefNum(A5),ioRefNum(A0)	; the refnum to use.
+	MOVE.L	(A2),ioBuffer(A0)				; pointer to the handle of data.
+	MOVE.L	#headerSize+picData,ioReqCount(A0) ; number of bytes to write.
+	MOVE.W	#fsFromStart,ioPosMode(A0)		; start at start in file,
+	CLR.L		ioPosOffset(A0)					; no offset from start.
+	_Write										; Write the empty header to the file.
+	
+; Now dispose the handle we used to write the empty header to the file.  Disposed
+; before the error check to avoid having to dispose it in the error handler.
+
+	MOVE.L	A2,A0							; handle to the data,
+	_DisposHandle								; freed back to system.
+
+; Check the result of the write.
+
+	TST.W		filePB+ioResult(A5)				; retrieve the error code from Write.
+	BNE		DeathCity						; if we got an error, leave.
+
+; Now open a port for our
+; use to allow us to easily copy the screen to itself, and to avoid having to worry if
+; a port is valid currently.  We have preflighted at least 500 bytes out of the heap,
+; which should be enough for a port, so we won’t blow up on this call at least.
+; In addition to the Open, this becomes the current port. (as: thePort)  The
+; same record is used whether it is color or not.
+
+	PEA		picPort(A5)						; address of record to fill
+	TST.B		sysInfo.hasColorQD(A5)			; do we have color QD?
+	BEQ.S		@0								; if not, open a regular port.
+	_OpenCPort									; fill it with color port junk.
+	BRA.S		@1
+@0
+	_OpenPort									; open a standard port.
+	
+@1
+	ST			portIsValid(A5)					; Set bool to Yes, for the picPort being in use.
+
+; Now that we have a new port to draw into, we want to be sure to get all the monitors/
+; devices in the system.  So... use the GrayRgn from low memory to Union with the current
+; visRgn we have in our new port.  We want to do the Union since the new Port's visRgn will 
+; include the menu bar area, and GrayRgn doesn't.  But of course, the new port doesn't have
+; the other devices, so we need the union.  This is also considered a little sick, that of 
+; changing the visRgn of a port, but it needs to be done.  Once we've changed the visRgn,
+; we'll get the whole system when we CopyBits. 
+
+	MOVE.L	picPort+visRgn(A5),-(SP)			; the handle to the visRgn for the new port.
+	MOVE.L	GrayRgn,-(SP)					; the handle to GrayRgn out of low mem.
+	MOVE.L	picPort+visRgn(A5),-(SP)			; the visRgn as the destination as well.
+	_UnionRgn									; modify the visRgn to include all monitors.
+
+; Now save the bounding rect that encompasses all the monitors.
+
+	MOVE.L	picPort+visRgn(A5),A0			; the handle to the visRgn.
+	MOVE.L	(A0),A0							; pointer to the region.
+	LEA		maxRect(A5),A1					; the address of our Rect,
+	MOVE.L	rgnBBox+topLeft(A0),(A1)+		; copy over the topLeft,
+	MOVE.L	rgnBBox+botRight(A0),(A1)+		; and the botRight
+	
+; Set the new GrafProc record up to have the standard pieces.  Here again,
+; use the same record for both color and not, but use the larger color record,
+; not filling all the space in the non-color case.
+
+	PEA		newGrafs(A5)					; the new array to use.
+	TST.B		sysInfo.hasColorQD(A5)			; do we have color QD?
+	BEQ.S		@2								; if not, set std procs, not color.
+	_SetStdCProcs								; fill the array with procs.
+	BRA.S		@3								; go on to change procs.
+@2
+	_SetStdProcs								; fill the array with B&W procs.
+@3
+
+; Change the port to use those GrafProcs instead. 
+; thePort^.grafProcs := @newGrafs
+
+	LEA		picPort(A5),A0					; get address of thePort.
+	LEA		newGrafs(A5),A1				; address of new procs record,
+	MOVE.L	A1,grafProcs(A0)					; set the port to the new record.
+
+; We are in our offscreen port.  Change the GrafProc pointer for picture saving
+; to our routine that actually writes the bytes to the disk. Works for both color and
+; regular.
+
+	LEA		PictWriter(PC),A0				; the address of the routine to use,
+	MOVE.L	A0,putPicProc(A1)				; change the newGraf record.
+
+; Now when the putPicProc gets called, it will run to our PictWriter routine.  This
+; way we get to save the data off to the disk instead of use up huge hunks of RAM to
+; build the picture.  PictWriter will use the gPictRefNum as the file to write to, but we
+; need to init a couple of other global variables to set up for the picture.  The two other
+; variables were already cleared by the top loop that cleared all the globals.
+
+	MOVE.W	#picData,gPictSize(A5)			; start off as just header size.
+;	CLR.W		gPictError(A5)					; starting as no error.
+;	CLR.L		gPictHandle(A5)					; since we have no picture handle yet.
+
+; Actually open the picture and do the CopyBits in order to process the picture.
+; The data will be written by PictWriter as it is called by QuickDraw. 
+
+	CLR.L		-(SP)							; the handle result comes back on stack.
+	PEA		maxRect(A5)					; the rect to use, full screen.
+	_OpenPicture								; start up the process.
+	MOVE.L	(SP)+,gPictHandle(A5)			; save the handle created.
+
+; Now the picture is open and ready to cruise.  Start by setting the clip region down,
+; to make it a more mellow picture (clipping weirdnesses abound).  This clip rect is the
+; rect that surrounds all monitors in the system.
+
+	PEA		maxRect(A5)					; the rect to use again,
+	_ClipRect									; clip to the screen bounds.
+
+; Loop through each monitor in the device list.  With each monitor, do a CopyBits of the 
+; full device, just the bounds rectangle. 
+
+	TST.B		sysInfo.hasColorQD(A5)			; do we have color QD?
+	BEQ.S		CopyLips						; if not, skip the GDevice stuff.
+	
+; Otherwise, we need to drive through the device list, so get the first one.
+
+	CLR.L		-(SP)							; returned GDHandle here.
+	_GetDeviceList								; get start of list.
+	MOVE.L	(SP)+,nextGD(A5)				; save the handle.
+	BEQ		DeathCity						; if no devices, get out of here.
+	
+; Loop back here to CopyBits the next device in the list.  The maxRect as we use it here is
+; for a given gDevice/screen, and isn't the total area of all monitors, as it was when we
+; setup the clipping.
+
+DoNextDevice
+	MOVE.L	nextGD(A5),A0					; get the handle to gDevice,
+	MOVE.L	(A0),A0							; deref the handle,
+	MOVE.L	gdPMap(A0),A0					; get PixMapHandle,
+	MOVE.L	(A0),A0							; deref to pointer of PixMap.
+	LEA		maxRect(A5),A1					; the address of rect to save,
+	MOVE.L	bounds+topLeft(A0),(A1)+		; save off the TopLeft of the rect,
+	MOVE.L	bounds+botRight(A0),(A1)+		; save the botRight too.
+	
+; For each gDevice that we copy, we want to start off the banding parameters as being the
+; full screen size, basically the maxRect parameters.  If this is a single monitor old system,
+; the concept still holds.  Start the copyTop at the top of the current screen, start the copyHeight
+; as the full screen size, and start the copyRect as the full screen.  These will all get changed
+; if there isn't enough ram to do a full screen copybits.  If there is enough ram, we'll get 
+; a single CopyBits saved in the picture for this screen/gDevice.
+
+CopyLips
+	MOVE.W	maxRect+top(A5),copyTop(A5)	; start first band at top of screen.
+	MOVE.W	maxRect+bottom(A5),D0			; get the bottom of screen,
+	SUB.W		maxRect+top(A5),D0				; giving height of screen,
+	MOVE.W	D0,copyHeight(A5)				; save it off as starting copyHeight.  
+	LEA		copyRect(A5),A1					; address of our copyRect,
+	MOVE.L	maxRect+topLeft(A5),(A1)+		; save off the TopLeft of the rect,
+	MOVE.L	maxRect+botRight(A5),(A1)+		; save the botRight too.
+
+; Set up the banding parameters for this time through the band loop.   This may be a one
+; time shot, but we can't be sure, and don't care, so just do it generally.
+
+BandLoop
+	MOVE.W	copyTop(A5),D0					; get the top of the next band to do,
+	MOVE.W	D0,copyRect+top(A5)				; set the top of the copyRect to new top.
+	ADD.W		copyHeight(A5),D0				; add in current band height, giving bottom.
+	
+	CMP.W		maxRect+bottom(A5),D0			; are we off bottom of full screen rect?
+	BLT.S		@0								; if not, stow the value.
+	MOVE.W	maxRect+bottom(A5),D0			; if we are, just stop at the max bottom.
+@0
+	MOVE.W	D0,copyRect+bottom(A5)			; the bottom of the next rectangle (band).
+	
+; The parameters are all setup for this band (maybe full screen).  
+; The picture is ready to roll.  CopyBits the screen to itself.  While inside of an open
+; picture this will save all the bits off into the picture handle.  Since the handle is
+; being written to disk as it is created by the PictWriter, this CopyBits will automatically
+; spool the data out to the disk.  We use the copyRect since we may only be doing a band
+; of the full screen right now. 
+
+	SF			gWroteBits(A5)					; set up to handle full memory case.
+	
+	PEA		picPort+portBits(A5)				; the source bitMap,
+	PEA		picPort+portBits(A5)				; the destination bitMap too.
+	PEA		copyRect(A5)					; the source rectangle, max screensize.
+	PEA		copyRect(A5)					; the dest rect too.
+	MOVE.W	#srcCopy,-(SP)					; use the copy mode.
+	CLR.L		-(SP)							; and a Nil clipping region.
+	_CopyBits									; copy the screen bits.
+
+; We have written that band out to the file using the bottleneck.  If QD failed by not having
+; enough RAM we need to shrink the band size down.  We know whether it failed or not
+; by checking the gWroteBits variable to be sure the bottleneck got called, and we'll also 
+; check QDError just to be sure.  QDError is only valid for color machines.
+
+	TST.B		sysInfo.hasColorQD(A5)			; do we have color QD?
+	BEQ.S		@1								; if not, skip QDError check.
+	CLR.W		-(SP)							; return result,
+	_QDError									; get last error,
+	MOVE.W	(SP)+,D0						; get value QD last set,
+	BNE.S		ShrinkCopyHeight				; if nonZero, try shrinking the band Height.
+@1
+	TST.B		gWroteBits(A5)					; and check the write flag,
+	BNE.S		UpCopyTop						; if it is true, we wrote bits, and can go on.
+
+; We have a case where the CopyBits to save the image didn't work, so the bottleneck never
+; got called to write any data.  Working under the assumption that it is a memory full error,
+; we want to shrink our band by half, and try again.
+
+ShrinkCopyHeight
+	MOVE.W	copyHeight(A5),D0				; get the current copyHeight
+	LSR.W		#1,D0							; divide the height by two.
+	MOVE.W	D0,copyHeight(A5)				; save off the new number.
+	
+	CMP.W		#1,D0							; are we down to 1 pixel high yet?
+	BLE.S		DeathCity						; if we are, just skip it, not enough ram.
+	BRA.S		BandLoop						; try this smaller band instead.
+
+; We didn't get any error while doing that band.  Up the copyTop to the next band to be done,
+; and check if we are done with the entire max rect yet.  If we are done, we can fall into the
+; outer loop of the gDevices on the system.  If not, we'll go back to do another band for this
+; current gDevice.
+
+UpCopyTop
+	MOVE.W	copyTop(A5),D0					; get the band top we just used,
+	ADD.W		copyHeight(A5),D0				; add in the current bandsize,
+	MOVE.W	D0,copyTop(A5)					; save that new band top.
+	CMP.W		maxRect+bottom(A5),D0			; are we off the end of the device yet?
+ 	BLT.S		BandLoop						; not off bottom of device, so do another band.
+	
+; If we have colorQD we need to get the next device and copy it.  If we don't have color QD
+; skip this stuff, since it will cause a system error if we run it.  Can you say 'special case?'
+; Sure, I knew you could.
+
+EndDeviceLoop
+	TST.B		sysInfo.hasColorQD(A5)			; do we have color QD?
+	BEQ.S		PictureDone						; if not, skip the GDevice stuff.
+	
+; We have done that monitor.  Now go to the next one in the list.  When we get to the
+; end we will get NIL back.
+
+	CLR.L		-(SP)							; make room for the result.
+	MOVE.L	nextGD(A5),-(SP)				; where we are now,
+	_GetNextDevice								; get us the next device in the list.
+	MOVE.L	(SP)+,nextGD(A5)				; move the gDevice handle.
+	BNE		DoNextDevice					; jump back to CopyBits more if there is more.
+	
+
+;------------------------------------------------------------------
+; That was a ton of work, but we didn't see it, PictWriter did.
+; Now we are done saving the bits to disk, we can shut down the picture saving operation.
+
+PictureDone
+	_ClosePicture								; close the picture.
+
+; We are done with the picture operation, see if we had an error while it was going on.
+; We have to check afterwards, since QD has no error checking, by design, for some
+; unknown reason.
+
+	MOVE		gPictError(A5),D0				; was there an error during spooling?
+	BNE.S		DeathCity						; if so, we are dead meat, and must leave.
+
+; Now we know the file was written OK, so we have to drive back to the front of the
+; file and update the pict size so it is correct.  Do the Positioning and Write operation
+; in the same call.  
+; Now write the 10 byte header off the pict handle to the disk, so that info is correct
+; in the Pict file.  The size and rect need to be written, since they won't be right 
+; until the picture is complete.
+
+	LEA		filePB(A5),A0					; the PB to use.
+	MOVE.W	gPictRefNum(A5),ioRefNum(A0)	; use the refnum we opened with,
+	MOVE.L	gPictHandle(A5),A1				; the handle to the pict,
+	MOVE.L	(A1),ioBuffer(A0)				; the buffer to write.
+	MOVE.L	#picData,ioReqCount(A0)		; the number of bytes to write.
+	MOVE.W	#fsFromStart,ioPosMode(A0)		; do offset from the start of file,
+	MOVE.L	#headerSize,ioPosOffset(A0)		; and offset past the 512 byte header.
+	_Write										; write the final data.
+	BNE.S		DeathCity						; if an error, split.
+
+; From here on out, we are cleaning up the world to what it was before we came in.
+; That means we won’t have any failures (recoverable anyway) during this exit.
+
+	BSR.S		CloseNClean					; close the file, clean up blocks.
+
+	BRA.S		CommonExit					; and leave cleanly.
+	
+
+;------------------------------------------------------------------
+; This is the error handler.  This is where we have died from some error during the
+; whole operation.  When we get here, we have to dispose of all the junk we created,
+; clean up, let the user know we chooked, and exit.  *** does there need to be something
+; more sophisticated to let the user know we died?  Notification request perhaps?
+
+DeathCity
+	MOVE.W	#8,-(SP)							; length for SysBeep,
+	_SysBeep									; a beep to signify errors.
+	
+	BSR.S		CloseNClean					; close the file and cleanup.
+	
+; Since we had some skanky error, attempt to delete the file we created at the start,
+; to clean up bogus junk.  If we get an error on the delete that’s OK.
+
+	LEA		filePB(A5),A0					; the parameter block,
+;	LEA		fileName(A5),A1				; the pointer to the file name string,
+;	MOVE.L	A1,ioFileName(A0)				; the file name to delete,
+;	MOVE.W	sysInfo.sysVRefNum(A5),ioVRefNum(A0) ; use startup volume, as above.
+;	CLR.W		ioFileType(A0)					; and no file type.
+	MOVE.L	#fsRtDirId,ioDirID(A0)			; file was in the root directory.
+	_HDelete									; try to kill it.
+	
+	
+;------------------------------------------------------------------
+CommonExit
+	MOVEM.L	(SP)+,A0-A2/A5/D0-D2/D7		; restore registers we trashed.  (9/25/90)
+	UNLK		A6								; kill local vars from stack.
+	RTS										; Exit from FKEY, successful or not.
+	
+
+;------------------------------------------------------------------
+; Close the File and clean up our tracks.
+; 	Everything is done, put the CrsrVis/CrsrState back before someone sees that
+; 	we were playing with it.  If we get caught, we face life in prison.  This is done
+;	whether we have an error or not.
+
+CloseNClean
+	MOVE.B	oldCrsrVis(A5),CrsrVis			; restore the cursor visibility.
+	ADD.B		#1,CrsrState						; Turn cursor back on.
+	
+; Restore the state of the itl4 resource handle if we got one
+	MOVE.L	itlHandle(A5), D0				; did we have this handle
+	BEQ.S		@3								; if not, don’t bother
+	MOVE.L	D0, A0							; get the handle into A0
+	MOVEQ	#0, D0							; a clean register is probably not needed
+	MOVE.B	itlState(A5), D0					; get the saved handle state
+	_HSetState									; and make it like it used to be
+
+@3
+; Close it in case it is open.  If it is not open, gPictRefNum will be zero.
+
+	LEA		filePB(A5),A0					; the pb block to use,
+	MOVE.W	gPictRefNum(A5),ioRefNum(A0)	; the file refnum we just used.
+	BEQ.S		@2								; if no file was open, skip it.
+	_Close										; close the file.
+@2
+; Kill the picture handle that was created at OpenPicture time, if it exists.
+; If it never made it, the handle will be nil, allowing us to skip it.
+
+	MOVE.L	gPictHandle(A5),D0				; get the handle to the picture,
+	BEQ.S		@1								; if it is NIL, skip the Kill.
+	MOVE.L	D0,-(SP)							; else, the handle to the stub on stack,
+	_KillPicture									; kill the swine.
+@1
+	MOVE.L	currPort(A5),-(SP)				; and the old port,
+	_SetPort									; so we are back.
+
+; And dispose the port that we created before, since we are done.
+
+	TST.B		portIsValid(A5)					; is the port valid, set up?
+	BEQ.S		@0								; if not, skip the close,
+	PEA		picPort(A5)						; address of port to blast.
+	_ClosePort									; close the dog, releasing memory.
+@0
+	RTS
+	
+	
+;------------------------------------------------------------------
+; PictWriter:
+; 	This routine is the bottleneck procedure that actually gets called when QuickDraw
+; is slamming through the bits while copying the screen.  For each time it gets called
+; it will save off the bytes passed and check the error stuff. 
+; As found in a Pascal routine:
+;
+;	{ This routine will save the current image as it is created.  As the data requests
+;		go by that data will be written to the file.  The data is being created by the
+;		OpenPicture/CopyBits in DoWrite, this is the bottleneck for that operation.
+;		Any errors found while doing this will make us skip any further requests
+;		to write data to the disk.  No memory is allocated.   Communication with 
+;		DoWrite is done through globals, since bottlenecks must be at the main
+;		level.  The bottleneck must also keep track of how many bytes are written,
+;		so that the header on the picture can be fixed up to be correct.  This must
+;		be done to avoid creating bogus pictures.  The picSize field of the handle
+;		must be updated continuously so that when the picture is done, the ClosePicture
+;		can create a valid picture.  The check for the NIL handle is to handle the
+;		problem of when the OpenPicture is called.  The proc gets called before 
+;		the handle is valid.  Be very careful of these bottleneck things, it is 
+;		easy to run into problems that are very hard to figure out.  QuickDraw
+;		has no facilities to give you info when things go wrong so it makes it
+;		a bit tougher. }
+;PROCEDURE  PictWriter (dPointer: Ptr; nextHunk: Integer);
+;
+;VAR	longHunk:	LongInt;
+;
+;BEGIN
+;	IF gPictError = noErr THEN  BEGIN
+;		longHunk := nextHunk;
+;		gPictError := FSWrite(gPictRefNum, longHunk, dPointer);
+;		gPictSize := gPictSize + longHunk;
+;		IF gPictHandle <> NIL THEN  gPictHandle^^.picSize := LoWord (gPictSize);
+;	END;
+;END;
+
+; For the PictWriter parameters, we will just use an A7 relative stack frame.  The
+; A5 stack frame for our globals will still be in effect from the WITH at the top, and
+; we will explicitly use the PictWriterStack parameters when we need them here,
+; doing the relative (SP) as expected, instead of (A5).
+
+PWStack		RECORD	{EndRegs},DECR
+PBegin			EQU		*					; start parameters after this point
+dPointer		DS.L		1					; offset to the pointer,
+nextHunk		DS.W		1					; offset onto stack to parameter,
+PWSize			EQU		PBegin-*			; to remove these dudes.
+RetAddr		DS.L		1					; return address on stack.
+SaveRegs		DS.L		6					; save/restore 6 registers in here.
+EndRegs		EQU		*					; to set the location.
+				ENDR
+
+PictWriter
+	MOVEM.L	A0-A2/D0-D2,-(SP)				; save registers we trash. 
+
+	MOVE.W	gPictError(A5),D0				; get current error result.
+	BNE.S		NoCanDo						; if we have an error pending, exit now.
+
+	ST			gWroteBits(A5)					; mark us as having had enough ram.
+	
+	CLR.L		D0								; start with empty register
+	MOVE.W	PWStack.nextHunk(SP),D0		; get size of next piece to write.
+	
+	LEA		filePB(A5),A0					; address of i/o parameter block,
+	MOVE.W	gPictRefNum(A5),ioRefNum(A0) ; the refnum to use.
+	MOVE.L	PWStack.dPointer(SP),ioBuffer(A0) ; address of data to write.
+	MOVE.L	D0,ioReqCount(A0)				; number of bytes to write, as longInt.
+	MOVE.W	#fsAtMark,ioPosMode(A0)		; start at mark in file,
+	CLR.L		ioPosOffset(A0)					; no offset from current mark.
+	_Write										; write the data to the open file.
+	MOVE.W	D0,gPictError(A5)				; set the error code to yea/nay.
+	
+; Now the data is out there in the file, update the picture size variable.
+
+	MOVE.W	PWStack.nextHunk(SP),D0		; retrieve the count of bytes to do,
+	ADD.W		D0,gPictSize(A5)					; add, ignore overflows, QD does.
+	
+; And update the word in the header of the Picture Handle to match.
+
+	MOVE.L	gPictHandle(A5),D0				; handle to the data block,
+	BEQ.S		NoCanDo						; if nil, skip it for now.
+	
+	MOVE.L	D0,A0							; put back in Address land.
+	MOVE.L	(A0),A0							; deref to pointer.
+	MOVE.W	gPictSize(A5),picSize(A0)			; set the size parameter.
+
+NoCanDo
+	MOVEM.L	(SP)+,A0-A2/D0-D2				; restore registers we trashed. 
+	MOVE.L	(SP)+,A0						; retrieve return address.
+	ADD.L		#PWStack.PWSize,SP			; kill the parameters,
+	JMP		(A0)							; and return.
+
+	ENDWITH									; done with the global Frame.
+	
+
+;------------------------------------------------------------------
+; Here we have a string constant that we want to use in order to do a Munger thing
+; on the creation of the filename.  We will search a given file string for the ^0 and replace
+; it with the current file number we are creating.  This ^0 allows us to be more 
+; internationally compatible, since the number can be at the front of the string which is
+; nicer and more grammatically correct for some languages.  Not to mention it is easy
+; for us to do it here.  This ^0 is defined here in the code as a constant, and isn't modified,
+; but is used as the source for the string search in Munger.
+
+	
+	String		Pascal							; put length byte on this one.
+	
+upSnick0Str		DC.W	'^0'						; the string piece to find and replace.
+	
+	String		Pascal							; put length byte on this one.
+	
+hardName		DC.W	'Pic ^0'					; default name, in case STR is lost.
+												; set to funny name to show something is wrong.
+												
+extendedOne									; the constant 1 in extended format
+				DC.W	$3FFF, $8000, $0000, $0000, $0000, $0000
+				
+numFormat
+				DC.B	$30,$00,$00,$05,$00,$00	; internal representation of the format
+				DC.B	$00,$00,$00,$05,$00,$05	; for our number “####”
+				DC.B	$00,$05,$00,$04,$00,$00
+				DC.B	$00,$00,$00,$00,$00,$00
+				DC.B	$00,$00,$01,$00,$00,$00
+				DC.B	$00,$00,$00,$00,$00,$00
+				DC.B	$00,$00,$00,$00,$00,$00
+				DC.B	$00,$00,$04,$05,$05,$05
+				DC.B	$05
+				
+	ENDP										; end of proc.
+	
+	END

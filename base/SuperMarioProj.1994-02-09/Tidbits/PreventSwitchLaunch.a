@@ -1,0 +1,150 @@
+;
+;	File:		PreventSwitchLaunch.a
+;
+;	Contains:	'proc' -16495 code:  Prevents switch launching from System 6 to System 7.
+;
+;	Written by:	Dean Yu
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <3>	  6/6/90	DTY		Went back to using stack frame to save default directory, to get
+;									around bug in FixSMgrWorld which trashed D1.
+;		 <1>	  6/6/90	DTY		First checked in.  _InitFonts patch to prevent a switch launch
+;									to System 7 from older Systems.  Closes the System 7 System
+;									file, re-opens the previous System file, re-initialise the
+;									system resource map, and attempt to remove patch from
+;									_InitFonts.
+;
+
+		LOAD	'StandardEqu.d'
+
+kInitFontsTrap	equ	$fe						; Trap word of _InitFonts
+kJmpInstr		equ	$4ef9					; JMP instruction used for unpatching
+
+InitFontsPtch	PROC	EXPORT
+
+patchVars	RECORD	0,DECR
+curVRefNum	ds.w	1					; Save current volume reference number
+patchVarSize	equ	*
+			ENDR
+			
+;
+;	To reduce the amount of memory that’s used we attempt to remove this patch from _InitFonts
+;	at the end of the patch.  If we determine that someone else patched _InitFonts before we
+;	got called (unlikely, but it could happen), the following bra.s instruction is changed to
+;	a jmp, and we reduce the size of our memory block down to 6 bytes, just enough to hold the
+;	jmp instruction.
+;
+
+		WITH	patchVars
+		bra.s	startInitFontsPatch
+oldInitFont	dc.l	0					; Address of previous _InitFonts routine stored here
+
+startInitFontsPatch
+
+;
+;	This code should only be run if the switch launch is coming from Finder 6.x  Check the code
+;	at the return address on the stack to make sure it’s 6.x code.  If it isn’t, generate a
+;	dsOldSystem System Error.  If it is Finder 6.x, add 4 bytes to the return address, since we
+;	want to bypass the Finder changing the value in BootDrive, since we closed the System 7 System
+;	file, and re-opened the old System file, so everything is the way it was before Finder started
+;	switch launch, except Finder doesn’t know that, so we have to fool it.
+;
+;	(SP) (Before) --->	31C3 0210		move.w	d3,BootDrive
+;	(SP) (After)  --->	508f			addq.l	#8,sp
+;
+		move.l	(sp),a0					; Get the return address, and check the next instruction
+		cmpi.l	#$31c30210,(a0)+		; to make sure it’s a move.w D3,BootDrive
+		bne.s	FinderTooOld			; If not, force a System Error.
+		move.l	a0,(sp)					; Put our modified return address back on the stack
+										
+;	If we’re here, then we should close the System 7 System file, and re-open the System 6
+;	System file, and re-initialise the system resource map.
+										
+		clr.w	-(sp)
+		_CloseResFile					; Close the System file
+		
+		link	a6,#patchVarSize
+		sub.w	#ioFQElSize,sp
+
+		move.l	sp,a0
+		clr.l	ioCompletion(a0)
+		clr.l	ioNamePtr(a0)
+		_GetVol							; Get the current default volume
+		move.w	ioVRefNum(a0),curVRefNum(a6)		; and save it
+		
+		move.w	BootDrive,ioVRefNum(a0)	; Set the volume to the previous System Folder
+		_SetVol
+
+;
+;	_InitResources returns the reference number of the System file on the stack, but since there’s a nice big
+;	parameter block already there, there’s no REAL reason to allocate a word for the reference number, since
+;	the next call to _SetVol will reset that word anyway.
+;	
+
+		_InitResources					; _InitResources will open the System file, and rebuild the resource map
+		
+		move.l	sp,a0
+		move.w	curVRefNum(a6),ioVRefNum(a0)		; Restore the default directory
+		_SetVol
+
+		add.w	#ioFQElSize,sp			; Get rid of our parameter block
+		unlk	a6						; We don’t need our stack frame any more
+;
+;	Remove this patch
+;
+
+		move.w	#kInitFontsTrap,d0
+		_GetTrapAddress					; Get the address of _InitFonts routine
+		move.l	a0,d0
+		_StripAddress					; Clean this guy off
+		move.l	d0,a0					; Save it
+		lea		InitFontsPtch,a1		; Get InitFontsPtch’s entry point
+		move.l	a1,d0
+		_StripAddress					; Cleanse ourselves of dirty bits
+
+		exg		a0,d0					; Ensure that entry point of InitFontsPtch is in A0 for _RecoverHandle later
+		cmp.l	d0,a0					; Make sure we’re the most recent patch on _InitFonts
+		bne.s	gotPatched				; If not, we do some fancy byte saving
+		
+		_RecoverHandle ,SYS
+		_DisposHandle					; Free up the memory we’re using
+		
+		move.w	#kInitFontsTrap,d0
+		move.l	oldInitFont,a0
+		_SetTrapAddress					; Restore _InitFonts
+		jmp		(a0)					; Continue with _InitFonts
+
+;
+;	There’s a patch in front of us on _InitFont, so we can’t remove ourselves,
+;	but we can reduce the space we’re taking up to 6 bytes:
+;	Since the address of the next _InitFonts routine is stored in bytes 2 thru 5 of this patch,
+;	the preceding two byte bra.s instruction can be changed to a jmp, which would then use
+;	oldInitFonts as the effective address to jump to.  So, when this patch gets called again, 
+;	it will jump straight to the next _InitFonts patch/routine, since InitFontsPtch has done it’s
+;	job.
+
+gotPatched
+
+		move.w	#kJmpInstr,(a0)			; Replace bra.s with jmp
+		_RecoverHandle ,SYS				; Handle to our block
+		move.l	#startInitFontsPatch - InitFontsPtch,d0		; Size of jump/bra.s instruction
+		_SetHandleSize					; Reduce our memory block down to size of jump.
+										; This needs to be changed to something safer, because the Memory Manager
+										; may move a block into this space when the patch gets cut back, and we
+										; wouldn’t be here any more.
+		bra.s	InitFontsPtch			; Since this is a jump now, we can just branch back to it to call the next routine
+		
+;
+;	InitFontsPtch checks specifically for code in Finder 6.x.  Anything else isn’t handled, and
+;	will generate a dsOldSystem system error.
+;
+
+FinderTooOld
+
+		moveq	#dsOldSystem,d0
+		_SysError
+		ENDPROC
+		END

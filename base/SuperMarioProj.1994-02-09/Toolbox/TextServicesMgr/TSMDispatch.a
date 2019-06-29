@@ -1,0 +1,1696 @@
+;______________________________________________________________________________
+;
+;	File:		TSMDispatch.a
+;
+;	Contains:	Text Services Manager trap dispatcher.
+;
+;	Written by:	Kenny SC. Tung
+;
+;	Copyright:	© 1991-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<53>	 7/27/92	KST		#1037539 <JH>: The _PaintBehind patch should only be called if
+;									the Process Manager has been booted.
+;		<52>	 7/21/92	KST		<JH>: Changed comments for CloseTSMAwareApp().
+;		<51>	 7/16/92	KST		#1034952 <Kda>: Let input method to set the cursor in TSMEvent
+;									call().
+;		<50>	 7/15/92	KST		<hsK>: Changed the release version to 1.0. Will not affect the
+;									functionality.
+;		<49>	  7/3/92	KST		<JH>: Correct a type error: kIMJustSetCursorBit should really be
+;									kSWMJustSetCursorBit.
+;		<48>	 6/26/92	KST		#1031142 <JH>: When the application claims not TSM aware any
+;									more, we need to clear all UseInputWindow flags so it will not
+;									be reused when another TSM aware app is launched.
+;		<47>	 6/26/92	KST		#1033450,1033456,1031316 <JH>: When XCLOSETSMAWAREAPPLICATION()
+;									is called, we better inform Process Manager about it.
+;		<46>	 6/22/92	KST		#1033280,1033495 <JH>: When part code <= inSysWindow, return not
+;									over a floating window. (I used to only check inDesk).
+;		<45>	 6/19/92	KST		#1032492 <JH>: When TSM tries to open the resource file using
+;									the refcon in the floating window, need to verify its
+;									windowkind.
+;		<44>	 6/17/92	KST		#1030843 <JH>: If we click in a popup menu inside of a floating
+;									window, HMGetBalloon needs to return true so that balloon will
+;									be removed. Also changed the function name from
+;									utaIsApplicationTSMAware to utaIsAppTSMAwareAndNotUsingIW to be
+;									more precise and descriptive.
+;		<43>	 6/14/92	KST		Changed utaRemoveDocumentID to return the number of TSM
+;									documents remained open by the application.
+;		<42>	 6/10/92	YK		Oops, don’t do last minutes change.
+;		<41>	 6/10/92	YK		#1031298 <JH>: Add OldJapaneseInputMethodExists.  It returns
+;									True if the specified old-input method exists.
+;		<40>	 6/10/92	KST		#1031142,1030881 <JH>: Since we removed the docID param from
+;									TSMEvent, UseInputWindow has been broken because keydown event
+;									is routed to SWM recursively. Fix it with a TSM global keeping
+;									track of which doc is using the input window. And added a new
+;									private call for SWM -- TSMEventFromSWM. The TSM boot code has
+;									been modified so that it can handle multiple TSMinit files.
+;									(Global will not be re-allocated).
+;		<39>	  6/4/92	JH		#1031574 <KST>: _HMGetBalloonPatch leaves bits behind when a
+;									help window is drawn over the menubar. Checking to see if we are
+;									over the menubar  or over a systemwindow before we return false.
+;		<38>	  6/2/92	KST		<JH>, Should not check for inContent in HMGetBalloon.
+;		<37>	  6/2/92	KST		<JH>,The previous change has a minor mistake in HMGetBalloon
+;									patch.
+;		<36>	  6/2/92	JH		#1028635,1030481,1030631,1030634,1030647 <KST>: Added SystemMenu
+;									patch to support system menus for input methods.
+;		<35>	 5/20/92	KST		#1030447 <JH>: Fixed a bug. UseInputWindow did not work if we
+;									want to have global effect for the application.
+;		<34>	 5/14/92	KST		#1025797,<JH>: Added one new message selector 'kMsgHelpHELPMgr'
+;									to InformTSM. This call is used by __HMScanHWinResource in
+;									BalloonPACK.a. Also patched __HMGetBalloonPatch so that Help
+;									balloon will not flash in the Finder.
+;		<33>	  5/4/92	KST		#1025252,<JH>: Patched _PaintBehind so that floating windows
+;									will be updated correctly when the whole screen is redrawn.
+;		<32>	  5/2/92	YK		Flush the parameter on the stack before return to a caller.
+;		<31>	  5/1/92	KST		#1027482,<JH>: If input method changed cursor in a floating
+;									layer, then don't let other application to change the cursor
+;									again.
+;		<30>	  5/1/92	KST		#1028301,<JH>: SetTSMDialogState, RestoreTSMDialogState,
+;									TSMChangeCursor, TSMRestoreCursor calls are no longer needed and
+;									should be removed from the source code.
+;		<29>	  4/9/92	KST		JH,modifying InitTSMApplication to support the fact that SWM is
+;									no longer an application but a driver. Adding 2 new messages in
+;									InformTSM. Will remove SetDialogState in the next release.
+;		<28>	 3/27/92	KST		Documentation changes.
+;		<27>	 3/23/92	KST		Changes due to the code review.
+;		<26>	 3/12/92	KST		Added a new call "utaGetTSMAwareDocTable".
+;		<25>	  3/6/92	KST		Removed debugger code. Will grow internal table when overflow.
+;		<24>	  3/4/92	KST		Get trap address of SetCursor at INIT time.
+;		<23>	  3/3/92	KST		Added 2 new calls: "TSMChangeCursor", and "TSMRestoreCursor".
+;		<22>	  3/2/92	KST		Added a private TSM call "NewTSMDocument4SWM".
+;		<21>	 2/28/92	KST		Added 2 new calls "SetTSMDialogState", and
+;									"RestoreTSMDialogState".
+;		<20>	 2/27/92	KST		In utKillTSMAwareApplication, if the app is not TSM aware, we'll
+;									send an AE to SWM ask it to close its input window. If it is TSM
+;									aware, we'll set tsmKillApplicationP flag to true.
+;		<19>	 2/11/92	DCL		Changed the name of TSMEqu.[aph] to TextServices.[aph] for
+;									better read-ability.
+;		<18>	 2/10/92	KST		InformTSM's msgChangeToOldJIM now takes a parameter -- FEPID.
+;		<17>	  2/1/92	KST		We don't have a global flag in TSM globals to indicate using
+;									bottom-line window.
+;		<16>	 1/31/92	YK		Added FindServiceWindow.
+;		<15>	 1/29/92	KST		Removed "xIsApplicationTSMAware" call. Also inform Process
+;									Manager whether it should start sending events to SWM when SWM
+;									informTSM with its PSN.
+;		<14>	 1/16/92	KST		Add a new message to InformTSM: kMsgChangeToOldJIM.
+;		<13>	 1/11/92	KST		TSM globals are initially cleared.
+;		<12>	 1/10/92	KST		Inform Process Manager if the application is TSM aware.
+;		<11>	  1/9/92	KST		Changed SetDefaultInputMethod selector back to 13 so that we can
+;									build TSM INIT with d13.
+;		<10>	  1/8/92	KST		Removed CleanUpTSMAwareApp routine. CleanUpTSMApp is now a
+;									message to InformTSM.
+;		 <9>	  1/4/92	KST		Add a new routine "CloseTextService". Also "OpenTextService" now
+;									returns component instance to the caller.
+;		 <8>	12/31/91	KST		Added "CleanUpTSMAwareApplication" and "InformTSM" new calls.
+;									Check saved resource for "Use Input Window" global flag at boot
+;									time.
+;		 <7>	12/20/91	KST		Making progress toward Alpha. Changed "inline" to "TSM", and
+;									added new calls.
+;		 <6>	12/10/91	KST		Adding a new "InlineAwareRegister" call.
+;		 <5>	12/10/91	KST		Disable the Gestalt call for now.
+;		 <4>	12/10/91	KST		Added boot time initialization code, and to use "TSMPrivate.a".
+;		 <3>	11/26/91	KST		Low level TSM routines are now dispatched directly to the
+;									Component Manager.
+;		 <2>	11/23/91	KST		Check in the first time for Cube-E.
+;
+;
+;______________________________________________________________________________
+
+
+
+
+;______________________________________________________________________________
+;
+;	File:	"TSMDispatch.a"
+;
+;	Written  by Kenny SC. Tung
+;
+;	Modification History:
+;	21Nov91		KSCT	New today.
+;______________________________________________________________________________
+
+		
+
+				
+			PRINT		OFF
+
+			LOAD		'StandardEqu.d'
+			INCLUDE		'Processes.a'
+			INCLUDE		'MFPrivate.a'
+			INCLUDE 	'LinkedPatchMacros.a'
+			INCLUDE		'GestaltEqu.a'
+			INCLUDE		'LayerEqu.a'
+			
+			INCLUDE		'TextServices.a'
+			INCLUDE		'TSMPrivate.a'
+
+			INCLUDE 	'Balloons.a'
+			INCLUDE 	'BalloonsPriv.a'
+			INCLUDE 	'ScriptPriv.a'
+
+			PRINT		ON
+
+			CASE		OBJ
+
+	IF &type('TSMDebug') = 'UNDEFINED' THEN
+TSMDebug	EQU		0
+	ENDIF
+
+
+	IF &type('BuildTSMInit') = 'UNDEFINED' THEN
+BuildTSMInit		EQU		0			; this is only defined when building INIT
+	ENDIF
+
+
+;______________________________________________________________________________
+; Input: D0.W	low  byte = trap index,
+;				high byte = # of parameters in words.
+; Note: 
+;______________________________________________________________________________
+TSMDispatch	PatchProc	_TSMDispatch,(Plus,SE,II,IIci,Portable)				; dispatch code
+
+		
+			MOVEQ	#0,D1
+			MOVE.W	D0,D1				; D1 = trap index
+			TST.W	D1					; Check the trap dispatch
+			BLT.S	@1					; Negative traps are trouble
+			CMP.W	#kMaxTSMSelector,D1	; Compare against our known limits
+			BLS.S	@2					; Continue if all seems well
+
+@1			MOVEQ	#0,D1
+			MOVE.W	D0,D1
+			LSR.W	#8,D1				; D1 = # of parameters in words
+			LSL.W	#1,D1				; convert to bytes
+			MOVEQ	#ParamErr,D0		; Indicate parameter error
+			MOVEA.L	(SP)+,A0			; get return address
+			LEA		(A7,D1),SP			; pop param
+			MOVE.W	D0,(SP)				; function result
+			JMP		(A0)				; Terminate this call
+
+@2		;; D1 = trap index.
+			LEA 	TSMTrapTable,A1		; Point to the trap table
+			LSL.W	#2,D1				; *4 for long index
+			MOVE.L	(A1, D1.W),A1		; pass control to routine
+			JMP		(A1)
+
+TSMTrapTable
+
+			dcImportResident	XNEWTSMDOCUMENT				; 0 initialize TSM aware document
+			dcImportResident	XDELETETSMDOCUMENT			; 1 
+			dcImportResident	XACTIVATETSMDOCUMENT		; 2 
+			dcImportResident	XDEACTIVATETSMDOCUMENT		; 3 
+			dcImportResident	XTSMEVENT					; 4 
+			dcImportResident	XTSMMENUSELECT				; 5
+			dcImportResident	XSETTSMCURSOR				; 6
+			dcImportResident	XFIXTSMDOCUMENT				; 7
+			dcImportResident	XGETSERVICELIST				; 8
+			dcImportResident	XOPENTEXTSERVICE			; 9
+			dcImportResident	XCLOSETEXTSERVICE			; 10				<04Jan91 #9>
+			dcImportResident	XSENDAETOCLIENT				; 11
+
+			
+			dcImportResident	XSETDEFAULTINPUTMETHOD		; 12
+			dcImportResident	XGETDEFAULTINPUTMETHOD		; 13 (D)
+			dcImportResident	XSETTEXTSERVICELANGUAGE		; 14 (E)
+			dcImportResident	XGETTEXTSERVICELANGUAGE		; 15 
+			dcImportResident	XUSEINPUTWINDOW				; 16
+			dcImportResident	XNEWSERVICEWINDOW			; 17
+			dcImportResident	XCLOSESERVICEWINDOW			; 18
+			dcImportResident	XGETFRONTSERVICEWINDOW		; 19
+
+			dcImportResident	XINITTSMAWAREAPPLICATION	; 20
+			dcImportResident	XCLOSETSMAWAREAPPLICATION	; 21
+			dcImportResident	XINFORMTSM					; 22
+
+			dcImportResident	XFINDSERVICEWINDOW			; 23
+			dcImportResident	XNEWTSMDOCUMENT4SWM			; 24				<02Mar92 #22>
+			dcImportResident	XTSMEVENTFROMSWM			; 25				<03Jun92 #39>
+
+
+			ENDP
+
+
+
+
+; __________________________________________________________________________
+; Function:	xInitTSMAwareApplication()
+;			Application registers itself as TSM aware.
+; Input:	none.
+; Output:	D0.W = error code (memFullErr, tsmNotAnAppErr, tsmAlreadyRegisteredErr)
+; Register usage: Use D0,D1,A0,A1
+;
+; Side Effect:	If application registers itself the first time, a table to
+;				record open document IDs is allocated if it is not allocated.
+; ___________________________________________________________________________
+XINITTSMAWAREAPPLICATION	PROC	EXPORT
+			Import			utaTSMAwareApplicationP
+			Export			xInitTSMAwareDriver
+			WITH			PSNRecord
+
+			SUBA.W	#10, sp					; allocate storage for PSN (8 bytes) and result
+			PEA		2(sp)					; push address of PSN storage
+			_GetSystemClientProcess			; get PSN with which to associate the file
+			TST.W	(sp)+					; on error, PSN == kNoProcess
+			BNE.S	noProcess
+
+xInitTSMAwareDriver
+		;; Verify if we have registered this app already ...
+			MOVE.L	highLongOfPSN(SP),D0	; get high half of PSN
+			MOVE.L	lowLongOfPSN(SP),D1		; get low  half of PSN
+			BSR		utaTSMAwareApplicationP	; is it already registered?
+			BNE.S	registered				; yes, punt =>
+		;; PSN on top of stack.  Locate a free entry and store.
+			BSR		getFreePSNEntry			; get a free entry in A1
+			BNE.S	cleanSPExit				; punt on error (D0 set)
+		;; Record this application in the PSN table (A1) ...
+
+	IF TSMDebug THEN						; debug begin
+			CMP.W	#kPSNTableSignature,psnTableSignature(A1)	; valid table?
+			BEQ.S	TableOK										; yes
+			_debugger
+TableOK
+	ENDIF									; end
+
+			MOVE.L	(sp)+,psnHighID(A1)		; pop and save high half of PSN
+			MOVE.L	(sp)+,psnLowID(A1)		; pop and save low  half of PSN
+			CLR.W	psnDoWeReallyUseIW(A1)	; don't use float input window
+			MOVEA.L	psnDocsTablePtr(A1),A0	; get the addr
+			MOVE.L	A0,D0					; is there a table?
+			BNE.S	hasTable				; if yes, recycle it (clear counter)
+			MOVE.L	#kDocTableDefSize,D0	; doc ID table size
+			_NewPtr ,sys ,clear				; from system heap
+			BEQ.S	newTable				; OK ->
+			MOVE.W	#memFullErr,D0			; set error code
+			BRA.S	cleanSPExit			; no memory, sorry
+
+newTable
+			MOVE.W	#kDefTableEntryN,docTableEntryN(A0)	; total entry number of the table
+			MOVE.L	A0,psnDocsTablePtr(A1)	; save the table in PSN record
+hasTable
+			CLR.W	docIDCount(A0)			; clear counter
+
+		;; Inform Process Manager that this application is TSM aware ...
+			LEA		psnHighID(A1),A0		; PSN addr
+			CLR.W	-(SP)					; room for result
+			MOVE.L	A0,-(SP)				; PSN
+			MOVE.W	#$FFFF,-(SP)			; flag = true
+			_InlineAware
+			ADDA.W	#2,SP					; ignore error
+			
+			MOVEQ	#0,D0					; return no error
+
+ret
+			MOVE.W	D0,4(SP)				; return error in Pascal style
+			RTS
+
+noProcess
+			MOVE.W	#tsmNotAnAppErr,D0
+cleanSPExit
+			LEA		8(SP),SP				; reset sp (for PSN record)
+			BRA.S	ret
+registered
+			MOVE.W	#tsmAlreadyRegisteredErr,D0
+			BRA.S	cleanSPExit
+
+
+; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Function:	getFreePSNEntry
+;			Internal routine called by xInitTSMAwareApplication only.
+; Output:	A1.L = pointer to PSN record if D0 = 0,
+;			D0.W = noErr if found one free slot
+; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+getFreePSNEntry											; private routine
+
+			MOVEA.L	ExpandMem,A0
+			MOVEA.L	ExpandMemRec.emTSMGlobals(A0),A0	; get TSM global in A0
+			MOVEA.L	TSMVarsRec.tsmIAPSNTablePtr(A0),A0	; get PSN table
+			MOVE.W	iaAppCount(A0),D0					; D0.W = total apps registered
+			MOVE.W	iaTotalPSNEntryN(A0),D1				; D1.W = total entries
+			CMP.W	D1,D0								; any free slot?
+			BHS.S	@full								; no
+@again
+			LEA		iaPSNStart(A0),A1					; A1 = first PSN record
+
+@tryNext
+			TST.L	psnHighID(A1)						; is this free?
+			BNE.S	@4									; No
+			TST.L	psnLowID(A1)						; is this free?
+			BEQ.S	@foundOne							; yes, both slots are zero
+@4
+			ADDA.W	#kPSNEntrySize,A1					; points to the next one
+			BRA.S	@tryNext
+			
+@foundOne	ADD.W	#1,iaAppCount(A0)					; bump app counter
+			MOVEQ	#0,D0								; no error
+			RTS
+
+@full	;; all full, need to grow the array	
+
+		;; PSN table is full, (too many TSM aware application?  Good !!!), need to grow the table ...
+			
+			MOVEA.L	A0,A1						; A1 = old PSN table
+			ADDQ	#kDefTableEntryN,D1			; increment total entry
+			MOVE.L	D1,D0
+			LSL.L	#kLog2PSNEntrySize,D0		; total bytes
+			ADD.L	#iaPSNStart,D0				; plus header = new size to allocate
+			_NewPtr ,sys ,clear					; allocate a larger table from system heap
+			BNE.S	@noMem						; no memory, we are in trouble
+
+		;; A0 = new PSN table, A1 = old PSN table, D1 = new total entry.
+			MOVE.W	iaTotalPSNEntryN(A1),D0		; D0.W = original total entries
+			LSL.L	#kLog2PSNEntrySize,D0		; convert to bytes
+			ADD.L	#iaPSNStart,D0				; plus header = old size to copy
+			EXG		A1,A0						; A0 is the source
+			_BlockMove							; copy A0 => A1
+			
+		;; A0 is the old table, we can release it now ...
+			_DisposePtr							; free mem
+
+			MOVEA.L	ExpandMem,A0				; we come here when buffer is full
+			MOVEA.L	ExpandMemRec.emTSMGlobals(A0),A0	; get TSM global in A0
+			MOVE.L	A1,TSMVarsRec.tsmIAPSNTablePtr(A0)	; save new table in TSM global
+			MOVE.W	D1,iaTotalPSNEntryN(A1)		; update (NEW) total entries
+			EXG		A1,A0						; A0 is now the new PSN table
+			BRA.S	@again						; try again
+@noMem
+			MOVE.W	#memFullErr,D0				; return error
+			RTS
+
+			ENDWITH
+			ENDP								; xInitTSMAwareApplication END
+
+
+
+; _________________________________________________________________________
+; Function:	OSErr utaRecordDocumentID(aHandle, &PSNRecord)
+;			Internal C routine --
+;				Record the document ID in PSN table for the application.
+;				Each application keeps track of all open document IDs.
+;				Called by 'xNewTSMDocument'.
+; Output:	noErr = no error
+; Register usage: Use D0,D1,A0,A1
+;
+; Side effect:
+;	Grow the document table if it is full.
+; _________________________________________________________________________
+
+utaRecordDocumentID		PROC	EXPORT
+			IMPORT		utaTSMAwareApplicationP
+			WITH		PSNRecord
+												; 0(SP)	-> return addr
+docIDParam	equ			4						; 4(SP)	-> aHandle = valid document ID
+psnParam	equ			8						; 8(SP)	-> ptr(PSNRecord)
+
+		
+			MOVEA.L	psnParam(SP),A0				; A0 = ptr(PSNRecord)
+			MOVE.L	highLongOfPSN(A0),D0		; get high half of PSN
+			MOVE.L	lowLongOfPSN(A0),D1			; get low  half of PSN
+			BSR		utaTSMAwareApplicationP		; is it already registered?
+			BEQ.S	@notAwareReturn				; no, it is not TSM aware? !!
+@1
+		;; It is registered, A1 = ptr(PSNRecord) ...
+			MOVE.L	psnDocsTablePtr(A1),D0		; D0 = ptr(doc ID table)
+			BEQ.S	@notAwareReturn				; if no table
+			MOVEA.L	D0,A0
+			MOVE.W	docIDCount(A0),D0			; D0.W = total ID recorded
+			MOVE.W	docTableEntryN(A0),D1		; D1.W = total entries
+			CMP.W	D1,D0						; any free slot?
+			BHS.S	@full						; no
+			LEA		docIDStart(A0),A1			; A1 = first ID
+@loop
+			TST.L	(A1)+						; is this slot free?
+			BNE.S	@loop						; no
+
+			MOVE.L	docIDParam(SP),-(A1)		; save the ID in the free slot
+			ADD.W	#1,docIDCount(A0)			; increment count
+			MOVEQ	#0,D0						; OK
+@Exit
+			RTS
+
+@notAwareReturn
+			MOVE.W	#tsmNeverRegisteredErr,D0	; return error
+			BRA.S	@Exit
+
+
+		
+@full											; all full, need to grow the array
+		;; document table is full, need to grow the table ...
+			
+			ADDQ	#kDefTableEntryN,D1			; increment total entry
+			MOVE.L	D1,D0
+			LSL.L	#kLog2DocEntrySize,D0		; entry * 4
+			ADD.L	#docIDStart,D0				; plus header
+			_NewPtr ,sys ,clear					; allocate a larger table from system heap
+			BNE.S	@noMem						; no memory, it's OK
+		;; A0 = new doc table, A1 = ptr(PSNRecord), D0.L = new table size, D1 = new total entry.
+			MOVE.L	A2,-(SP)					; free A2
+			MOVEA.L	A1,A2						; A2 = ptr(PSNRecord)
+			MOVE.L	psnDocsTablePtr(A2),A1		; A1 = ptr(old table)
+			MOVE.L	A0,psnDocsTablePtr(A2)		; save the new table
+
+		;; A0 = new doc table, A1 = old doc table,
+			MOVE.W	docTableEntryN(A1),D0		; D0.W = original total entries
+			LSL.L	#kLog2DocEntrySize,D0		; entry * 4
+			ADD.L	#docIDStart,D0				; plus header
+			EXG		A1,A0						; A0 is the source
+			_BlockMove							; copy A0 => A1
+			
+		;; A0 is the old table, we can release it now ...
+			_DisposePtr							; free mem
+
+			MOVE.W	D1,docTableEntryN(A1)		; update (NEW) total entries
+			MOVEA.L	A2,A1						; A1 = ptr(PSNRecord)
+			MOVEA.L	(SP)+,A2					; restore A2
+			BRA.S	@1							; try again
+@noMem
+			MOVE.W	#memFullErr,D0				; return error
+			RTS
+
+			ENDWITH
+			ENDP								; utaRecordDocumentID END
+
+
+; _________________________________________________________________________
+; Function:	OSErr	utaRemoveDocumentID(handle, countPtr, psnRecordPtr);
+;			Internal routine -- Remove the document ID in process's doc ID table.
+;			Called by 'xDeleteTSMDocument' only.
+;			The caller of this routine should close all open text services!
+; Input:	Handle is a valid document ID
+; Output:	count			= number of TSM documents remained
+;			psnRecordPtr	= psn Record Ptr (meaningful only if count = 0)
+; Register usage: Use D0,D1,A0,A1
+; C calling convention .....
+; _________________________________________________________________________
+
+; 0(SP)	-> return addr
+; 4(SP)	-> handle (ID)
+; 8(SP) -> ptr(short)							; count
+;12(SP) -> ptr(psn record)						; meaningful only if count = 0 !!!!!!!!!!!!!
+
+utaRemoveDocumentID	PROC	EXPORT
+			IMPORT	utaTSMAwareApplicationP
+			WITH	PSNRecord, TSMDocumentRecord
+		
+			MOVEA.L	4(SP),A0					; A0 = handle
+			MOVEA.L	(A0),A0						; A0 = doc ID pointer
+			MOVE.L	iDocPSNID1(A0),D0			; get high half of PSN
+			MOVE.L	iDocPSNID2(A0),D1			; get low  half of PSN
+			BSR		utaTSMAwareApplicationP		; is it already registered?
+			BEQ.S	@err						; no, it is not TSM aware? !!
+
+		;; It is registered, A1 = ptr(PSNRecord) ...
+			MOVE.L	psnDocsTablePtr(A1),D0		; D0 = ptr(doc ID table)
+			BEQ.S	@err						; if no table
+			MOVEA.L	D0,A0						; A0 = ptr(doc ID table)
+			MOVE.W	docIDCount(A0),D0			; D0.W = total ID recorded
+			BEQ.S	@stackOK					; br if empty (A1 = ptr(PSNRecord))
+			
+			MOVE.L	A1,-(SP)					; save ptr
+			MOVE.W	docTableEntryN(A0),D0		; D0.W = total entry
+			LEA		docIDStart(A0),A1			; A1 = first ID
+			MOVE.L	8(SP),D1					; D1 = document ID to delete
+@loop
+			TST.W	D0							; more to search?
+			BLE.S	@notFound					; no (should never happen)
+			SUBQ	#1,D0						; one less to search
+			CMP.L	(A1)+,D1					; is this the one?
+			BNE.S	@loop						; no
+
+			CLR.L	-(A1)						; found, clear it
+			SUB.W	#1,docIDCount(A0)			; decrement count
+			MOVEA.L	(SP)+,A1					; A1 = ptr(PSNRecord)
+
+@stackOK
+			MOVE.W	docIDCount(A0),D0			; D0.W = total ID recorded
+			MOVEA.L	8(SP),A0					; A0 = ptr to short
+			MOVE.W	D0,(A0)						; return count remaining
+			MOVEA.L	12(SP),A0					; A0 = ptr to psn record
+			MOVE.L	A1,(A0)						; return psn record ptr
+			MOVEQ	#0,D0						; perfect
+			RTS
+
+@notFound
+			ADDQ.W	#4,SP						; pop ptr
+@err
+			MOVE.W	#tsmNeverRegisteredErr,D0	; not TSM aware
+			RTS
+
+			ENDWITH
+			ENDP								; utaRemoveDocumentID END
+
+
+; _____________________________________________________________________________________
+; Function:	OSErr	utaUpdateAppFlagInPSNTable(&PSNRecord, useFloatWindowP);
+;			Internal routine -- update the 'psnAppUseInputWindowP' flag in the PSN table.
+;			Called by 'xActivateTSMDocument', and 'xUseInputWindow'.
+; Input:	Handle is a valid document ID
+; Output:	none
+; Register usage: Use D0,D1,D2,A0,A1
+; Modification history:
+;	20May92	KST	A boolean passed in by C compiler is 4 bytes !! When xUseInputWindow
+;				calls this routine and pass us the Boolean flag, I used MOVE.B to get
+;				the flag, which got garbage from the stack.					<#35>
+; _____________________________________________________________________________________
+
+utaUpdateAppFlagInPSNTable	PROC	EXPORT
+			IMPORT		utaTSMAwareApplicationP
+			WITH		PSNRecord
+
+									; 0(SP)	-> return addr
+psnParam	equ			4			; 4(SP)	-> ptr(PSNRecord)
+useFWParam	equ			8			; 8(SP)	-> useFloatWindow flag
+
+
+			MOVEA.L	psnParam(SP),A0				; A0 = ptr(PSNRecord)
+			MOVE.L	highLongOfPSN(A0),D0		; get high half of PSN
+			MOVE.L	lowLongOfPSN(A0),D1			; get low  half of PSN
+
+			BSR		utaTSMAwareApplicationP		; is it already registered?
+			BEQ.S	@neverRegister				; no, it is not TSM aware? !!
+
+		;; It is registered, A1 = ptr(PSNRecord) ...
+			MOVE.L	useFWParam(SP),D2			; get flag with .L				<#35>
+			MOVE.B	D2,psnAppUseInputWindowP(A1); change the APP. flag in PSN record
+			
+			MOVE.W	#$FFFF,D0					; true (inline aware)
+			TST.W	psnDoWeReallyUseIW(A1)		; is the document using input window?
+			BEQ.S	@3							; no (inline aware)
+			MOVEQ	#0,D0						; D0 = false (not inline aware)
+
+@3
+		;; Inform Process Manager that this application is TSM aware or not...
+			MOVEA.L	psnParam(SP),A0				; A0 = ptr(PSNRecord)
+			CLR.W	-(SP)						; room for result
+			MOVE.L	A0,-(SP)					; PSN
+			MOVE.B	D0,-(SP)					; Boolean flag
+			_InlineAware
+			ADDA.W	#2,SP
+			MOVEQ	#0,D0						; no error
+@5
+			RTS
+@neverRegister
+			MOVE.W	#tsmNeverRegisteredErr,D0	; not TSM aware
+			BRA.S	@5
+			
+			ENDWITH
+			ENDP								; utaUpdateAppFlagInPSNTable END
+
+
+
+; _________________________________________________________________________
+; Function:	void	utaUpdateDocFlagInPSNTable(idocID);
+;			Internal routine -- update the 'psnDocUseInputWindowP' flag in the PSN table.
+;			Called by 'xActivateTSMDocument', and 'xUseInputWindow'.
+; Input:	Handle is a valid document ID
+; Output:	none
+; Register usage: Use D0,D1,D2,A0,A1
+; _________________________________________________________________________
+
+; 0(SP)	-> return addr
+; 4(SP)	-> handle (ID)
+
+utaUpdateDocFlagInPSNTable	PROC	EXPORT
+			IMPORT	utaTSMAwareApplicationP
+			WITH	PSNRecord, TSMDocumentRecord
+
+			MOVEA.L	4(SP),A0					; A0 = handle
+			MOVEA.L	(A0),A0						; A0 = doc ID pointer
+			MOVE.L	iDocPSNID1(A0),D0			; get high half of PSN
+			MOVE.L	iDocPSNID2(A0),D1			; get low  half of PSN
+			MOVE.B	iDocUseInputWindowP(A0),D2	; get flag when we dereferenced the handle
+
+			BSR		utaTSMAwareApplicationP		; is it already registered ? (D2 preserved)
+			BEQ.S	@8							; no, it is not TSM aware? !!
+
+		;; It is registered, A1 = ptr(PSNRecord), D2.B = flag ...
+			MOVE.B	D2,psnDocUseInputWindowP(A1); change the doc falg in PSN record
+
+			MOVE.W	#$FFFF,D0					; true (inline aware)
+			TST.W	psnDoWeReallyUseIW(A1)		; is the document using input window?
+			BEQ.S	@3							; no (inline aware)
+			MOVEQ	#0,D0						; D0 = false (not inline aware)
+
+@3
+		;; Inform Process Manager that this application is TSM aware or not...
+			LEA		psnHighID(A1),A0			; PSN addr
+			CLR.W	-(SP)						; room for result
+			MOVE.L	A0,-(SP)					; PSN
+			MOVE.B	D0,-(SP)					; Boolean flag
+			_InlineAware
+			ADDA.W	#2,SP
+			MOVEQ	#0,D0						; no error
+
+@8			RTS
+
+			ENDWITH
+			ENDP								; utaUpdateDocFlagInPSNTable END
+
+
+
+; _________________________________________________________________________
+; Function:	utaTSMAwareApplicationP
+;			Internal routine -- Verify if the application is TSM aware.
+; Input:	D0.L = high half of PSN.	(I don't believe we've designed PSN as 8 bytes !!!)
+;			D1.L = low half of PSN
+; Output:	D0.W = true (non-zero) if the app is TSM aware, A1 = ptr(PSNRecord)
+;			D0.W = false (zero) if the app is not TSM aware.
+;			and condition code set.
+; Register usage: Use D0,D1,A0,A1. D2 must be preserved.
+;
+; Side Effect:	If D0 = true, return pointer to my internal PSN record in A1
+; _________________________________________________________________________
+utaTSMAwareApplicationP	PROC	EXPORT
+			WITH		PSNRecord
+
+
+			MOVE.L	D3,-(SP)							; free D3
+			
+		;; make sure PSN is not 0 ...
+			MOVE.L	D0,D3
+			OR.L	D1,D3								; valid PSN
+			BEQ.S	@tsmAwareExit						; no, both id are 0
+			
+			MOVEA.L	ExpandMem,A0
+			MOVEA.L	ExpandMemRec.emTSMGlobals(A0),A0	; get TSM global in A0
+			MOVEA.L	TSMVarsRec.tsmIAPSNTablePtr(A0),A0	; get PSN table
+			MOVEQ	#0,D3
+			MOVE.W	iaAppCount(A0),D3					; D3.W = total apps registered
+			BEQ.S	@notFound							; none
+			MOVE.W	iaTotalPSNEntryN(A0),D3				; D3.L = total entries
+			BEQ.S	@notFound							; should not happen, just in case
+			LEA		iaPSNStart(A0),A1					; A1 = first PSN record
+			SUBQ	#1,D3
+@loop
+			CMP.L	psnHighID(A1),D0					; same id?
+			BNE.S	@5									; no
+			CMP.L	psnLowID(A1),D1						; same id?
+			BEQ.S	@found								; yes
+			
+@5
+			ADDA.W	#kPSNEntrySize,A1					; points to the next one
+			DBRA	D3,@loop							; no array overflow check
+@notFound
+			MOVEQ	#0,D0								; not TSM aware
+@tsmAwareExit
+			MOVE.L	(SP)+,D3							; restore D3
+			TST.W	D0									; set CCR
+			RTS
+
+@found
+			MOVEQ	#1,D0								; TSM aware
+
+	IF TSMDebug THEN
+			CMP.W	#kPSNTableSignature,psnTableSignature(A1)	; valid table?
+			BEQ.S	@20									; yes
+			_debugger
+@20
+	ENDIF
+
+			BRA.S	@tsmAwareExit
+			ENDWITH
+			
+			ENDP										; utaTSMAwareApplicationP
+
+
+
+; _____________________________________________________________________________________________
+; Function:	xCloseTSMAwareApplication()
+;			Application deregisters itself when quit. 
+; Input:	ProcessSerialNumberPtr.
+; Output:	D0.W = error code (memFullErr, tsmNotAnAppErr, openDocumentsErr)
+; Register usage: Use D0,D1,A0,A1
+;
+; •• Note:	xCloseTSMAwareApplication can't close the application if there is any document open.
+;			utKillTSMAwareApplication will close the document and then close the application.
+;
+; •• utCloseAppCommon code is shared by InformTSM's @KillTSMApp.
+;	 Do not change the calling convention without changing @KillTSMApp !!
+; _____________________________________________________________________________________________
+XCLOSETSMAWAREAPPLICATION	PROC	EXPORT
+			IMPORT			utaTSMAwareApplicationP, utDeleteCleanUpTSMDocument
+			EXPORT			utCloseAppCommon
+			WITH			PSNRecord
+
+		;; Verify if we have registered this application ...
+			SUBA.W	#10,SP						; allocate storage for PSN (8 bytes) and result
+			PEA		2(SP)						; push address of PSN storage
+			_GetSystemClientProcess				; get PSN with which to associate the file
+			MOVE.W	(SP)+,D0					; on error, PSN == kNoProcess
+			BNE.W	closeRet					; punt
+			MOVEQ	#0,D2						; clear flag (no force close)
+
+utCloseAppCommon								; shared by utKillTSMAwareApplication
+		;; If you change the stack frame for this code, be sure to change utKillTSMAwareApplication
+		;; If D2 <> 0, then force to close all documents and exit. (called from InformTSM).
+		;; If D2 == 0 and there is open document, then return error.
+		;; <21Jul92 #52>	Ignore D2 flag as the application cannot do anything with the error now !
+
+		;; Verify if this application is really TSM aware ...
+
+			MOVE.L	0(SP),D0					; get high half of PSN
+			MOVE.L	4(SP),D1					; get low  half of PSN
+			BSR		utaTSMAwareApplicationP		; is it already registered?
+			BEQ.S	@notTSMaware				; no, it is not TSM aware
+
+		;; It is registered, A1 = ptr(PSNRecord) ...
+
+			MOVE.L	psnDocsTablePtr(A1),D0		; get document ID table
+			BEQ.S	@docsClosed					; stop if nil
+			MOVEA.L	D0,A0						; A0 = document ID table
+			MOVE.W	docIDCount(A0),D0			; any open document?
+			BEQ.S	@docsClosed					; no, OK =>
+		;;	TST.W	D2							; is this a force close?
+		;;	BEQ.S	docsOpenErr					; no, can't continue
+			
+		;; There is/are open document(s), so let's close the documents for the app.
+		;; D2 is free register now ...
+			MOVE.L	A1,-(SP)					; save PSNRecord pointer
+			MOVEQ	#0,D0						; clear 32 bits
+			MOVE.W	docTableEntryN(A0),D0		; total number of entry
+			SUBQ	#1,D0						; for DBRAing
+			LEA		docIDStart(A0),A0			; A0 = points to the first ID
+
+@loop	;; need to preserve A0/D0
+			MOVE.L	(A0)+,D1					; D1 = doc ID
+			BEQ.S	@1							; empty
+
+			CLR.L	-4(A0)						; clear the table entry too
+			MOVEM.L	D0/A0,-(SP)					; save D0/A0 across the call
+			
+			MOVE.L	D1,-(SP)					; push parameter -> ID
+			JSR		utDeleteCleanUpTSMDocument	; delete and clean up the document			<#47>
+			ADDA.W	#4,SP						; pop param
+			
+			MOVEM.L	(SP)+,D0/A0					; restore D0/A0
+@1			DBRA	D0,@loop
+
+			MOVEA.L	(SP)+,A1					; restore PSNRecord pointer
+			MOVEA.L	psnDocsTablePtr(A1),A0		; A0 = document ID table
+		;; the document ID table is not released, we just clear the counter for re-use
+			MOVE.W	#0,docIDCount(A0)			; clear counter, all closed
+@docsClosed
+			
+			CLR.L	psnHighID(A1)				; mark this PSN slot to be free
+			CLR.L	psnLowID(A1)
+			CLR.L	psnAppUseInputWindowP(A1)	; clear UseInputWindow flags so it will not be reused	<#48>
+
+			MOVEA.L	ExpandMem,A0
+			MOVEA.L	ExpandMemRec.emTSMGlobals(A0),A0	; get TSM global in A0
+			MOVEA.L	TSMVarsRec.tsmIAPSNTablePtr(A0),A0	; get PSN table
+			SUB.W	#1,iaAppCount(A0)					; decrease app counter
+
+		;; now, inform Process Manager that this process is not TSM aware any more ....
+		
+			CLR.W	-(SP)						; room for result
+			PEA		2(SP)						; PSN
+			CLR.W	-(SP)						; flag = flase
+			_InlineAware						; not aware
+			ADDA.W	#2,SP						; ignore error
+			
+			MOVEQ	#0,D0						; return no error
+			BRA.S	closeRet
+
+@notTSMaware
+			MOVE.W	#tsmNeverRegisteredErr,D0	; return error
+			BRA.S	closeRet
+
+docsOpenErr										; can't close because there is open documents
+			MOVE.W	#tsmDocumentOpenErr,D0		; return error
+closeRet
+			LEA		8(SP),SP					; restore sp
+			MOVE.W	D0,4(SP)					; return error in Pascal style
+			RTS
+			ENDWITH
+
+			ENDP								; XCLOSETSMAWAREAPPLICATION END
+
+
+; _______________________________________________________________________________
+; Function:	pascal OSErr utaGetTSMAwareDocTable(ProcessSerialNumberPtr, docTablePtr)
+;			Verify if the application is TSM aware.
+;			If the USEINPUTWINDOW flag is set, we treat the app as non-TSM aware!
+;			If the app is TSM aware, then return its document table pointer in docTablePtr.
+;			If error, then docTablePtr has undefined value.
+; Input:	ProcessSerialNumberPtr.
+;			docTablePtr = pointer to docTable.
+; Output:	D0.W = error code (memFullErr, temNeverRegisteredErr, tsmUseInputWindowErr),
+;			D0.W = noErr if it is TSM aware.
+; Register usage: Use D0,D1,A0,A1
+; _______________________________________________________________________________
+UTAGETTSMAWAREDOCTABLE		PROC	EXPORT
+			Import			UTAISAPPTSMAWAREANDNOTUSINGIW
+			WITH			PSNRecord
+
+			MOVEA.L	8(SP),A1						; get ProcessSerialNumberPtr
+			CLR.W	-(SP)
+			MOVE.L	A1,-(SP)						; push ProcessSerialNumberPtr
+			JSR		UTAISAPPTSMAWAREANDNOTUSINGIW	; get doc table ptr
+			MOVE.W	(SP)+,D0						; is it TSM aware or use input window?
+			BNE.S	@5								; no
+			MOVEA.L	4(SP),A0						; get pointer to docTable
+			MOVE.L	psnDocsTablePtr(A1),(A0)		; return docTable
+			
+@5
+			MOVEA.L	(SP)+,A0						; get return address
+			LEA		8(SP),SP						; restore sp
+			MOVE.W	D0,(SP)							; return error in Pascal style
+			JMP		(A0)
+			
+			ENDWITH
+			ENDP
+
+
+
+
+; _______________________________________________________________________________
+; Function:	utaGetTSMAppRecordPtr(ProcessSerialNumber	*PSNRecord, TSMAppsRecord	**appRecordPtr);
+;			Verify if the application is TSM aware.
+;			If the USEINPUTWINDOW flag is set, we treat the app as non-TSM aware!
+;			If the app is TSM aware, then return its document table pointer in docTablePtr.
+;			If error, then docTablePtr has undefined value.
+; Input:	ProcessSerialNumberPtr.
+;			docTablePtr = pointer to docTable.
+; Output:	D0.W = error code (memFullErr, temNeverRegisteredErr, tsmUseInputWindowErr),
+;			D0.W = noErr if it is TSM aware.
+; Register usage: Use D0,D1,A0,A1
+; _______________________________________________________________________________
+UTAGETTSMAPPRECORDPTR		PROC	EXPORT
+			Import			utaTSMAwareApplicationP
+			WITH			PSNRecord
+
+			MOVEA.L	8(SP),A1					; get ProcessSerialNumberPtr
+			MOVE.L	highLongOfPSN(A1),D0		; get high half of PSN
+			MOVE.L	lowLongOfPSN(A1),D1			; get low  half of PSN
+			BSR		utaTSMAwareApplicationP		; is it already registered?
+			BEQ.S	@5							; no, it is not TSM aware
+			
+			MOVEA.L	4(SP),A0					; get pointer to psn record
+			MOVE.L	A1,(A0)						; return record
+			MOVEQ	#0,D0						; return noErr
+@return
+			MOVEA.L	(SP)+,A0					; get return address
+			LEA		8(SP),SP					; restore sp
+			MOVE.W	D0,(SP)						; return error in Pascal style
+			JMP		(A0)
+
+
+@5
+			MOVE.W	#tsmNeverRegisteredErr,D0	; return error
+			BRA.S	@return
+
+			ENDWITH
+			ENDP
+
+
+
+
+; _______________________________________________________________________________
+; Function:	pascal OSErr utaGetAppsUseInputWindowFlag(ProcessSerialNumberPtr, booleanPtr)
+;			Verify if the application is TSM aware.
+;			If the USEINPUTWINDOW flag is set, we treat the app as non-TSM aware!
+; Input:	ProcessSerialNumberPtr.
+; Output:	D0.W = error code (memFullErr, temNeverRegisteredErr, tsmUseInputWindowErr),
+;			D0.W = noErr if it is TSM aware and not using input window.
+;			A1.L = ptr(PSNRecord table entry)
+; Register usage: Use D0,D1,A0,A1
+; _______________________________________________________________________________
+UTAGETAPPSUSEINPUTWINDOWFLAG	PROC	EXPORT
+			Import	utaTSMAwareApplicationP
+
+retaddr		equ		0
+booleanPtr	equ		4
+psnPtr		equ		8
+
+
+			MOVEA.L	psnPtr(SP),A1				; get ProcessSerialNumberPtr
+			MOVE.L	highLongOfPSN(A1),D0		; get high half of PSN
+			MOVE.L	lowLongOfPSN(A1),D1			; get low  half of PSN
+			BSR		utaTSMAwareApplicationP		; is it already registered?
+			BEQ.S	@5							; no, it is not TSM aware
+			MOVE.B	PSNRecord.psnAppUseInputWindowP(A1),D1; get the byte
+@3
+			MOVEQ	#0,D0						; return noErr
+			MOVEA.L	(SP)+,A0					; get return address
+			MOVEA.L	(SP)+,A1					; get boolean address
+			MOVE.B	D1,(A1)						; return flag
+			MOVE.L	A0,(SP)						; remove parameter
+			MOVE.W	D0,4(SP)					; return error in Pascal style
+			RTS
+
+@5
+			MOVE.W	#tsmNeverRegisteredErr,D0	; return error
+			BRA.S	@3
+
+			ENDP
+
+
+; _______________________________________________________________________________
+; Function:	pascal OSErr utaIsAppTSMAwareAndNotUsingIW(ProcessSerialNumberPtr)
+;			Verify if the application is TSM aware and use input window or not.
+;			If the USEINPUTWINDOW flag is set, we treat the app as non-TSM aware!
+; Input:	ProcessSerialNumberPtr.
+; Output:	D0.W = error code (memFullErr, temNeverRegisteredErr, tsmUseInputWindowErr),
+;			D0.W = tsmUseInputWindowErr means the app is TSM aware !!!!
+;			D0.W = noErr if it is TSM aware and not using input window.
+;			A1.L = ptr(PSNRecord table entry)
+; Register usage: Use D0,D1,A0,A1
+; _______________________________________________________________________________
+UTAISAPPTSMAWAREANDNOTUSINGIW	PROC	EXPORT
+			Import			utaTSMAwareApplicationP
+
+		;; Verify if we have registered this application ...
+			MOVEA.L	4(SP),A1					; get ProcessSerialNumberPtr
+			MOVE.L	highLongOfPSN(A1),D0		; get high half of PSN
+			MOVE.L	lowLongOfPSN(A1),D1			; get low  half of PSN
+			BSR		utaTSMAwareApplicationP		; is it already registered?
+			BEQ.S	@5							; no, it is not TSM aware
+
+		;; It is registered, A1 = ptr(PSNRecord)
+			TST.W	psnDoWeReallyUseIW(A1)		; is the document using input window?
+			BNE.S	@7							; yes, if any of the 2 flags is set, return error
+			MOVEQ	#noErr,D0					; no error
+@3
+			MOVEA.L	(SP)+,A0					; get return address
+			MOVE.L	A0,(SP)						; remove parameter
+			MOVE.W	D0,4(SP)					; return error in Pascal style
+			RTS
+
+@5
+			MOVE.W	#tsmNeverRegisteredErr,D0	; return error
+			BRA.S	@3
+
+@7
+			MOVE.W	#tsmUseInputWindowErr,D0	; return error
+			BRA.S	@3
+
+
+			ENDP								; xIsApplicationTSMAware END
+
+
+; _______________________________________________________________________________
+; Function:	pascal OSErr xInformTSM(msgNumber, msgParamPtr)
+;			Inform TSM with some messages
+; Input:	
+; Output:	noErr if all OK
+; Register usage: Use D0,D1,D2,A0,A1
+; Stack frame:
+;	SP =>	00(SP).L ->	return addr
+;			04(SP).L ->	msgParamPtr
+;			08(SP).W ->	msgSelector
+;			10(SP).W ->	msgResult
+; _______________________________________________________________________________
+XINFORMTSM	PROC	EXPORT
+			Import	utCloseAppCommon, utChangeToOldJIM, utInformPMgr, utSuspendResumeApp
+
+msgParamPtr	equ		4
+msgSelector	equ		8
+msgResult	equ		10
+
+
+			MOVE.W	msgSelector(SP),D0			; get selector
+			BEQ		@noopExit					; no op
+			MOVEA.L	msgParamPtr(SP),A1			; get param ptr(script/id)		<06Feb92 #18>
+
+			CMP.W	#kMsgBkgAppsPSN,D0			; is SWM passing me the PSN?
+			BEQ.S	@getSWMsPSN					; yes
+			CMP.W	#kMsgKillTSMApp,D0			; kill the application?
+			BEQ.S	@KillTSMApp					; yes
+			
+			CMP.W	#kMsgSuspendApp,D0			; suspend the non-TSM aware application?
+			BEQ.S	@SuspendApp					; yes
+			
+			CMP.W	#kMsgResumeApp,D0			; resume the non-TSM aware application?
+			BEQ.S	@ResumeApp					; yes
+			
+			CMP.W	#kMsgHelpHELPMgr,D0			; kMsgHelpHELPMgr?
+			BEQ.W	@tsmHelpMgrPatch			; yes
+			
+			CMP.W	#kMsgChangeToOldJIM,D0		; change to old JIM
+			BNE.W	@bad						; no
+
+
+
+	; _______________________________________________________________
+	; Function:	void utChangeToOldJIM()
+	;			User wants to switch to old input method (for Japanese script only)
+	; Input:	none
+	;			A1 = param record pointer
+	; Output:	noErr if all OK
+	;			tsmTSNotOpenErr = JIM is not open.
+	; _______________________________________________________________
+	
+			MOVE.L	A1,-(SP)					; pass the parameter			<06Feb92 #18>
+			JSR		utChangeToOldJIM			; for Japanese script only
+			TST.L	(SP)+						; pop param						<06Feb92 #18>
+			BRA.S	@noopExit					; and exit
+
+
+	; _______________________________________________________________
+	; Function:	void SuspendApp()
+	;			User wants to switch to old input method (for Japanese script only)
+	; Input:	none
+	;			A1 = param record pointer
+	; Output:	noErr if all OK
+	;			tsmTSNotOpenErr = JIM is not open.
+	; _______________________________________________________________
+@SuspendApp
+			MOVE.L	#kTSMSuspend,-(SP)			; pass the parameter
+
+@SuspendResume
+			JSR		utSuspendResumeApp			; suspend/resume
+			TST.L	(SP)+						; pop param
+			BRA.S	@noopExit					; and exit
+			
+@ResumeApp
+			MOVE.L	#kTSMResume,-(SP)			; pass the parameter
+			BRA.S	@SuspendResume
+
+
+
+	; _______________________________________________________________
+	; Function:	utKillTSMAwareApplication(ProcessSerialNumberPtr)
+	;			Called from Patches:MiscPatches.a
+	; Input:	ProcessSerialNumberPtr.
+	;			A1 = param record pointer
+	; Output:	noErr if all OK
+	;
+	; Modification history:
+	; 25Feb92	KST	If the app is not TSM aware, we'll send an AE to SWM
+	;				ask it to close its input window.
+	; 27Feb92	KST	Set tsmKillApplicationP flag to signal we're killing the 
+	;				TSM aware application, and the menu is already killed !!
+	; 27Mar92	KST	If the app is not TSM aware, we'll not be called.
+	; _______________________________________________________________
+@KillTSMApp
+
+	;; When 'utCloseAppCommon' is called, it expects D2 is used as a flag,
+	;; and the stack frame looks like this:
+	;
+	;	SP	-->			highLongOfPSN	(long)
+	;					lowLongOfPSN	(long)
+	;					return address	(long)
+	;	(high addr)		result			(word)
+	;
+	;	•• Do not change this without changing XCLOSETSMAWAREAPPLICATION !!
+
+			MOVEA.L	ExpandMem,A0
+			MOVEA.L	ExpandMemRec.emTSMGlobals(A0),A0; get TSM global in A0
+			ST.B	TSMVarsRec.tsmKillApplicationP(A0)	; set flag				<#20>
+			
+			MOVEQ	#1,D2						; set flag, force close the app
+			SUBA.W	#2,SP						; room for result
+			PEA		@return2Here				; return address
+			MOVE.L	lowLongOfPSN(A1),D1			; get  low  half of PSN
+			MOVE.L	D1,-(SP)					; push low  PSN
+			MOVE.L	highLongOfPSN(A1),D1		; get  high half of PSN
+			MOVE.L	D1,-(SP)					; push hign PSN
+			JMP		utCloseAppCommon			; use common code, D2 is the flag
+@return2Here
+			ADDA.W	#2,SP						; ignore error
+			MOVEA.L	ExpandMem,A0
+			MOVEA.L	ExpandMemRec.emTSMGlobals(A0),A0; get TSM global in A0
+			CLR.B	TSMVarsRec.tsmKillApplicationP(A0)	; clear flag			<#20>
+			
+			MOVEQ	#0,D0						; always success
+			BRA.S	@noopExit					; and exit
+
+	; _______________________________________________________________
+	; Function:	getSWMsPSN(SWM's ProcessSerialNumberPtr)
+	; Input:	ProcessSerialNumberPtr.
+	;			A1 = param record pointer
+	; Output:	noErr if all OK
+	; _______________________________________________________________
+@getSWMsPSN
+			Import	xInitTSMAwareDriver
+			
+			MOVEA.L	ExpandMem,A0
+			MOVEA.L	ExpandMemRec.emTSMGlobals(A0),A0; get TSM global in A0
+			MOVE.L	highLongOfPSN(A1),D1			; get high ID
+			MOVE.L	D1,TSMVarsRec.tsmSWMHighPSN(A0)	; save in TSM global
+			MOVE.L	lowLongOfPSN(A1),D1				; get low ID
+			MOVE.L	D1,TSMVarsRec.tsmSWMLowPSN(A0)	; save in TSM global
+
+			
+			JSR		utInformPMgr					; set up flag
+			
+			MOVEA.L	msgParamPtr(SP),A0				; get param ptr which points at the PSN		
+			MOVEA.L	(SP),A1							; get return addr
+			SUBQ	#2,SP							; get 2 more bytes on the
+			MOVE.L	highLongOfPSN(A0),highLongOfPSN(SP)
+			MOVE.L	lowLongOfPSN(A0),lowLongOfPSN(SP)
+			MOVE.L	A1,8(SP)						; move the return address
+			JMP		xInitTSMAwareDriver				; return through InitTSMAware
+
+
+@noopExit	; exit point shared by all InformTSM subfunctions
+
+			MOVEA.L	(SP),A1						; get return addr
+			LEA		10(SP),SP					; pop off params
+			MOVE.W	D0,(SP)						; result
+			JMP		(A1)						; return to caller
+
+			MOVEQ	#0,D0						; always success
+			BRA.S	@noopExit					; and exit
+			
+@bad											; bad selector
+			MOVE.W	#paramErr,D0				; return error
+			BRA.S	@noopExit
+
+
+
+
+	; _______________________________________________________________
+	; Function:	tsmHelpMgrPatch
+	; Input:	
+	;			A1 = param record pointer
+	; Output:	1. return noErr if the mouse is over a floating window and,
+	;			2. also return that windowptr in tsmHelpWindowPtr, and
+	;			3. if the mouse is over content region, we'll try to open the 
+	;			   resource file and return the refnum in tsmHelpRefnum.
+	;			   (If the window is a system floating window and refcon <> nil).
+	; Side effect:
+	;			If we return noErr, then tsmHelpWindowPtr must contains a floating window,
+	;			because Help Manager will later swap the layer to floating layer.
+	;
+	; (6) parameter for kMsgHelpHELPMgr		-- record of 10 bytes:
+	; tsmHelpRefnum			EQU			0		; > 0 if we opened IM's resource file
+	; tsmHelpWindowPtr		EQU			2		; nil if no floating window
+	; tsmHelpSavedLayer		EQU			6		; temp. storage for Help Manager to swap the layer
+	; tsmHelpRecSize		EQU			tsmHelpSavedLayer+4
+	; _______________________________________________________________
+@tsmHelpMgrPatch
+			MOVEM.L	A2/A3,-(SP)					; save A2/A3
+			CLR.W	tsmHelpRefnum(A1)			; clear Refnum
+			CLR.L	tsmHelpWindowPtr(A1)		; clear WindowPtr
+			MOVEA.L	A1,A2						; A2 = param ptr
+			
+
+			SUBQ	#2,-(SP)					; room for result
+			MOVE.L	Mouse,-(SP)					; pass the global mouse on stack
+			PEA		tsmHelpWindowPtr(A2)		; pass WindowPtr
+			_FindServiceWindow
+			MOVE.W	(SP)+,D0					; over our window?
+			BEQ.S	@helpErrReturn				; no
+
+			CMP.W	#inSysWindow,D0				; in system item, menubar					<#46>
+			BLE.S	@helpErrReturn				; exit if yes, not over a floater			<#46>
+	
+			CMP.W	#inContent,D0				; in content?
+			BNE.S	@windowHasNoInstance		; no, just swap the layer
+
+			MOVEA.L	tsmHelpWindowPtr(A2),A3		; save the window ptr in A3
+			
+		;; OK, the mouse is over a floating window so open the resource file so that
+		;; Help Manager can dig out the Balloon resource ...
+		;; But first, let's check if the window is a system floating window and refcon <> nil.						<#45>
+		;; from here on, we return noErr to indicate the mouse is over a floater ...
+
+			CMP.W	#systemFloatKind,WindowRecord.windowKind(A3)	; is this floater belonging to a text service	<#45>
+			BNE.S	@windowHasNoInstance							; if not, don't try to open its resource file	<#45>
+			
+			MOVE.L	WindowRecord.refcon(A3),D0	; is there an Instance?
+			BEQ.S	@windowHasNoInstance		; if not, then don't try to open anything
+
+			SUBQ	#2,-(SP)					; room for result
+			MOVE.L	D0,-(SP)					; the Component instance
+		;; need special case for SWM
+
+			_OpenComponentResFile
+			MOVE.W	(SP)+,D0					; is it open?
+			BLE.S	@helpErrReturn				; no
+			MOVE.W	D0,tsmHelpRefnum(A2)		; return the RefNum
+
+@windowHasNoInstance
+			MOVEQ	#0,D0						; OK
+			BRA.S	@helpPopStack
+
+@helpErrReturn
+			CLR.W	tsmHelpRefnum(A2)			; clear Refnum
+			CLR.L	tsmHelpWindowPtr(A2)		; clear WindowPtr
+			MOVE.W	#paramErr,D0				; return error
+
+@helpPopStack
+			MOVEM.L	(SP)+,A2/A3					; restore A2/A3
+			BRA.S	@noopExit
+
+
+
+			ENDP								; XINFORMTSM END
+
+	; END InformTSM
+
+
+
+
+;; Begin patches ...
+
+	IF not BuildTSMInit THEN
+
+; _______________________________________________________________________________
+; SetCursor Patch
+;
+;	Applications such as Finder periodically set the cursor. This is a problem
+;	if IM changes the cursor over floating window. The cursor will now flash
+;	because 2 parties compete changing the cursor. This patch will temporarily
+;	disable the SetCursor call if IM or SWM changed the cursor.
+; _______________________________________________________________________________
+
+__SetCursorPatch	PatchProc	_SetCursor,(Plus,SE,II,Portable,IIci)
+
+	move.l	ExpandMem,a0										; good old ExpandMem again
+	move.l	ExpandMemRec.emTSMGlobals(a0),a0					; our global ptr into a0
+	
+	btst	#kInTSMEventCallBit,TSMVarsRec.tsmPatchFlags(a0)	; Am I called from inside of text services ?
+	bne.s	@AllowTextServicesToSetCursor						; then let them set their cursor regardless of the following flags
+
+	btst	#kIMJustSetCursorBit,TSMVarsRec.tsmPatchFlags(a0)	; should we let SetCursor calls through?
+	bne.s	@JustRTS											; flag is on nobody can set the cursor until it clears
+
+	;; kSWMJustSetCursorBit is set in SWM driver ....
+	btst	#kSWMJustSetCursorBit,TSMVarsRec.tsmPatchFlags(a0)	; should we let SetCursor calls through?
+	bne.s	@JustRTS											; flag is on nobody can set the cursor until it clears
+
+@AllowTextServicesToSetCursor
+	jmpOld												; flag is clear go ahead and set the cursor
+	
+@JustRTS
+	move.l	(sp)+,a0									; pop return address					<32>
+	addq	#4,sp										; flush the parameter on the stack		<32>
+	jmp		(a0)										; return to the caller.					<32>
+	
+	ENDPROC
+
+
+
+
+; _______________________________________________________________________________
+; PaintBehind Patch
+;	AfterDark redraws the screen with FrontWindow(), and grayrgn. This however,
+;	does not draw the floating windows. This patch will paint from IM layer if
+;	theWindow = frontwindow, and theRegion = GrayRgn.
+; Register usage:	Trash A0/D0
+;
+; 27Jul92	KST	This patch should only be called if the Process Manager has been booted.		<#53>
+; _______________________________________________________________________________
+
+__PaintBehindPatch	PatchProc	_PaintBehind,(Plus,SE,II,Portable,IIci)
+
+theRetAddr	EQU		0									; satck frame for this call
+theRegion	EQU		4
+theWindow	EQU		8
+
+	MOVEA.L	ExpandMem,A0							; A0 = ExpandMem							<#53>
+	TST.W	ExpandMemRec.emProcessMgrExists(A0)		; has Process Manager has been booted?		<#53>
+	BEQ.S	@NeverMind								; false if not								<#53>	
+	
+	
+	SUBA.W	#4,SP
+	_FrontWindow
+	MOVE.L	(SP)+,D0
+	CMP.L	theWindow(SP),D0							; draw from the front window?
+	BNE.S	@NeverMind									; no
+
+	MOVEA.L	GrayRgn,A0									; get the GRAY region handle
+	MOVEA.L	(A0),A0										; dereference it
+	LEA		rgnBBox+bottom(A0),A0						; A0 points to bottom
+	MOVEA.L	theRegion(SP),A1							; get the region
+	MOVEA.L	(A1),A1										; dereference it
+	LEA		rgnBBox+top(A1),A1							; A1 points to top
+	
+	;; Note: Pyro always pass the region with -1, -1, bottom+1, right+1,
+	;;		 and this is why I don't branch with BNE or BEQ ...
+
+	TST.W	(A1)+										; top should be 0
+	BGT.S	@NeverMind									; if > 0, then don't do anything special
+	TST.W	(A1)+										; left should be 0
+	BGT.S	@NeverMind									; if > 0, then don't do anything special
+	
+	;; A1 points to bottom of rect
+
+	MOVE.W	(A1)+,D0
+	CMP.W	(A0)+,D0									; paint the whole desktop?
+	BLT.S	@NeverMind									; no
+	MOVE.W	(A1),D0
+	CMP.W	(A0),D0										; paint the whole desktop?
+	BLT.S	@NeverMind									; no
+
+	;; Here, we assume the guy is trying to paint the whole screen, let's paint the floating windows too.
+	;; Dean said: "Just paint from input method's floating layer".				-- (04May92)
+	;; I tried paint from the root layer, Balloon window's contents doesn't get redraw anyway.
+
+	SUBA.W	#6,SP
+	PEA		2(SP)
+	_GetFrontServiceWindow
+	MOVE.W	(SP)+,D0									; any error?
+	BNE.S	@NeverMind									; br if error
+	MOVE.L	(SP)+,D0									; get the front floating window
+	BEQ.S	@NeverMind									; br if no floating window
+	MOVE.L	D0,theWindow(SP)							; paint from the root
+
+@NeverMind
+	jmpOld												; flag is clear go ahead and set the cursor
+	
+
+	
+	ENDPROC
+	
+__SystemMenuPatch	PatchProc	_SystemMenu,(Plus,SE,II,Portable,IIci)
+		import	CHANGEMENURESULTFORINPUTMETHOD
+		
+		move.l	4(sp),d0						;get menuresult
+		swap	d0								;make the high word low
+		cmp.w	#-kTSMSystemMenuID,d0			;is this us?
+		bne.s	@NotTSMMenu						;
+		swap	d0								;put the high word back
+		move.l	d0,-(sp)						;move it onto the stack
+		pea		(sp)							;push the address
+		jsr		CHANGEMENURESULTFORINPUTMETHOD	;and send it to the input method
+		addq	#4,sp							;get rid of space for menuresult
+		rts										;return to caller
+@NotTSMMenu
+		jmpOld									;not ours so forget about it
+		
+		ENDPROC
+
+
+
+; ____________________________________________________________________________________
+; __HMGetBalloonPatch Patch
+;	Again, applications such as Finder periodically redraw the Help balloon. This is
+;	a problem if there is a help balloon over the floating window. The balloon window
+;	will flash because app tries to remove the Balloon and paint one of its own.
+;	Trashes D0/A0/A1 -- these are free registers, right?
+; ____________________________________________________________________________________
+
+__HMGetBalloonPatch	PatchProc	 _Pack14,(Plus,SE,II,Portable,IIci)
+
+	cmp.w	#kHMGetBalloons,d0						; is this IsBalloon?
+	beq.s	@DoGetBalloonPatch						; yes so do it
+	
+	jmpOld											; it wasn't kHMIsBalloon so call the real Pack14
+	
+@DoGetBalloonPatch
+	
+	subq	#2,sp									; room on the stack
+	jsrOld											; and jump to the old one
+	move.b	(sp)+,d0								; get resut
+	move.b	d0,4(sp)								; and put in on the stack
+	beq.s	@returnOldResult						; no balloon, so return the result to original caller
+	
+	;
+	; OK so a ballon is up see if the last window we helped was a floating window
+	; we do that by getting the parent of the last window helped 
+	; and seeing if that parent equals the IMlayer. This patch is for Finder because
+	; Finder does not know/care the floating window and draw its own Balloon.
+	;
+
+	; Now check if we are clicked inside of a floating window ...								<#44>
+
+		SUBQ	#6,SP								; room for result
+		MOVE.L	Mouse,-(SP)							; pass the global mouse on stack
+		PEA		6(SP)								; pass WindowPtr
+		_FindServiceWindow
+		MOVE.W	(SP)+,D0							; over our window?
+		ADDQ.W	#4,SP								; restore the stack
+		BEQ.S	@returnOldResult					; no
+
+		CMP.W	#inSysWindow,D0						; in system item, menubar?					<#39>
+		BLE.S	@returnOldResult					; exit if yes, return the original result	<#39>
+	
+		MOVEA.L	ExpandMem,A1						; A1 = ExpandMem							<#44>
+		MOVE.L	ExpandMemRec.emTSMGlobals(A1),D0	; get TSM global							<#44>
+		BEQ.S	@noTSM								; br if no TSM								<#44>
+		MOVEA.L	D0,A0								; A0 = TSM global							<#44>
+		
+	;; If we are inside of PopUpMenuSelect, then say the balloon is on so that a previous balloon will be removed correctly.
+		BTST	#kInTSMPopUpMenuSelectCall,TSMVarsRec.tsmPatchFlags(A0)	; are we in PopUpMenuSelect?					<#44>
+		BNE.S	@returnOldResult										; flag is on so return the original result		<#44>
+
+@noTSM
+	;; If we are inside of MenuSelect, then say the balloon is on so that a previous balloon will be removed correctly.
+	;; Note Help Manager already patched out __MenuSelect and set a flag in emHelpGlobals, so we'll just use that one !!
+		MOVE.L	ExpandMemRec.emHelpGlobals(A1),A0	; A0 = HelpMgr global ptr					<#47>
+		TST.B	hmgInMenuSelectFlag(A0)				; are we in MenuSelect?						<#47>
+		BNE.S	@returnOldResult					; yes so return the original result			<#47>
+
+	;; end change of #44, #47
+
+
+		MOVE.B	#0,4(sp)							; pretend no help windows are up by slamming the result to 0
+	
+@returnOldResult
+		RTS											; and return
+	
+		ENDPROC
+
+
+
+
+; ____________________________________________________________________________________
+; __PopUpMenuSelect Patch							<#44>
+;		If there is a popup menu in the floating window and with HelpMgr on, need to 
+;		return the original result from HMGetBalloon so that balloon will be removed.
+; ____________________________________________________________________________________
+
+__PopUpMenuSelect	PatchProc	_PopUpMenuSelect,(Plus,SE,II,Portable,IIci)
+
+retAddr		EQU		8								; saved 2 registers
+
+		MOVEM.L	A0-A1,-(SP)							; free A0/A1
+		MOVEA.L	ExpandMem,A1
+		MOVE.L	ExpandMemRec.emTSMGlobals(A1),D1	; get TSM global
+		BEQ.S	@noEntry							; br if no TSM
+		MOVEA.L	D1,A1								; A1 = TSM global
+		BSET	#kInTSMPopUpMenuSelectCall,TSMVarsRec.tsmPatchFlags(A1)	; say we're in PopupMenuSelect
+		MOVE.L	retAddr(SP),D1						; return address
+		MOVE.L	D1,TSMVarsRec.tsmPopUpReturnAddr(A1)					; save the return address			
+		LEA		@return2Here,A0						; return to here
+		MOVE.L	A0,retAddr(SP)
+
+	;; OK, now to prevent from text services to receive an update event from SWM driver,
+	;; we need to tell SWM not to route events to TSM/text services ...
+		MOVE.W	TSMVarsRec.tsmSWMDrvrRefNum(A1),D1	; get refnum
+		BEQ.S	@noEntry							; br if no SWM
+		NOT.W	D1									; unit entry := -1 * (refNum + 1)
+		cmp.w	UnitNtryCnt,D1						; is there an entry of this number?
+		bhs.s	@noEntry							; no, so return NIL
+		LSL.W	#2,D1								; index := entry * 4
+		MOVE.L	UTableBase,A1						; unit I/O table [pointer]
+		MOVEA.L	0(A1,D1.W),A1						; return DCtlHandle
+		MOVEA.L	(A1),A1								; dereference the handle
+		MOVEA.L dCtlStorage(A1),A1					; get storage handle
+		MOVEA.L	(A1),A1								; dereference the handle
+		
+		ST		swmdrvrRecordMenuIsDown(A1)			; set the byte to true
+@noEntry
+		MOVEM.L	(SP)+,A0-A1							; restore A0/A1
+
+		jmpOld										; and jump to the old one
+
+@return2Here
+
+		MOVEA.L	ExpandMem,A1
+		MOVE.L	ExpandMemRec.emTSMGlobals(A1),A1	; get TSM global
+		BCLR	#kInTSMPopUpMenuSelectCall,TSMVarsRec.tsmPatchFlags(A1)	; we're not in PopupMenuSelect
+		MOVE.L	TSMVarsRec.tsmPopUpReturnAddr(A1),D1					; get the return address
+		MOVE.L	D1,-(SP)							; return to caller
+		
+		
+		MOVE.W	TSMVarsRec.tsmSWMDrvrRefNum(A1),D1	; get refnum
+		BEQ.S	@exit								; br if no SWM
+		NOT.W	D1									; unit entry := -1 * (refNum + 1)
+		cmp.w	UnitNtryCnt,d1						; is there an entry of this number?
+		bhs.s	@exit								; no, so return NIL
+		LSL.W	#2,D1								; index := entry * 4
+		MOVE.L	UTableBase,A1						; unit I/O table [pointer]
+		MOVEA.L	0(A1,D1.W),A1						; return DCtlHandle
+		MOVEA.L	(A1),A1								; dereference the handle
+		MOVEA.L dCtlStorage(A1),A1					; get storage handle
+		MOVEA.L	(A1),A1								; dereference the handle
+		CLR.B	swmdrvrRecordMenuIsDown(A1)			; clear the byte
+		
+@exit
+		
+		RTS
+
+		ENDPROC
+
+
+		ENDIF										; end if building INIT
+
+
+
+; _______________________________________________________________________________
+;	pascal short Gestalt(OSType selector, long responsePtr)
+;	Define a new Gestalt call to return TSM's version.
+; _______________________________________________________________________________
+
+TSMGestalt	PROC	EXPORT
+
+			MOVE.L		4(A7),A0				; Return result to caller (responsePtr)
+			MOVE.L		#TSMVersion,(A0)		; get version number
+			MOVE.L		(SP)+,A0				; Get return address
+			ADDQ		#8,A7					; Nuke some parameters
+			CLR.W		(A7)					; no error
+			JMP			(A0)					; return
+
+			ENDPROC
+
+
+
+
+
+;============================================================================================
+;
+;	InstallProc for the Text Services Manager -- allocate memory for globals.
+;
+;============================================================================================
+
+
+TSMgrInstall	InstallProc (Plus,SE,II,Portable,IIci)
+		WITH	PSNRecord
+
+
+
+		MOVEA.L	ExpandMem,A1
+		MOVE.L	ExpandMemRec.emTSMGlobals(A1),D0	; get TSM global
+		MOVEA.L	D0,A1								; clear A1 flag
+		BEQ.S	@noGlobal							; not initialized
+		MOVE.W	TSMVarsRec.tsmRecSize(A1),D0		; record size
+		CMP.W	#TSMVarsRec.TSMVarsRecSize,D0		; are they the same size?
+		BEQ.W	@return								; yes, reuse it
+
+		
+@noGlobal
+	;; allocate TSM global, and save it in ExpandMem ...
+	;; A1 <> nil if we have allocated the globals already.
+	;; all fields are initially cleared (0 or flase) !
+		MOVE.L	#TSMVarsRec.TSMVarsRecSize,D0
+		_NewPtr	,Sys ,Clear							; allocate global from system heap
+		BNE.W	@cantboot							; fatal error
+	
+	;; A0 = new record, A1 = old record, copy A1 => A0,
+		MOVE.L	A1,D0								; do we have an old one?
+		BEQ.S	@noOldRecord						; no
+		MOVEQ	#0,D0
+		MOVE.W	TSMVarsRec.tsmRecSize(A1),D0		; old record size
+		EXG		A0,A1								; A0 = old record
+		_BlockMove									; A0 => A1 (preserved)
+		_DisposePtr									; free the old one
+		MOVEA.L	ExpandMem,A0
+		MOVE.W	#TSMVarsRec.TSMVarsRecSize,TSMVarsRec.tsmRecSize(A1)	; new record size
+		MOVE.L	A1,ExpandMemRec.emTSMGlobals(A0)	; save the new TSM global in ExpandMem
+		BRA.S	@return								; OK
+
+@noOldRecord
+		MOVE.W	#TSMVarsRec.TSMVarsRecSize,TSMVarsRec.tsmRecSize(A0)
+		MOVE.B	#kTSMVersion,	TSMVarsRec.tsmMajorVersion(A0)				; 1.0
+		MOVE.B	#0,				TSMVarsRec.tsmMinorVersion(A0)				; released !!!
+		MOVE.W	#kUnknownScript,TSMVarsRec.tsmCurrentSLRec.fScript(A0)		; current script   = unknown
+		MOVE.W	#kUnknownLanguage,TSMVarsRec.tsmCurrentSLRec.fLanguage(A0)	; current language = unknown
+
+		MOVE.L	#$4B534354,TSMVarsRec.tsmDebugSignature(A0)
+		
+		MOVEA.L	ExpandMem,A1
+		MOVE.L	A0,ExpandMemRec.emTSMGlobals(A1)	; save TSM global in ExpandMem
+		MOVE.L	A0,A1								; save global in A1
+	
+	;; allocate TSM aware PSN table, and save it in TSM global ...
+		MOVE.L	#kPSNTableDefSize,D0				; allocate TSM aware PSN table
+		_NewPtr	,Sys ,Clear							; from system heap
+		BNE.S	@cantboot2							; fatal error
+	
+		MOVE.L	A0,TSMVarsRec.tsmIAPSNTablePtr(A1)	; save the table addr in global too
+		MOVE.W	#kDefTableEntryN,D0
+		MOVE.W	D0,iaTotalPSNEntryN(A0)				; total entry number of the table
+	;	LEA		iaPSNStart(A0),A0					; A0 points to the start of the array
+	;	SUBQ.W	#1,D0								; for dbra
+@loop1
+	;	MOVE.W	#kPSNTableSignature,psnTableSignature(A0)	; valid table signature
+	;	ADDA.W	#kPSNEntrySize,A0					; next record
+	;	DBRA	D0,@loop1
+	; can't update default IM in TSM globals because we can't save the component, just description. too bad.
+
+		MOVE.L		#gestaltTSMgrVersion,D0			; selector to d0
+		leaResident	TSMGestalt,A0					; get our function pointer into A0
+		_NewGestalt									; install it
+
+		MOVEQ	#0,D0								; all done
+@return
+		RTS
+
+@cantboot2
+		MOVE.L	A1,A0
+		_DisposePtr									; free global
+		MOVEA.L	ExpandMem,A0
+		CLR.L	ExpandMemRec.emTSMGlobals(A0)		; clear TSM global
+
+@cantboot
+		MOVEQ	#dsMemFullErr,D0					; no mem error
+		_SysError
+		BRA.S	@return
+
+		ENDWITH
+		ENDPROC										; TSMgrInstall END
+
+
+
+;============================================================================================
+;
+;	old input method support.
+;
+;============================================================================================
+
+
+; _______________________________________________________________________________
+;	pascal Boolean OldJapaneseInputMethodExists( short fepID);
+;
+;	return true if the old Input Method which has the given id is installed.
+; _______________________________________________________________________________
+
+
+ojimRecord	RECORD {a6link},decr
+boolResult		ds.w	1			; activate result.
+fepID			ds.w	1			; interface routine ID number.
+return			ds.l	1			; return address.
+a6link			ds.l	1			; old a6 register.
+ojimRecord	equ	*					; size of local variables.
+			ENDR
+
+OLDJAPANESEINPUTMETHODEXISTS PROC EXPORT
+		WITH	ojimRecord,intfRecord,ScriptSystemGlobals,SMgrRecord
+
+		link	a6,#ojimRecord
+		clr.w	boolResult(a6)						; assume not found.
+		GetSmgrCore	a0								; load script manager core.
+		move.l	smgrEntry+(smJapanese*4)(a0),d0		; load doubleTalkRecord for Japanese.
+		beq.s	@exit								; not installed. (something wrong)
+		move.l	d0,a0
+		
+		move.l	intfArray(a0),d0					; get the array handle.
+		ble.s	@exit								; nil or negative -> something wrong.
+		move.l	d0,a1								; Load table handle.
+		move.l	(a1),a1								; Load table pointer.
+		move.l	(a1)+,d0							; Load table length.
+		move.w	fepID(a6),d1						; Load search id number.
+		bra.s	@1									; enter loop at bottom
+@0
+		move.l	(a1)+,a0							; load table entry.
+		cmp.w	(a0),d1								; same id number?
+		beq.s	@foundID							; yes -> we found it!
+@1		dbra	d0,@0								; do the next entry.
+		bra.s	@exit
+@foundID
+		move.w	#$0100,boolResult(a6)				; return (Pascal) true.
+@exit
+		unlk	a6
+		move.l	(sp)+,a0							; pop the return address.
+		addq	#2,sp								; pop the Integer arguments.
+		jmp		(a0)								; return to the caller.
+
+		ENDWITH
+		ENDPROC
+
+		END

@@ -1,0 +1,1779 @@
+;
+;	File:		DrawLine.a
+;
+;	Copyright:	© 1981-1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM2>	 6/11/92	stb		<sm 6/9/92>stb Synched with QDciPatchROM.a; added comments to
+;									DrawLine, SkipSetup, FASTLINE, HTOGL, VLINE, FASTSLANT.
+;		 <8>	12/13/90	SMC		Refixed <7>. With KON.
+;		 <7>	11/26/90	SMC		Fixed call to StretchBits to use locmode with pattern bit
+;									forced.  PnMode was being used.  With BAL.
+;		 <6>	10/31/90	SMC		Fixed alpha channel bugs with BAL.
+;		 <5>	 9/17/90	BG		Removed <3>. 040s are now behaving more reliably.
+;		 <4>	 7/20/90	gbm		Change some identifiers to cease conflicting with interface
+;									files
+;		 <3>	 6/26/90	BG		Added EclipseNOPs for flakey 040s.
+;		 <2>	 2/13/90	BAL		Ensure that the initial bit offset is calculated in a long
+;									instead of a word so that lines drawn into really wide pixmaps
+;									don't freak out.
+;	  <•1.6>	 7/14/89	BAL		For Aurora: Final CQD
+;	   <1.5>	 6/30/89	BAL		Cleared runBuf(a6) before calling getSeek
+;	  <•1.4>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;	  <•1.3>	 4/12/89	BAL		Blasting in 32-Bit QuickDraw 1.0B1
+;				 1/22/89	BAL		Made patVPos a long.
+;				 9/22/88	BAL		Moved initialization of region state records into GetSeek.
+;				 9/19/88	BAL		Altered to use common stack frame file 'Drawing Vars.a'
+;				 9/18/88	BAL		Altered to get CRSRFLAG value from _BitsToPix; Removed
+;									references to PIXSRC;
+;				 11/8/87	BAL		Fixed computation of bufSize for more accurate region clipping
+;									at at depths greater than 1. <C954>
+;				 11/7/87	BAL		Fixed ChkPat to handle new patterns. <C945>
+;				  6/4/87	CRC		preserve hilite mode across calls to colormap; set patmode in
+;									case user forgot
+;				  1/3/87	CRC		pass color param to stretch
+;				12/12/86	CRC		Added support for arithmetic modes
+;				 10/9/86	EHB		Added mask parameters to stretchbits calls
+;				 7/29/86	EHB		Allocate EXPAT buffer on stack so long aligned
+;				 7/26/86	EHB		Added support for expanded patterns
+;				 7/22/86	EHB		Pass MODE to PatExpand
+;				  7/5/86	EHB		Replaced SeekMask and GetXRtn with GetMask
+;				 6/20/86	EHB		New params to COLORMAP; Added FCOLOR and BCOLOR to stack frame
+;				 6/18/86	EHB		Call StretchBits instead of RgnBlt
+;				 6/15/86	EHB		Make sure stack is longword aligned (for fast buffers); If one
+;									1-bit region, play directly into RGNBUFFER Convert BitsToPix and
+;									use pixelSize
+;				 6/14/86	EHB		Call GetXRtn to set expand routine for SeekMask; Added DSTPIX to
+;									stack frame
+;				 6/13/86	EHB		Updated SeekMask to check rgn changed flag Moved SeekMask to
+;									another file; Rearranged stack frame with SeekMask stuff at top
+;				 6/10/86	EHB		Modified to use 32-bit DrawSlab
+;				  6/5/86	EHB		Clear flag bits from all references to rowBytes
+
+
+		BLANKS	ON
+		STRING	ASIS
+
+		MACHINE	MC68020
+
+;-----------------------------------------------------------------
+;
+;  -->	DRAWLINE.TEXT
+;
+;------------------------------------------------------------------
+
+DrawLine PROC	EXPORT 
+		IMPORT 	SHFTTBL
+		Export 	steepBlitTab,shallowBlitTab,FastLine,FastSlant
+;----------------------------------------------------------------
+;
+;  PROCEDURE DRAWLINE(P1,P2: POINT);
+;
+;  DRAWS A LINE CLIPPED TO CURRENT PORT'S CLIPRGN AND VISRGN
+;
+;  P1 AND P2 ARE GIVEN IN LOCAL COORDINATES OF THEPORT.
+;
+
+
+;------------------------------------------------
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	8					;SIZE OF PARAMETERS
+P1				EQU 	PARAMSIZE+8-4		;POINT
+P2				EQU 	P1-4				;POINT
+
+
+;-------------------------------------------------
+;
+;  A6 OFFSETS OF LOCAL VARIABLES AFTER LINK:
+;
+;  STACK FRAME VARS USED BY SEEKMASK (CALLED BY STRETCHBITS, RGNBLT, DRAWARC, DRAWLINE)
+;
+&CurFile	SETC	'DRAWLINE'
+
+			INCLUDE	'DrawingVars.a'
+
+;-------------------------------------------------
+; includes fixes as seen in QDciPatchROM.a											<sm 6/9/92>stb
+
+		LINK	A6,#VARSIZE 				;ALLOCATE LOCAL VARS
+		MOVEM.L D0-D7/A1-A5,-(SP)			;SAVE REGS
+		MOVE.L	SP,SAVESTK(A6)				;REMEMBER STACK FOR LATER
+		MOVE.L	A5,SAVEA5(A6)				;REMEMBER GLOBAL PTR
+		CLR.L	DSTMASKBUF(A6)				;ASSUME NO MASK
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	WIDEOPEN(A0),BIGRGN(A6) 	;STASH WIDEOPEN IN BIGRGN
+		MOVE.L	THEPORT(A0),A3				;POINT TO CURRENT GRAFPORT
+		TST 	PNVIS(A3)					;IS PNVIS NEGATIVE ?
+		BLT 	GOHOME						;YES, QUIT
+		MOVE.W	PNMODE(A3),D1				;get pen mode							Start of <7>
+		_GetStreamMode						;strip off alpha bits
+;this code moved up here from below at SET UP NEWPATTERN TO INDICATE OLD OR NEW STYLE PATTERN
+		BSET	#3,D1						;set the pattern bit in case the user forgot to
+		MOVEQ	#$10,D0						;1 past normal mode range
+		BTST	#5,D1						;arithmetic mode?
+		BEQ.S	@noRith
+		CMP		#$3A,D1						;hilite?
+		BEQ.S	@ok
+		MOVEQ	#$30,D0						;1 past arithmetic mode range
+@noRith	CMP		D0,D1						;greater than defined range?
+		BGT		GOHOME
+@ok		MOVE	D1,LOCMODE(A6)				;copy mode for colormap					End of <7>
+		MOVE.L	A3,PORT(A6) 				;SAVE PORT FOR LATER
+
+
+;----------------------------------------------------------------
+;
+;  MAKE SURE THE STACK IS ON A LONGWORD BOUNDARY (FOR FAST BUFFERS)
+;
+		MOVE.L	SP,D1						;GET THE STACK POINTER
+		AND.B	#$FC,D1						;FORCE LONG ALIGNMENT
+		MOVE.L	D1,SP						;USE IT
+
+
+;----------------------------------------------------
+;
+;  CONVERT DSTBITS TO PIXMAP
+;		(A5 must contain global ptr)
+;
+		LEA		PORTBITS(A3),A1				;GET POINTER TO DSTBITS
+		LEA		DSTPIX(A6),A2				;USE DSTPIX IN ITS PLACE
+		_BitsToPix							;CONVERT BITMAP
+		MOVE.L	D1,REALBOUNDS(A6)			;SAVE REAL DST BOUNDS.TOPLEFT
+		MOVE.B	D2,CRSRFLAG(A6)				;REMEMBER IF DST IS SCREEN 			<BAL 18Sep88>
+
+;----------------------------------------------------
+;
+;  CONVERT PIXEL DEPTH TO SHIFT AMOUNT TO AVOID MULTIPLIES
+;
+		LEA		SHFTTBL,A0					;TO CONVERT DEPTH TO SHIFT
+		MOVE	DSTPIX+PIXELSIZE(A6),D0		;GET DST PIXEL SIZE
+		MOVEQ	#0,D1						;DEFAULT SHIFT = 0
+		MOVE.B	0(A0,D0),D1					;GET SRC SHIFT
+		MOVE	D1,DSTSHIFT(A6)				;AND SAVE DST SHIFT AMOUNT
+
+
+;----------------------------------------------------------------
+;
+;  SET UP NEWPATTERN TO INDICATE OLD OR NEW STYLE PATTERN
+;  ALSO SET UP LOCAL PATTERN POINTER, LOCPAT(A6)
+;
+		LEA		PNPAT(A3),A0				;POINT TO THE PATTERN
+		MOVE.L	A0,LOCPAT(A6)				;COPY PATTERN POINTER
+		TST		PORTBITS+ROWBYTES(A3)		;IS THE DST OLD OR NEW?
+;ciDrawLine from QDciPatchROM.a used to be right here
+		SMI		NEWPATTERN(A6)				;FLAG = TRUE IF NEW PATTERN
+
+
+;-------------------------------------------------------
+;
+;  Check for color filtering.  Alter mode and pattern accordingly.
+;
+		MOVE.B	HiliteMode,-(SP)			;preserve the hilite mode
+		CLR.B	multiColor(A6)				;use fg/bg color
+		_COLORMAP							;CHECK AGAINST THECOLOR, THEFILTER
+		MOVE.B	(SP)+,HiliteMode			;since stretch (and thus ColorMap) may be called later
+
+;---------------------------------------------------------
+;
+;  GET CLIPRGN AND VISRGN HANDLES AND DE-REFERENCE THEM
+;
+		MOVE.L	A3,A5						;PUT GRAFPTR IN A5
+		MOVE.L	CLIPRGN(A5),A2				;GET CLIPRGN HANDLE
+		MOVE.L	(A2),A2 					;GET CLIPRGN POINTER
+		MOVE.L	VISRGN(A5),A3				;GET VISRGN HANDLE
+		MOVE.L	(A3),A3 					;GET VISRGN POINTER
+
+
+;-------------------------------------------------------------
+;
+;  SET UP LINERECT, THE RECTANGLE BOUNDING THE LINE AND PEN
+;
+		MOVEM.W P2(A6),D1/D2/D3/D4			;GET D1=V1, D2=H1, D3=V2, D4=H2
+		CMP 	D3,D1						;IS V1 > V2 ?
+		BLE.S	VOK2						;NO, CONTINUE
+		EXG 	D1,D3						;YES, SWAP VERT
+VOK2	CMP 	D4,D2						;IS H1 > H2 ?
+		BLE.S	HOK2						;NO, CONTINUE
+		EXG 	D2,D4						;NO SWAP HORIZ
+HOK2	ADD 	PNSIZE+H(A5),D4 			;ADD PEN WIDTH TO RIGHT
+		ADD 	PNSIZE+V(A5),D3 			;ADD PEN HEIGHT TO BOTTOM
+		MOVEM.W D1/D2/D3/D4,LINERECT(A6)	;STORE TOP, LEFT, BOTTOM, RIGHT
+
+
+;-----------------------------------------------------------------------
+;
+;  CALC MINRECT, THE INTERSECTION OF LINERECT, BITMAP BOUNDS,
+;  CLIPRGN BBOX, AND VISRGN BBOX.  QUIT IF NO INTERSECTION.
+;
+		PEA 	LINERECT(A6)				;PUSH LINE RECT
+		PEA 	DSTPIX+BOUNDS(A6) 			;PUSH PIXMAP BOUNDS
+		PEA 	RGNBBOX(A2) 				;PUSH CLIPRGN BBOX
+		PEA 	RGNBBOX(A3) 				;PUSH VISRGN BBOX
+		MOVE	#4,-(SP)					;PUSH NRECTS=4
+		PEA 	MINRECT(A6) 				;PUSH DST ADDR
+		_RSECT								;CALC INTERSECTION
+		BEQ 	GOHOME						;QUIT IF NO INTERSECT
+
+
+;-----------------------------------------------------------
+;
+;  HIDE CURSOR IF CURSOR INTERSECTS MINRECT AND DST IS SCREEN.
+;		(A5 must contain global ptr)
+;
+		MOVE.L	SAVEA5(A6),A5					;GET GLOBAL PTR
+		TST.B	CRSRFLAG(A6)					;IS DST TO A SCREEN?				<BAL 19Sep88>
+		BEQ.S	NOTSCRN							;=>NO
+		PEA 	MINRECT(A6) 		  			;PUSH SHIELDRECT PARAMETER
+		MOVE.L	REALBOUNDS(A6),-(SP)			;PUSH DELTA FOR GLOBAL
+		_SHIELDCURSOR							;HIDE CURSOR IF IT INTERSECTS
+NOTSCRN MOVE.L	PORT(A6),A5 		  			;GET BACK THEPORT
+
+
+;-----------------------------------------------------------
+;
+;  CHECK FOR BOTH VISRGN AND CLIPRGN RECTANGULAR
+;
+		CLR.B	FASTFLAG(A6)				;FASTFLAG := FALSE
+		CMP 	#10,RGNSIZE(A2) 			;IS CLIPRGN RECTANGULAR ?
+		BNE.S	FLAGOK						;NO, CONTINUE
+		CMP 	#10,RGNSIZE(A3) 			;IS VISRGN RECTANGULAR ?
+		BEQ.S	CKPAT						;YES, CONTINUE
+
+
+;-----------------------------------------------------------
+;
+;  If only visRgn is non-rectangular, then check if
+;  its intersection with minrect would be rectangular.
+;  IF TrimRect(visRgn,minRect) then treat as rectangular.
+;
+		MOVE.L	visRgn(A5),-(SP)			;push rgnHandle
+		PEA 	minRect(A6) 				;push addr of minRect
+		MOVE.W	#-1,-(SP)					;pass Trim = True
+		_TrimRect							;call trimRect
+		BLT 	show						;quit if intersection empty
+		BGT.S	FLAGOK						;continue if non-rectangular
+
+
+;-----------------------------------------------------------
+;
+;  CHECK FOR BLACK OR WHITE PATTERN
+;
+CKPAT	BTST	#5,LocMode+1(A6)			;an arithmetic mode?
+		BNE.S	FlagOK						;skip fast case if so
+
+		MOVE.L	LOCPAT(A6),A0				;POINT TO PATTERN
+		TST.B	NEWPATTERN(A6)				;is it a new pattern?			<C945 07Nov87 BAL>
+		BEQ.S	@oldPat						;=>no, skip pixpat fields		<C945 07Nov87 BAL>
+
+		MOVE.L	(a0),a0						;get the pixpat handle			<C945 07Nov87 BAL>
+		MOVE.L	(a0),a0						;get the pixpat pointer			<C945 07Nov87 BAL>
+		TST		PATTYPE(A0)					;is it an old-style pattern?	<C945 07Nov87 BAL>
+		BNE.S	FLAGOK						;=>no, skip fast case			<C945 07Nov87 BAL>
+
+		MOVE.L	patData(a0),a0				;get handle to pattern data		<C945 07Nov87 BAL>
+		MOVE.L	(a0),a0						;get pattern ptr				<C945 07Nov87 BAL>
+
+@oldPat	MOVE.L	(A0)+,D0					;GET 1ST HALF OF PATTERN
+		CMP.L	(A0)+,D0					;IS IT SAME AS 2ND HALF ?
+		BNE.S	FLAGOK						;NO, CONTINUE
+		NOT.L	D0							;IS PATTERN BLACK ?
+		BEQ.S	YESFLAG 					;YES, WE MADE IT
+		NOT.L	D0							;IS PATTERN WHITE ?
+		BNE.S	FLAGOK						;NO, CONTINUE
+		EOR 	#4,LOCMODE(A6) 				;YES, ALTER MODE AS IF BLACK
+YESFLAG ST		FASTFLAG(A6)				;RECT CLIPPED AND BLACK
+
+
+;-----------------------------------------------------------
+;
+;  fast case: map mode into  black,xor,white, or do-nothing
+;
+		MOVEQ	#7,D0						;GET 3 BIT MASK
+		AND 	LOCMODE(A6),D0 				;GET 3 BITS OF MODE
+		MOVE.B	MODEMAP(D0),D0				;MAP TO BLACK,XOR,WHITE,NOP
+		BMI 	show						;QUIT IF DO-NOTHING MODE
+		MOVE	D0,LOCMODE(A6) 				;UPDATE MODE
+		BRA.S	FLAGOK						;AND CONTINUE
+MODEMAP DC.B	0,0,1,2,2,255,255,255
+FLAGOK
+
+
+;-----------------------------------------------------------
+;
+;  GET THE TWO LINE ENDPOINTS INTO REGISTERS
+;  AND CHECK FOR HORIZONTAL OR VERTICAL LINE
+;
+		MOVEM.W P2(A6),D1/D2/D3/D4			;GET D1=V2, D2=H2, D3=V1, D4=H1
+		CMP 	D2,D4						;H1=H2 ?
+		BEQ.S	HVLINE						;YES, DO VERTICAL LINE
+		CMP 	D1,D3						;NO, IS V2 > V1 ?
+		BGT.S	SLANTED 					;YES, DRAW SLANTED LINE
+		BLT.S	VSWAP						;SWAP POINTS AND DRAW SLANTED
+											;ELSE V1=V2, DO HORIZONTAL
+
+;-----------------------------------------------------------
+;
+;  LINE IS EITHER HORIZONTAL OR VERTICAL.
+;  CHECK FOR ONE DOT LINE, BLACK OR WHITE PATTERN, AND
+;  CLIPRGN AND VISRGN BOTH RECTANGULAR. IF SO, OPTIMIZE FAST LINES.
+;
+HVLINE	TST.B	FASTFLAG(A6)				;RECT CLIPPED AND BLACK ?
+		BEQ.S	NOTFAST 					;NO, CONTINUE
+		CMP.L	#$00010001,PNSIZE(A5)		;IS PEN 1 BY 1 ?
+		bne.s 	NotFast						;NO, CONTINUE
+		_FastLineJmp						;YES, DO IT FAST !
+
+
+;--------------------------------------------------------------------
+;
+;  NOT FASTLINE.  PUSH PARAMS AND CALL STRETCHBITS FOR HORIZ OR VERT LINE.
+;
+NOTFAST PEA		PORTBITS(A5)				;PUSH SRCBITS = PORTBITS
+		CLR.L	-(SP)						;NO MASKBITS
+		PEA		PORTBITS(A5)				;PUSH DSTPIX
+		PEA 	MINRECT(A6) 				;PUSH SRCRECT = DSTRECT
+		CLR.L	-(SP)						;NO MASKRECT
+		PEA 	MINRECT(A6) 				;PUSH DSTRECT
+		MOVE	PNMODE(A5),D0				;GET MODE										<8>
+		AND		#$FCFF,D0					;STRIP SOME BITS								<8>
+		BSET	#3,D0						;set the pattern bit in case the user forgot to	<8>
+		MOVE	D0,-(SP)					;PUSH CLEANED MODE								<8>
+		PEA 	PNPAT(A5)					;PUSH PATTERN
+		MOVE.L	CLIPRGN(A5),-(SP)			;PUSH CLIPRGN HANDLE
+		MOVE.L	VISRGN(A5),-(SP)			;PUSH VISRGN HANDLE
+		MOVE.L	BIGRGN(A6),-(SP)			;PUSH SAVED WIDEOPEN
+		MOVE.L	SAVEA5(A6),A5				;GET GLOBAL PTR
+		CLR		-(SP)						;pass multicolor flag false
+		_STRETCHBITS						;DRAW THE HORIZ OR VERT LINE
+		BRA 	show						;RESTORE CURSOR AND QUIT
+
+
+;-------------------------------------------------------------
+;
+;  THE LINE IS SLANTED.  SORT VERTICALLY
+;  AND DRAW TOP TO BOTTOM AS HORIZONTAL SLABS.
+;
+VSWAP	EXG 	D1,D3						;SORT POINTS BY VERTICAL
+		EXG 	D2,D4						;SWAP HORIZ TO MATCH
+SLANTED MOVE	D3,D0						;COPY LINE BOTTOM
+		ADD 	PNSIZE+V(A5),D0 			;ADD PEN HEIGHT
+		CMP 	minRect+TOP(A6),D0			;IS RESULT <= minRect TOP ?		<07Jul89>
+		BLE 	show						;YES, RESTORE CURSOR AND QUIT
+		CMP 	minRect+BOTTOM(A6),D1		;IS TOP >= minRect BOTTOM ?		<07Jul89>
+		BGE 	show						;YES, RESTORE CURSOR AND QUIT
+
+
+;-------------------------------------------------------------
+;
+;  SET UP INITIAL FIXED POINT LEFTEDGE AND RIGHTEDGE
+;  AND CHECK FOR ZERO PENSIZE.
+;
+		MOVE.W	D2,LEFTEDGE(A6) 			;LEFTEDGE.INT := TOP HORIZ
+		MOVE.W	#$8000,LEFTEDGE+2(A6)		;LEFTEDGE.FRACT := 1/2
+		MOVE.L	LEFTEDGE(A6),RIGHTEDGE(A6)	;RIGHTEDGE:=LEFTEDGE
+		MOVE	PNSIZE+H(A5),D0 			;GET PEN WIDTH
+		BLE 	show						;QUIT IF PENWIDTH <= 0
+		ADD.W	D0,RIGHTEDGE(A6)			;ADD TO RIGHTEDGE.INT
+		MOVE	PNSIZE+V(A5),D6 			;GET PEN HEIGHT
+		BLE 	show						;QUIT IF PEN HEIGHT <= 0
+
+
+;----------------------------------------------------
+;
+;  CALC FIXED POINT SLOPE = FixRatio(dh,dv);
+;
+		SUB 	D2,D4	 					;CALC DH
+		SUB 	D1,D3 						;CALC DV
+		ext.l	D3
+		moveq	#0,d7						;clear out high word
+		move.w	d4,d7						;copy DH to d7
+		swap	D7
+		DIVS.l	D3,D7						;CALC FIXED POINT SLOPE DH/DV
+		MOVE.L	D7,SLOPE(A6)				;SAVE FOR LATER
+
+;
+;  CALC adjust := pen height * slope
+;
+		move.l	d7,d5						;assume height is 1
+		cmp.w	#1,d6						;is pen height 1
+		beq.s	@gotAdjust
+		ext.l	d6
+		MULS.L	d6,d5						;CALC FixMul(pnSize.v,slope)
+
+
+@gotAdjust
+;
+;  ADJUST LEFTEDGE AND RIGHTEDGE DEPENDING ON SIGN AND MAGNITUDE OF SLOPE
+;  Set steepFlag in A2:  0->shallow; 1->down&right; -1->down&left
+
+		sub.l	a2,a2						;assume shallow
+		MOVE.L	D7,D0						;COPY SLOPE
+		ASR.L	#1,D0						;CALC SLOPE/2
+		ADD.L	D0,LEFTEDGE(A6) 			;ADD SLOPE/2 TO LEFT EDGE
+		ADD.L	D0,RIGHTEDGE(A6)			;ADD SLOPE/2 TO RIGHT EDGE
+
+		TST.L	D7							;IS SLOPE NEGATIVE ?
+		BMI.S	NEGSLOPE					;YES, CONTINUE
+		SUB.L	D5,LEFTEDGE(A6) 			;SUBTRACT ADJUST FROM LEFTEDGE
+		CMP.L	#$00010000,D7				;IS SLOPE < ONE ?
+		BGT.S	LESSV1						;NO, BRANCH
+		BEQ.S	Pos45						;NO, BRANCH
+
+MOREV1	ADD.L	D7,LEFTEDGE(A6) 			;ADD SLOPE TO LEFTEDGE
+		addq	#1,a2						;remember steep and to right
+		BRA.S	SLOPEOK 					;CONTINUE
+
+Pos45	addq	#1,a2						;remember 45°
+LESSV1	SUB.W	#1,RIGHTEDGE(A6)			;RIGHTEDGE := RIGHTEDGE - 1
+		BRA.S	SLOPEOK 					;CONTINUE
+
+
+;----------------------------------------------------
+;
+;  SLOPE IS NEGATIVE
+;
+NEGSLOPE SUB.L	D5,RIGHTEDGE(A6)			;SUBTRACT ADJUST FROM RIGHTEDGE
+		CMP.L	#$FFFF0000,D7				;IS SLOPE > -ONE ?
+		BLT.S	LESSV2						;NO, CONTINUE
+
+MOREV2	ADD.L	D7,RIGHTEDGE(A6)			;ADD SLOPE TO RIGHTEDGE
+		subq	#1,a2						;remember steep and to left
+		BRA.S	SLOPEOK
+
+LESSV2	ADD.W  #1,LEFTEDGE(A6)				;LEFTEDGE := LEFTEDGE + 1
+
+
+
+SLOPEOK MOVEM.W MINRECT(A6),D1/D2/D3/D4 	;GET MINRECT TOP,LEFT,BOTTOM,RIGHT
+;
+;  ADJUST LEFTEDGE AND RIGHTEDGE IF LINE WAS CLIPPED VERTICALLY
+;
+		CMP 	LINERECT+TOP(A6),D1 		;DID TOP GET CLIPPED ?
+		BEQ.S	TOPOK						;NO, CONTINUE
+		MOVE	D1,D0
+		SUB 	LINERECT+TOP(A6),D0 		;CALC DISCARD AMOUNT
+		EXT.L	D0							;MAKE IT LONG
+		MOVE.L	D7,D5						;GET 32 BIT SLOPE
+		MULS.L	D0,D5						;SLOPE * SCANS CLIPPED
+		ADD.L	D5,LEFTEDGE(A6) 			;BUMP LEFTEDGE TO NEW TOP
+		ADD.L	D5,RIGHTEDGE(A6)			;BUMP RIGHTEDGE TO NEW TOP
+
+;-----------------------------------------------------------
+;
+;  LINE IS SLANTED.  IF |SLOPE| <= 1 THEN
+;  CHECK FOR ONE DOT LINE, BLACK OR WHITE PATTERN, AND CLIPRGN
+;  AND VISRGN BOTH RECTANGULAR. IF SO THEN OPTIMIZE.
+;
+TOPOK
+	;	bchg	#0,0						;debugging code
+	;	beq.s	CalcBufLeft
+
+		TST.B	FASTFLAG(A6)				;RECT CLIPPED AND BLACK ?
+		BEQ.S	CalcBufLeft 				;NO, CONTINUE
+		cmp.w	LINERECT+left(a6),D2		;is MinRect.Left>Line's left edge?
+		bgt.s	CalcBufLeft					;horizontally clipped!
+		cmp.w	LINERECT+right(a6),D4		;is MinRect.Right<Line's right edge?
+		blt.s	CalcBufLeft					;horizontally clipped!
+		CMP.L	#$00010001,PNSIZE(A5)		;IS PEN 1 BY 1 ?
+		bne.s	CalcBufLeft					;no, continue
+		_FastSlantJmp						;YES, DO IT FAST !
+											;Assumes:	D1,D2,D3,D4 = MinRect T,L,B,R
+											;			D7 = slope (16.16)
+CalcBufLeft
+;-----------------------------------------------------------
+;
+;  CALC BUFLEFT
+;
+									 		;D2 = MINRECT LEFT
+		MOVE	DSTSHIFT(A6),D5				;GET SHIFT FOR PIXEL DEPTH
+		SUB 	DSTPIX+BOUNDS+LEFT(A6),D2	;CONVERT TO GLOBAL COORDS
+		ext.l	d2							;make it a long			<BAL 17Jan89>
+		LSL.l	D5,D2						;CONVERT PIXELS TO BITS
+		AND.l 	#~$1f,D2					;TRUNC TO MULT OF 32 BITS
+		MOVE.l	D2,D1						;GET BUFLEFT IN BITS
+		LSR.l	#3,D1						;CONVERT BITS TO BYTES
+		MOVE	D1,PATHPOS(A6)				;AND SAVE AS HORIZONTAL PATTERN BASE
+		LSR.l	D5,D2						;CONVERT BITS TO PIXELS
+		ADD 	DSTPIX+BOUNDS+LEFT(A6),D2	;CONVERT BACK TO GLOBAL
+		MOVE	D2,BUFLEFT(A6)				;SAVE AS BUFLEFT
+;
+;  IF FASTFLAG, THEN SKIP REGION SETUP
+;
+		TST.B	FASTFLAG(A6)				;RECT CLIPPED AND BLACK ?
+		BNE 	SKIPSETUP					;YES, DON'T WASTE TIME WITH SETUP
+
+;_________________________________________________________________________________________
+;
+;  CALC expansion buffer  = [ (minRect.right-minRect.left) div 32 + 1 ] * pixelsize - 1
+;  CALC bufSize  = [ (minRect.right-minRect.left)  * pixelsize - 1 ] div 32		<C954> 08Nov87 BAL
+;
+											;D4 = MINRECT RIGHT
+		SUB 	D2,D4						;CALC MAXH-BUFLEFT
+		move	d4,d0						;save for expansion scanline buffer	<C954>
+
+		ext.l	d4							;clear out high word				<C954>
+		lsl.l	d5,d4						;convert to bits					<C954>
+		subq.l	#1,d4						;force downward round				<C954>
+		LSR.l	#5,D4						;GET NUMBER OF LONGS IN SCANBUF - 1	<C954>
+		MOVE	D4,BUFSIZE(A6)				;BUFSIZE = # LONGS -1				<C954>
+
+		LSR		#5,D0						;get (pixels in scanbuf)/32			<C954>
+		ADDQ	#1,D0						;MAKE IT ONE BASED
+		LSL		D5,D0						;CONVERT PIXELS TO BITS
+		SUBQ	#1,D0						;MAKE 0 BASED AGAIN
+;
+;  ALLOCATE AND CLEAR A SCANLINE BUFFER FOR THE COMPOSITE MASK
+;
+CLRMASK CLR.L	-(SP)						;ALLOCATE AND CLEAR ONE LONG
+		DBRA	D0,CLRMASK					;LOOP TILL DONE
+		MOVE.L	SP,RGNBUFFER(A6)			;REMEMBER WHERE RGNBUFFER IS
+
+
+;--------------------------------------------------------------------
+;
+;  ALLOCATE BUFFERS AND INIT STATE RECORDS FOR EACH NON-RECT REGION
+;  GET SEEK ROUTINE INTO SEEKMASK(A6)
+;  GET EXPAND ROUTINE INTO EXRTN(A6) FOR SEEK ROUTINE
+;  Clobbers: A0-A3, D0-D4
+;
+		lea		Show,a0						;get go home routine
+		move.l	a0,goShow(a6)				;pass to getSeek		<BAL 21Mar89>
+		move.l	maskbc,StackFree(a6)		;pretend lots of stack	<BAL 21Mar89>
+
+		clr.l	DstRow(a6)					;flag as seeking down
+		clr.l	runBuf(a6)					;don't use run clipping		<1.5> BAL
+		MOVE.L	VISRGN(A5),-(SP)			;PUSH VIS RGNHANDLE
+		MOVE.L	CLIPRGN(A5),-(SP)			;PUSH CLIP RGNHANDLE
+		MOVE.L	#1,-(SP)					;PUSH HANDLE COUNT - 1
+		_GETSEEK							;GET EXPAND ROUTINE INTO EXRTN(A6)
+											;AND SEEK ROUTINE INTO SEEKMASK(A6)
+
+SKIPSETUP
+
+;------------------------------------
+;
+;  CALC STARTING DSTLEFT
+;
+; as seen in QDciPatchROM.a at TryLine, fixes both patches on _FastSlabMode and _GetSeek	<sm 6/9/92>stb
+
+		MOVE	MINRECT+TOP(A6),D1
+		SUB 	DSTPIX+BOUNDS+TOP(A6),D1	;CONVERT MINV TO GLOBAL COORDS
+		MOVE	DSTPIX+ROWBYTES(A6),D0		;get dst rowbytes
+		AND	  	#nuRBMask,D0				;clear off flag bits
+		MOVE	D0,DSTROW(A6)				;SAVE FOR LATER
+		MULS	D0,D1						;MULT BY DST ROWBYTES;	BAL	02Dec88
+		ADD.L	DSTPIX+BASEADDR(A6),D1		;ADD START OF BITMAP
+
+		MOVE	BUFLEFT(A6),D2				;GET BUFLEFT
+		SUB 	DSTPIX+BOUNDS+LEFT(A6),D2	;CONVERT BUFLEFT TO GLOBAL
+		ext.l	d2							;clear out high end				<BAL 13Feb90>
+		MOVE	DSTSHIFT(A6),D7				;GET PIXEL TO BIT SHIFT AMOUNT
+		LSL.L	D7,D2						;CONVERT PIXELS TO BITS			<BAL 13Feb90>
+		LSR.L	#3,D2						;CONVERT BITS TO BYTES			<BAL 13Feb90>
+;		EXT.L	D2							;CLR HI WORD					<BAL 13Feb90>
+		ADD.L	D2,D1						;ADD HORIZ BYTE OFFSET
+		MOVE.L	D1,DSTLEFT(A6)				;SAVE AS DSTLEFT
+
+
+;----------------------------------------------------
+;
+;  MAKE LEFTEDGE,RIGHTEDGE,MINRECT RELATIVE TO BUFFER LEFT
+;
+		MOVE	BUFLEFT(A6),D1
+		SUB.W	D1,LEFTEDGE(A6) 			;ADJUST LEFTEDGE.INT
+		SUB.W	D1,RIGHTEDGE(A6)			;ADJUST RIGHTEDGE.INT
+		SUB 	D1,MINRECT+LEFT(A6)
+		SUB 	D1,MINRECT+RIGHT(A6)
+
+
+;------------------------------------------------------------
+;
+;  TAKE FAST OR SLOW OUTER CONTROL LOOP FOR SLANTED LINES:
+;
+		TST.B	fastFlag(A6)				;ARE WE RECT CLIPPED BLACK ?
+		BEQ.S	GOSLOW						;NO, CONTINUE
+		MOVE	LOCMODE(A6),D2 				;GET (ALTERED) PEN MODE
+		_FastSlabMode						;Get fast case jump in A4
+		LEA 	MINRECT(A6),A3				;POINT TO MINRECT
+		MOVE.L	SLOPE(A6),D7				;GET FIXED POINT SLOPE
+		MOVE.L	DSTLEFT(A6),A5				;GET DSTLEFT
+		MOVE.L	FCOLOR(A6),D4				;PASS FCOLOR
+		MOVE.L	BCOLOR(A6),D5				;AND BACKCOLOR
+		MOVE	MINRECT+BOTTOM(A6),D6		;GET MINRECT BOTTOM
+		SUB 	MINRECT+TOP(A6),D6			;CALC HEIGHT
+		SUB 	#1,D6						;MINUS 1 FOR DBRA COUNT
+
+;-----------------------------------------------------------
+;
+;  Switch to 32 bit addressing mode
+;
+		moveq	#true32b,d0					;switch to 32 bit addressing
+		_rSwapMMUMode			;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+		move.b	d0,MMUsave(a6)				;save previous state for later
+
+NXTFAST MOVE.W	LEFTEDGE(A6),D1 			;GET LEFTEDGE.INT
+		MOVE.W	RIGHTEDGE(A6),D2			;GET RIGHTEDGE.INT
+		MOVE.L	A5,A1						;INIT DSTPTR TO LEFT
+		MOVE.W	DSTSHIFT(A6),D0				;GET PIXEL TO BIT SHIFT AMOUNT
+		_DrawSlab							;DRAW ONE SLAB IN PENMODE
+		ADD		DSTROW(A6),A5				;BUMP DST TO NEXT ROW
+		ADD.L	D7,LEFTEDGE(A6) 			;ADD SLOPE TO LEFT EDGE
+		ADD.L	D7,RIGHTEDGE(A6)			;ADD SLOPE TO RIGHT EDGE
+		DBRA	D6,NXTFAST					;LOOP FOR ALL SCANLINES
+		BRA 	DONE						;AND QUIT
+
+
+GOSLOW
+;------------------------------------------------------------------
+;
+;  SET INVERSE FLAG AND CALL PATEXPAND TO EXPAND PATTERN
+;
+		CLR.L	D7							;SAY NOT INVERTED
+		MOVE	LOCMODE(A6),D2 				;GET (ALTERED) PEN MODE
+		BTST	#5,D2						;a new arithmetic mode?
+		BNE.S	NOTINV						;if so, no invert bit to test
+		BCLR	#2,D2						;TEST AND CLR INVERT BIT
+		BEQ.S	NOTINV						;SKIP IF NOT INVERTED
+		NOT.L	D7							;INVERTED; D7 GETS ALL 1'S
+
+NOTINV	MOVE.L	SAVEA5(A6),A5				;GET GLOBAL PTR
+		_PATEXPAND							;EXPAND 8 BYTES TO 16 LONGS
+											;SETUP PATROW,PATHMASK,PATVMASK
+		MOVE	PATROW(A6),D1				;GET THE PATTERN ROWBYTES
+		BNE.S	DONEW						;=>NON-ZERO, IT'S A NEW PATTERN
+
+		MOVEQ	#$F,D6						;ELSE 16 ROWS OF PATTERN
+		MOVEQ	#$4,D1						;GET PATTERN ROWBYTES INTO D1
+		MOVE	D1,PATROW(A6)				;AND SET PATTERN ROWBYTES
+		MOVE	#$3,PATHMASK(A6)			;HORIZONTAL MASK FOR PATTERN
+		MOVE	#$3F,PATVMASK(A6)			;VERTICAL MASK FOR PATTERN
+		BRA.S	DOOLD						;=>GO GET STARTING OFFSET INTO PATTERN
+
+;  NEW PATTERN.  SET STARTING VERT POSITION.
+
+DONEW	MOVEQ	#0,D6						;CLEAR HIGH WORD
+		MOVE	PATVMASK(A6),D6				;GET VERTICAL MASK
+		ADDQ	#1,D6						;CONVERT TO COUNT
+		DIVU	PATROW(A6),D6				;DIVIDE BY ROWSIZE
+		SUBQ	#1,D6						;GET ROWS OF PATTERN
+
+DOOLD	AND 	MINRECT+TOP(A6),D6			;GET TOP VERT LOCAL COORD
+		MULU	D1,D6						;CALC OFFSET INTO PATTERN
+		MOVE.l	D6,PATVPOS(A6)				;SAVE AS PATVPOS		<BAL 22Jan89>
+
+;  GET SLOW SLABMODE IN A4 (RELIES ON PATROW, SET UP BY PATEXPAND)
+
+		MOVE	LOCMODE(A6),D2 				;GET (ALTERED) PEN MODE
+		_SlabMode							;GET DrawSlab CASE JUMP IN A4
+
+;-----------------------------------------------------------
+;
+;  Switch to 32 bit addressing mode
+;
+		moveq	#true32b,d0					;switch to 32 bit addressing
+		_rSwapMMUMode			;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+		move.b	d0,MMUsave(a6)				;save previous state for later
+
+;  FOR EACH SLAB, MAKE MASK BUFFER CURRENT AND DRAW SLAB
+
+		MOVE	MINRECT+TOP(A6),VERT(A6)	;INIT CURRENT VERT:=MINV
+		MOVE.L	DSTLEFT(A6),A5				;GET DSTLEFT
+		MOVE.L	FCOLOR(A6),D4				;PASS FCOLOR
+		MOVE.L	BCOLOR(A6),D5				;AND BACKCOLOR
+		MOVE.L	SLOPE(A6),D7				;GET FIXED POINT SLOPE
+NXTMASK JSR		([SEEKMASK,A6])				;MAKE MASK BUFFER CURRENT
+		LEA 	MINRECT(A6),A3				;POINT TO MINRECT
+		LEA		([EXPAT,A6],D6.l),A0		;GET pointer to THIS ROW'S PATTERN
+		MOVE.L	(A0),D6						;set up the pattern
+		MOVE.W	LEFTEDGE(A6),D1 			;GET LEFTEDGE.INT
+		MOVE.W	RIGHTEDGE(A6),D2			;GET RIGHTEDGE.INT
+		MOVE.L	A5,A1						;INIT DSTPTR TO LEFT
+		MOVE.L	RGNBUFFER(A6),A2			;INIT MASKPTR TO LEFT
+		MOVE.W	DSTSHIFT(A6),D0				;GET SHIFT FOR PIXEL DEPTH
+		_DrawSlab							;DRAW ONE SLAB IN PENMODE
+		MOVE.l	PATVPOS(A6),D6				;GET PATVPOS				<BAL 22Jan89>
+		ADD 	PATROW(A6),D6	 			;BUMP TO NEXT SCAN
+		AND		PATVMASK(A6),D6				;WRAP AT END OF PATTERN
+		MOVE.l	D6,PATVPOS(A6)				;SAVE PATVPOS FOR DRAWSLAB	<BAL 22Jan89>
+		ADD 	DSTROW(A6),A5				;BUMP DST TO NEXT ROW
+		ADD.L	D7,LEFTEDGE(A6) 			;ADD SLOPE TO LEFT EDGE
+		ADD.L	D7,RIGHTEDGE(A6)			;ADD SLOPE TO RIGHT EDGE
+		ADD 	#1,VERT(A6) 				;BUMP CURRENT VERT FOR SEEKMASK
+		MOVE	VERT(A6),D0 				;GET CURRENT VERT
+		CMP 	MINRECT+BOTTOM(A6),D0		;AT BOTTOM YET ?
+		BLT 	NXTMASK 					;NO, LOOP ALL SCAN LINES
+
+
+DONE	move.b	MMUsave(a6),d0				;get previous MMU state in d0
+		_rSwapMMUMode			;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+SHOW	MOVE.L	SAVEA5(A6),A5				;GET GLOBAL PTR
+		TST.B	CRSRFLAG(A6)				;DRAWING TO SCREEN?
+		BEQ.S	GOHOME						;=>NO, JUST RETURN
+		_SHOWCURSOR							;RESTORE CURSOR
+GOHOME	BSET	#hiliteBit,HiliteMode		;reset hilite override, in case colormap was skipped
+		MOVE.L	SAVESTK(A6),SP				;STRIP BUFFER
+		MOVEM.L (SP)+,D0-D7/A1-A5			;RESTORE REGISTERS
+		UNLINK	PARAMSIZE,'DRAWLINE'
+
+
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+;
+;  SET UP AND DRAW A FAST HORIZONTAL OR VERTICAL LINE.
+;
+
+; as seen in QDciPatchROM.a														<sm 6/9/92>stb
+
+FASTLINE
+
+;-----------------------------------------------------------
+;
+;  Switch to 32 bit addressing mode
+;
+		moveq	#true32b,d0					;switch to 32 bit addressing
+		move.w	d1,-(sp)					;save a register
+		_rSwapMMUMode			;get previous mode in d0.b (can trash a0/a1/a2, d0/d1/d2)
+		move.w	(sp)+,d1					;restore d1
+		move.b	d0,MMUsave(a6)				;save previous state for later
+
+		MOVE.L	alphaMask(A6),D4			;get alpha mask						<6>
+		CMP		D1,D3						;IS LINE HORIZONTAL ?
+		BNE 	VLINE						;NO, MUST BE VERTICAL
+		BSR 	HVSETUP 					;GET DSTPTR,ROWBYTES,HGLOBAL
+		MOVEQ	#-1,D6						;GET ONES IN D6
+		LSR.L	D0,D6						;CONVERT TO LEFTMASK
+		MOVE	MINRECT+RIGHT(A6),D2		;GET MINRECT RIGHT
+		SUB 	DSTPIX+BOUNDS+LEFT(A6),D2 	;CONVERT TO GLOBAL
+		EXT.L	D2							;MAKE IT LONG
+		LSL.L	D3,D2						;CONVERT PIXELS TO BITS
+		MOVEQ	#$1F,D0						;NEED RIGHT MOD 32
+		AND.L	D2,D0						;MAKE A COPY OF RIGHT
+		MOVEQ	#-1,D3						;GET ONES IN D3
+		LSR.L	D0,D3						;SHIFT IN 0'S FOR LEFTMASK
+		NOT.L	D3							;CONVERT TO RIGHTMASK
+		AND.L	D4,D6						;clip left mask with alpha mask		<6>
+		AND.L	D4,D3						;clip right mask with alpha mask	<6>
+		LSR.L 	#5,D2						;CONVERT BITS TO LONGS
+		CMP 	#1,LOCMODE(A6) 				;WHICH MODIFIED MODE ?
+		BLT.S	HSET						;BR IF FOREGROUND
+		BEQ.S	HTOGL						;BR IF XOR
+											;ELSE BACKGROUND
+
+;------------------------------------------------------
+;
+;  DRAW A HORIZONTAL LINE IN THE BACKGROUND COLOR (NORMALLY WHITE)
+;
+		MOVE.L	BCOLOR(A6),D5				;GET THE COLOR
+		BRA.S	HDRAW
+
+
+;--------------------------------------------
+;
+;  DRAW A HORIZONTAL LINE IN THE FOREGROUND COLOR (NORMALLY BLACK)
+;
+HSET	MOVE.L	FCOLOR(A6),D5				;GET THE FOREGROUND COLOR
+HDRAW	SUB 	D1,D2						;CALC LONG COUNT
+		BEQ.S	ALLONE						;BR IF ALL IN ONE LONG
+
+		MOVE.L	D5,D1						;COPY COLOR
+		AND.L	D6,D1						;MASK COLOR FOR LEFT EDGE
+		NOT.L	D6							;GET NOT LEFTMASK
+		AND.L	(A4),D6						;PUNCH HOLE IN DEST
+		OR.L	D1,D6						;COMBINE SRC AND DST
+		MOVE.L	D6,(A4)+					;AND DROP COLOR IN
+
+		SUB 	#1,D2						;DEC LONG COUNT
+		BEQ.S	DOEND						;BR IF NO UNMASKED LONG
+
+		NOT.L	D4							;reverse alpha mask					<6>
+		BEQ.S	DOONE						;use normal loops if all ones		<6>
+;
+; <6>	Draw horizontal line using alpha mask
+;
+ALPHALINE
+		MOVE.L	(A4),D0						;get long of dst
+		EOR.L	D5,D0						;apply color
+		AND.L	D4,D0						;mask with alpha mask
+		EOR.L	D5,D0						;reapply color
+		MOVE.L	D0,(A4)+					;put result to dst
+		DBRA	D2,ALPHALINE				;do another long
+		BRA.S	DOEND						;all done
+
+DOTWO	MOVE.L	D5,(A4)+					;FILL A LONG WITH COLOR
+DOONE	MOVE.L	D5,(A4)+					;FILL ANOTHER LONG
+		SUB 	#2,D2						;ANY UNMASKED LONGS LEFT ?
+DOMORE 	BGT 	DOTWO						;YES, AT LEAST TWO LONGS
+		BEQ 	DOONE						;YES, FINISH UP LAST LONG
+DOEND	AND.L	D3,D5						;MASK SOURCE FOR RIGHT EDGE
+		NOT.L	D3							;GET NOTMASK
+		AND.L	(A4),D3						;PUNCH HOLE IN DST DATA
+		OR.L	D5,D3						;COMBINE SRC AND DST
+		MOVE.L	D3,(A4)						;AND DROP COLOR IN
+		BRA.S	DONE						;RESTORE CURSOR AND QUIT
+
+	ALIGN	Alignment
+
+ALLONE	AND.L	D3,D6						;COMBINE LEFT AND RIGHT MASKS
+		AND.L	D6,D5						;GET MASKED COLOR
+		NOT.L	D6							;GET NOTMASK
+		AND.L	(A4),D6						;PUNCH OUT DESTINATION
+		OR.L	D5,D6						;COMBINE SRC AND DST
+		MOVE.L	D6,(A4) 					;DRAW LINE
+		BRA.S	DONE						;RESTORE CURSOR AND QUIT
+
+
+	ALIGN	Alignment
+
+; as seen in QDciPatchROM.a														<sm 6/9/92>stb
+;--------------------------------------------------
+;
+;  DRAW AN XOR HORIZONTAL LINE
+;
+HTOGL	SUB 	D1,D2						;CALC LONGCOUNT
+		BEQ.S	ONETOGL 					;BR IF ALL IN ONE LONG
+		EOR.L	D6,(A4)+					;DO LEFT LONG WITH MASK
+		SUB 	#1,D2						;DEC LONG COUNT
+		BEQ.S	ENDTOGL 					;BR IF NO UNMASKED LONGS
+		BRA.S	TOGLONE						;SEE IF ANY LONGS LEFT TO DO
+TOGLTWO EOR.L	D4,(A4)+					;INVERT A LONG						<6>
+TOGLONE EOR.L	D4,(A4)+					;INVERT ANOTHER LONG				<6>
+		SUB 	#2,D2						;ANY UNMASKED LONGS LEFT ?
+TOGLMORE BGT	TOGLTWO 					;YES, AT LEAST TWO LONGS
+		BEQ 	TOGLONE 					;YES, FINISH UP LAST LONG
+ENDTOGL EOR.L 	D3,(A4) 					;DRAW LINE
+		BRA.S	DONE						;RESTORE CURSOR AND QUIT
+
+ONETOGL AND.L 	D3,D6						;COMBINE LEFT AND RIGHT MASK
+		EOR.L 	D6,(A4) 					;DRAW LINE
+		BRA.S	DONE						;RESTORE CURSOR AND QUIT
+
+
+	ALIGN	Alignment
+
+; as seen in QDciPatchROM.a														<sm 6/9/92>stb
+;-------------------------------------------------------
+;
+;  DRAW A ONE PIXEL WIDE VERTICAL LINE.
+;
+VLINE	BSR.S	HVSETUP 					;GET DSTPTR,ROWBYTES,HGLOBAL
+		MOVEQ	#-1,D2						;GET ONES IN D2
+		LSR.L	D0,D2						;CONVERT TO LEFTMASK (LEFT MOD 32 IN D0)
+		MOVE.L	D2,D0						;GET LEFTMASK
+		MOVE	DSTPIX+PIXELSIZE(A6),D1		;GET PIXEL SIZE
+		LSR.L	D1,D0						;SHIFT BY PIXEL SIZE FOR RIGHT EDGE
+		NOT.L	D0							;MAKE IT A RIGHTMASK
+		AND.L	D0,D2						;AND RIGHTMASK INTO LEFTMASK
+		AND.L	D4,D2						;MASK WITH ALPHA MASK				<6>
+		MOVE	MINRECT+BOTTOM(A6),D1		;GET BOTTOM
+		SUB 	MINRECT+TOP(A6),D1			;CALC HEIGHT
+		SUB 	#1,D1						;INIT HEIGHT COUNT
+		CMP 	#1,LOCMODE(A6) 				;WHICH MODIFIED MODE ?
+		BLT.S	VSET						;BR IF FOREGROUND
+		BEQ.S	VTOGL						;BR IF XOR
+
+VCLR	MOVE.L	BCOLOR(A6),D5				;GET BACKGROUND COLOR
+		BRA.S	VDRAW						;=>AND DO LINE
+
+VSET	MOVE.L	FCOLOR(A6),D5				;GET FOREGROUND COLOR
+VDRAW	BEQ.S	VAND						;COLOR IS ALL 0's SO JUST AND
+		MOVE.L	D5,D0						;COPY COLOR
+		NOT.L	D0							;WAS IT ALL 1's?
+		BEQ.S	VOR							;YES, JUST NEED TO OR
+		AND.L	D2,D5						;GET DATA TO WRITE
+		NOT.L	D2							;MAKE NOTMASK
+
+NXTV	MOVE.L	D2,D3						;GET NOTMASK
+		AND.L	(A4),D3						;PUNCH A HOLE IN THE DST
+		OR.L	D5,D3						;COMBINE SRC AND DST
+		MOVE.L	D3,(A4) 					;AND PUT TO DST
+		ADD 	D7,A4						;BUMP TO NEXT ROW
+		DBRA	D1,NXTV 					;LOOP ALL DOTS
+		BRA.S	DONE						;RESTORE CURSOR AND QUIT
+
+	ALIGN	Alignment
+
+VTOGL	EOR.L	D2,(A4) 					;TOGGLE ONE DOT
+		ADD 	D7,A4						;BUMP TO NEXT ROW
+		DBRA	D1,VTOGL					;LOOP ALL DOTS
+		BRA.S	DONE						;RESTORE CURSOR AND QUIT
+
+	ALIGN	Alignment
+
+VOR		OR.L	D2,(A4) 					;TOGGLE ONE DOT
+		ADD 	D7,A4						;BUMP TO NEXT ROW
+		DBRA	D1,VOR						;LOOP ALL DOTS
+		BRA.S	DONE						;RESTORE CURSOR AND QUIT
+
+	ALIGN	Alignment
+
+VAND	NOT.L	D2							;MAKE INTO CLEARING MASK
+@AND	AND.L	D2,(A4) 					;TOGGLE ONE DOT
+		ADD 	D7,A4						;BUMP TO NEXT ROW
+		DBRA	D1,@AND						;LOOP ALL DOTS
+		BRA.S	DONE						;RESTORE CURSOR AND QUIT
+
+
+	ALIGN	Alignment
+
+;------------------------------------------------------------------------
+;
+;  LOCAL ROUTINE TO SET UP POINTER TO FIRST WORD, BIT INDEX, AND ROWBYTES
+;
+;  INPUTS:		MINRECT
+;				A5: thePort
+;
+;  OUTPUTS: 	D0: LEFT MOD 32 (for getting mask)
+;				D1: LEFT DIV 32 (for long position)
+;				D3: DSTSHIFT
+;				D7: ROWBYTES
+;				A4: POINTER TO FIRST WORD
+;
+;  CLOBBERS:	D0,D1,D7,A0,A4
+;
+HVSETUP MOVE.L	DSTPIX+BASEADDR(A6),A4		;GET BITMAP START
+		MOVE	MINRECT+TOP(A6),D0			;GET STARTING VERT
+		SUB 	DSTPIX+BOUNDS+TOP(A6),D0	;CONVERT TO GLOBAL
+		MOVE	DSTPIX+ROWBYTES(A6),D7		;GET ROWBYTES
+		AND		#nuRBMask,D7				;clear off flag bits
+		MULS	D7,D0						;MULT TOP BY ROWBYTES;	BAL	02Dec88
+		ADD.L	D0,A4						;ADD TO BASEADDR
+		MOVE	MINRECT+LEFT(A6),D0 		;GET STARTING HORIZ
+		SUB 	DSTPIX+BOUNDS+LEFT(A6),D0	;CONVERT TO GLOBAL
+		EXT.L	D0							;MAKE IT LONG
+		MOVE	DSTSHIFT(A6),D3				;GET DSTSHIFT
+		EXT.L	D3							;MAKE IT LONG
+		LSL.L	D3,D0						;CONVERT PIXELS TO BITS
+		MOVE.L	D0,D1						;MAKE A COPY
+		LSR.L	#5,D1						;CONVERT BITS TO LONGS
+		LEA		(A4,D1*4),A4				;add in byte cnt
+		AND 	#$1F,D0						;TREAT LEFT MOD 32
+		RTS
+
+	ALIGN	4
+
+;-------------------------------------------------------
+
+SteepBlitTab
+		DC.L	steepCopy1-SteepBlitTab
+		DC.L	steepCopy2-SteepBlitTab
+		DC.L	steepCopy4-SteepBlitTab
+		DC.L	steepCopy8-SteepBlitTab
+		DC.L	steepCopy16-SteepBlitTab
+		DC.L	steepCopy32-SteepBlitTab
+
+SteepBlitXorTab
+		DC.L	steepXor1-SteepBlitTab
+		DC.L	steepXor2-SteepBlitTab
+		DC.L	steepXor4-SteepBlitTab
+		DC.L	steepXor8-SteepBlitTab
+		DC.L	steepXor16-SteepBlitTab
+		DC.L	steepXor32-SteepBlitTab
+
+;-------------------------------------------------------
+
+ShallowBlitTab
+		DC.L	shallowCopy1-ShallowBlitTab
+		DC.L	shallowCopy2-ShallowBlitTab
+		DC.L	shallowCopyN-ShallowBlitTab
+		DC.L	shallowCopyN-ShallowBlitTab
+		DC.L	shallowCopyN-ShallowBlitTab
+		DC.L	done-ShallowBlitTab				;never used
+
+ShallowBlitXorTab
+		DC.L	shallowXor1-ShallowBlitTab
+		DC.L	shallowXor2-ShallowBlitTab
+		DC.L	shallowXorN-ShallowBlitTab
+		DC.L	shallowXorN-ShallowBlitTab
+		DC.L	shallowXorN-ShallowBlitTab
+		DC.L	done-ShallowBlitTab				;never used
+
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+;
+;  SET UP AND DRAW A FAST SLANTED LINE.
+;  Only steep lines are currently implemented:  (45°<=ø<=135°)
+;
+;  Assumes:	D1,D2,D3,D4 = MinRect top,left,bottom,right
+;			D7 = slope (16.16)
+
+FASTSLANT
+
+;------------------------------------------------------------------------
+;
+;  SET UP REGISTERS FOR FAST SLANT LOOPS
+;
+;  INPUTS:		MINRECT, DSTPIX, SLOPE
+;
+;-------------------------------------------------------
+;		a0 = 				d0 = 
+;		a1 = 				d1 = fgColor/bkColor
+;		a2 = 				d2 = dst pixel size (bit width)
+;		a3 = rowBytes		d3 = dstShift
+;		a4 = dstPtr			d4 = bit offset to pixel left
+;		a5 = 				d5 = leftEdge (16.16)
+;		a6 = locals			d6 = scan count (zero based)
+;		a7^= 				d7 = slope (16.16)
+;-------------------------------------------------------
+; includes fix as seen in QDciPatchROM.a												<sm 6/9/92>stb
+
+SLANTSETUP
+		TST.B	alphaMode(A6)				;if alphamode == 0, stay in all cases		<6>
+		BEQ.S	@stay						;											<6>
+		TST		A2							;leave if shallow and alphamode != 0		<6>
+		BEQ		goBack						;											<6>
+		MOVE	LOCMODE(A6),D0				;get the local mode							<6>
+		ADDQ	#1,D0						;convert from xor=1 to xor=srcXor			<6>
+		CMP		#srcXor,D0					;											<6>
+		BNE		goBack						;if copying, leave because alphamode != 0
+@stay	MOVE.L	DSTPIX+BASEADDR(A6),A4		;GET BITMAP START
+		MOVE	D1,D0						;GET STARTING VERT
+		SUB 	DSTPIX+BOUNDS+TOP(A6),D0	;CONVERT TO GLOBAL
+		MOVE	DSTPIX+ROWBYTES(A6),D6		;GET ROWBYTES
+		AND		#nuRBMask,D6				;clear off flag bits
+		MULS	D6,D0						;MULT TOP BY ROWBYTES
+		MOVE	D6,A3						;REMEMBER ROWBYTES
+		ADD.L	D0,A4						;ADD TO BASEADDR
+		tst.w	a2							;taller or wider?
+		beq		Shallow
+		SUB		D1,D3						;CALC HEIGHT
+		MOVEQ	#-1,D6						;
+		ADD		D3,D6						;D6 IS HEIGHT-1
+		MOVE.L	LEFTEDGE(A6),D5				;GET LEFTEDGE
+
+		MOVE.L	D5,D2						;Get LeftEdge.int
+		SWAP	D2
+		SUB 	DSTPIX+BOUNDS+LEFT(A6),D2	;CONVERT TO GLOBAL
+		EXT.L	D2							;MAKE IT LONG
+		MOVE	DSTSHIFT(A6),D3				;GET DSTSHIFT
+		LSL.L	D3,D2						;CONVERT PIXELS TO BITS
+		MOVE.L	D2,D4						;MAKE A COPY
+		LSR.L	#5,D2						;CONVERT BITS TO LONGS
+		LSL.L	#2,D2						;Convert back to bytes
+		ADD.L	D2,A4						;ADD TO RUNNING TOTAL
+		AND 	#$1F,D4						;TREAT LEFT MOD 32
+
+;-----------------------------------------------------------
+;
+;  Switch to 32 bit addressing mode
+;
+		moveq	#true32b,d0					;switch to 32 bit addressing
+		_rSwapMMUMode						;(can trash a0/a1/a2, d0/d1/d2)
+		move.b	d0,MMUsave(a6)				;save previous state for later
+
+		tst.l	d7							;are we going right to left
+		bpl.s	@toRight					;fractions ok
+		neg.w	d7							;make fraction positive
+		not.w	d5							;measure distance from right
+											;(plus one for boundary cases)
+@toRight
+		tst.w	d7							;are we ± 45°?
+		bne.s	@not45						;FOR REED:
+		not.w	d7							;hack slope and fraction so that
+		move.w	d7,d5						;every scanline generates a carry
+@not45
+		MOVE	DSTPIX+PIXELSIZE(A6),D2		;GET DST PIXEL SIZE
+		MOVE.L	FCOLOR(A6),D1				;ASSUME FOREGROUND COLOR
+		moveq	#0,d0						;init zero register for loops
+		LEA		SteepBlitTab,a0				;point to mode table
+		CMP 	#1,LOCMODE(A6) 				;WHICH MODIFIED MODE ?
+		BLT.S	@useFG						;BR IF FOREGROUND
+		BEQ.S	@doXor						;BR IF XOR
+											;ELSE BACKGROUND
+		MOVE.L	BCOLOR(A6),D1				;GET THE COLOR
+@useFG	ADD.L	(A0,D3*4),A0				;GET MODECASE
+		JMP		(A0)						;GO THERE
+
+@doXor	MOVE.L	alphaMask(A6),D1			;get xoring mask
+		ADD.L	SteepBlitXorTab-SteepBlitTab(A0,D3*4),A0	;Adjusted modecase
+		JMP		(A0)						;GO THERE
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+;
+;  DRAW ONE PIXEL WIDE STEEP SLANTED LINES
+;
+;-------------------------------------------------------
+;		a0 = 				d0 = zero
+;		a1 = 				d1 = fgColor/bkColor/(-1 for xor)
+;		a2 = 				d2 = dst pixel size (bit width)
+;		a3 = rowBytes		d3 = dstShift
+;		a4 = dstPtr			d4 = bit offset to pixel left
+;		a5 = 				d5 = leftEdge (16.16)
+;		a6 = locals			d6 = scan count (zero based)
+;		a7^= 				d7 = slope (16.16)
+;-------------------------------------------------------
+steepCopy1
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		bfins	d1,(a4){d4:d2}				;blit one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d4
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		bfins	d1,(a4){d4:d2}				;blit one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		subx.l	d0,d4
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+steepCopy2
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		bfins	d1,(a4){d4:2}				;blit one pixel
+		add.l	a3,a4						;bump to next row
+		move.l	d0,d2						;start with zero
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d2						;get a one or zero
+		add.l	d2,d4						;bump a bit
+		add.l	d2,d4						;bump a bit
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		bfins	d1,(a4){d4:2}				;blit one pixel
+		add.l	a3,a4						;bump to next row
+		move.l	d0,d2						;start with zero
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d2
+		sub.l	d2,d4						;bump a bit
+		sub.l	d2,d4						;bump a bit
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+steepCopy4
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		bfins	d1,(a4){d4:4}				;blit one pixel
+		add.l	a3,a4						;bump to next row
+		move.l	d0,d2						;start with zero
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d2						;get a one or zero
+		lsl.l	#2,d2						;scale up by bit depth
+		add.l	d2,d4						;bump a pixel
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		bfins	d1,(a4){d4:4}				;blit one pixel
+		add.l	a3,a4						;bump to next row
+		move.l	d0,d2						;start with zero
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d2
+		lsl.l	#2,d2						;scale up by bit depth
+		sub.l	d2,d4						;bump a pixel
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+steepCopy8
+		lsr.l	#3,d4						;convert bit offset to byte offset
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		move.b	d1,(a4,d4)					;blit one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d4						;bump a pixel
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		move.b	d1,(a4,d4)					;blit one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		subx.l	d0,d4
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+steepCopy16
+		lsr.l	#4,d4						;convert bit offset to word offset
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		move.w	d1,(a4,d4*2)				;blit one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d4						;bump a pixel
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		move.w	d1,(a4,d4*2)				;blit one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		subx.l	d0,d4
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+steepCopy32
+		lsr.l	#5,d4						;convert bit offset to long offset
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		move.l	d1,(a4,d4*4)				;blit one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d4						;bump a pixel
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		move.l	d1,(a4,d4*4)				;blit one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		subx.l	d0,d4
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+;
+;  XOR ONE PIXEL WIDE STEEP SLANTED LINES
+;
+;-------------------------------------------------------
+steepXor1
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		bfchg	(a4){d4:d2}					;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d4
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		bfchg	(a4){d4:d2}					;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		subx.l	d0,d4
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+steepXor2
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		bfchg	(a4){d4:2}					;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		move.l	d0,d2						;start with zero
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d2						;get a one or zero
+		add.l	d2,d4						;bump a bit
+		add.l	d2,d4						;bump a bit
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		bfchg	(a4){d4:2}					;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		move.l	d0,d2						;start with zero
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d2
+		sub.l	d2,d4						;bump a bit
+		sub.l	d2,d4						;bump a bit
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+steepXor4
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		bfchg	(a4){d4:4}					;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		move.l	d0,d2						;start with zero
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d2						;get a one or zero
+		lsl.l	#2,d2						;scale up by bit depth
+		add.l	d2,d4						;bump a pixel
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		bfchg	(a4){d4:4}					;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		move.l	d0,d2						;start with zero
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d2
+		lsl.l	#2,d2						;scale up by bit depth
+		sub.l	d2,d4						;bump a pixel
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+steepXor8
+		lsr.l	#3,d4						;convert bit offset to byte offset
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		eor.b	d1,(a4,d4)					;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d4						;bump a pixel
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		eor.b	d1,(a4,d4)					;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		subx.l	d0,d4
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+steepXor16
+		lsr.l	#4,d4						;convert bit offset to word offset
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		eor.w	d1,(a4,d4*2)				;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d4						;bump a pixel
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		eor.w	d1,(a4,d4*2)				;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		subx.l	d0,d4
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+steepXor32
+		lsr.l	#5,d4						;convert bit offset to long offset
+		tst.l	d7							;are we backwards
+		bmi.s	@toLeft
+
+@toRight
+		eor.l	d1,(a4,d4*4)				;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		addx.l	d0,d4						;bump a pixel
+		dbra	d6,@toRight
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft
+		eor.l	d1,(a4,d4*4)				;toggle one pixel
+		add.l	a3,a4						;bump to next row
+		add.w	d7,d5						;add fractions
+		subx.l	d0,d4
+		dbra	d6,@toLeft
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+;
+;  DRAW ONE PIXEL WIDE Shallow SLANTED LINES
+;
+;-------------------------------------------------------
+;		a0 = 				d0 = actual slab width
+;		a1 = 				d1 = fgColor/bkColor/(-1 for xor)
+;		a2 = |dx/dy|		d2 = zero
+;		a3 = rowBytes		d3 = dstShift
+;		a4 = dstPtr			d4 = bit offset to pixel left
+;		a5 = bits to right	d5 = integer slab width
+;		a6 = locals			d6 = scan count (zero based)
+;		a7^= 				d7 = (high)slope,(low)rightEdge
+;-------------------------------------------------------
+goBack
+	;	move.w	minRect+left(a6),d2			;restore minRect left
+	;	move.w	minRect+right(a6),d4		;restore minRect right
+		bra		CalcBufLeft
+
+Shallow
+		cmp.w	lineRect+top(a6),d1			;was top clipped?
+		bgt.s	goBack						;yes, take slow case
+		cmp.w	lineRect+bottom(a6),d3		;is bottom clipped?
+		blt.s	goBack						;yes, take slow case
+		SUB		D1,D3						;CALC HEIGHT
+		MOVEQ	#-2,D6						;
+		ADD		D3,D6						;D6 IS HEIGHT-2
+
+		move.w	d2,d0						;assume left to right
+		tst.l	d7							;dx/dy < 0?
+		bpl.s	@useLeft					;yes, left to right
+		move.w	d4,d0						;no, MinRect.right instead
+@useLeft
+		SUB 	DSTPIX+BOUNDS+LEFT(A6),D0	;CONVERT MinRect.Left TO GLOBAL
+		EXT.L	D0							;MAKE IT LONG
+		MOVE	DSTSHIFT(A6),D3				;GET DSTSHIFT
+		LSL.L	D3,D0						;CONVERT PIXELS TO BITS
+		MOVE.L	D0,D1						;MAKE A COPY
+		LSR.L	#5,D0						;CONVERT BITS TO LONGS
+		LSL.L	#2,D0						;Convert back to bytes
+		ADD.L	D0,A4						;ADD TO RUNNING TOTAL
+		AND 	#$1F,D1						;TREAT LEFT MOD 32
+
+		move.l	d7,d5						;copy slope
+		bpl.s	@notNeg
+		neg.l	d5							;get |slope|
+@notNeg	move.l	d5,a2						;copy |slope| for later
+		cmp.l	#$10800,d5					;is it nearly 45°?
+		blt.s	goBack						;yes, can't be as inaccurate as before
+		clr.w	d5
+		swap	d5							;|slope|.int
+		lsl.l	d3,d5						;|slope|.int * pixelSize
+		cmp.w	#32,d5						;does max slab fit in a long?
+		bge.s	goBack						;no, punt for now
+
+		SUB		D2,D4						;get pixel width
+		move.w	rightEdge+2(a6),d7			;get rightEdge.frac
+		LSL.L	D3,D4						;CONVERT PIXELS TO BITS
+		ADD		D1,D4						;D4 is bit offset to rightedge of last slab
+		MOVE.W	D4,A5						;save for later
+		MOVE.L	D1,D4						;save initial bit offset
+		tst.l	d7							;right to left?
+		bpl.s	@widthOK
+		SUB		D1,A5						;undo the damage
+		SUB		D1,A5						;do it right
+
+@widthOK
+;
+;  Switch to 32 bit addressing mode
+;
+		moveq	#true32b,d0					;switch to 32 bit addressing
+		_rSwapMMUMode						;(can trash a0/a1/a2, d0/d1/d2)
+		move.b	d0,MMUsave(a6)				;save previous state for later
+
+		moveq	#0,d0						;compute first (clipped) slab width in d0
+		move.w	minrect+right(a6),d0		;get right clip
+		sub.w	leftEdge(a6),d0				;get initial slab width
+		tst.l	d7							;right to left?
+		bmi.s	@yesNeg						;yes, all ok
+		move.w	rightEdge(a6),d0			;get rightEdge.int
+		sub.w	minrect+left(a6),d0			;get initial slab width
+@yesNeg	LSL.L	D3,D0						;CONVERT PIXELS TO BITS
+		moveq	#0,d2						;get a useful constant
+		MOVE.L	FCOLOR(A6),D1				;ASSUME FOREGROUND COLOR
+		LEA		ShallowBlitTab,a0			;point to mode table
+		CMP 	#1,LOCMODE(A6) 				;WHICH MODIFIED MODE ?
+		BLT.S	@useFG						;BR IF FOREGROUND
+		BEQ.S	@doXor						;BR IF XOR
+											;ELSE BACKGROUND
+		MOVE.L	BCOLOR(A6),D1				;GET THE COLOR
+@useFG	ADD.L	(A0,D3*4),A0				;GET MODECASE
+		JMP		(A0)						;GO THERE
+
+@doXor										;Use alternate table
+		ADD.L	ShallowBlitXorTab-ShallowBlitTab(A0,D3*4),A0	;Adjusted modecase
+		JMP		(A0)						;GO THERE
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+
+shallowCopy1								;start with first clipped slab
+		tst.l	d7							;slope negative?
+		bmi.s	@toLeft						;draw from right to left
+
+@midR	bfins	d1,(a4){d4:d0}				;blit a slab
+		add.l	a3,a4						;bump to next row
+		add.l	d0,d4						;bump offset by slab width
+		move.w	d5,d0						;prime slab width with slope.int
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add one
+		dbra	d6,@midR
+		sub		d4,a5						;compute width of last slab
+		move	a5,d0
+		bfins	d1,(a4){d4:d0}				;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft										;start with first clipped slab
+@midL	sub.l	d0,d4						;bump offset by slab width
+		bfins	d1,(a4){d4:d0}				;blit a slab
+		add.l	a3,a4						;bump to next row
+		move.w	d5,d0						;prime slab width with slope.int
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add one
+		dbra	d6,@midL
+		add		d4,a5						;compute width of last slab
+		move	a5,d0
+		sub.l	d0,d4						;bump offset by slab width
+		bfins	d1,(a4){d4:d0}				;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+
+shallowCopy2								;start with first clipped slab
+		tst.l	d7							;slope negative?
+		bmi.s	@toLeft						;draw from right to left
+
+@midR	bfins	d1,(a4){d4:d0}				;blit a slab
+		add.l	a3,a4						;bump to next row
+		add.l	d0,d4						;bump offset by slab width
+		move.l	d2,d0						;zero working register
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add 1
+		add.l	d0,d0						;double it
+		add.l	d5,d0						;add in base slab width (slope.int)
+		dbra	d6,@midR
+		sub		d4,a5						;compute width of last slab
+		move	a5,d0
+		bfins	d1,(a4){d4:d0}				;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft										;start with first clipped slab
+@midL	sub.l	d0,d4						;bump offset by slab width
+		bfins	d1,(a4){d4:d0}				;blit a slab
+		add.l	a3,a4						;bump to next row
+		move.l	d2,d0						;zero working register
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add 1
+		add.l	d0,d0						;double it
+		add.l	d5,d0						;add in base slab width (slope.int)
+		dbra	d6,@midL
+		add		d4,a5						;compute width of last slab
+		move	a5,d0
+		sub.l	d0,d4						;bump offset by slab width
+		bfins	d1,(a4){d4:d0}				;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+
+shallowCopyN								;start with first clipped slab
+		tst.l	d7							;slope negative?
+		bmi.s	@toLeft						;draw from right to left
+
+@midR	bfins	d1,(a4){d4:d0}				;blit a slab
+		add.l	a3,a4						;bump to next row
+		add.l	d0,d4						;bump offset by slab width
+		move.l	d2,d0						;zero working register
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add 1
+		lsl.l	d3,d0						;quad it
+		add.l	d5,d0						;add in base slab width (slope.int)
+		dbra	d6,@midR
+		sub		d4,a5						;compute width of last slab
+		move	a5,d0
+		bfins	d1,(a4){d4:d0}				;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft										;start with first clipped slab
+@midL	sub.l	d0,d4						;bump offset by slab width
+		bfins	d1,(a4){d4:d0}				;blit a slab
+		add.l	a3,a4						;bump to next row
+		move.l	d2,d0						;zero working register
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add 1
+		lsl.l	d3,d0						;quad it
+		add.l	d5,d0						;add in base slab width (slope.int)
+		dbra	d6,@midL
+		add		d4,a5						;compute width of last slab
+		move	a5,d0
+		sub.l	d0,d4						;bump offset by slab width
+		bfins	d1,(a4){d4:d0}				;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+
+shallowXor1									;start with first clipped slab
+		tst.l	d7							;slope negative?
+		bmi.s	@toLeft						;draw from right to left
+
+@midR	bfchg	(a4){d4:d0}					;blit a slab
+		add.l	a3,a4						;bump to next row
+		add.l	d0,d4						;bump offset by slab width
+		move.w	d5,d0						;prime slab width with slope.int
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add one
+		dbra	d6,@midR
+		sub		d4,a5						;compute width of last slab
+		move	a5,d0
+		bfchg	(a4){d4:d0}					;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft										;start with first clipped slab
+@midL	sub.l	d0,d4						;bump offset by slab width
+		bfchg	(a4){d4:d0}					;blit a slab
+		add.l	a3,a4						;bump to next row
+		move.w	d5,d0						;prime slab width with slope.int
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add one
+		dbra	d6,@midL
+		add		d4,a5						;compute width of last slab
+		move	a5,d0
+		sub.l	d0,d4						;bump offset by slab width
+		bfchg	(a4){d4:d0}					;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+
+shallowXor2									;start with first clipped slab
+		tst.l	d7							;slope negative?
+		bmi.s	@toLeft						;draw from right to left
+
+@midR	bfchg	(a4){d4:d0}					;blit a slab
+		add.l	a3,a4						;bump to next row
+		add.l	d0,d4						;bump offset by slab width
+		move.l	d2,d0						;zero working register
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add 1
+		add.l	d0,d0						;double it
+		add.l	d5,d0						;add in base slab width (slope.int)
+		dbra	d6,@midR
+		sub		d4,a5						;compute width of last slab
+		move	a5,d0
+		bfchg	(a4){d4:d0}					;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft										;start with first clipped slab
+@midL	sub.l	d0,d4						;bump offset by slab width
+		bfchg	(a4){d4:d0}					;blit a slab
+		add.l	a3,a4						;bump to next row
+		move.l	d2,d0						;zero working register
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add 1
+		add.l	d0,d0						;double it
+		add.l	d5,d0						;add in base slab width (slope.int)
+		dbra	d6,@midL
+		add		d4,a5						;compute width of last slab
+		move	a5,d0
+		sub.l	d0,d4						;bump offset by slab width
+		bfchg	(a4){d4:d0}					;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+;-------------------------------------------------------
+
+shallowXorN									;start with first clipped slab
+		tst.l	d7							;slope negative?
+		bmi.s	@toLeft						;draw from right to left
+
+@midR	bfchg	(a4){d4:d0}					;blit a slab
+		add.l	a3,a4						;bump to next row
+		add.l	d0,d4						;bump offset by slab width
+		move.l	d2,d0						;zero working register
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add 1
+		lsl.l	d3,d0						;quad it
+		add.l	d5,d0						;add in base slab width (slope.int)
+		dbra	d6,@midR
+		sub		d4,a5						;compute width of last slab
+		move	a5,d0
+		bfchg	(a4){d4:d0}					;blit last slab
+		bra		done
+
+	ALIGN	Alignment
+
+@toLeft										;start with first clipped slab
+@midL	sub.l	d0,d4						;bump offset by slab width
+		bfchg	(a4){d4:d0}					;blit a slab
+		add.l	a3,a4						;bump to next row
+		move.l	d2,d0						;zero working register
+		add.w	a2,d7						;add fractions
+		addx.l	d2,d0						;conditionally add 1
+		lsl.l	d3,d0						;quad it
+		add.l	d5,d0						;add in base slab width (slope.int)
+		dbra	d6,@midL
+		add		d4,a5						;compute width of last slab
+		move	a5,d0
+		sub.l	d0,d4						;bump offset by slab width
+		bfchg	(a4){d4:d0}					;blit last slab
+		bra		done
+
+;-------------------------------------------------------
+
+		ENDPROC
+
+

@@ -1,0 +1,146 @@
+;
+;	File:		ControlMgrExtensions.a
+;
+;	Contains:	Extensions to the Control Manager used by both the ROM and System.
+;
+;	Written by:	Ed Tecot and Jeff Miller
+;
+;	Copyright:	© 1989-1990, 1992-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM2>	 5/18/93	RC		perfomance/bug fix (speed up scrolling with Truth changes to
+;									ScrollDelay)
+;		 <2>	 6/30/92	JSM		Move scroll speed throttling code here from ScrollSpeedFix.a,
+;									add install proc for the future and ROM builds to set up
+;									ExpandMem.
+;		 <1>	 6/30/92	JSM		first checked in
+;
+
+				LOAD 	'StandardEqu.d'
+				INCLUDE	'LinkedPatchMacros.a'
+				INCLUDE	'ControlPriv.a'
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Implement humane scrolling speeds on “wicked fast” machines.
+
+	IF forROM OR TheFuture THEN					; don’t put data in code space in ROMs or in the future
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; InitScrollSpeedGlobals — allocate and initialize globals stored in emScrollSpeedGlobals
+;
+; Called by StartBoot.a for the ROM, or by a MakeInstall macro in ControlMgrPatches.a for the System.
+;
+
+InitScrollSpeedGlobals		Proc	Export
+
+		with	ScrollSpeedGlobals
+
+; allocate mem & get ptr to it
+
+		move.l  #ScrollSpeedGlobalsSize,D0		; D0 = size of RAM we need
+		_NewPtr SYS,CLEAR          				; Get RAM for variables
+
+; set ptr in ExpandMemRec.emScrollSpeedGlobals
+
+		move.l	ExpandMem,A1					; A1 -> ExpandedMem	
+		move.l	A0,ExpandMemRec.emScrollSpeedGlobals(A1)	; store vars Pointer in ExpandMem
+				
+		endwith
+		
+		rts
+		
+		endproc
+
+	ENDIF
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; UserDelay is a dispatcher style trap which accepts a selector in D0 and
+; some parameters on the stack and returns an OSErr.
+; Currently only selector 0 (ScrollDelay) is defined.
+
+__UserDelay		Dispatcher	_UserDelay,(Plus,SE,II,Portable,IIci), \
+		(\
+				ScrollDelay,	\
+		)
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; FUNCTION ScrollDelay(startTicks, actionTicks: LONGINT; itemsVisible: INTEGER): OSErr
+; startTicks is the time the scrolling started, usually from the mouse down event.
+; actionTicks is the time that began this particular scroll action.
+; itemsVisible is the number of items visible in the list, 0 if unknown.
+
+ScrollDelay		PROC	EXPORT
+
+sdFrame			RECORD	0
+returnAddress	DS.L	1
+itemsVisible	DS.W	1
+actionTicks		DS.L	1
+startTicks		DS.L	1
+result			DS.W	1
+				ENDR
+
+FirstValue		EQU		12						; Number of ticks to begin with.
+KnownEndValue	EQU		3						; Number of ticks to end with, when the list size is known.
+UnknownEndValue	EQU		0						; Number of ticks to end with, when the list size is unknown.
+DecayValue		EQU		48						; Time to decay from StartValue to EndValue.
+KnownConst		EQU		DecayValue / (FirstValue - KnownEndValue)
+UnknownConst	EQU		DecayValue / (FirstValue - UnknownEndValue)
+
+; Calculate the time to wait until.  EndValue is the number of ticks to end with: KnownEndValue
+; if the list size is known, UnknownEndValue if unknown.  The equation is:
+;													DecayValue
+; Delay = actionTicks + EndValue + --------------------------------------------------------
+;																		DecayValue
+;									(actionTicks - startTicks) + -------------------------
+;																	FirstValue - EndValue
+
+				WITH	sdFrame
+				CLR.W	result(SP)				; No error.
+				
+; Commented out 5/18/93 RPC so that EndValue is always 0 for both ListMgr and non-ListMgr alike.
+;				TST.W	itemsVisible(SP)		; Know the number of items visible?
+;				BEQ.S	@unknown				; No, skip this part.
+;				MOVEQ.L	#KnownEndValue, D0		; EndValue = KnownEndValue
+;				MOVEQ.L	#KnownConst, D1			; For speed
+;				BRA.S	@calcDelay
+
+;@unknown
+				MOVEQ.L	#UnknownEndValue, D0	; EndValue = UnknownEndValue
+				MOVEQ.L	#UnknownConst, D1		; For speed
+
+@calcDelay
+				MOVE.L	actionTicks(SP), D2
+				ADD.L	D2, D0					; D0 = actionTicks + EndValue
+				ADD.L	D2, D1					;										DecayValue
+				SUB.L	startTicks(SP), D1		; D1 = (actionTicks - startTicks) + ---------------------
+												;									FirstValue - EndValue
+				MOVEQ.L	#DecayValue, D2
+				DIVU	D1, D2
+				EXT.L	D2						; Toss the remainder (assume quotient < 32767)
+				ADD.L	D2, D0					; Now everything's in D0
+
+; We need to loop until D0 <= TickCount() or the mouse button comes up.
+				MOVE.L	D0, -(SP)				; Save the time on the stack.
+@loopDelay
+				SUBQ.L	#4, SP
+				_TickCount
+				MOVE.L	(SP)+, D0
+				CMP.L	(SP), D0				; Timed out?
+				BHS.S	@endDelay				; Yes, Get Out.
+
+				SUBQ.L	#2, SP
+				_StillDown						; Mouse still down?
+				TST.B	(SP)+
+				BNE.S	@loopDelay				; Yes, Try Again.
+
+
+@endDelay
+				MOVE.L	returnAddress+4(SP), startTicks+4(SP)
+				LEA		startTicks+4(SP), SP	; Clean up the stack frame.
+				RTS
+				ENDWITH
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+				end

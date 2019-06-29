@@ -1,0 +1,1298 @@
+;
+;	File:		FP881B2DC.a
+;
+;	Contains:	Floating Point Binary-To-Decimal conversions
+;
+;	Written by:	Clayton Lewis;  adapted from FPBD by Jerome Coonen
+;
+;	Copyright:	© 1985-1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:   Mac32
+;
+;	Change History (most recent first):
+;
+;		 <3>	 9/17/90	BG		Removed <2>. 040s are behaving more reliably now.
+;		 <2>	  7/4/90	BG		Added EclipseNOPs for flakey 040s.
+;	   <1.1>	11/11/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	   <1.0>	 2/12/88	BBM		Adding file for the first time into EASE…
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: FP881b2dc.a
+;; Implementation of FP881 binary <-> decimal conversions.
+;; Copyright Apple Computer, Inc. 1985,1986,1987
+;; All Rights Reserved
+;; Confidential and Proprietary to Apple Computer,Inc.
+;;
+;; Written by Clayton Lewis from FPBD by J. Coonen;  begun  1 Jul 85.
+;; Debugged by Stuart McDonald.
+;;
+;; Modification history:
+;;	Rev11 : First version of file
+;;	Rev20 : First version with fairly solid bin-dec conversions REV20 2 Oct 85
+;;	Rev21 : 16Jun86 CRL moved to MPW
+;;	Rev22 : 17Nov86 -S.McD. Wrong machine code for FNEG F2,F2.
+;;	Rev23 : 23Nov86 -S.McD. Filled in all the missing B2D conversions.
+;;	Rev24 : 15Dec86 -S.McD. Logic bug in B2D conversions fixed.
+;;                  30Dec86 -S.McD. Zeroed FPSR for NonArith codes exiting thru halt check.
+;;                  13Jan87 -S.McD. Now save/restore any of the registers FP2-FP7 used.
+;;                  15Jan87 -S.McD. Status and copyright notice changed.
+;;                  21Jan87 -S.McD. Deleted some commented out code in BD85.
+;;<PB172/02Jun87> JTC Rolled in patch to get D3 flag cleared in B2D.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;*************************************************************
+;; DECIMAL --> BINARY CONVERSION
+;*************************************************************
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Use of registers:
+;;   D0   = working register
+;;   D1   = working register
+;;   D2   = working register
+;;   D3.W = d.exp
+;;   D3   = bit 31 - a little trick at PTMUL;  bit 30 - inexact flag
+;;   D5   = user control register (with halts disabled), always unchanged
+;;   D7   = control register (as currently set)
+;;
+;;   A0   = address of decimal record
+;;   A1   = ptr within d.sig
+;;
+;;   FP0  = accumulating value, eventually final result
+;;   FP1  = the constant 10
+;;   FP2  = 10^|exp| as returned from POW10
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+D2B
+	FMOVE	#0,FPSR	; IEEE default status -S.McD.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Initialize registers
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEM.L	D2/D3/D5/D7,-(SP)	; save more registers
+	FMOVEM	FP2,-(SP)	; must save/restore FP2-FP7 -S.McD.
+	ANDI.L	#$FF,D5	; disable halts in D5 copy of control
+
+	MOVEQ	#0,D3	; 0 -> loop and inexact flags in D3.hi
+
+	FMOVECR	#$0F,FP0	; 0 -> FP0
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Set up pointers, get d.exp
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.L	LKADR2(A6),A0	; address of decimal, src
+	MOVE.W	2(A0),D3	; d.exp
+	LEA	4(A0),A1	; pointer to d.sig
+	MOVEQ	#19,D2	; max number of digits allowed from d.sig
+
+	FMOVECR	#$33,FP1	; 10 -> FP1
+
+	MOVE.B	(A1)+,D1	; d.sig length byte
+	BEQ	DBZSTO	; if d.sig has no characters, stuff 0.0
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; First character
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.B	(A1),D0	; no autoincrement
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Check for infinity
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	CMPI.B	#$49,D0	; is it I?
+	BEQ.S	DBINF	;   if so, branch
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Check for NaN
+;; If found, construct extended NaN on the stack
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	CMPI.B	#'N',D0	; capital N?
+	BNE.S	DBDigits	;   if not, branch
+
+	ADDQ.L	#1,A1	; next character after 'N'
+	SUBQ.B	#1,D1	; # characters after 'N' in d.sig
+	MOVEQ	#8,D2	; assume 8 digits in nancode
+	CMPI.B	#4,D1	; are there at least 4?
+	BGE.S	@31	;   if so, branch
+	SUBQ.B	#4,D2	;   else prepare for nancode followed by 0000
+	ADD.B	D1,D2	; total number of digits in extended format
+@31
+	BSR.S	@35
+	SUBQ.L	#8,SP
+	MOVE.L	D3,(SP)
+	CLR.L	D3
+	MOVEQ	#8,D2
+	BSR.S	@35
+	MOVE.L	D3,4(SP)
+	BRA.S	@39
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Move max(D1,D2) digits to D3
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@35
+	ROL.L	#4,D3	; align bits so far
+	SUBQ.B	#1,D1	; #characters left in string
+	BMI.S	@37	;   if none, branch
+	MOVE.B	(A1)+,D0	; next character
+	CMPI.B	#'9',D0	; is it 1..9?
+	BLE.S	@36	;   if so, branch
+	ADDI.B	#9,D0	;   else adjust A..F
+@36
+	ANDI.B	#$0F,D0	; mask to nibble
+	OR.B	D0,D3
+@37
+	SUBQ.W	#1,D2	; decrement char count
+	BNE.S	@35	; continue if characters left
+	RTS		;   else return
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Clear lead bit (irrelevant) and
+	;;   test for nonzero nancode
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@39
+	ANDI.L	#$3FFFFFFF,(SP)	; temporarily ignore quiet bit
+	OR.L	(SP),D3	;   and check for zero nan
+	BNE.S	@40
+	MOVEQ	#NaNZero,D3
+	SWAP	D3	; align lead bits
+	MOVE.L	D3,(SP)
+@40
+	OR.B	#$40,(SP)	; set quiet nan bit
+
+DBNFIN
+	MOVE.W	#$7FFF,D0	; max exponent
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Set sign and move resulting extended to FP0
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+DBSSTO
+	TST.B	(A0)	; sign in hi byte of word
+	BEQ.S	@1
+	BSET	#15,D0
+@1
+	SWAP	D0	; prepare for 96 bit format
+	MOVE.L	D0,-(SP)	; 96 bit extended on stack
+
+	FMOVE.X	(SP)+,FP0	; extended in FP0
+
+	BRA.S	DBStore
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; INFINITY found. signif = 0, exit thru nan code
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+DBINF
+	MOVEQ	#0,D0
+	MOVE.L	D0,-(SP)
+	MOVE.L	D0,-(SP)
+	BRA.S	DBNFIN
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; NOT INFINITY, NOT NAN.
+;; Zero or truly digits.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+DBDigits
+	CMPI.B	#$30,D0	; is it '0'?
+	BNE.S	SigDigs	;   if not, then truly a number
+
+DBZSTO
+	TST.B	(A0)	; if zero, check d.sgn (hi byte of word)
+	BEQ.S	@1
+
+	FNEG	FP0,FP0
+@1
+	BRA.S	DBStore
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SIGDIGS
+;; Build significand (in FP0) from significant digits
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+SigDigTop
+	FMUL	FP1,FP0	; 10*temp -> temp
+
+SigDigs
+	MOVEQ	#$0F,D0	; nibble mask
+	AND.B	(A1)+,D0	; next character of d.sig
+
+	FADD.B	D0,FP0	; temp + next char -> temp
+
+	SUBQ.B	#1,D1
+	BEQ.S	Canon	; continue unless end of d.sig
+	SUBQ.B	#1,D2
+	BNE.S	SigDigTop	; continue unless 20th digit
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; More than 19 input digits.
+	;; Set bit #30 of D3 if nonzero last char (inexact).
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEQ	#$0F,D0	; nibble mask
+	AND.B	(A1),D0	; last character
+	BEQ.S	DoneDig
+	BSET	#30,D3
+	BRA.S	DoneDig
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; CANON - 19 or fewer input digits.
+;; Enforce smallest positive
+;; exponent.  Append trailing 0's and
+;; decrement exponent.  Exponent OK up
+;; to 27 since no inexact until 28.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+CanonTop
+	CMPI.W	#27,D3	; d.exp is in D3
+	BLE.S	DoneDig
+
+	FMUL	FP1,FP0	; 10*signif -> signif
+
+	SUBQ.W	#1,D3
+Canon
+	SUBQ.W	#1,D2	; max digit count
+	BNE.S	CanonTop
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; DONEDIG - Pass correct sign to FP0,
+;;   and go to core routine for scaling.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+DoneDig
+	TST.B	(A0)	; d.sgn (hi byte of word)
+	BEQ.S	@1
+
+	FNEG	FP0,FP0
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Scale the value in FP0 (source)
+	;;   by the exponent in D3
+	;;   and return the result in FP0.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@1
+	BSR.S	DBCore
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; DBStore
+;; Restore registers.
+;; Check requested data format and return FP0 to caller.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+DBStore
+	FMOVEM	(SP)+,FP2	; must save/restore FP2-FP7 -S.McD.
+	MOVEM.L	(SP)+,D2/D3/D5/D7	; restore working registers
+
+	MOVE.L	LKADR1(A6),A1	; dest address
+	MOVE.W	LKOP(A6),D1	; opword
+
+	LSR.W	#6,D1	; format info to hi bits of lo byte
+	ADD.B	D1,D1	; 'not-float' -> carry bit
+	BCS.S	IntFormat
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Here if a floating point format
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	ADD.B	D1,D1	; S -> carry bit, D -> hi bit
+	BCS.S	Sformat
+	BPL	Return2Args	; X format
+
+	FMOVE.D	FP0,(A1)	; D format
+
+	BRA	Exit2Args
+
+Sformat
+	FMOVE.S	FP0,(A1)
+
+	BRA	Exit2Args
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Here if an integer format
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+IntFormat
+	ADD.B	D1,D1	; C -> carry bit, L -> hi bit
+	BCS	FromD2B	; finish off in CVTE2Comp for Comp format
+	BMI.S	Lformat
+
+	FMOVE.W	FP0,(A1)	;I format
+
+	BRA	Exit2Args
+
+Lformat
+	FMOVE.L	FP0,(A1)
+
+	BRA	Exit2Args
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; DBCORE
+;; When entered from D2B:
+;;	D3.W has exponent, bit 30 holds inexact (& >19 digits) flag
+;;	D5 holds user's control register setting
+;;	A0 points to source value (decimal or extended)
+;;   	FP0 has signed significand.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+DBCore
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Set rounding up, down or nearest depending on current mode,
+	;;   sign of operand, and sign of exponent.
+	;; Recall that the control register rounding bits are 4 & 5.
+	;;   00=tonearest    01=towardzero   10=downward   11=upward
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.L	D5,D7	; clean copy of control register
+	MOVEQ	#$30,D1	; rounding bit mask
+	AND.B	D7,D1	; caller's rounding bits -> D1
+	BEQ.S	@51	; ToNearest => leave rounding alone, clear flags
+
+	TST.B	(A0)	; operand +?
+	BPL.S	@99	;   if so, branch
+
+	CMPI.B	#$20,D1	; rounding now downward?
+	BEQ.S	@1	;   if so, branch
+@0
+	TST.W	D3
+	BMI.S	@20	;   if exp neg, set upward; else...
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Set rounding downward
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@10
+	ANDI.L	#$FFDF,D7	; clear current rounding
+	ORI.B	#$20,D7
+
+	BRA.S	@30
+
+@99
+	CMPI.B	#$30,D1	; rounding now upward?
+	BNE.S	@0	;   if operand pos & not upward, branch
+@1
+	TST.W	D3
+	BMI.S	@10	;   if exp neg, set downward; else...
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Set rounding upward
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@20
+	ORI.B	#$30,D7
+@30
+			; and install in 881
+	FMOVE	D7,FPCR
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Compute 10^|exp|, put into FP2
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@51
+	BSR	POW10
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Force toward-zero rounding
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.L	D5,D7	; copy of control
+	ANDI.L	#$FFDF,D7	; control with cleared rounding
+	ORI.B	#$10,D7	; set towardzero rounding
+
+	FMOVE	D7,FPCR
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Scale by 10^|exp|. ( 10^|exp| in FP2 )
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	TST.W	D3	; pos or neg exponent?
+	BPL.S	@101	;   if pos, branch
+
+	FDIV	FP2,FP0
+
+	BRA.S	@102
+@101
+	FMUL	FP2,FP0
+@102
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; If inexact, adjust result.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FMOVE	FPSR,D0
+
+	BTST	#9,D0	; did div or mul set inexact?
+	BNE.S	Tweak	;   if so, adjust for it
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Check inexact flag from earlier operations, bit 30 of D3
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	BTST	#30,D3	; inexact flag
+	BNE.S	Tweak
+
+DBCoreReturn
+	BRA.S	DBExit
+
+Tweak
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Set inexact flag on 881.
+	;; Check caller's rounding mode and tweak a bit if needed.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	BSET	#3,D0	; set inexact even in lost digit case
+
+	FMOVE	D0,FPSR
+
+	TST.B	D1	; D1 has caller's rounding bits
+	BEQ.S	Jam1LSB	; ToNearest is hopeless, just set operand LSB
+
+	CMPI.B	#$10,D1	; TowardZero rounding?
+	BEQ.S	DBExit	;   if so, result OK, return to caller
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Directed rounding.  Add 1/2 ulp.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FGETEXP	FP0,FP1
+	FMOVECR	#$32,FP2
+	FTEST	FP0
+	FBUN	@2
+	FBOLT	@1
+	FNEG	FP2,FP2
+@1
+	FSCALE.W	#-64,FP2
+	FSCALE	FP1,FP2
+	FADD	FP2,FP0
+@2
+
+	BRA.S	DBExit
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Set the operand LSB
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Jam1LSB
+	FMOVE.X	FP0,-(SP)	; copy to stack
+
+	MOVE.W	(SP),D0	; sign & exp
+	ADDQ.W	#1,D0	; 7FFF -> 8000 & FFFF -> 0000
+	ADD.W	D0,D0	; 8000 -> 0000 & 0000 -> 0000
+	BNE.S	@1	; continue if neither Inf nor NaN
+	ADD.L	#12,SP	;   else kill copy of FP0 on stack
+	BRA.S	DBExit	;   and return
+@1
+	BSET	#0,11(SP)	; if genuine number, turn on LSB
+
+	FMOVE.X	(SP)+,FP0	;   and move back to FP0
+DBExit
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Restore user value of control register.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FMOVE	D5,FPCR
+
+	RTS
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Compute power of 10.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+TAB10SZ EQU    9
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Table entries are 8 words long:
+	;;     1	-- n, where table value is 10^n
+	;;     2	-- rounding error, +1 if rounded up, -1 if down
+	;;     3-8	-- 96-bit extended value
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+TAB10
+	DC.W	14
+	DC.W	0
+	DC.W	$402D
+	DC.W	$0000
+	DC.W	$B5E6
+	DC.W	$20F4
+	DC.W	$8000
+	DC.W	$0000
+
+	DC.W	27
+	DC.W	0
+	DC.W	$4058
+	DC.W	$0000
+	DC.W	$CECB
+	DC.W	$8F27
+	DC.W	$F420
+	DC.W	$0F3A
+
+	DC.W	55
+	DC.W	1
+	DC.W	$40B5
+	DC.W	$0000
+	DC.W	$D0CF
+	DC.W	$4B50
+	DC.W	$CFE2
+	DC.W	$0766
+
+	DC.W	108
+	DC.W	1
+	DC.W	$4165
+	DC.W	$0000
+	DC.W	$DA01
+	DC.W   	$EE64
+	DC.W   	$1A70
+	DC.W   	$8DEA
+
+	DC.W	206
+	DC.W	-1
+	DC.W	$42AB
+	DC.W	$0000
+	DC.W	$9F79
+	DC.W	$A169
+	DC.W	$BD20
+	DC.W	$3E41
+
+	DC.W	412
+	DC.W	1
+	DC.W	$4557
+	DC.W	$0000
+	DC.W	$C6B0
+	DC.W	$A096
+	DC.W 	$A952
+	DC.W	$02BE
+
+	DC.W	824
+	DC.W	1
+	DC.W	$4AB0
+	DC.W	$0000
+	DC.W	$9A35
+	DC.W	$B246
+	DC.W	$41D0
+	DC.W	$5953
+
+	DC.W	1648
+	DC.W	1
+	DC.W	$5561
+	DC.W	$0000
+	DC.W	$B9C9
+	DC.W	$4B7F
+	DC.W	$A8D7
+	DC.W	$6515
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Table is accessed from high exponents to low.  It is
+	;; addressed from bottom up for historical reasons.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+TAB10E
+	DC.W	3296
+	DC.W	1
+	DC.W	$6AC4
+	DC.W	$0000
+	DC.W	$86D4
+	DC.W	$8D66
+	DC.W	$26C2
+	DC.W	$7EEC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Start code.  Two special cases:
+;; 	exp < 15   - just pull value from table below.
+;;	exp > 5000 - outrageous values are set to 5000
+;;
+;;	A0   = pointer to decimal record, save for later use
+;;	D1.B = rounding bits as set by caller, save for later use
+;;	D2.W = local use-position in tens table, not to be saved
+;;	D3.W = exp on input, D3 bit 30 = inexact flag.  Save D3.
+;;	D7   = rounding direction bits and working values of exponent
+;;	FP2  = register expecting return value 10^|exp|
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+POW10
+	MOVEQ	#26,D2
+	LSL.L	D2,D7	; shift rounding direction bits to #31,30
+	MOVEQ	#TAB10SZ,D2	; note D2.hi=0
+	MOVE.W	D3,D7	; compute |exp|
+	BPL.S	@1
+	NEG.W	D7
+@1
+	CMPI.W	#15,D7	; easy case when |exp| < 15
+	BCS.S	PTQUICK
+
+	CMPI.W	#5000,D7	; |exp| > 4999?
+	BCS.S	@10
+	MOVE.W	#5000,D7	; if so, just use 5000
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Loop through table from hi values to lo,
+	;; accumulating powers of ten.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@10
+	LEA	TAB10E(PC),A1	; pointer to a power of 10
+PTLOOP
+	CMP.W	(A1),D7	; table power vs. exp
+	BCS.S	PTSKIP	; carry set => D7<(A1) <=> exp<table power
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; When exponent exceeds current table entry, decrement the
+	;;   exponent and multiply/store by the power of ten.  If
+	;;   rounding is required on the power of ten,the table entry
+	;;   is moved to the stack and adjusted there.
+	;;
+	;; Note:  If an inexact power of ten is used, the inexact
+	;;   exception bit is arbitrarily forced on, regardless of
+	;;   the corresponding halt bit.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	SUB.W	(A1)+,D7	; decrement exp and set A1 to point to error
+
+	TST.W	(A1)	; check direction of error
+	BEQ.S	@31	; if exact, skip over error routine
+	BSET	#30,D3	; inexact flag.
+
+	CMPI.L	#$3FFFFFFF,D7; hi bits: 00 nearest, 01 zero, 10 down, 11 up
+	BMI.S	@13	; nearest or upward
+
+	TST.W	(A1)	; (A1)≤0 => error OK since downward or TowardZero
+	BLE.S	@31
+	BRA.S	@15
+@13
+	BCS.S	@31	; nearest
+	TST.W	(A1)
+	BGE.S	@31	; (A1)≥0 => error OK since Upward
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; If the value must be rounded, copy it to the stack.
+	;; Rounding:  error=1 => subtract 1 from LSB. error=-1 => add.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@15
+	MOVE.L	10(A1),-(SP); low significant long
+	TST.W	(A1)+	; A1 now points to extended value
+	BPL.S	@21	; if error=1, then subtract
+	ADDQ.L	#1,(SP)	; force opposite rounding
+	BRA.S	@23
+@21
+	SUBQ.L	#1,(SP)
+@23
+	MOVE.L	4(A1),-(SP)	; middle 32 sig bits
+	MOVE.L	(A1),-(SP)	; exp and hi 16 sig bits
+
+	FMOVE.X	(SP)+,FP1
+
+	BRA.S	@33
+
+@31
+	ADDQ.L	#2,A1	; skip over error, point to extended value
+
+	FMOVE.X	(A1),FP1
+
+@33
+	BSR.S	PTMUL
+	SUBQ.L	#4,A1	; return to start of table entry
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Next table entry is 8 words (16 bytes) up.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+PTSKIP
+	SUBA.W 	#16,A1	; skip to next table entry
+	SUBQ.W	#1,D2	; decrement num counter
+	BNE.S	PTLOOP	; zero when finished
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Now have exp <= 14.  If D1<0 then must
+	;;   multiply in, else just move it from table.
+	;; Compute POWER * 12, offset into table below
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+PTQUICK
+	LSL.W	#2,D7	; 4*D7
+	MOVE.W	D7,D2
+	ADD.W	D7,D7	; 8*D7
+	ADD.W	D2,D7	; = 12*D7
+
+	FMOVE.X	TAB10S(PC,D7),FP1	; correct power of 10 into FP1
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; This sequence is used as a subroutine by table
+	;; code at start.  It is also fallen into from PTQUICK.
+	;;
+	;; Trick with high bit of D3:  0 => 1st pass thru code,
+	;;   so load value rather than multiply.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+PTMUL
+	TST.L	D3	; positive means do not multiply
+	BPL.S	@42
+
+	FMUL	FP1,FP2
+
+	RTS
+@42
+	FMOVE	FP1,FP2
+
+	BSET	#31,D3	; set negative to force subsequent multiplies
+	RTS
+
+TAB10S
+	DC.W	$3FFF	; 10 ^ 0
+	DC.W	$0000
+	DC.W	$8000
+	DC.W	$0000
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$4002	; 10 ^ 1
+	DC.W	$0000
+	DC.W	$A000
+	DC.W	$0000
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$4005	; 10 ^ 2
+	DC.W	$0000
+	DC.W	$C800
+	DC.W 	$0000
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$4008	; 10 ^ 3
+	DC.W	$0000
+	DC.W	$FA00
+	DC.W	$0000
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$400C	; 10 ^ 4
+	DC.W	$0000
+	DC.W	$9C40
+	DC.W	$0000
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$400F	; 10 ^ 5
+	DC.W	$0000
+	DC.W	$C350
+	DC.W	$0000
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$4012	; 10 ^ 6
+	DC.W	$0000
+	DC.W	$F424
+	DC.W	$0000
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$4016	; 10 ^ 7
+	DC.W	$0000
+	DC.W	$9896
+	DC.W	$8000
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$4019	; 10 ^ 8
+	DC.W	$0000
+	DC.W	$BEBC
+	DC.W	$2000
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$401C	; 10 ^ 9
+	DC.W	$0000
+	DC.W	$EE6B
+	DC.W	$2800
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$4020	; 10 ^ 10
+	DC.W	$0000
+	DC.W	$9502
+	DC.W	$F900
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$4023	; 10 ^ 11
+	DC.W	$0000
+	DC.W	$BA43
+	DC.W	$B740
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$4026	; 10 ^ 12
+	DC.W	$0000
+	DC.W	$E8D4
+	DC.W	$A510
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$402A	; 10 ^ 13
+	DC.W	$0000
+	DC.W	$9184
+	DC.W	$E72A
+	DC.W	$0000
+	DC.W	$0000
+
+	DC.W	$402D	; 10 ^ 14
+	DC.W	$0000
+	DC.W	$B5E6
+	DC.W	$20F4
+	DC.W	$8000
+	DC.W	$0000
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;*************************************************************
+;; BINARY --> DECIMAL CONVERSION
+;*************************************************************
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Use of registers:
+;;   D0   = copy of status register for input classification
+;;   D1   = working register
+;;   D2   = working register
+;;   D3.W = tentative exponent
+;;   D3   = bit 31 - a little trick at PTMUL;
+;;   D4   = fixed formatting: current best guess for #digits left of the decimal point
+;;   D5   = user control register with halts disabled, always unchanged
+;;   D6   = f.digits, unchanged until last step at BD9
+;;   D7   = control register (as currently set)
+;;
+;;   A0   = address of source (binary)
+;;   A1   = ptr within d.sig
+;;   A2   = address of destination (decimal record)
+;;   A3   = address of decform record
+;;
+;;   FP0  = working register
+;;   FP1  = used for comparisons and to hold 10^19 just before final scaling
+;;   FP2  = exp.frac and also 10^|exp| returned from POW10
+;;   FP3  = binary source value, always unchanged
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+B2D
+	FMOVE	#0,FPSR	; IEEE default status -S.McD.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Set up registers,
+	;; Preset zero result
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEM.L	D2-D7/A2-A3,-(SP)	; save working registers
+	FMOVEM	FP2-FP3,-(SP)	; must save/restore FP2-FP7 -S.McD.
+	ANDI.L	#$FF,D5	; disable halts on D5 copy of control
+	MOVEQ	#0,D3	; clear all internal flags	<02Jun87>
+
+	MOVE.L	D5,D7	; working copy of control
+	MOVE.L	LKADR2(A6),A0
+	MOVE.L	LKADR1(A6),A2
+	MOVE.L	LKADR3(A6),A3
+
+	CLR.L	(A2)+	; positive, exponent=0, A2 pts to d.sig
+	MOVE.W	#$0130,(A2)	; d.sig = '0'
+
+	MACHINE	MC68020
+	BFEXTU	D1{18:3},D0	; move the 3 opcode size bits to D0. -S.McD.
+	MACHINE	MC68000
+	ADD.W	D0,D0	; scale by two to address into word table
+	ANDI.W	#OPMASK2,D0	; clear spurious bits 
+B2Dop
+	MOVE.W	B2DTab(D0),D0
+	JMP	B2Dop(D0)
+B2DTab
+	DC.W	B2Dext-B2Dop	; ... case 0
+	DC.W	B2Ddbl-B2Dop
+	DC.W	B2Dsgl-B2Dop
+	DC.W	B2Dint-B2Dop	; ... case 3 not used
+	DC.W	B2Dint-B2Dop
+	DC.W	B2Dlong-B2Dop
+	DC.W	B2Dcomp-B2Dop
+	DC.W	B2Dint-B2Dop	; ... case 7 not used
+
+B2Dext
+	MOVE.L	6(A0),-(SP)	; move extended source to FP0
+	MOVE.L	2(A0),-(SP)
+	MOVE.L	(A0),-(SP)
+
+	BPL.S	@1	; branch if positive
+
+	MOVE.B	#1,-4(A2)	;   else 1 -> d.sgn
+@1
+
+	FMOVE.X	(SP)+,FP0	;  source  to FP0
+	
+	BRA.S	B2Dfp
+
+B2Ddbl
+	MOVE.L	4(A0),-(SP)	; move double source to FP0
+	MOVE.L	(A0),-(SP)
+
+	BPL.S	@1	; branch if positive
+
+	MOVE.B	#1,-4(A2)	;   else 1 -> d.sgn
+@1
+
+	FMOVE.D	(SP)+,FP0	;  source  to FP0
+	
+	BRA.S	B2Dfp
+
+B2Dsgl
+	MOVE.L	(A0),-(SP)	; move single source to FP0
+
+	BPL.S	@1	; branch if positive
+
+	MOVE.B	#1,-4(A2)	;   else 1 -> d.sgn
+@1
+
+	FMOVE.S	(SP)+,FP0	;  source  to FP0
+	
+	BRA.S	B2Dfp
+
+B2Dint
+	MOVE.W	(A0),-(SP)	; move word source to FP0
+
+	BPL.S	@1	; branch if positive
+
+	MOVE.B	#1,-4(A2)	;   else 1 -> d.sgn
+@1
+
+	FMOVE.W	(SP)+,FP0	;  source  to FP0
+	
+	BRA.S	B2Dfp
+
+B2Dlong
+	MOVE.L	(A0),-(SP)	; move long source to FP0
+
+	BPL.S	@1	; branch if positive
+
+	MOVE.B	#1,-4(A2)	;   else 1 -> d.sgn
+@1
+
+	FMOVE.L	(SP)+,FP0	;  source  to FP0
+	
+	BRA.S	B2Dfp
+
+B2Dcomp
+	BSR	Comp2X
+
+	BPL.S	@1	; branch if positive
+
+	MOVE.B	#1,-4(A2)	;   else 1 -> d.sgn
+@1
+
+	FMOVE.X	FP1,FP0	;  source  to FP0
+	
+B2Dfp
+	FMOVE.X	FP0,-(SP)	; PUSH temp src extended -S.McD.
+
+	FABS.X	FP0	; |source| to FP0
+
+	FMOVE	FPSR,D0
+
+	FMOVE	FP0,FP3	; save original copy of input x
+
+	LSL.L	#6,D0	; Z -> carry bit, Inf -> #31, Nan -> #30
+	BCS	BDFin	; if zero, already done
+	BMI.S	Inf	; branch if value is an infinity
+	BTST	#30,D0	; check nan bit
+	BEQ.S	BD1	;   if not nan, then finite nonzero
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Handle NaN
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.W	#$114E,(A2)+; length 17, 'N'
+	MOVE.L	4(SP),D6	; significand, hi word -S.McD.
+	BSR.S	@2	; convert to ascii, place in d.sig
+	MOVE.L	8(SP),D6	; significand, lo word	-S.McD.
+	BSR.S	@2	; convert to ascii, place in d.sig
+	BRA	BDFin
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Short subroutine called by NaN handler
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@2
+	MOVEQ	#8,D0	; loop count
+@3
+	ROL.L	#4,D6	; print from hi to lo
+	MOVEQ	#$0F,D1	; nibble mask
+	AND.B	D6,D1	; strip nibble
+	OR.B	#'0',D1	; make ascii
+	CMPI.B	#'9',D1	; should it be a letter?
+	BLE.S	@4	;  if not, done
+	ADDQ.B	#7,D1	;  else add 7 to force A..F
+@4
+	MOVE.B	D1,(A2)+	; stuff character
+	SUBQ.W	#1,D0
+	BNE.S	@3
+	RTS
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Handle Infinity
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Inf
+	MOVE.W	#$0149,(A2)	; set d.sig to 'I'
+	BRA	BDFin
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Handle nonzero finite number
+;;
+;; Input registers:
+;;   FP0 - binary source value
+;;   A0  - source (binary #) address
+;;   A2  - address of d.sig (significand of destination)
+;;
+;; In case of fixed formatting, skip to BD3
+;; In case of float formatting, compute floor(log10(|x|))
+;;    by using Jerome's approximation:  exp.frac
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+BD1
+	TST.B	(A3)	; examine decform.style
+	BEQ.S	@2	; branch if FloatDecimal
+	MOVEQ.L	#0,D4	;   else clear D4=(#digits left of decimal for float)
+	BRA.S	BD3	;   and skip the Float code
+@2
+	MOVE.L	#$4D104D42,D6; floor ( log10(2) )
+	MOVE.L	4(SP),D1	; 1.frac		-S.McD.
+	MOVE.W	(SP),D1	; sign and exp	-S.McD.
+	BCLR	#15,D1	; shut off sign bit
+	SUB.W	#$3FFF,D1	; unbias exponent
+	BPL.S	@3	; branch if positive exponent
+	ADDQ.L	#1,D6	;   else bump log10(2)
+@3
+	SWAP	D1	; put in the order exp, then frac
+	ADD.W	D1,D1	; now have exp.frac
+
+			; D1*D6 -> D4,D6,  implied pt at middle of D4
+	MACHINE MC68020
+	MULS.L	D1,D4:D6	; log10(exp.frac) into D4.h (junk in D6)
+	MACHINE MC68000
+
+	SWAP	D4	; move result down to low word
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Add 1, giving the number of digits
+	;;   left of the decimal point
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	ADDQ.W	#1,D4
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Compute the scaling amount:  Scale in -2(A2).
+;; -Scale = tentative decimal exponent.
+;; Note that code may loop back on itself.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+BD3
+	FMOVE	D5,FPCR	; restore control regiser
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Deliver digit count in D6.  D6 unchanged until no longer needed (BD9).
+	;;   If FloatDecimal, deliver 1..19.
+	;;   If FixedDecimal, deliver stated count.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVE.L	(A3),D6	; count value from decform (D6.L now pos)
+	TST.B	(A3)	; f.style, nonzero=fixed
+	BNE.S	@2
+	TST.W	D6	; if count <= 0 then force 1
+	BLE.S	@1
+
+	CMPI.W	#19,D6	; count > 19?
+	BLE.S	@2	;   if not, skip
+	MOVEQ	#19,D6	;   else force 19
+	BRA.S	@2
+@1
+	MOVEQ	#1,D6
+@2
+	MOVE.W	D6,D3
+	BCLR	#31,D3	; first pass thru POW10 sets hi bit, be sure it's off
+
+	SUB.W	D4,D3	; D4=0 (fixed) or 1+log10(x) (float)
+	MOVE.W	D3,-2(A2)	; deliver exponent to dest
+	NEG.W	-2(A2)	;   with correct sign
+	MOVEQ	#0,D0	; DBCore flag:  no 20th digit
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Scale the value in FP0 (source),
+	;;   by the exponent in D3 (tentative exp),
+	;;   and return result in FP0.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	BSR	DBCore	; compute scaled value
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Round result to integer in FP0 according to user rounding.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FINT	FP0,FP0
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Check scaled.x>10^#digits & check whether fixed overflow
+	;;   (return '?') or rounding error in Floor(log10(x)).
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	TST.B	(A3)	; fixed or float?
+	BNE.S	@3
+	MOVE.L	D6,D3	; get f.digits
+	BRA.S	@5
+@3
+	MOVEQ	#19,D3
+@5
+	MOVE.L	D5,D7	; POW10 expects current control register in D7
+	BSR	POW10
+
+	FCMP	FP2,FP0
+	FBGE.W	@9
+
+	BRA.S	BD85
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Scaled.x value is out of range.
+	;;   Distinguish 2 cases:
+	;;   Float:  fix log10(x) and recompute (even if exactly 10^N)
+	;;   Fixed:  store '?' and give up
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@9
+	TST.B	(A3)	; fixed or float?
+	BNE.S	@15	;   branch if fixed
+
+	ADDQ.W	#1,D4	; fix log10(x)
+
+	FMOVE	FP3,FP0	; restore original binary source value
+
+	BRA.S	BD3
+@15
+	MOVE.W	#$013F,(A2)	; store '?' in d.sig
+	BRA	BDFIN
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Now check result against lower
+;;   bound:  10^(N-1).
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+BD85
+	TST.B	(A3)	; nonzero => FixedDecimal
+	BNE.S	BD9	;   branch if fixed
+
+	MOVE.L	D6,D3	; get f.digits
+	SUBQ.W	#1,D3	; want N-1
+
+	MOVE.L	D5,D7	; POW10 expects current control register in D7
+	BSR	POW10
+
+	FCMP	FP2,FP0
+	FBLT.W	@7
+
+	BRA.S	BD9
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Scaled value too small, force 10^(N-1).
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@7
+	FMOVE	FP2,FP0	; store 10^(N-1) in place of x
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Compute the digit string.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+BD9
+	FINT	FP0,FP0	; round final result to integer
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Check for zero, easy if found.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FBNE.W	@1
+
+	MOVE.W	#$0130,(A2)	; if zero, return '0'
+	BRA	BDFIN
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Divide scaled value by 10^19.
+	;; Note that use of D5 for control register ends
+	;;   here.  Now D5 holds status.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@1
+	MOVE.L	#$60913D00,-(SP)	; exact double precision 10^19
+	MOVE.L	#$43E158E4,-(SP)
+
+	FMOVE	D5,FPCR
+	FMOVE	FPSR,D5
+	FMOVE.D	(SP)+,FP1
+	FDIV	FP1,FP0
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Collect the significand and set inexact if appropriate
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FMOVE.X	FP0,-(SP)	; retrieve fractional value
+
+	MOVE.W	(SP)+,D0	; collect exponent, which cannot be positive
+	ADDQ.L	#2,SP	; disregard junk word
+	MOVE.L	(SP)+,D3	; move significand to D3/4 (hi/lo)
+	MOVE.L	(SP)+,D4	;   two moves are faster than movem
+
+	SUB.W	#$3FFE,D0	; unbias exponent
+	BEQ.S	@4	; skip un-normalizing if exp=-1 (D0=0)
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Un-normalize until D0 = 0
+	;;          D3		 D4
+	;;  ---------------------    ---------------------
+	;; |a   b   c   d   e  f |  |g   h   i   j   k   l|
+	;;  ---------------------    ---------------------
+	;;	\	\	\
+	;;  ---------------------    ---------------------
+	;; |0   0   0   0  a   b |  |c   d   e  f   g   h |
+	;;  ---------------------    ---------------------
+	;;
+	;; Steps:
+	;;  ---------------------    ---------------------
+	;; |a   b   c   d   e  f |  |0   0   0   0   g   h|   shift lo
+	;;  ---------------------    ---------------------
+	;;  ---------------------    ---------------------
+	;; |c   d   e  f   0   0 |  |0   0   0   0   g   h|   backshift hi
+	;;  ---------------------    ---------------------
+	;;  ---------------------    ---------------------
+	;; |a   b   c   d   e  f |  |c   d   e  f   g   h |   OR and restore hi
+	;;  ---------------------    ---------------------
+	;;  ---------------------    ---------------------
+	;; |0   0   0   0  a   b |  |c   d   e  f   g   h |   shift hi
+	;;  ---------------------    ---------------------
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@2
+	CMPI.W	#-32,D0	; can we un-normalize by a whole long?
+	BPL.S	@3	;   if not, branch
+	MOVE.L	D3,D4	;   if so, shift significand by 32
+	MOVEQ	#0,D3
+	ADD.W	#32,D0	;   and adjust exponent accordingly
+@3
+	MOVE.W	D0,D2	; copy of negative shift count
+	ADD.W	#32,D2	; 32 minus shift count ( ≥ 0 )
+	NEG.W	D0	; positive shift count
+	LSR.L	D0,D4	; shift low bits of significand, pad with 0's
+	MOVE.L	D3,D6	; copy of significand.hi
+	LSL.L	D2,D6	; capture new hi bits for D4
+	OR.L	D6,D4	;   and move them into place
+	LSR.L	D0,D3	; shift down remaining bits of D3
+@4
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Perform the actual conversion to string
+	;;   First bump significand by one bit to avoid strings of 9's
+	;;
+	;; Input:
+	;;   D3/D4 = significand.hi/significand.lo
+	;;   A2 = ptr to d.sig length byte
+	;; To be used below:
+	;;   D0 = next digit reclaimed from significand
+	;;   D1 = decrementing digit counter (initially 19)
+	;;   A0 = pointer to d.sig length byte
+	;;   A2 = pointer to current ascii digit (as string is constructed)
+	;;   D2/D6/D7 = temp storage for multiply-by-10 loop
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	FMOVE	D5,FPSR	; restore status register
+
+	MOVEQ	#0,D0
+	ADDQ.L	#1,D4
+	ADDX.L	D0,D3
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; Write the digit string, guaranteed nonzero, skipping leading zeros.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	MOVEA.L	A2,A0	; copy ptr to output string
+	CLR.B	(A2)+	; zero out length byte
+	MOVEQ	#19,D1	; digit counter
+@11
+	ADD.L	D4,D4	; double fraction
+	ADDX.L	D3,D3
+	ADDX.W	D0,D0
+
+	MOVE.L	D4,D2	; save 2 * dig
+	MOVE.L	D3,D6
+	MOVE.W	D0,D7
+
+	ADD.L	D4,D4	; 4 * dig
+	ADDX.L	D3,D3
+	ADDX.W	D0,D0
+	ADD.L	D4,D4	; 8 * dig
+	ADDX.L	D3,D3
+	ADDX.W	D0,D0
+
+	ADD.L	D2,D4	; 10 * dig
+	ADDX.L	D6,D3
+	ADDX.W	D7,D0
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; D0 is guaranteed nonzero if any nonzero digits have been seen.
+	;; The high byte of D0 contains a bit marking 'first nonzero digit seen'.
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	TST.W	D0	; ADDX.W won't set the Z bit
+	BEQ.S	@12	; 0 --> lead 0
+
+	ORI.L	#$0130,D0	; turn to ascii (flagging nonzero-digit-seen)
+	MOVE.B	D0,(A2)+	;   and place into output string
+	CLR.B	D0	; leave nonzero-digit-seen mark
+	ADDQ.B	#1,(A0)	; increment string length byte
+@12
+	SUBQ.B	#1,D1
+	BNE.S	@11
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Restore registers and exit.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+BDFIN
+	ADDA.W	#12,SP	; POP temp src extended -S.McD.
+	FMOVEM	(SP)+,FP2-FP3	; must save/restore FP2-FP7 -S.McD.
+	MOVEM.L	(SP)+,D2-D7/A2-A3	; restore working registers
+	BRA	Exit3Args
+
+

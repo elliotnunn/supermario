@@ -1,0 +1,500 @@
+;
+;	File:		Lines.a
+;
+;	Contains:	Line Drawing Routines
+;
+;	Copyright:	© 1981-1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM2>	 6/11/92	stb		<sm 6/9/92>stb Synch with QDciPatchROM.a, added comment to
+;									StdLine.
+;		 <6>	 1/15/92	KC		Fix "If last BRA.S to import is to next instruction, BAD CODE
+;									will be generated" assembler warning.
+;		 <5>	 8/31/90	SMC		Made cleaner fix of revision <3>.
+;		 <4>	 8/31/90	SMC		Fixed long JSR code added in revision <3>.
+;		 <3>	 5/30/90	HJR		Fix out of range link error by essentially adding a BigJSR.
+;		 <2>	 5/30/90	JT		Line, LineTo, Move, and MoveTo now clear the horizontal pen
+;									fraction.
+;	  <•1.4>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;	  <•1.3>	 4/12/89	BAL		Blasting in 32-Bit QuickDraw 1.0B1
+;				  1/8/89	BAL		Vectorized CheckPic, DoLine
+;				 8/11/86	EHB		Modified PenPat for color patterns
+;
+;	To Do:
+;
+
+		BLANKS	ON
+		STRING	ASIS
+
+;-----------------------------------------------------------------
+;
+;
+;	  * 	 ***   *   *  *****   ***
+;	  * 	  *    *   *  *  	 *	 *
+;	  * 	  *    **  *  *  	 *
+;	  * 	  *    * * *  ***	  ***
+;	  * 	  *    *  **  * 	 	 *
+;	  * 	  *    *   *  *  	 *	 *
+;	  *****  ***   *   *  *****   ***
+;
+
+StdLine PROC  EXPORT
+		IMPORT PutPicVerb,PutPicByte,PutPicLong,PutPicOp,StdDevLoop
+;---------------------------------------------------------------
+;
+;  PROCEDURE StdLine(newPt: Point);
+;
+; from QDciPatchROM.a														<sm 6/9/92>stb
+
+PARAMSIZE		EQU 	4
+NEWPT			EQU 	PARAMSIZE+8-4
+
+VARSIZE			EQU		0					;TOTAL SIZE OF LOCALS
+
+		LINK	A6,#VARSIZE					;ALLOCATE STACK FRAME
+		MOVEM.L D5-D7/A3-A4,-(SP)			;SAVE REGS
+		_CheckPic							;SET UP A4,A3 AND CHECK PICSAVE
+		BLE.S	NOTPIC						;BRANCH IF NOT PICSAVE
+
+		MOVE.B	#FRAME,-(SP)				;PUSH VERB
+		bsr.l	PutPicVerb					;CHECK pnSize, pnMode, pnPat
+
+;--------------------------------------------------------
+;
+;  PUT ONE OF FOUR LINE OPCODES BASED ON NEWPT AND DH,DV.
+;
+;  line 		  		20, pnLoc(pt), newPt(pt)
+;  line from		  	21,	newPt(pt)
+;  short line		  	22, pnLoc(pt), dh,dv(-128..127)
+;  short line from	  	23, dh,dv(-128..127)
+;
+
+		MOVEQ	#$20,D7 					;INIT OPCODE TO $20
+		MOVE.L	PICSAVE(A3),A4				;GET PICSAVE HANDLE
+		MOVE.L	(A4),A4 					;DE-REFERENCE PICSAVE
+		MOVE.L	PNLOC(A3),D0				;GET CURRENT PNLOC
+		CMP.L	PICPNLOC(A4),D0 			;IS LINE FROM LAST ENDPOINT ?
+		BNE.S	NOTFROM 					;NO, CONTINUE
+		ADDQ	#1,D7						;YES, SET BIT ZERO
+NOTFROM MOVE	NEWPT+H(A6),D6				;GET NEWPT.H
+		SUB 	D0,D6						;CALC DH = NEWPT.H - PNLOC.H
+		MOVE	D6,D0						;COPY DH
+		EXT.W	D0
+		CMP.W	D6,D0						;IS DH -128..127 ?
+		BNE.S	PUTOP						;NO, CONTINUE
+
+		MOVE	NEWPT+V(A6),D5				;GET NEWPT.V
+		SUB 	PNLOC+V(A3),D5				;CALC DV = NEWPT.V - PNLOC.V
+		MOVE	D5,D0						;COPY DV
+		EXT.W	D0
+		CMP.W	D5,D0						;IS DV -128..127 ?
+		BNE.S	PUTOP						;NO, CONTINUE
+		ADDQ	#2,D7						;YES, SET BIT ONE IN OPCODE
+
+PUTOP	MOVE	D7,-(SP)					;PUSH THE OPCODE
+		bsr.l 	PutPicOp					;PUT ONE OF 4 LINE OPCODES
+		ROR 	#1,D7						;DO WE NEED STARTPT ? (BIT 0)
+		BCS.S	STARTOK 					;NO, CONTINUE
+		MOVE.L	PNLOC(A3),-(SP)
+		bsr.l	PutPicLong					;YES, PUT STARTPT = PNLOC
+
+STARTOK ROR 	#1,D7						;IS LINE SHORT ? (BIT 1)
+		BCS.S	DHDV						;YES, PUT DH,DV
+		MOVE.L	NEWPT(A6),-(SP) 			;NO, PUT LONG NEWPT
+		bsr.l	PutPicLong					;PUT NEWPT TO THEPIC
+		BRA.S	UPDATE
+
+DHDV	MOVE.B	D6,-(SP)					;PUSH DH (-128..127)
+		bsr.l	PutPicByte					;PUT TO THEPIC
+		MOVE.B	D5,-(SP)					;PUSH DV (-128..127)
+		bsr.l	PutPicByte					;PUT TO THEPIC
+
+UPDATE	MOVE.L	PICSAVE(A3),A4				;GET PICSAVE HANDLE
+		MOVE.L	(A4),A4 					;DE-REFERENCE PICSAVE
+		MOVE.L	NEWPT(A6),PICPNLOC(A4)		;UPDATE PICTURE SAVING STATE
+
+;  CALL STANDARD LOOP TO DRAW TO ALL DEVICES
+
+NOTPIC	PEA		StdDraw						;PUSH ADDRESS OF DRAW ROUTINE
+		PEA		GetRect						;PUSH ADDRESS OF RECT ROUTINE
+		_StdDevLoop							;DRAW TO ALL DEVICES
+
+		MOVEM.L (SP)+,D5-D7/A3-A4			;RESTORE REGS
+		UNLINK	PARAMSIZE,'STDLINE '
+
+
+;---------------------------------------------------------------
+;
+;	PROCEDURE GetRect(VAR theRect: rect); 
+;
+;	RETURN THE OBJECT'S RECTANGLE
+;   MAKE A RECTANGLE OUT OF NEWPT AND PNLOC AND ADJUST FOR PNSIZE
+;
+GetRect	MOVE.L	(SP)+,A0					;GET RETURN ADDRESS
+		MOVE.L	(SP)+,A1					;GET DST RECT
+
+		MOVE.L	NEWPT(A6),D0				;GET NEWPT
+		MOVE.L	PNLOC(A3),D1				;GET CURRENT PENLOC
+		CMP		D0,D1						;COMPARE HORIZONTAL COORDS
+		BGT.S	@1							;=>D1 CONTAINS LARGER = RIGHT
+		EXG		D0,D1						;ELSE SWAP THEM
+@1		MOVE	D0,LEFT(A1)					;SET LEFT
+		ADD		PNSIZE+H(A3),D1				;EXTEND RIGHT FOR PEN
+		MOVE	D1,RIGHT(A1)				;SET RIGHT
+		SWAP	D0
+		SWAP	D1
+		CMP		D0,D1						;COMPARE VERTICAL COORDS
+		BGT.S	@3							;=>D1 CONTAINS LARGER = RIGHT
+		EXG		D0,D1						;ELSE SWAP THEM
+@3		MOVE	D0,TOP(A1)					;SET TOP
+		ADD		PNSIZE+V(A3),D1				;EXTEND BOTTOM FOR PEN
+		MOVE	D1,BOTTOM(A1)				;SET BOTTOM
+
+		JMP		(A0)						;AND RETURN
+
+
+;---------------------------------------------------------------
+;
+;	PROCEDURE StdDraw; 
+;
+;	DRAW THE OBJECT
+;
+StdDraw	MOVE.L	NEWPT(A6),-(SP)				;PUSH NEWPT
+		_DoLine								;DOLINE(NEWPT);
+DONESD	RTS
+
+
+LineTo	PROC  EXPORT
+;----------------------------------------------------------
+;
+;  PROCEDURE LineTo(h,v: INTEGER);
+;
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+	IF hasPenFraction THEN
+		move.w	#$8000,pnLocFixed(a0)		; reset pen fraction.
+	ENDIF
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE.L	GRAFPROCS(A0),D0			;IS GRAFPROCS NIL ?
+		MOVE.L	JStdLine,A0 				;get piece of trap table
+		BEQ.S	USESTD						;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	LINEPROC(A0),A0 			;NO, GET PROC PTR
+USESTD	JMP 	(A0)						;GO TO IT
+
+
+Line	PROC  EXPORT
+		IMPORT LineTo
+;----------------------------------------------------------
+;
+;  PROCEDURE Line(dh,dv: INTEGER);
+;
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+	IF hasPenFraction THEN
+		move.w	#$8000,pnLocFixed(a0)		; reset pen fraction.
+	ENDIF
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE	PNLOC+H(A0),D0				;GET CURRENT PENLOC.H
+		ADD 	D0,6(SP)					;ADD TO DH
+		MOVE	PNLOC+V(A0),D0				;GET CURRENT PENLOC.V
+		ADD 	D0,4(SP)					;ADD TO DV
+		JMP 	LineTo						;LineTo(pnLoc.h+dh,pnLoc.v+dv);
+
+
+
+MoveTo	PROC  EXPORT
+		EXPORT	CommonMoveEnd
+;----------------------------------------------------------
+;
+;  PROCEDURE MoveTo(h,v: INTEGER);
+;
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	GRAFGLOBALS(A5),A1			;POINT TO QUICKDRAW GLOBALS
+	IF hasPenFraction THEN
+		move.w	#$8000,pnLocFixed(a1)		; reset pen fraction.
+	ENDIF
+		MOVE.L	THEPORT(A1),A1				;POINT TO CURRENT GRAFPORT
+		MOVE.L	(SP)+,PNLOC(A1) 			;COPY POINT INTO PNLOC
+CommonMoveEnd
+; If this is a new color port, also clear the fractional position field
+		TST		PORTBITS+ROWBYTES(A1)		;is it a new port?
+		BPL.S	@skipFract					;no, all done
+		MOVE	#$8000,pnLocHFrac(A1)		;initialize to 1/2
+@skipFract
+
+		JMP 	(A0)						;RETURN
+
+
+
+MOVE	PROC  EXPORT
+		EXPORT Moov
+		IMPORT	CommonMoveEnd
+;----------------------------------------------------------
+;
+;  PROCEDURE Move(dh,dv: INTEGER);
+;
+MOOV	MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE	(SP)+,D0					;POP DV
+		MOVE	(SP)+,D1					;POP DH
+		MOVE.L	GRAFGLOBALS(A5),A1			;POINT TO QUICKDRAW GLOBALS
+	IF hasPenFraction THEN
+		move.w	#$8000,pnLocFixed(a1)		; reset pen fraction.
+	ENDIF
+		MOVE.L	THEPORT(A1),A1				;GET CURRENT GRAFPORT
+		ADD 	D0,PNLOC+V(A1)				;ADD DV TO PNLOC.V
+		ADD 	D1,PNLOC+H(A1)				;ADD DH TO PNLOC.H
+		BRA.S	CommonMoveEnd				;clear fraction and return
+		NOP									; silence the assembler <6>
+
+
+DoLine	PROC  EXPORT
+		IMPORT DrawLine,PutLine,SetHSize
+;----------------------------------------------------------
+;
+;  PROCEDURE DoLine(newPt: Point);
+;
+;  { called by StdLine and StdPoly frame }
+;
+		MOVEM.L D6-D7/A3-A4,-(SP)			;SAVE REGS
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A3				;POINT TO CURRENT GRAFPORT
+		MOVE.L	20(SP),D7					;GET NEWPT
+		MOVE.L	PNLOC(A3),D6				;OLDPT := THEPORT^.PNLOC
+;
+;  CHECK IF WE ARE SAVING FOR A POLYGON
+;
+		TST.L	POLYSAVE(A3)				;ARE WE SAVING FOR A POLYGON ?
+		BEQ.S	NOTPOLY 					;NO, CONTINUE
+		MOVE.L	THEPOLY(A4),A1				;YES, GET POLYHANDLE
+		MOVE.L	(A1),A0 					;DE-REFERENCE IT
+		moveq	#0,d0						;clear out high end				@@@@ <08May88> BAL
+		MOVE	(A0),D0 					;GET CURRENT POLYSIZE
+		CMP 	#10,D0						;IS THIS THE FIRST POINT ?
+		BNE.S	FIRSTOK 					;NO, CONTINUE
+		MOVE.L	D6,0(A0,D0.L) 				;YES, INSTALL FIRST := OLDPT	@@@@ <08May88> BAL
+		ADD 	#4,D0						;BUMP INDEX
+		bcs.s	SIZEOK						;poly is full don't resize		@@@@ <08May88> BAL
+FIRSTOK MOVE.L	D7,0(A0,D0.L) 				;INSTALL NEWPT AT END			@@@@ <08May88> BAL
+		ADD 	#4,D0						;BUMP INDEX
+		MOVE	D0,(A0) 					;UPDATE INDEX
+		CMP 	POLYMAX(A4),D0				;TIME TO MAKE BIGGER ?
+		Bcs.S	SIZEOK						;NO, CONTINUE					@@@@ <08May88> BAL
+		ADD 	#256,POLYMAX(A4)			;YES, GROW IN CHUNKS
+		MOVE.L	A1,-(SP)					;PUSH POLYHANDLE
+		MOVE	POLYMAX(A4),-(SP)			;PUSH NEW SIZE
+		BSR.L	SetHSize					;MAKE THEPOLY BIGGER						<5>
+SIZEOK	BRA.S	NOTRGN						;DONT SAVE FOR RGN TOO
+;
+; IF NOT POLY, THEN CHECK FOR RGNSAVE.
+; IF RGNSAVE THEN PutLine(oldPt,newPt,rgnBuf,rgnIndex,rgnMax);
+;
+NOTPOLY TST.L	RGNSAVE(A3) 				;ARE WE SAVING FOR A REGION ?
+		BEQ.S	NOTRGN
+		MOVE.L	D6,-(SP)					;PUSH OLDPT
+		MOVE.L	D7,-(SP)					;PUSH NEWPT
+		MOVE.L	RGNBUF(A4),-(SP)			;PUSH RGNBUF
+		PEA 	RGNINDEX(A4)				;PUSH VAR RGNINDEX
+		PEA 	RGNMAX(A4)					;PUSH VAR RGNMAX
+		_PUTLINE 							;ADD INVERSION PTS TO RGNBUF
+
+NOTRGN	MOVE.L	D6,-(SP)					;PUSH OLDPT
+		MOVE.L	D7,-(SP)					;PUSH NEWPT
+		_DRAWLINE							;DRAW THE LINE
+		MOVE.L	D7,PNLOC(A3)				;UPDATE THEPORT^.PNLOC
+
+; If this is a new color port, also clear the fractional position field
+		TST		PORTBITS+ROWBYTES(A3)		;is it a new port?
+		BPL.S	@skipFract					;no, all done
+		MOVE	#$8000,pnLocHFrac(A3)		;initialize to 1/2
+@skipFract
+
+		MOVEM.L (SP)+,D6-D7/A3-A4			;RESTORE REGS
+		MOVE.L	(SP)+,(SP)					;STRIP PARAM
+		RTS 								;AND RETURN
+
+
+
+HidePen PROC  EXPORT
+		EXPORT ShowPen
+;----------------------------------------------------------
+;
+;  PROCEDURE HidePen;
+;
+		MOVEQ	#-1,D0
+		BRA.S	SHARE
+
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE ShowPen;
+;
+ShowPen MOVEQ	#1,D0
+SHARE	MOVE.L	GRAFGLOBALS(A5),A0				;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A0					;GET CURRENT PORT
+		ADD 	D0,PNVIS(A0)					;INCREMENT/DECREMENT PNVIS
+		RTS 									;AND RETURN
+
+
+
+GetPenState PROC  EXPORT	
+			EXPORT	SETPENSTATE
+;----------------------------------------------------------
+;
+;  PROCEDURE GetPenState(VAR pnState: PenState);
+;
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE	PORTBITS+ROWBYTES(A0),D1	;KEEP ROWBYTES IN D1
+		LEA 	PNLOC(A0),A0				;POINT TO PNLOC
+		MOVE.L	4(SP),A1					;POINT TO VAR PNSTATE
+
+NOTSET	MOVE.L	(A0)+,(A1)+ 				;COPY PNLOC FROM THEPORT
+		MOVE.L	(A0)+,(A1)+ 				;COPY PNSIZE FROM THEPORT
+		MOVE	(A0)+,(A1)+					;COPY PENMODE
+		TST		D1							;IS IT A NEW GRAFPORT?
+		BMI.S	GETNEW						;=>YES, GET NEW INFO
+COPY2	MOVE.L	(A0)+,(A1)+ 				;COPY PNPAT FROM THEPORT
+COPY1	MOVE.L	(A0)+,(A1)+ 				;ALL 8 BYTES
+DONE	MOVE.L	(SP)+,(SP)					;STRIP 4 BYTES
+		RTS 								;AND RETURN
+
+; SRC IS A NEW GRAFPORT, IF THE PATTERN WAS OLD-STYLE, COPY ITS DATA
+; IF THE PATTERN WAS NEW, COPY THE HANDLE AND SET HIGH BIT OF PENMODE
+
+GETNEW	MOVE.L	(A0),(A1)					;COPY PENPIXPAT HANDLE
+		MOVE.L	(A0),A0						;GET HANDLE
+		MOVE.L	(A0),A0						;POINT TO PENPIXPAT
+		TST		PATTYPE(A0)					;IS IT A NEW PATTERN?
+		BEQ.S	NOTNEW						;=>NO, COPY OLD DATA
+		OR		#$8000,-2(A1)				;ELSE SET FLAG IN PENMODE
+		BRA.S	DONE						;AND RETURN
+
+NOTNEW	MOVE.L	PATDATA(A0),A0				;GET HANDLE TO PATTERN DATA
+		MOVE.L	(A0),A0						;POINT TO PATTERN DATA
+		BRA.S	COPY2						;COPY THE PATTERN AND RETURN
+
+
+SetPenState 
+;----------------------------------------------------------
+;
+;  PROCEDURE SetPenState(pnState: PenState);
+;
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE	PORTBITS+ROWBYTES(A0),D1	;KEEP ROWBYTES IN D0
+		LEA 	PNLOC(A0),A1				;POINT TO PNLOC
+		MOVE.L	4(SP),A0					;POINT TO VAR PNSTATE
+
+		MOVE.L	(A0)+,(A1)+ 				;COPY PNLOC FROM THEPORT
+		MOVE.L	(A0)+,(A1)+ 				;COPY PNSIZE FROM THEPORT
+		MOVE	(A0)+,(A1)					;COPY PENMODE
+		AND		#$7FFF,(A1)+				;AND CLEAR HIGH BIT
+		TST		D1							;IS IT A PENPIXPAT?
+		BPL.S	COPY2						;=>NO, SET IT OLD WAY
+
+; DESTINATION IS A COLOR PORT.  MUST CHECK FOR OLD OR NEW PAT
+
+@SETNEW	TST		-2(A0)						;IS IT A PENPIXPAT?
+		BPL.S	@SETOLD						;=>NO, SET OLD PATTERN
+		MOVE.L	(A0),-(SP)					;PUSH HANDLE
+		_PENPIXPAT							;AND SET PEN'S PIXPAT
+		BRA.S	DONE						;AND RETURN
+
+@SETOLD	MOVE.L	A0,-(SP)					;POINT TO PAT
+		_PENPAT								;AND SET IT
+		BRA.S	DONE						;AND RETURN
+
+
+GetPen	PROC  EXPORT
+;----------------------------------------------------------
+;
+;  PROCEDURE GetPen(VAR pt: Point);
+;  { inquire the current pen location }
+;
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE.L	4(SP),A1					;POINT TO VAR PT
+		MOVE.L	PNLOC(A0),(A1)				;GET PNLOC FROM THEPORT
+		MOVE.L	(SP)+,(SP)					;STRIP 4 BYTES
+		RTS 								;AND RETURN
+
+
+
+PenSize PROC  EXPORT
+;----------------------------------------------------------
+;
+;  PROCEDURE PenSize(width,height: INTEGER);
+;  { set the pen width and height }
+;
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE.L	4(SP),PNSIZE(A0)			;SET PEN WIDTH AND HEIGHT
+		MOVE.L	(SP)+,(SP)					;STRIP 4 BYTES
+		RTS 								;AND RETURN
+
+
+
+PenMode PROC  EXPORT
+		IMPORT PortWord
+;----------------------------------------------------------
+;
+;  PROCEDURE PenMode(mode: INTEGER);
+;  { set the transfer mode for line drawing }
+;
+		MOVEQ	#PNMODE,D0					;PUT PORT OFFSET IN D0
+		JMP 	PORTWORD					;INSTALL PARAM INTO THEPORT
+
+
+
+PenPat	PROC	EXPORT
+		IMPORT 	OLDPATTONEW
+		EXPORT	PenNormal
+;----------------------------------------------------------
+;
+;  PROCEDURE PenPat(pat: Pattern);
+;  { set the pattern for line drawing }
+;
+		MOVE.L	4(SP),A1					;POINT TO INPUT PATTERN
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+
+SETPPAT	TST		PORTBITS+ROWBYTES(A0)		;IS IT A NEW GRAFPORT?
+		BMI.S	NEWPPAT						;=>YES, INSTALL A COLOR PATTERN
+
+		LEA 	PNPAT(A0),A0				;POINT TO PNPAT
+		MOVE.L	(A1)+,(A0)+ 				;COPY PATTERN INTO THEPORT
+		MOVE.L	(A1)+,(A0)+ 				;ALL 8 BYTES
+DONE	MOVE.L	(SP)+,(SP)					;STRIP 4 BYTES
+		RTS 								;AND RETURN
+
+NEWPPAT	MOVE.L	A1,-(SP)					;PUSH THE PATTERN
+		PEA		PNPIXPAT(A0)				;AND THE PEN PAT HANDLE
+		_OLDPATTONEW						;INSTALL THE PATTERN
+		BRA.S	DONE						;AND RETURN
+
+
+PenNormal
+;----------------------------------------------------------
+;
+;  PROCEDURE PenNormal;
+;  { restore all line drawing parameters to normal }
+;
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		LEA		BLACK(A0),A1				;POINT TO BLACK PATTERN
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE.L	#$00010001,PNSIZE(A0)		;PEN SIZE:=1,1
+		MOVE	#8,PNMODE(A0)				;PENMODE:=PATTERN COPY
+		MOVE.L	(SP),-(SP)					;PUSH DUMMY PARAM
+		BRA.S	SETPPAT						;PNPAT := BLACK
+
+
+		ENDPROC 
+
+
+
+
+
+
+
+

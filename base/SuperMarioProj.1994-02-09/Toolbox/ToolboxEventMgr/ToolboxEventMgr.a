@@ -1,0 +1,779 @@
+;
+;	File:		ToolboxEventMgr.a
+;
+;	Contains:	Event-Oriented ROM-Based Routines for User Interface ToolBox
+;
+;
+;	Change History (most recent first):
+;
+;	  <SM10>	 1/28/94	chp		Remove TNT-specific hack from <SM9>.
+;	   <SM9>	11/10/93	fau		In TryDevice, don't do anything if debugging TNT, as we don't
+;									support the old SCSI API yet.
+;	   <SM8>	11/19/92	RB		When looking for FKEY's, look in ROM first.
+;	   <SM7>	 11/3/92	SWC		Changed SCSIEqu.a->SCSI.a.
+;	   <SM6>	10/22/92	CSS		Change some branch short instructions to word branches.
+;		 <9>	  7/21/92	CSS		Clean up previous comment so this file can be copied exactly 
+;									into SuperMario.
+;		 <8>	  6/8/92	JSM		Check emProcessMgrExists to see if we need to do HLE stuff
+;									instead of calling Gestalt, re-roll-in
+;									CheckInhibitFKEYInGetNextEvent and FixCheckActivate patches more
+;									intelligently (simply bypass the GetResource call if ScrDmpEnb
+;									is false for CheckInhibitFKEYInGetNextEvent, and just delete the
+;									code that FixCheckActivate was bypassing).
+;		 <7>	  6/2/92	JSM		Check emProcessMgrExists to see if we can call HLE stuff instead
+;									of using Gestalt.
+;		 <6>	 2/10/92	JSM		Moved this file to ToolboxEventMgr folder, keeping all the old
+;									revisions.
+;		 <5>	10/17/91	JSM		Cleanup header, roll-in HLEAvail and GetNextHLE patches (still
+;									need to not call Gestalt all the time), remove some code
+;									conditionalized for onMacPP.
+;		 <4>	 9/11/91	stb		& bbm: roll in GetMouse patch to set the window mgr port for the
+;									journalling driver
+;		 <2>	 6/12/91	LN		Changed #include 'HardwareEqu.a' to 'HardwarePrivateEqu.a'
+;	   <1.4>	 12/4/89	MSH		Ported IdleUpdate call from forked off hcmac sources.
+;	   <1.3>	 8/28/89	SES		Removed references to nFiles.
+;	   <1.2>	11/17/88	DHD		Made the journaling _Control call be IMMED
+;	   <1.1>	11/10/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	  <•1.6>	 9/23/88	CCH		Got rid of inc.sum.d and empty nFiles
+;	   <1.5>	  9/8/88	MSH		Removed all traces of sleep/idle support.
+;	   <1.4>	 6/24/88	MSH		Removed the go to sleep code from getnextevent for HcMac.
+;	   <1.3>	 5/16/88	BBM		Added WaitNextEvent Proc. aka Phil Goldman and Ed Tecot. Cleaned
+;									up comments.
+;	   <1.2>	 4/18/88	CSL		added support for SLEEP & IDLE in GetNextEvent for HcMac
+;	   <1.1>	 3/28/88	BBM		Second try at idle now looks for events while wasting time in
+;									slow mode.
+;	   <1.0>	 2/11/88	BBM		Adding file for the first time into EASE…
+;				11/17/88	DHD		Made the Journaling Control call be immediate.
+;
+
+			BLANKS		ON
+			STRING		ASIS
+
+			LOAD		'StandardEqu.d'
+			INCLUDE		'HardwarePrivateEqu.a'
+			INCLUDE		'SCSI.a'
+			INCLUDE		'GestaltEqu.a'				; <5>
+			INCLUDE		'MFPrivate.a'				; <5>
+
+;
+MiscMGR 		PROC	  EXPORT
+;
+;  Definitions for the external world
+;
+				EXPORT	GetMouse
+				EXPORT	StillDown
+				EXPORT	Button
+				EXPORT	WaitMouseUp
+				EXPORT	TickCount
+				EXPORT	GetKeys
+				EXPORT	GetNextEvent
+				EXPORT	EventAvail
+
+				IMPORT	EnableTimeOut					; <A300/29Oct86>
+				IMPORT	DisableTimeOut					; <A300/29Oct86>
+				
+;
+; PROCEDURE GetKeys(VAR k: keyMap) returns 128 bits (4 longs) worth of keyMap state.
+;
+GetKeys
+				MOVE.L	4(SP),A1		; Get user's dest. address
+				LEA 	KeyMap,A0		; point to keymap
+
+				MOVE.L	(A0)+,(A1)+ 	; move in first long
+				MOVE.L	(A0)+,(A1)+ 	; move in second long
+				MOVE.L	(A0)+,(A1)+ 	; move in third long
+				MOVE.L	(A0)+,(A1)+ 	; move in last long
+
+				MOVE.L	4(SP),A1		; Get user's dest. address
+				MOVEQ	#jcGetKeys,D1	; GetKeys code
+				BSR.S	GetJournal		; and journal it
+
+				MOVE.L	(SP)+,(SP)		; strip parameter
+				RTS
+
+
+;
+; FUNCTION Button:BOOLEAN is a function that returns the state of the mouse button
+;
+Button
+				LEA 	4(SP),A1		; Get pointer to function result
+				CLR 	(A1)			; return false for now
+				TST.B	MBState 		; See if button down
+				BMI.S	itsUp			; and skip if not
+				ADDQ.B	#1,(A1) 		; Turn false into truth
+itsUp
+				MOVEQ	#jcButton,D1	; Button code
+				BRA.S	GetJournal		; and go journal it if need be(implied return)
+
+
+;
+; FUNCTION TickCount:LongInt returns the current time in Ticks, fall into common
+; journaling code
+;
+TickCount
+				LEA 	4(SP),A1		; point to function result
+				MOVE.L	Ticks,(A1)		; Return the ticks count
+				MOVEQ	#jcTickCount,D1 ; Time code
+
+;
+; GetJournal is the main routine that implements journaling for GetMouse,
+; Button, Time and GetKeys.  It takes a "caller code" in D1 (passed on through
+; the journaling hook) and a pointer to the actual data we're polling (for
+; example, its TICKS for the Time call) in A1
+;
+GetJournal
+				MOVE.W	JournalFlag,D0	; is journaling on?
+				BEQ.S	adios			; if not, skip
+				BPL.S	ItsRecord		;
+
+; handle playBack
+				MOVEQ	#JPlayCtl,D0	; say its PlayBack
+				BRA.S	CallJournal 	; invoke the journal
+
+; handle record
+ItsRecord
+				MOVEQ	#JRecordCtl,D0	; say its Record and fall into callJournal
+
+
+; routine to invoke the journal.  D0 has control code, D1 has "which" selector
+; and A0 is the address to stuff the result
+
+CallJournal
+				SUB 	#40,SP					; make some space for parameter block
+
+				LEA 	IORefNum(SP),A0 		;										<24Oct85>
+				MOVE	JournalRef,(A0)+		; IORefNum	<-- refNum					<24Oct85>
+				MOVE	D0,(A0)+				; CSCode	<-- journal call			<24Oct85>
+				MOVE.L	A1,(A0)+				; CSParam	<-- result pointer			<24Oct85>
+				MOVE.W	D1,(A0)+				; CSParam+4 <-- caller code 			<24Oct85>
+				MOVE.W	D3,(A0)+				; CSParam+6 <-- GNE vs OSAvail flag 	<24Oct85>
+				MOVE.L	SP,A0					; point up param block
+
+				_Control ,IMMED
+				ADD 	#40,SP					; pop off param block
+				BNE.S	BadJournal				; if couldn't find it, turn off journal
+				RTS 							; all done
+
+BadJournal
+				CLR.W	JournalFlag 			; turn journal off if no good
+				ST		CRSRCouple				; recouple cursor
+adios			RTS
+
+;
+; PROCEDURE GetMouse(VAR mousePt: Point);
+;
+;	 GetMouse is a routine that returns the current mouse position in the local
+;  coordinates of the current grafPort
+;
+GetMouse
+				MOVE.L	4(SP),A1		; put user's result ptr in A1
+				MOVE.L	Mouse,(A1)		; send back the mouse coordinates
+				MOVEQ	#jcGetMouse,D1	; GetMouse code
+				BSR.S	GetJournal		; and journal it (in global space)
+
+				MOVE.L	4(SP),-(SP) 	; put user's result ptr on stack
+				_GlobalToLocal			; map to local coordinates
+
+				MOVE.L	(SP)+,(SP)		; strip parameter
+				RTS
+
+;
+;  FUNCTION StillDown: BOOLEAN;
+;
+; returns true only if the button is down AND there are no button events in the queue
+;
+;
+StillDown
+				LINK	A6,#-20 		;get a buffer for events
+				CLR.W	8(A6)			;assume StillDown := false
+;
+				SUBQ	#2,SP			;make room for function result
+				_Button 				;is the button down?
+				TST 	(SP)+			;inspect result
+				BEQ.S	SDDone			;if not, we're done, return false
+;
+				SUBQ	#2,SP			;make room for result
+				MOVE	#7,-(SP)		;7 is mask for button events
+				PEA    -20(A6)			;push pointer to event buffer
+				_EventAvail 			;are there any?
+				TST 	(SP)+			;well...
+				BNE.S	 SDDONE 		;if there are, return false
+;
+				ADDQ.B	 #$01,8(A6) 	 ;return true(Turn false into true)
+;
+SDDONE			UNLK	A6
+				RTS
+
+;
+; FUNCTION WaitMouseUp:BOOLEAN is sort of like StillDown but eats the
+; buttonUp event.
+;
+WaitMouseUp
+				LINK	A6,#-20 		;get a buffer for events
+
+				CLR.W	-(SP)			;make room for result
+				_StillDown				;is it still down?
+				MOVE	(SP)+,8(A6) 	;update our result
+				BNE.S	ItStillDown 	;branch if stillDown
+;
+; its not stillDown so eat the buttonUp event
+;
+				SUBQ	#2,SP			;make room for result
+				MOVE.W	#4,-(SP)		;event 2 (mouseUp) only
+				PEA 	-20(A6) 		;push buffer address
+				_GetNextEvent			;get it
+ItStillDown
+				UNLK	A6				;deallocate stack frame
+				RTS 					;all done so return to caller
+
+
+;
+; FUNCTION EventAvail(eventMask: INTEGER; VAR myEvent: eventRecord): BOOLEAN;
+;
+;	Here is the high-level EventAvail that is called by the applications.
+;	Its really just a special case of GetNextEvent (see below), but it
+;	doesn't remove events from the queue.
+;
+EventAvail
+				MOVEQ	#-1,D0			; set D0 to indicate EventAvail
+				BRA.S	GNECommon		;use common code
+
+;
+; FUNCTION GetNextEvent(eventMask: INTEGER; VAR myEvent: eventRecord): BOOLEAN;
+;
+;	Here is the high-level GetNextEvent that is called by the applications.
+;	It calls the OS "GetOSEvent" for raw events, supplies updates by
+;	calling CheckUpdate, and calls the journalling and desk Ornament mechanisms
+;	as appropriate.
+
+;	If a filter proc is installed, it passes control to the filter proc before returning
+;	to the caller.
+;
+GetNextEvent
+				MOVEM.L (SP)+,D0-D2 	; pull return,MyEvent,Mask/Result			<EHB 28-Jan-85>
+				SUBQ	#2,SP			; make room for result						<EHB 28-Jan-85>
+				MOVE.L	D0,-(SP)		; push return address						<EHB 28-Jan-85>
+				MOVE.L	D1,-(SP)		; push MyEvent								<EHB 28-Jan-85>
+				MOVEM.L D1-D2,-(SP) 	; push Mask/Result,MyEvent					<EHB 28-Jan-85>
+
+; Call GNECommon with stack like this:	result, return(user), MyEvent, Mask/Result, MyEvent, return(us)
+
+				MOVEQ	#0,D0			; clear D0 to indicate GetNextEvent 		<EHB 28-Jan-85>
+				BSR.S	GNECommon		; do common GetNextEvent Stuff				<EHB 28-Jan-85>
+
+; set things up to call a GetNextEvent Filter Proc. This is what a call to GNEFilter looks like:
+
+;	Entry:		A1 = MyEvent Pointer
+;				D0 = result
+;				 (SP) = return address to caller
+;				4(SP) = result to caller
+;	Exit:		Just like return from GetNextEvent
+
+				MOVE.W	(SP)+,D0		; pull result								<EHB 28-Jan-85>
+				MOVE.L	(SP)+,A1		; MyEvent pointer							<EHB 28-Jan-85>
+				MOVE.W	D0,4(SP)		; pass result to caller (leave ret addr)	<EHB 28-Jan-85>
+				MOVE.L	JGNEFilter,-(SP)	; filter proc?							<EHB 28-Jan-85>
+				BNE.S	@1				; =>yes, RTS to it ...WAS BGT.S!!!			<11Apr85>
+				ADDQ	#4,SP			; else strip it off the stack				<EHB 28-Jan-85>
+@1
+				RTS 					; return to caller							<EHB 28-Jan-85>
+
+; here is common GetNextEvent/EventAvail code.	The DS window check is done here because the
+; registers are already saved here.
+
+GNECommon
+				LINK	A6,#0			;set up a stack frame
+				MOVEM.L D3/A3,-(SP) 	;save some work registers
+				MOVE.L	D0,D3			;put D0 in D3 to discriminate GetNextEvent
+				BNE.S	@1				; don't clear DS window if EventAvail       <EHB 28-Jan-85>
+
+; clear DS Window if there is one
+
+				BSET	#7,DSWndUpdate	; is there a disk switched window to remove?<EHB 28-Jan-85>
+				BNE.S	@1				; =>no, just set up for GNE Filter Proc 	<EHB 28-Jan-85>
+
+				TST.B	WWExist 		; does a window world exist?				<EHB 28-Jan-85>
+				BNE.S	@1				; no, one less world to worry about 		<EHB 28-Jan-85>
+
+				SUBQ	#4,SP			; make space to keep current port			<EHB 28-Jan-85>
+				MOVE.L	SP,-(SP)		; and point to it							<EHB 28-Jan-85>
+				_GetPort				; remember current port on stack			<EHB 28-Jan-85>
+
+				MOVE.L	WMgrPort,-(SP)	; get port w/wide open clip/vis 			<KWK 13-May-85>
+				_SetPort				; and set it								<KWK 13-May-85>
+
+				SUBQ	#4,SP			; get frontWindow for PaintBehind			<EHB 28-Jan-85>
+				_FrontWindow			;											<EHB 28-Jan-85>
+				SUBQ	#4,SP			; get a region for PaintBehind				<EHB 28-Jan-85>
+				_NewRgn 				;											<EHB 28-Jan-85>
+				MOVE.L	(SP),A3 		; and set region to the deep squid window	<EHB 28-Jan-85>
+				PEA 	DSAlertRect 	;											<EHB 28-Jan-85>
+				_RectRgn				;											<EHB 28-Jan-85>
+				MOVE.L	A3,-(SP)		; cover up that ugly alert					<EHB 28-Jan-85>
+				_PaintBehind			;											<EHB 28-Jan-85>
+				MOVE.L	A3,-(SP)		; and then throw away the clobbered region	<EHB 28-Jan-85>
+				_DisposRgn
+
+				_SetPort				; window gone! Restore old port from stack	<EHB 28-Jan-85>
+@1
+
+				CLR.W	14(A6)			;set result to FALSE (assume no event)
+				MOVE.L	8(A6),A3		;point A3 to the event record
+
+; First, see if an activate event and return if so (Z flag reset if found one)
+
+				MOVE.W	12(A6),D0		;get the caller's event mask
+				MOVE.L	A3,A0			;get event pointer in A0
+
+				BSR 	CheckActivate	; See if activate
+				BEQ.S	Dormant 		; if got one, indicate it and jump to sys
+				ADDQ.B	#01,14(A6)		; turn the false into true
+				BRA.S	PassToSystem
+
+
+; See if there are any events.
+
+Dormant
+				MOVE.W	12(A6),D0		;get the caller's event mask
+				MOVE.L	A3,A0			;get event pointer in A0
+
+				TST 	D3				;EventAvail or GetNextEvent?
+				BPL.S	DontPeek		;branch if its not an eventAvail
+
+				_OSEventAvail			;ask OS for next event
+				BRA.S	GoCheckHLE		;go check if we got a high level event					<5>
+
+DontPeek
+				_GetOSEvent 			;ask the OS for an event
+
+; Check for high level event
+GoCheckHLE
+				tst.w	EvtNum(a3)					; find something?							<5>
+				bne.s	GoCheckJournal				; if so, get out without further ado		<5>
+	
+; no OS events.  Should we look for high-level events?
+				move.w	12(a6),d0					; get the caller's event mask				<5>
+				btst	#highLevelEvtBit,d0			; high-level events requested?				<5>
+				beq.s	GoCheckJournal				; if not, just go on						<5>
+
+; We need to check for high level events.  Determine whether Process Mgr is around yet.
+				move.l	ExpandMem,a0					; get ExpandMem							<7>
+				tst.w	ExpandMemRec.emProcessMgrExists(a0)	; is Process Mgr up yet?			<7>
+				beq.s	GoCheckJournal					; exit now if we're still too early		<7>
+
+; Ask the Process Mgr for a high level event.
+CallGetHLEvent
+				clr.w	-(sp)						; allocate result storage					<5>
+				move.w	12(a6),-(sp)				; pass event mask							<5>
+				move.l	a3,-(sp)					; pass address of event record				<5>
+				tst.w 	d3							; EventAvail or GetNextEvent?				<5>
+				seq		-(sp)						; pass Boolean: GNE - true, EA - false		<5>
+				_GetNextHighLevelEvent				; call Process Mgr							<5>
+				addq	#2,sp						; pop result								<5>
+
+; Go check the journal
+GoCheckJournal
+				MOVE.L	A3,A1			; pass the eventPtr
+				MOVEQ	#jcEvent,D1 	; event code
+				BSR 	GetJournal		; invoke the journal
+
+; Check to see if we got an event and set return code so far
+				TST.W	EvtNum(A3)		; did we get an event?
+				BEQ.S	noneYet
+
+				ADDQ.B	#1,14(A6)		; if so, return TRUE(Turn false into true)
+				BRA.S	PassToSystem	; and then pass to system code
+
+noneYet
+				MOVE.W	12(A6),D0		;get caller's event mask
+				BTST	#UpdatEvt,D0	;is it enabled?
+				BEQ.S	PassToSystem	;if not, don't bother to check
+
+				CLR.W	-(SP)			;make space for function result
+				MOVE.L	A3,-(SP)		;push the event pointer
+				_CheckUpdate			;any update events?
+				MOVE.W	(SP)+,14(A6)	;return the result
+
+; OK, we got an event so see if the system wants it.  But before passing it to an
+; accessory, see if it's an FKey.                                                   <13Jan86  JTC>
+
+PassToSystem
+				TST 	D3				;was it an EventAvail call?
+				BMI		DoneGNE 		;don't pass those to the system
+
+				TST.W	14(A6)			;did we really, truly get one?
+				BEQ		DoneGNE 		;if not, we're done
+
+; If Command AND Shift AND not-Option AND low byte of evtMessage between 0 and 9 AND
+; key up or down THEN we take the event (i.e. returning FALSE to app) and, if it's up,
+; actually try the FKey stuff.
+TryFKey
+				MOVEQ	#$0B,D1 		;seek cmdKey, shiftKey, not alphaLock, and optionKey	<09Apr85>
+				AND.B	evtMeta(A3),D1	;high byte of meta word contains modifier bits			<09Apr85>
+				SUBQ.B	#$03,D1 		;want cmdKey AND shiftKey BUT NOT optionKey 			<09Apr85>
+				BNE 	TrySysEvent 	;if not so, no FKey action!  <SM6> CSS 							<13Jan86  JTC>
+
+				MOVE.B	evtMessage+2(A3), D0	; Get the raw keycode							<PMAB102/20Apr87>
+				CMP.B	#$3F, D0				; Keyboard or Keypad?							<PMAB102/20Apr87>
+				BHI.S	TrySysEvent				; Keypad -- punt								<PMAB102/20Apr87>
+
+				MOVE.B	evtMessage+3(A3),D1 ;low byte is ascii code (or fkey code)				<09Apr85>
+				SUB.B	#$30, D1		; convert from char to num								<C89/28Jul86>
+				CMPI.B	#10,D1
+				BCC.S	TrySysEvent 	;10-255 falls out of FKey range 						<13Jan86  JTC>
+
+				MOVE.W	evtNum(A3),D0	;what kind of event?									<09Apr85>
+				SUBQ.W	#keyUpEvt,D0	;quick compare											<09Apr85>
+				BEQ.S	DoneFKey		;return FALSE and NULLify the event 					<13Jan86  JTC>
+				ADDQ.W	#keyUpEvt-keyDwnEvt,D0	;quick compare with keyDwnEvt					<09Apr85>
+				BNE.S	TrySysEvent 	;exit if neither key up nor down						<13Jan86  JTC>
+;
+; Have FKey code in D1, so use code stolen from GNEFilter of yore, to load and execute			<09Apr85>
+; possible resource. 
+;
+
+; begin roll-in CheckInhibitFKEYInGetNextEvent patch - honor ScrDmpEnb							<SM4>
+
+				TST.B	ScrDmpEnb			; Check the ScrDmpEnb flag							<SM4>
+				BEQ.S	@CheckOtherFKEYs	; if it's false, don't do the FKEY					<SM4>
+
+; end roll-in CheckInhibitFKEYInGetNextEvent patch												<SM4>
+
+				SUBQ	#4,SP				; load in appropriate function-key package
+				MOVE.L	#'FKEY',-(SP)
+				MOVE.W	D1,-(SP)			; types 0-9
+				MOVE.W	#MapTrue,RomMapInsert	; look in ROM first								<SM8> rb
+				_GetResource
+				MOVE.L	(SP)+,D0
+				BNE.S	@2					; br if we got the resource
+;
+;No FKEY=n resource for these keys (Command-Shift-1 to -0) so do the eject
+;disk thing for -1, -2 and -0.
+;
+@CheckOtherFKEYs							;								<SM4>
+				cmp.w	#2,D1				; check for 1,2,0				<C150/09sep86>
+				bgt.s	DoneFKey			;								<C150/09sep86>
+				tst.w	D1					;								<C150/09sep86>
+				bmi.s	DoneFKey			; 								<C150/10sep86>
+				bne.s	@1					; if Command-Shift-0			<C150/09sep86>
+				moveq	#3,D1				;   make it drive #3			<C150/09sep86>
+@1				moveq	#1,D2				;flag as from the keyboard		<C150/10sep86>
+				move.l	jDoEject,A0			;								<C150/10sep86>
+				jsr		(A0)				; do the eject now				<C150/09sep86>
+				bra.s	DoneFKey			; 								<C150/09sep86>
+
+@2				MOVE.L	D0,A0
+				MOVE.L	(A0),D0 			; dereference
+				BEQ.S	DoneFKey			; exit if purged
+
+				_Hlock						; lock the FKEY code,			<C169/06oct86>
+				MOVE.L	A0,-(SP)			; save for unlock
+				MOVE.L	(A0),A0 			; dereference
+				JSR 	(A0)
+				MOVE.L	(SP)+,A0			; recover handle
+				_HUnLock					; unlock it						<C169/06oct86>
+
+;
+; The system handled the event so return false. FKey ups and downs are turned
+;to NULLs to hide them from Modal Dialog, e.g.								<28Oct85>
+;
+DoneFKey
+				CLR.W	evtNum(A3)			; continue as if an accessory	<28Oct85>
+				BRA.S	HandBySys			; had sucked it up				<13Jan86JTC>
+
+
+; SEvtEnb is zero if the application wants to disable systemEvent.	Test it.
+TrySysEvent 							;											<13Jan86  JTC>
+				TST.B	SEvtEnb 		; System event enabled??					<EHB 28-Jan-85>
+				BEQ.S	DoneGNE 		; if not, let the app have a crack! 		<13Jan86  JTC>
+
+				SUBQ	#2,SP			;make room for function result
+				MOVE.L	A3,-(SP)		;push the event record
+				_SystemEvent			;call the desk manager
+				TST 	(SP)+			;did the system want it?
+				BEQ.S	DoneGNE 		;if not, leave TRUE and quit... 			<13Jan86  JTC>
+
+; Common exit point if handled by FKey or SystemEvent code.  Set FALSE and go...	<13Jan86  JTC>
+HandBySys								;											<09Apr85>
+				CLR.W	14(A6)			;return FALSE
+
+; all done with GetNextEvent so restore the registers and return to the caller
+
+DoneGNE
+
+
+; The following is a one-time check to see if the internal drive (SCSI ID in low
+; memory) is up to speed by now.  If so, then clear high bit of PRAM startup
+; device timeout value (PRAM address $01, byte length) to indicate that device
+; 0 is there (and the startup code will wait for it at the next boot).
+
+				BTST.B	#7,SCSIPoll		; bit 7 is cleared by InitSCSIMgr			<C613/12Jan87>
+				BNE.S	@1				; don't poll if we've already done it once	<C613/12Jan87>
+				CMP.L	#20*60,Ticks	; have we been running for 20 seconds?		<A349/04Nov86>
+				BLO.S	@1				; no, too early yet							<A300/29Oct86>
+				BSET.B	#7,SCSIPoll		; set it so we don't do it again			<C613/12Jan87>
+				BSR		TryDevice		; see if that device is out there			<C613/12Jan87>
+
+@1
+
+; see if there was no event, if so do a get mouse to tickle tracking
+; Historical note: by this time, an FKey is made to look like "no event", in which	<13Jan86  JTC>
+; case the mouse update is done...
+
+				TST.W	EvtNum(A3)		; did we get one?
+				BNE.S	NeverMind		; if not, go check for possible update evt
+
+; be sure to set the port to the WMgrPort for the journalling driver
+
+				TST.W	WWExist			; see if the window mgr and QD exist			<4>
+				bne.s	NeverMind		; if window mgr isn’t there, don’t call GetMouse<4>
+
+; Window Manager exists.  Set the port to the Window Manager’s port before calling _GetMouse
+
+				sub.w	#4,sp			; room for the result							<4>
+				move.l	sp,-(sp)		; push address of var param result				<4>
+				_GetPort				; Save the current port on the stack			<4>
+		
+				move.l	WMgrPort,-(sp)	;												<4>
+				_SetPort				; Set the port to the Window Manager’s port		<4>
+
+				PEA 	TempRect		;we don't care about it so stuff it here
+				_GetMouse				;read the mouse so it will be journalled
+
+				_SetPort				; restore the old port; it's on the stack.		<4>
+
+NeverMind
+				MOVEM.L (SP)+,D3/A3 	;restore registers
+				UNLK	A6				;unbuild stack frame
+				MOVE.L	(SP)+,A0		;get return address
+				ADDQ	#6,SP			;strip both parameters
+				JMP 	(A0)			;return to caller
+
+; CheckActive is used to generate active and deactive events.  It is entered
+; and exited with D0 containing the event mask and A0 and A3 pointing to the
+; event record.  If D3 is set, its an EventAvail call rather than a GetNextEvent
+; call. On exit, if the z-flag is clear, it had an event.
+
+; First see if the event is enabled.
+
+CheckActivate							; <19feb86> BBM
+				BTST	#ActivateEvt,D0	;is it enabled?
+				BEQ.S	DoneChkActive	;if not, we're done
+
+				MOVE.L	CurDeActive,D1	;get the deactived window
+				BGT.S	GotDActive		;if non-zero and non-neg, go post it
+
+				MOVE.L	CurActivate,D1	;how about an activate one?
+				BLE.S	DoneChkActive	;if none, we're done
+				MOVEQ	#1,D2			;flag the activate
+
+; we got an activated or deactived window so make the event
+
+GotActCommon
+				MOVEQ	#0,D0			;use a mask of zero
+				_OSEventAvail			;get a NULL event record
+				MOVE.W	#ActivateEvt,(A0)+ ;flag it as (de)activate event
+				MOVE.L	D1,(A0) 		;the windowPtr is the message
+
+; Roll-in FixCheckActivate patch															<SM4>
+;
+; A bug occurs in the IIci ROM under 32-bit mode. The high bit of CurActivate and CurDeactivate
+; are used as flags to indicate that the events have already been sent. (0 in either also means that
+; the event was sent.) The problem is that the ROM code (written for 24-bit machines) refers to the
+; windowKind field without stripping off this high bit. Under some circumstances, this would cause
+; a bus error. Since the code that checks the window is only used to set the system/application bit
+; in the modifiers of the activate/deactivate event, and that bit was never documented in a released
+; version of Inside Mac. (and no one uses it), we can fix the bug by getting rid of the code that
+; sets the system/application bit.
+
+; put the bits into evtMeta
+
+				MOVE.W	EvtMeta(A3),D0	;get it
+				AND 	#$FFFC,D0		;mask in low bits
+				OR		D2,D0			;or in flag bits
+				MOVE.W	D0,EvtMeta(A3)	;stuff it back
+
+; eat up the event by clearing buffer if not a peek call
+
+				TST.W	D3				;is it a peek call?
+				BNE.S	GotDone1		;if so, we're done
+
+				LSR 	#1,D0			;activate or deactivate?
+				BCC.S	ClearDAct		;if deactivate, go clear it
+
+				BSET	#7,CurActivate	;clear activate event
+GotDone1
+				MOVEQ	#-1,D1			;clear z flag to say we got something
+				RTS
+DoneChkActive
+				MOVEQ	#0,D1			;set z flag to say we got nothing
+				RTS
+ClearDAct
+				BSET	#7,CurDeActive
+				BRA.S	GotDone1
+
+GotDActive		CLR 	D2				;flag the deactivate
+				BRA.S	GotActCommon	;go use common code
+
+
+;--------------------------------------------------------------------------
+;
+; TryDevice -- we do a one-time check of the SCSI ID for the internal hard
+;	disk some number of seconds after bootup.  Since the internal disk is
+;	powered from the CPU's power supply, it is likely that the startup code
+;	will be ready to boot off a floppy before the disk has spun up to full
+;	speed.  Unless we have some way to know if there is an internal drive,
+;	the start code won't know whether or not to wait for the device.  This
+;	'lightning bolt' happens once per bootup, setting a field in parameter
+;	RAM that the startup code looks at.  If we find a SCSI device ready that
+;	corresponds to the internal disk SCSI ID stored in parameter RAM, then
+;	we set a field in parameter RAM so the startup code will wait for it
+;	at the next bootup.  This introduces some hysteresis in the process if the
+;	user changes the ID of his internal drive, but it was deemed to be more
+;	preferable than the alternative of a Control Panel setting to enable and
+;	disable waiting for the internal hard disk.  The default ID to check is
+;	0, but can be changed in parameter RAM (which gets stored into the SCSIPoll
+;	variable by InitSCSIMgr).
+;
+
+TryDevice								; This subroutine new <A300/29Oct86>
+				CLR.L	-(SP)			; 6-byte Test Unit Ready command block
+				CLR.L	-(SP)			;   (6 zeroes) and 2-byte return value
+				_SCSIGet				; arbitrate for the SCSI bus
+				TST.W	(SP)			; success?
+				BNE.S	TryDevDone		; if arbitrate failed, don't change PRAM
+				MOVE.B	SCSIPoll,D0		; get SCSI ID of the int. drive		<C613>
+				AND.B	#$07,D0			; mask off ID bits					<C613>
+				MOVE.W	D0,-(SP)		; push SCSI ID for the select		<C613>
+
+				_SCSISelect				; try to select (max. wait 250 ms.)
+				TST.W	(SP)			; success?
+				BEQ.S	SelectOK		; branch if select succeeded
+
+				_DisableDynWait			; don't wait for that id on bootup	<A349/04Nov86>
+				BRA.S	TryDevDone		; exit
+
+SelectOK
+				PEA		2(SP)			; address of Test Unit Ready command
+				MOVE.W	#6,-(SP)		; length of Test Unit Ready command
+				_SCSICmd				; do the command
+		;
+		;	If something went wrong with the command, then we need to do
+		;	SCSIComplete anyway, so it isn't necessary to check the
+		;	return value.  Since we don't need the space for the command
+		;	block any more, we just reuse it for the status and message
+		;	values (each a word) returned by SCSIComplete.  Before pushing
+		;	anything else, these EA's are 2(sp) and 4(sp), so we PEA 2(sp)
+		;	for the first (which adds 4 bytes to the stack), and PEA 8(sp)
+		;	for the second [PEA 4+4(sp)].
+		;
+				PEA		2(SP)			; address for status value
+				PEA		8(SP)			; address for message value
+				MOVEQ.L	#60,D0			; maximum number of ticks to wait	<A349/04Nov86>
+				MOVE.L	D0,-(SP)		; push it
+				_SCSIComplete			; wrap things up, ignore return code
+		;
+		;	If we got this far, then there is a device 0, so enable timeout
+		;
+				_EnableDynWait			; startup code will wait for dev. 0	<A349/04Nov86>
+
+TryDevDone
+				ADDQ.L	#8,sp			; clean up local variables
+				RTS
+
+
+				ENDPROC
+
+
+;____________________________________________________________________________________
+;
+; Proc WaitNextEvent
+;
+; by Phil Goldman and Ed Tecot
+;
+; This is the Classic Mac OS version of WaitNextEvent.  It is completely replaced
+; in MultiFinder.
+;
+; Modification History:
+;	S380	04Feb88	EMT		Fix WaitNextEvent when mouseRgn is nil
+;	S426	16Mar88	PYG		Handle overflow for timeout and control of mouse-moved diarrhea
+;
+
+WaitNextEvent	PROC	EXPORT
+
+mouseMovedMsg	EQU	$FA000000
+maxTickCount	EQU	$FFFFFFFF
+
+; Stack Frame
+retAddr		EQU		4
+mouseRgn	EQU		retAddr+4
+timeOut		EQU		mouseRgn+4
+theEvent	EQU		timeOut+4
+eventMask	EQU		theEvent+4
+retBool		EQU		eventMask+2
+
+; Locals
+; d3:			Tick time to wakeup (i.e. return)
+; d4:			Last mouse position
+
+			LINK	A6, #0					; Set up stack frame
+			MOVEM.L	D3-d4/A2, -(SP)			; Save registers						<S436/22Mar88> PYG
+			moveq.l	#$FFFFFFFF,d4			; pick a supposed invalid first value	<S436/22Mar88> PYG
+											; for the previous mouse position
+			MOVE.L	Ticks, D3				; Save Ticks on entry
+			ADD.L	timeOut(A6), D3			; D3 is wakeup time
+			bcc.s	@WaitTimeOK				; if no (unsigned) overflow, branch		<S426/16Mar88> PYG
+			moveq.l	#maxTickCount,d3		; if overflow, peg to max tick count	<S426/16Mar88> PYG
+@WaitTimeOK									;										<S426/16Mar88> PYG
+			MOVE.L	theEvent(A6), A2		; We'll use this often
+
+@WaitLoop
+			_SystemTask
+
+			SUBQ.W	#2, SP					; Make space for return value
+			MOVE.W	eventMask(A6), -(SP)
+			MOVE.L	A2, -(SP)				; theEvent
+			_GetNextEvent
+			MOVE.B	(SP)+, retBool(A6)		; Stuff the boolean return value
+			BNE.S	@WaitDone				; If non-zero, we're done
+
+; GetNextEvent correctly stuffs evtTicks, evtMouse, evtMeta, and evtMBut fields
+			CMP.L	evtTicks(A2), D3		; Time to wake up?
+			BLS.S	@WaitDone				; If so, we're done
+
+			MOVE.L	mouseRgn(A6), D0		; Get the mouseRgn							<S380>
+			BEQ.S	@WaitLoop				; Loop if nil								<S380>
+
+			cmp.l	evtMouse(A2),d4			; is it the same as the last one?		<S436/22Mar88> PYG
+			beq.s	@WaitLoop				; if so, loop							<S426/16Mar88> PYG
+			
+			move.l	evtMouse(A2),d4			; and save new value					<S436/22Mar88> PYG
+			
+			SUBQ.W	#2, SP					; Make space
+			MOVE.L	evtMouse(A2), -(SP)		; pt for PtInRgn						<S426/16Mar88> PYG
+			MOVE.L	D0, -(SP)				; rgn for PtInRgn							<S380>
+			_PtInRgn
+			TST.B	(SP)+					; Is it in the region?
+			BNE.S	@WaitLoop				; If it is, loop around
+
+			MOVE.W	eventMask(A6), D0
+			BTST	#app4Evt, D0			; Accept app4?
+			BEQ.S	@WaitDone				; No, get out
+
+; Manufacture a mouse moved event
+			MOVE.W	#app4Evt, evtNum(A2)			; what = app4Evt
+			MOVE.L	#mouseMovedMsg, evtMessage(A2)	; message = MouseMoved
+			ST.B	retBool(A6)						; return True
+
+@WaitDone
+			MOVEM.L	(SP)+, D3-d4/A2			; Restore registers						<S436/22Mar88> PYG
+			UNLK	A6
+			MOVE.L	(SP), A0				; Get return address
+			LEA		retBool-4(SP), SP		; Pop the arguments
+			JMP		(A0)					; Return
+
+			ENDPROC
+
+			END
+

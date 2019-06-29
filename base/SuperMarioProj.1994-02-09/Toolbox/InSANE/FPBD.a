@@ -1,0 +1,2041 @@
+;
+;	File:		FPBD.a
+;
+;	Contains:	Binary-to-Decimal conversion routines
+;
+;	Written by:	Kenton Hansen
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:  
+;	Change History (most recent first):
+;
+;	Terror Change History:
+;
+;		 <2>	12/20/90	BG		(actually KLH) Fixed an incorrect register usage in DivWS.
+;		 <1>	11/14/90	BG		Added to BBS for the first time.
+
+
+;-----------------------------------------------------------
+; Binary-to-decimal and decimal-to-binary conversions
+;
+; Copyright Apple Computer, Inc., 1983,1984,1985,1989,1990
+; All rights reserved
+;
+; 09 Mar 90	Correctly rounded conversion algorithms written
+;		  by Kenton Hansen completed
+; 20 Mar 90	Conversion routines installed into MC68020 SANE
+;		  by Jon Okada
+; 21 Mar 90 KLH	Corrected zero NaN anomaly, & Dec2Int setting of
+;		  inexact, overlow and invalid simultaneously
+; 30 Mar 90 KLH	Put tighter limits on decform.digits
+; 02 Apr 90 KLH	Corrected case of df.digits = -32000 while style = fixed
+; 11 Apr 90 KLH	Corrected bcc.s -> bhi.s on 'divide will succeed' statements
+; 12 Apr 90 JPO Replaced FSETXCP macro with faster, smaller code
+; 30 May 90 KLH Fixed bug in DivWS ("ble.s" changed to "bge.s").
+; 11 Jun 90 JPO Installed in fast 020 SANE package
+; 20 Aug 90 KLH Corrected Calculator DA problem, i.e., short decimal record
+;
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; MACROs for quickly accessing other PACK4 routines
+;-----------------------------------------------------------
+
+
+	MACRO
+	BDFP68K
+	BSR	FP020
+	ENDM
+
+	MACRO
+	BDMULI
+	MOVE.W	#$2004,-(SP)
+	BSR	FP020
+	ENDM
+
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+;;	PROCEDURE Num2Dec(VAR f: decform;x: Extended;VAR d: decimal);
+;;	{ d <-- x according to format f }
+;;	 _____________________________________|
+;;	|				      |
+;;	|	 address of df	(decform)     |
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 address of x	(extended)    |
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 address decimal record	      |
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 return address 	      |
+;;	|_____________________________________|
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+BDOPW	EQU	4*15		; opword location in A6-relative stack frame
+dcAdN2D	EQU	4*15+2		; address decimal record address
+BDPOP3	EQU	14		; # of operand bytes to pop prior to return
+exAdN2D	EQU	dcAdN2D+4	; extended address
+dfAdN2D	EQU	exAdN2D+4	; address decform record address
+MaxDigs	EQU	19
+
+EnvSave	EQU	-2		; address of Environment
+Env2	EQU	-4		; overlaps with MISCRec
+MISCRec	EQU	-12		; MISC record (for Halt Handler)
+XTemp	EQU	-16		; Intermediate location for Extended
+
+
+;-----------------------------------------------------------
+; Main entry point for binary to decimal conversions.
+;-----------------------------------------------------------
+
+QB2D:
+	movem.l	A0-A4/D0-D7,-(SP)	; save state
+	link	a6,#-16			; reserve 16 bytes local stack frame
+
+	move.w	BDOPW(A6),D7		; D7.W <- opword
+	and.w	#$3820,D7		; isolate SRC format in D7.W
+	
+	move.w	(FPSTATE).W,D3	; get caller's environment
+	move.w	D3,EnvSave(A6)	; save it
+	and.w	#$6000,D3	; install environment that is default
+	move.w	D3,(FPSTATE).W	;   except for caller's rounding direction
+
+	move.l	exAdN2D(a6),a3	; save original source address in A3
+
+	lea	XTemp(a6),a0	; A0 <- addr of temp extended
+	move.l	a0,exAdN2D(a6)	; move current dst to 'exAdN2D(a6)'
+	move.l	a3,-(sp)	; push &SRC
+	move.l	a0,-(sp)	; push &temp
+	MOVE.W	d7,-(SP)	; move format to stack
+	add.W	#FOZ2X,(SP)	; create opword on stack
+	BDFP68K			; convert to extended
+
+	TST.B	D7		; 96-bit extended in XTemp?
+	BEQ.S	@1		; no
+
+	MOVE.L	XTemp+4(A6),XTemp+2(A6)	; yes; convert to 80-bit format
+	MOVE.L	XTemp+8(A6),XTemp+6(A6)	;      in place
+
+@1:
+	movea.l	dfAdN2D(a6),A1	; get decform into D2
+	move.l	(A1),D2
+	movea.l	dcAdN2D(a6),A1	; get address of decimal record
+	move.w	(a0)+,d0	; get sign and exponent from stack frame
+	clr.w	(a1)		; clear sign/exp in decimal record
+	BCLR	#15,D0		; strip sign from exponent		
+	beq.s	@4
+	MOVE.b	#1,(a1)		; set decimal sign		
+@4:
+	move.L	(a0)+,d4	; get high 32 bits of extended from memory
+	move.L	(a0),d5		; get low 32 bits of extended from memory
+
+
+;-----------------------------------------------------------
+; ENUM TYPE: SET DEFAULT
+; STRING LENGTH TO 1, USEFUL JUST BELOW AND LATER WHEN
+; SCALED FIXED-PT RESULT OVERFLOWS TO '?'.
+;-----------------------------------------------------------
+	MOVE.B	#1,4(A1)	; LENGTH TO 1
+
+;-----------------------------------------------------------
+; NOW PICK OUT NAN, INF, ZERO CASES...
+;-----------------------------------------------------------
+	cmp.w	#$7fff,d0	; d0 - $7fff
+	bne.s	@10		; zero denorm or normal
+	move.l	d4,d0
+	ANDI.L	#$7FFFFFFF,D0	; test fractional part of significand
+	bne.s	@28		; NaN found
+	tst.l	d5
+	bne.s	@28		; NaN found
+	MOVEQ	#'I',D0		; Infinity found
+@16:
+	MOVE.B	D0,5(A1)	; SAVE 1-CHAR FIELD
+	BRA 	BDFIN		; GO TO END OF CONVERSION
+
+;-----------------------------------------------------------
+; CHECK FOR 0, INF, OR (GASP) AN HONEST NUMBER.
+;-----------------------------------------------------------
+@10:
+	TST.L	D4		; IF-SPECIAL-NUMBER
+	bne.S	BD1 		; --> FINITE, NONZERO
+	TST.L	D5		; IF-SPECIAL-NUMBER
+	bne.S	BD1 		; --> FINITE, NONZERO
+
+	MOVEQ	#'0',D0 	; ASSUME IT'S ZERO
+	bra.s	@16
+
+@28:			
+	bset	#30,d4		; test for signaling NaN while quieting
+	bne.s	@29		; quiet NaN found
+
+	bset	#ERRI,(FPSTATE).W	; signaling NaN raises INVALID exception
+
+;-----------------------------------------------------------
+; PUT NXXXX... FOR 16 HEXITS OF A NAN, REGARDLESS OF FORMAT
+; SINCE TRAILING ZEROS WILL BE STRIPPED LATER.	NOTE THAT
+; NAN STRUCT IS 22 BYTES LONG: 2 WORDS FOR SIGN AND EXP,
+; AND 18 BYTES FOR LENGTH, N, AND 16 HEXITS.
+;-----------------------------------------------------------
+@29:	
+	ADDQ.L	#4,A1		; POINT TO RESULT STRING
+	MOVE.B	#17,(A1)+	; LENGTH = N PLUS 2 SETS OF 8
+	MOVE.B	#'N',(A1)+	; FIRST CHAR
+
+	BSR.S	@31 		; FIRST 8 HEXITS FROM D4
+	MOVE.L	D5,D4		; MOVE LOW 8 HEXITS
+	BSR.S	@31 		; AND CONVERT
+
+	SUBA.W	#22,A1		; POINT TO HEAD OF STRUCT
+	BRA 	BDFIN
+
+;-----------------------------------------------------------
+; ROUTINE TO DISPLAY D4 IN 0-9, A-F.
+;-----------------------------------------------------------
+@31:
+	MOVEQ	#8,D0		; LOOP COUNT
+@33:
+	ROL.L	#4,D4		; PRINT FROM HI TO LO
+	MOVEQ	#$0F,D1 	; NIBBLE MASK
+	AND.B	D4,D1		; STRIP NIBBLE
+	OR.B	#'0',D1 	; '0' IS $30
+	CMPI.B	#'9',D1 	; HEX LETTER?
+	BLE.S	@35
+
+	ADDQ.B	#7,D1		; TRANSLATE TO A-F
+@35:
+	MOVE.B	D1,(A1)+	; STUFF CHARACTER
+	SUBQ.W	#1,D0
+	BNE.S	@33
+	RTS
+
+;-----------------------------------------------------------
+; NEED NORMALIZED FORM OF NUMBER (EVEN WHEN VALUE IS
+; EXTENDED DENORMALIZED) IN ORDER TO COMPUTE
+;	FLOOR( LOG10 ( | X | ) ).
+; AS EXPLAINED IN THE B-D PAPER, WE CAN APPROXIMATE
+; LOG2 ( | X | )   BY	EXP.FRAC .
+; SO WE PUT THIS INFORMATION TOGETHER BEFORE STORING THE
+; SIGNED EXTENDED VALUE AT THE TOP OF THE STACK FRAME (A3).
+; FOR CONVENIENCE, THIS INFORMATION IS KEPT EVEN IN THE
+; CASE OF FIXED CONVERSIONS, IN WHICH IT IS IRRELEVENT.
+;-----------------------------------------------------------
+BD1:
+	tst.l	d4
+	bmi.s	@2		; x normal
+			
+@1:
+	subq.w	#1,d0		; normalize x
+	add.l	d5,d5
+	addx.l	d4,d4
+	bpl.s	@1		; x denormal
+
+@2:
+	MOVE.L	D4,D1		; INTEGER-BIT.FRAC
+	MOVE.W	D0,D1		; EXP IN LOW WORD
+	SUBI.W	#$3FFF,D1	; UNBIAS EXP
+	SWAP	D1		; ALIGN EXP AND INT.FRAC
+	ADD.W	D1,D1		; FINALLY HAVE EXP.FRAC
+
+	MOVE.L	#$4D104D42,D0	; FLOOR( LOG10 (2) )
+	TST.L	D1		; EXP NEGATIVE?
+	BPL.S	@7
+
+	ADDQ.W	#1,D0		; BUMP LOG TO ASSURE FLOOR
+
+;-----------------------------------------------------------
+; COMPUTE  LOG10(2) * LOG2(X)  INTO D4.W.  THIS IS A 32*32
+; SIGNED MULTIPLY SO CANNOT USE CORE ROUTINE OF THE MULT
+; OPERATION.  SINCE ONLY THE LEADING 16 BITS ARE OF
+; INTEREST, IT IS NOT NECESSARY TO CARRY OUT THE LOW ORDER
+; 16*16 PARTIAL PRODUCT.  THE SCHEME IS:
+;
+;		A  B	= D0 = FLOOR( LOG10 (2) ) > 0
+;	*	X  Y	= D1 = FLOOR( LOG2 |X| )
+;	     -------
+;		A--Y
+;		B--X
+;	+ A--X
+;	------------
+;	   ???????? = D4.W, KEEPING ONLY 16 BITS
+;-----------------------------------------------------------
+@7:
+	MOVE.L	D0,D4
+	SWAP	D4	; D4.W = A
+	MULU	D1,D4	; D4.L = A--Y
+	CLR.W	D4
+	SWAP	D4	; D4.W = A--Y.HI
+
+	SWAP	D1	; D1.W = X
+	MOVE.W	D1,D5
+	MULS	D0,D5	; D5.L = B--X
+	SWAP	D5
+	EXT.L	D5	; D5.W = B--X.HI WITH SIGN
+	ADD.L	D5,D4	; CANNOT CARRY OR BORROW
+
+	SWAP	D0	; D0.W = A
+	MULS	D1,D0	; D0.L = A--X
+	ADD.L	D0,D4
+	SWAP	D4	; D4.W = FLOOR(LOG10(X))
+
+;-----------------------------------------------------------
+; ADD 1 TO D4.W YIELDING THE NUMBER OF DIGITS LEFT OF THE
+; DECIMAL POINT WHEN X IS WRITTEN OUT, A HANDY VALUE.
+;-----------------------------------------------------------
+				;if (f.style = FloatDecimal) and (f.digits < 1) then f.digits := 1;
+	move.w	d2,d1		; contains decform.digits
+	bmi.s	@8		; negative
+
+	cmpi.w	#$2000,d1	; peg positive at 8K
+	blt.s	@9
+
+	move.w	#$2000,d1
+	bra.s	@9
+
+@8:
+	cmpi.w	#$e000,d1	; peg negative at -8K
+	bgt.s	@9
+	move.w	#$e000,d1
+@9:
+	swap	d2		; contains decform.style
+	lsr.w	#8,d2		; word --> byte
+	tst.b	d2		; nonzero --> fixed
+	bne.s	loop
+	tst.w	d1					
+	bgt.s	loop		; f.digts >= 0
+	moveq	#1,d1		; f.digits := 1
+
+loop:
+	addq.w	#1,d4		; logx := logx + 1
+	move.w	d1,d5		; len := f.digits
+	tst.b	d2		; nonzero --> fixed
+	beq.s	@1
+	add.w	d4,d5		; len := len + (logx + 1)
+@1:
+	cmpi.w	#MaxDigs,d5	; len - MaxDigs
+	ble.s	@2
+	move.w	#MaxDigs,d5	; len := MaxDigs
+@2:
+	move.w	d5,2(a1)	; d.exp := len
+	sub.w	d4,2(a1)	; d.exp := d.exp - (logx + 1)
+	tst.w	d5
+	bgt.s	@3
+	moveq	#1,d5		; len := 1
+
+@3:
+	move.l	exAdN2D(a6),-(sp)
+	move.l	a1,-(sp)
+	move.b	d5,4(a1)	; <klh 20aug90>, requested # of digits
+	jsr		BIGX2S
+
+	cmp.b	4(a1),d5	; len - length (d.sig)
+	bcs.s	loop
+
+	neg.w	2(a1)		; d.exp := -d.exp
+
+BDFIN:
+	move.w	(FPSTATE).W,d0	; current environment word
+	andi.w	#$1f00,d0	; current exceptions
+	or.w	d0,EnvSave(A6)	; set current exceptions in saved environment
+	move.w	EnvSave(A6),(FPSTATE).W	; restore updated saved environment
+
+	lsr.w	#8,d0		; align pending exceptions into halt position
+	and.w	EnvSave(a6),d0	; exceptions causing halts
+	beq.s	NoHalts
+
+	move.l	4(a6),MISCRec+4(a6)	; original d0 saved on stack
+	swap	d0			; prepare pending CCR/halts
+	clr.w	d0			;   (faking CCR = 0)
+	move.l	d0,MISCRec(a6)		; pending halt exceptions
+
+	pea	MISCRec(a6)		; push mischaltinfo record addr
+	move.l	dfAdN2D(a6),-(sp)	; push src1 (decform) addr
+	move.l	a3,-(sp)		; push src addr
+	move.l	dcAdN2D(a6),-(sp)	; push dst (decimal) addr
+	move.w	BDOPW(A6),-(sp)		; push opword
+
+	movea.l	(FPHV).W,A0		; get haltvector and jsr to user
+	jsr	(A0)			;   halt handler
+
+NoHalts:
+	unlk	a6
+	movem.l (sp)+,A0-A4/D0-D7	; restore registers
+	move.l	(sp),BDPOP3(sp)		; move rts address to proper location
+	lea	BDPOP3(sp),sp		; clean up stack
+	move	#0,CCR			; zero CCR
+	rts				; return
+
+
+
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+;;	PROCEDURE Dec2Num(d: decimal, VAR x: Extended);	
+;;	 _____________________________________
+;;	|			  	      |
+;;	|	 d address decimal record     |
+;;	|_____________________________________|
+;;	|									  |
+;;	|	address of x	(extended)    |
+;;	|_____________________________________|
+;;	|									  |
+;;	|	 return address 	      |
+;;	|_____________________________________|
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+dbopw	EQU	4*15		; opword location relative to A6
+exAddr	EQU	4*15+2		; extended address
+BDPOP2	EQU	10		; # of operand bytes to pop prior to return
+dcAddr	EQU	exAddr+4	; address decimal record
+MxDgs	EQU	19		; 'brain dead' limit for decimal point on decimal record
+				; input.  Scheme is backwards compatible for previous
+				; routines
+
+
+;-----------------------------------------------------------
+; Main entry point for decimal to binary conversions.
+;-----------------------------------------------------------
+
+QD2B:
+	movem.l	A0-A4/D0-D7,-(SP)	; save state
+	link	a6,#-16			; reserve 16 bytes local stack frame
+
+	move.w	DBOPW(A6),D7	; D7.W <- opword
+	and.w	#$3800,D7	; isolate DST format in D7.W
+	beq.s	QDEC2X		; extended (80- or 96-bit) format
+
+	cmp.w	#$1000,D7
+	blt.s	QDEC2D		; double
+	beq.s	QDEC2S		; single
+	
+	MOVE.W	#$6000,d0	; comp or integer: mask for rounding direction only
+	bra.s	NoRound
+
+QDEC2S:				; single precision DST
+	MOVE.W	#$6040,d0	; mask for rounding precision and direction
+	bra.s	NoRound
+
+
+
+QDEC2D:				; double precision DST
+	MOVE.W	#$6060,d0	; mask for rounding precision and direction		
+
+NoRound:
+	move.w	(FPSTATE).W,D3	; D3 <- caller's environment
+	move.w	D3,EnvSave(A6)	; save it
+	and.w	d0,d3
+	or.w	#$0080,d3	; special bit to tell rounding routine
+				; to set sticky bit but don't round since
+				; FOX2Z will do the proper rounding,  i.e.,
+				; this gimmick avoids double rounding.
+	bra.s	SetIt		; set new environment
+
+
+
+QDEC2X:				; extended precision DST
+	MOVE.W	#$6060,d0	; mask for rounding precision and direction
+	move.w	(FPSTATE).W,D3	; D3 <- caller's environment
+	move.w	D3,EnvSave(A6)	; save it
+	and.w	d0,d3
+
+SetIt:
+	move.w	D3,(FPSTATE).W	; set new environment (caller's rounding		
+				;   direction/precision with no halts enabled)
+drpad:
+	move.l	exAddr(a6),a3	; save original destination address in A3
+	cmpi.w	#FFEXT,d7
+	beq.s	@1
+
+	lea	XTemp(a6),a0
+	move.l	a0,exAddr(a6)	; move XTemp(a6) to 'exAdN2D(a6)'		
+
+@1:
+	move.l	dcAddr(a6),A2	; get address of decimal record
+	LEA 	4(A2),A4	; PTR TO STRING
+
+;-----------------------------------------------------------
+; CLEAR OUT DIGIT ACCUMULATOR AND INITIALIZE COUNTERS.
+;-----------------------------------------------------------
+	CLR.L	D4		; DIGIT BUFFER
+	MOVE.L	D4,D5
+
+	MOVE.B	(A4)+,D6	; DIGIT STRING LENGTH COUNT
+	BEQ.S	DBZSTO		; ZERO LENGTH --> 0.0
+
+;-----------------------------------------------------------
+; GET FIRST CHARACTER BUT DON'T AUTOINCREMENT.
+;-----------------------------------------------------------
+	MOVE.B	(A4),D0 	; FIRST CHAR
+
+;-----------------------------------------------------------
+; CHECK FOR 'I' -- INFINITY.
+;-----------------------------------------------------------
+	CMPI.B	#$49,D0 	; IS IT 'I'?
+	BEQ.S	DBNFIN
+
+;-----------------------------------------------------------
+; CHECK FOR 'N', IF SO GET HEXITS FOR SIGNIFICAND.	IF THERE
+; ARE FEWER THAN THREE, FORCE LEAD ZEROS.
+;-----------------------------------------------------------
+	CMPI.B	#'N',D0 	; ALLOW ONLY CAPITAL N
+	BNE.S	DBZER
+
+	MOVE.B	-1(A4),D2	; CHARACTER COUNT
+	ADDQ.L	#1,A4		; POINT TO FIRST HEXIT
+	SUBQ.B	#1,D2		; DON'T COUNT 'N'
+
+	MOVEQ	#8,D0		; ASSUME 8 DIGITS
+	CMPI.B	#4,D2		; OK IF AT LEAST 4
+	BGE.S	@31
+	SUBQ.B	#4,D0		; FOUR 0'S AND WHAT'S THERE
+	ADD.B	D2,D0
+@31:
+	BSR.S	@35
+	MOVE.L	D5,D4
+	CLR.L	D5
+	MOVEQ	#8,D0
+	BSR.S	@35
+	BRA.S	@39
+
+;-----------------------------------------------------------
+; ROUTINE TO GET D0 DIGITS TO D5, UP TO COUNT IN D2
+;-----------------------------------------------------------
+@35:
+	ROL.L	#4,D5		; ALIGN BITS SO FAR
+	SUBQ.B	#1,D2		; DEC STRING COUNT
+	BMI.S	@37
+
+	MOVE.B	(A4)+,D1
+	CMPI.B	#'9',D1
+	BLE.S	@36
+	ADDI.B	#9,D1		; TRUE NIBBLE VALUE
+@36:
+	ANDI.B	#$0F,D1 	; NIBBLE MASK
+	OR.B	D1,D5
+@37:
+	SUBQ.W	#1,D0
+	BNE.S	@35
+	RTS
+
+;-----------------------------------------------------------
+; CLEAR IRRELEVANT LEAD BIT AND TEST FOR ANYTHING NONZERO.
+;-----------------------------------------------------------
+@39:
+	bset	#QNANBIT,D4	; make it a quiet NaN
+	move.l	D4,D0
+	swap	D0
+	andi.b	#$FF,D0		; test for zero NaN code
+	bne.s	DBNFIN		; nonzero code; done
+
+	ori.w	#NANZERO,D0	; insert special NaN code
+	swap	D0
+	move.l	D0,D4
+
+;-----------------------------------------------------------
+; SET EXPONENT FOR INF/NaN IN D0
+;-----------------------------------------------------------
+DBNFIN:
+	MOVE.W	#$7FFF,D0	; STORE HUGE EXP
+	BRA.S	DBSSTO
+
+;-----------------------------------------------------------
+; GET HERE IF ALL DIGITS ZERO: FORCE SIGNED 0 AND STORE
+;-----------------------------------------------------------
+DBZER:
+	CMPI.B	#$30,D0 	; IS IT '0'?
+	BNE.S	SIGDIGS
+DBZSTO:
+	CLR.L	D0
+DBSSTO:
+;-----------------------------------------------------------
+; DECIMAL.SGN ENUM TYPE TEST USES HI BYTE ONLY
+;-----------------------------------------------------------
+	TST.B	(A2)		; CHECK OPERAND SIGN
+	BEQ.S	@1
+	BSET	#15,D0
+@1:
+	move.l	exAddr(a6),A0
+	MOVE.W	D0,(A0)+
+	MOVE.L	D4,(A0)+
+	MOVE.L	D5,(A0)
+	bra.s	NoDigs
+
+BrnDd:				;save exponent, adjust exponent, call bigd2x, restore exponent
+	move.w	2(a2),-(sp)	; save original decimal.exp
+
+	moveq	#0,d0
+	move.b	d6,d0
+	subi.w	#MxDgs,d0
+	sub.w	d0,2(a2)	; adjust decimal.exp for brain dead 19 digit max
+
+	move.l	exAddr(a6),-(sp)
+	move.l	dcAddr(a6),-(sp)
+	jsr	BIGD2X
+
+	move.w	(sp)+,2(a2)	; restore original decimal.exp
+	bra.s	NoDigs		; normal finish	
+
+SIGDIGS:
+	cmpi.b	#MxDgs,d6
+	bhi.s	BrnDd
+		
+	move.l	exAddr(a6),-(sp)
+	move.l	dcAddr(a6),-(sp)
+	jsr	BIGD2X
+
+NoDigs:
+	cmpi.w	#FFEXT,d7	; if non-extended DST, convert
+	bgt.s	@1
+
+	BTST	#5,dbopw+1(A6)	; if 80-bit extended DST, result
+	BEQ.S	@3			;   is already delivered
+
+	MOVE.L	6(A3),8(A3)		; if 96-bit extended DST, convert
+	MOVE.L	2(A3),4(A3)		;   in place
+	BRA.S	@3
+
+@1:
+	pea	XTemp(a6)	; non-extended DST requires conversion
+	move.l	a3,-(sp)	; put address of dest onto stack
+	MOVE.W	d7,-(SP)	; move op to stack
+	add.W	#FOX2Z,(SP)	; move op to stack
+	BDFP68K			; convert to DST format
+
+	move.w	(FPSTATE).W,D0	; Get current environment
+	btst	#8,D0		; INVALID exception?
+	beq.s	@2		;   no
+
+	andi.w	#$E1FF,D0	;   yes. clr spurious exceptions
+	bra.s	@4
+
+@2:
+	cmpi.w	#FFSGL,D7	; integer or comp DST?
+	ble.s	@4		;   no. single or double
+
+	bclr	#ERRU+8,D0	;   yes. clr underflow
+	bra.s	@4
+
+
+@3:
+	move.w	(FPSTATE).W,D0	; extended DST:  D0 <- environment
+@4:
+	andi.w	#$1f00,D0	; current exceptions
+	or.w	D0,EnvSave(A6)	; set current exceptions in saved environment
+	move.w	EnvSave(A6),(FPSTATE).W	; restore updated saved environment
+
+	lsr.w	#8,d0		; align pending exceptions into halt position
+	and.w	EnvSave(a6),D0	; exceptions causing halts
+	beq.s	NoHlts
+
+	move.l	4(a6),MISCRec+4(a6)	; original d0 saved on stack
+	swap	d0			; prepare pending CCR/halts
+	clr.w	d0			;   (faking CCR = 0)
+	move.l	d0,MISCRec(a6)		; save in mischaltinfo record
+
+	pea	MISCRec(a6)		; push mischaltinfo record addr
+	move.l	dcAddr+4(A6),-(sp)	; push (nonexistent) SRC2 addr
+	move.l	dcAddr(a6),-(sp)	; push SRC (decimal record) addr
+	move.l	a3,-(sp)		; push DST addr
+	move.w	dbopw(A6),-(sp)		; push opword
+		
+	movea.l	(FPHV).W,A0		; get haltvector and jsr to
+	jsr	(a0)			;   user halt handler
+
+NoHlts:
+	unlk	a6
+	movem.l (sp)+,A0-A4/D0-D7	; restore registers
+	move.l	(sp),BDPOP2(sp)		; move rts address to proper location
+	lea	BDPOP2(sp),sp		; clean up stack
+	move	#0,CCR			; clr CCR
+	rts				; return
+
+
+
+
+BIGD2X:
+bgSz		equ	784	; 780.1=(256*21)*(Ln(5)/Ln(2)/16)
+lclSz		equ	4*bgSz+160
+ParamSize	EQU	8	; size of all the passed parameters
+MinSpace	EQU	3316	; minimum stack space in bytes
+rtnAd		EQU	4*13	; rtnAd(a6) contains the return address
+s		EQU 	rtnAd+4	; s(a6) contains the address of string or decimal record
+x		EQU 	s+4	; x(a6) contains the address of x
+
+AAdr	equ	-4		; contains the address of aReg
+BAdr	equ	AAdr-4		; contains the address of bReg
+CAdr	equ	BAdr-4		; contains the address of cReg
+DAdr	equ	CAdr-4		; contains the address of dReg
+EAdr	equ	DAdr-4		; contains the address of Environment
+xreg	equ	EAdr-4		; xReg(A6) address of xReg		
+areg	equ	xreg-16		; aReg(A6) address of aReg
+
+
+	MoveM.L	A1-A4/D0-D7,-(SP)
+	link	a6,#-160
+		
+	movea.L	s(a6),a0
+	addq	#2,a0
+	move.w	(a0),D0		; hi part of D0 never used!!
+	blt	SigDiv
+
+	bsr	SizeExt		
+	bsr	a2b
+	bsr	StoD
+	move.L	DAdr(A6),CAdr(A6)
+	bsr	cXb2a
+	movea.L	a1,a3
+
+	move.w	#$4f,d6		; 63 + 16
+	move.w	d1,d2
+	movea.l	a3,a2
+@1:
+	subi.w	#16,d6		; find first non zero word
+	move.w	(a2)+,d0
+	bne.s	@3		; found first non zero word
+	dbra	d2,@1
+		
+@2:
+	addq.w	#1,d6		; find first bit
+	lsl.w	#1,d0
+@3:
+	bpl.s	@2		; location of first bit not found
+
+	moveq	#-1,d5		; d5 < 0 => decimal to binary
+	bsr	Roundit		; Roundit likes address of register in a3
+
+	move.w	d1,d7
+	asl.w	#4,d7		; times 16 = number of bits
+	movea.L	s(a6),a0
+	addq	#2,a0
+	add.w	(a0),d7
+	addi.w	#$400e,d7	; add extended bias
+
+	bsr.s	StuffIt
+
+	tst.l	d4
+	bmi.s	@5
+@4:
+	subq.w	#1,d7		; decrement exponent
+	asl.l	#1,d6
+	roxl.l	#1,d5
+	roxl.l	#1,d4
+	bpl.s	@4		
+@5:
+	move.l	x(a6),a0
+	cmp.w	#$7fff,d7	; d7 - $7fff
+	bcc.s	OverFlo
+	asl.w	#1,d7
+PICont:
+	asl.w	(a0)		; put sign bit in 'X'
+	roxr.w	#1,d7		; put sign into exponent word
+	move.w	d7,(a0)+	; put sign and exponent into memory
+	move.L	d4,(a0)+	; put high 32 bits of extended into memory
+	move.L	d5,(a0)		; put low 32 bits of extended into memory
+
+	bra	DoneB2X
+
+OverFlo:
+	or.w	#ERRWXO,(FPSTATE).W	; signal INEXACT and OVERFLOW
+
+	MOVE.W	(FPSTATE).W,D2		; D2 <- environment
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	BTST	#14,D2		; bit for +/-infinity rounding directions
+	BNE.S	DnOrTZ		; DOWNWARD or TOWARDZERO
+	BTST	#13,D2
+	BEQ.S	RtrnInf		; TONEAREST
+
+	MOVE.L	x(A6),A4	; UPWARD
+	MOVE.W	(A4),D2		;	contains sign and biased exponent
+	BPL.S	RtrnInf		; + & UPWARD, bumpit
+	BRA.S	RtrnMax		; - & UPWARD, don't bumpit
+
+DnOrTZ:
+	BTST	#13,D2		; DOWNWARD or TOWARDZERO
+	BNE.S	RtrnMax		; TOWARD-ZERO
+	MOVEA.L	x(A6),A4	; x(A6) contains the address of x
+	MOVE.W	(A4),D2		; contains sign and biased exponent
+	BMI.S	RtrnInf		; - & DOWNWARD, bumpit
+				; + & DOWNWARD, don't bumpit
+RtrnMax:
+	move.w	#$fffc,d7	; return Max
+	moveq	#-1,d4
+	moveq	#-1,d5
+	bra.s	PICont
+
+RtrnInf:
+	move.w	#$fffe,d7	; return infinity
+	moveq	#0,d4
+	moveq	#0,d5
+	bra.s	PICont
+
+StuffIt:
+	moveq	#0,d4		; clear significand
+	moveq	#0,d5		; clear significand
+	moveq	#0,d6		; clear significand
+	tst.w	d1
+	bgt.s	@4
+	move.w	(a3)+,d4	; 1 significant word
+	swap	d4
+	rts
+
+@4:
+	move.l	(a3)+,d4	; 2 or more significant words
+	subq.w	#2,d1		; d1 - 2
+	bgt.s	@5
+	blt	NormIt
+	move.w	(a3)+,d5	; 3 significant words
+	swap	d5
+	rts
+
+@5:
+	move.l	(a3)+,d5	; 4 or more significant words
+	subq.w	#2,d1		; d1 - 2 (d1 - 4)
+	bgt.s	@6
+	blt	NormIt
+	move.w	(a3)+,d6	; 5 significant words
+	swap	d6
+	rts
+
+@6:
+	move.l	(a3)+,d6	; 6 or more significant words
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		
+DivWS:
+	move.w	d1,d4		; d4 := max {d1, d3}	<klh 11apr90>
+	cmp.w	d3,d1		; d1 - d3		<klh 11apr90>
+	bge.s	@1		; d1 >= d3		<klh 30may90>
+	move.w	d3,d4		; d4 := max {d1, d3}	<klh 11apr90>
+@1:
+	tst.w	d4		; 								<klh 11apr90><T2>
+	beq.s	RtDvWS		; only one word in A1 & A3	<klh 11apr90>
+	lea	2(a1),a2	;			<klh 11apr90>
+	lea	2(a3),a4	;			<klh 11apr90>
+	moveq	#0,d2		;			<klh 11apr90>
+@2:
+	addq.w	#1,d2		;			<klh 11apr90>
+	cmp.w	d2,d1		; d1 - d2		<klh 11apr90>
+	bge.s	@3		; d1 >= d2, don't clear (a2)	<klh 11apr90>
+	clr.w	(a2)		;			<klh 11apr90>
+@3:
+	cmp.w	d2,d3		; d3 - d2		<klh 11apr90>
+	bge.s	@4		; d3 >= d2, don't clear (a4)	<klh 11apr90>
+	clr.w	(a4)		;			<klh 11apr90>
+@4:
+	cmpm.w	(a4)+,(a2)+	;			<klh 11apr90>
+	bne.s	RtDvWS		;			<klh 11apr90>
+	cmp.w	d2,d4		; d4 - d2		<klh 11apr90>
+	bgt.s	@2		; d4 > d2, keep looking	<klh 11apr90>
+	bra.s	RtDvWS		; note: condition code will be Z, values identical
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		
+SigDiv:
+	bsr	SizeExtN		
+	bsr	StoD		; D3.w = # words - 1 in (A3)
+	bsr	Nrmlz10		; D7.w = # bits to the right of (A1) word
+	movea.l	a4,a3		; a4 set by StoD
+
+	moveq	#4,d6		; D6.W + 1 = # of DIVU steps required
+	CMP.W	(A3),D0		; DO - (A3)
+	BEQ.S	DivWS		; need further investigation	<klh 11apr90>
+RtDvWs:
+	BHI.S	@1		; Divide will succeed, no padding necessary	<11apr90>
+	ADDQ.w	#1,D3		; append a zero word to A3
+	CLR.W	-(A3)
+	moveq	#5,d6		; D6.W + 1 = # of DIVU steps required
+@1:
+	move.w	d3,d2
+	asl.w	#4,d2		; times 16
+	sub.w	d7,d2
+	addi.w	#$3FFE,d2	; add extended bias
+	move.w	d2,-(SP)	; (d3*16 - d7) + $3FFE -> stack
+
+	bsr	BgnDiv
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;	MakeX transforms contents of software register in a3 (d1.w = length)
+;	into and extended value in D0.W (sign & exponent) &
+;	D4/D5 (64-bit significand).
+;	first the register is rounded and checked for overflow and underflow
+	
+;
+;	find leading significant bit
+;
+
+	moveq	#0,d6
+	move.w	(a3),d0
+	bra.s	@3
+
+@2:
+	addq.w	#1,d6		; find first bit
+	lsl.w	#1,d0
+@3:
+	bpl.s	@2		; location of first bit not found
+
+	move.w	(SP)+,d7
+	move.l	d7,a1		; Roundit DOESN'T USE a1
+	sub.w	d6,d7		; if negative, necessary '0' bits appended to left
+	bmi.s	Dnrml
+
+	addi.w	#63,d6
+
+	moveq	#-1,d5		; d5 < 0 => decimal to binary
+	bsr	Roundit		; Roundit likes address of register in a3
+
+	move.l	a1,d7
+
+	bsr	StuffIt
+
+NormIt:
+	tst.l	d4
+	bmi.s	@2
+
+@1:
+	subq.w	#1,d7		; decrement exponent
+	asl.l	#1,d6
+	roxl.l	#1,d5
+	roxl.l	#1,d4
+	bpl.s	@1
+@2:
+	move.l	x(a6),a0
+	asl.w	#1,d7
+	asl.w	(a0)		; put sign bit in 'X'
+	roxr.w	#1,d7		; put sign into exponent word
+	move.w	d7,(a0)+	; put sign and exponent into memory
+	move.L	d4,(a0)+	; put high 32 bits of extended into memory
+	move.L	d5,(a0)		; put low 32 bits of extended into memory
+
+	bra	DoneB2X
+
+NeedWrd:
+	tst.w	d0
+	bge.s	@1
+	clr.w	-(a3)
+	addq	#1,d1
+	addi.w	#16,d6
+	subi.w	#16,d7
+	addi.w	#16,d0
+@1:
+	rts
+
+Dnrml:
+	move.l	a1,d0
+	cmpi.w	#-66,d0		; iscale(a6) - (-66)
+	bpl.s	@0		; not an extreme denormalized case
+
+	move.w	#-66,d7
+	move.w	d7,d0
+	sub.w	d6,d7
+@0:
+	add.w	d7,d6
+	bsr.s	NeedWrd
+	bsr.s	NeedWrd
+	bsr.s	NeedWrd
+	bsr.s	NeedWrd
+	bsr.s	NeedWrd
+	addi.w	#63,d6
+
+	move.w	d0,-(SP)
+	moveq	#-1,d5		; d5 < 0 => decimal to binary
+	movea.l	a3,a1		; save a3
+	bsr	Roundit		; Roundit likes address of register in a3
+	movea.l	a1,a3		; restore a3
+
+	move.w	(SP)+,d7
+
+	bsr	StuffIt
+
+	tst.l	d4
+	bmi.s	@2
+@1:
+	tst.w	d7
+	ble.s	@2		; min exponent, no further normalization
+	subq.w	#1,d7		; decrement exponent
+	asl.l	#1,d6
+	roxl.l	#1,d5
+	roxl.l	#1,d4
+	bpl.s	@1
+@2:
+	move.l	x(a6),a0
+	asl.w	#1,d7
+	asl.w	(a0)		; put sign bit in 'X'
+	roxr.w	#1,d7		; put sign into exponent word
+	move.w	d7,(a0)+	; put sign and exponent into memory
+	move.L	d4,(a0)+	; put high 32 bits of extended into memory
+	move.L	d5,(a0)		; put low 32 bits of extended into memory
+		
+;	Note: any power of ten that turns a pascal string into a denormalized
+;	number will not do it exactly.  Therefore it is not necessary to check
+;	for inexact.  All denormalized results cause underflow in Decimal to Binary
+
+	tst.L	d4
+	bmi.s	noUF			; not denormalized
+
+	OR.W	#ERRWXU,(FPSTATE).W	; subnormal:  signal INEXACT and UNDERFLOW
+		
+noUF:
+	bra		DoneB2X
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		
+StoD:
+	moveq	#0,d3		; initialize length
+	move.L	DAdr(A6),A3
+	subq.l	#2,a3		; starting address of integer
+	clr.w	(A3)+		; clear initial word for integer
+	MOVE.L	s(A6),A0	; s(A6) contains the address of decimal record
+	MOVE.L	x(A6),A4	; address of x for directed roundings
+;-----------------------------------------------------------
+; DECIMAL.SGN ENUM TYPE TEST USES HI BYTE ONLY
+;-----------------------------------------------------------
+	TST.B	(A0)		; CHECK OPERAND SIGN
+	BEQ.S	@10
+	BSET.B	#7,(a4)		; store decimal.sig in x for directed roundings
+	bra.s	@11
+
+@10:
+	BCLR.B	#7,(a4)		; store decimal.sig in x for directed roundings
+
+@11:
+	addq.L	#4,A0		; address of decimal.sig
+	moveq	#0,d0
+	move.b	(a0)+,d0	; length of string
+	bra.s	@3
+;
+; Loop through string, successively multiplying by 10 and adding
+; in the low nibble of the character.
+;
+@1:
+	MOVEQ	#$0F,D7
+	AND.B	(A0)+,D7	; GET LOW NIBBLE
+	movea.l	a3,a4
+	move.w	d3,d4
+@2:
+	move.w	-(a4),d6	;	get word for multiply
+	mulu	#10,d6		
+	add.l	d6,d7		;	add previous overflow or decimal digit
+	move.w	d7,(a4)		;	move word back into memory register
+	clr.w	d7		;	clear non overflow part
+	swap	d7		;	put overflow part in low word
+	dbra	d4,@2		;	condition codes not affected
+
+	beq.s	@3
+	move.w	d7,-(a4)	;	add new word to memory register
+	addq.w	#1,d3
+
+@3:
+	dbra	d0,@1
+	rts
+
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; Binary to String routines modified from JTC's BINDEC.a
+; procedure BigX2S (var x: extended; iscale: integer; var s: string);
+;
+;;
+;;
+;;	_________________________________________________________________
+;;
+;; after 'Link' instruction the stack should look like:
+;;
+;;	 _____________________________________
+;;	|				      |
+;;	|	 address of x	    (extended)|
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 s address decimal record     |
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 return address		      |
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 address	(20 bytes)    |
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 xreg		(12 bytes)    |
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 areg		(1456 bytes)  |
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 breg		(728 bytes)   |
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 creg		(728 bytes)   |
+;;	|_____________________________________|
+;;	|				      |
+;;	|	 dreg		(108 bytes)   |
+;;	|_____________________________________|
+;;
+;;_________________________________________________________________
+;;
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+BIGX2S:
+	MoveM.L	A1-A4/D0-D7,-(SP)
+	link	a6,#-160
+
+	movea.L	s(a6),a0
+	addq	#2,a0
+	move.w	(a0),D0		;hi part of D0 never used!!
+
+	ble.s	DivCase
+
+	bsr	SizeExt
+	bsr	XbyA
+	bra.s	MStr
+
+DivCase:
+	bsr	SizeExtN
+	bsr	GetX
+	bsr	DivX
+	moveq	#0,d5		; d5 >= 0 => binary to decimal
+	bsr	Roundit
+
+MStr:
+	bsr.s	MakeStr
+		
+Done:
+	UNLK	A6			; destroy the link
+	MoveM.L	(SP)+,A1-A4/D0-D7	; restore registers & return address
+	MOVEA.L	(SP)+,A0		; pull off the return address
+	LEA	ParamSize(SP),SP	; strip all of the caller's parameters
+	JMP	(A0)			; return to the caller	
+
+DoneB2X:			; special backend to check for rounding precision
+	move.w	(FPSTATE).W,D4	; D4 <- environment
+	and.w	#$0060,d4	; check for rounding precision
+	beq.s	Done
+
+	pea	Tbl1		; address of integer value 1
+	MOVE.L	x(a6),-(SP)	; push address of extended
+	BDMULI			; forces rounding precision control
+
+	bra.s	Done
+
+
+MakeStr:
+	movea.L	CAdr(A6),A1	; initialize bcd string address
+	CLR.L	(A1)		; initialize string
+	MOVEQ	#0,D3		; initialize bcd string length
+	TST.W	D6
+	MOVE.L	A1,A2
+	BMI.s	RtnZero
+
+	ADDQ.W	#1,D1
+BinLoop:
+	MOVEQ	#15,D5
+	CMP.W	D5,D6		; D6 - D5
+	BGE.S	@2
+	MOVE.W	D6,D5
+
+@2:
+	SUBQ.W	#1,D1		; decrement number of words remaining
+	BLT.S	bcdAddr		
+	MOVE.W	(A3)+,D2
+
+bcdAddr:
+	MOVE.L	A1,A2		; reset bcd string address
+	ADD.W	D2,D2		; generate X if appropriate
+	MOVE.L	D3,D7
+	LEA	4(A2),A2
+@5:
+	MOVE.L	-(A2),D0	; put long word of string into D0
+	ABCD	D0,D0			
+	ROR.L	#8,D0
+	ABCD	D0,D0
+	ROR.L	#8,D0
+	ABCD	D0,D0
+	ROR.L	#8,D0
+	ABCD	D0,D0
+	ROR.L	#8,D0
+	MOVE.L	D0,(A2)		; put it back
+	DBRA	D7,@5		; end of long word string loop
+
+	MOVEQ	#0,D0
+	ABCD	D0,D0
+	BEQ.S	@6		; no X condition found
+	ADDQ.L	#1,D3		; add new long word to string
+	MOVE.L	D0,-(A2)
+@6:
+	DBRA	D5,bcdAddr
+	SUBI.W	#16,D6		; number of binary digits - 1	remaining
+	BGE.S	BinLoop
+
+	MOVE.L	s(A6),A0	; s(A6) contains the address of decimal record
+	addq	#4,a0		; address of string
+	LEA 	1(A0),A1	; pointer to string of characters
+	moveq.l	#0,d5		; <klh 20aug90>
+	move.b	(a0),d5		; <klh 20aug90>		
+;
+; The hard part is delivering the ascii digits, stripping leading
+; zeros.  Use D6 as a marker:  if minus then skipping leading zeros; if
+; plus print any digit.
+;
+@7:
+	BSR.S	BD1OUT
+	BSR.S	BD1OUT
+	BSR.S	BD1OUT
+	BSR.S	BD1OUT
+	DBRA	D3,@7		; end of long word string loop
+
+;
+; Finally, stuff the string length, restore the registers, and exit.
+; A0 points to the length byte, A1 points to the next character after
+; the string; so  (A1 - A0 - 1) is the true length.
+;
+	MOVE.W	A1,D0
+	SUB.W	A0,D0
+	SUBQ.B	#1,D0
+	BEQ.S	RtnZero
+	MOVE.B	D0,(A0)
+	RTS
+
+RtnZero:
+	MOVE.L	s(A6),A0	; s(A6) contains the address of decimal record
+	addq	#4,a0
+	MOVE.W	#$0130,(A0)	; Return the following string, '0'
+	RTS
+
+;
+; Utility routine to print two digits from nibbles in D1, skipping
+; leading zeros, according to sign of D6.  Recall that ascii digits
+; have the hex form $3x.
+;
+BD1OUT:
+	MOVEQ	#0,D1
+	MOVE.B	(A2)+,D1
+	ROR.W	#4,D1		; ALIGN D1: $0000L00H
+	BSR.S	BD1DIGOUT
+	ROL.W	#4,D1		; ALIGN D1: $0000000L
+				; FALL THROUGH AND RETURN
+;
+; Place a character from D1.B into the string (A1).
+; Skip a leading 0 if D6.W is negative.
+;
+BD1DIGOUT:
+	TST.W	D6
+	BPL.S	BDDOIT
+
+	TST.B	D1		; 0 NIBBLE?
+	BEQ.S	BDSKIPIT
+
+	MOVEQ	#0,D6		; MARK NONZERO FOUND
+BDDOIT:
+	subq.l	#1,d5		; <klh 20aug90, last valid location - length (d.sig)>
+	bmi.s	@1		; <klh 20aug90>
+	ORI.B	#$30,D1 	; MAKE ASCII DIGIT
+	MOVE.B	D1,(A1)		; <klh 20aug90>
+@1:
+	addq.l	#1,a1		; <klh 20aug90>
+	SUB.B	D1,D1		; CLEAR FOR NEXT ROTATE
+BDSKIPIT:
+	RTS
+
+		
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+XbyA:
+	movea.L	s(a6),a0
+	addq	#2,a0
+	move.w	(a0),D6		; d.exp
+	MOVE.L	x(A6),A0	; x(A6) contains the address of x
+	MOVE.W	(A0)+,D7	; contains sign and biased exponent
+	BCLR.L	#15,D7		; test and clear sign bit
+	SUBI.W	#$403f,D7	; subtract extended (bias + 64)
+	ADD.W	D6,D7		; location of binary point to the right
+
+	MOVE.W	(A0)+,D3	; contains 1st word of significand
+	MOVE.W	(A0)+,D4	; contains 2nd word of significand
+	MOVE.W	(A0)+,D5	; contains 3rd word of significand
+	MOVE.W	(A0)+,D6	; contains 4th word of significand
+	movea.L	AAdr(A6),A3
+	adda.L	#16,A3
+	movea.L	AAdr(A6),A1
+	subq.L	#2,A1
+	movea.L	CAdr(A6),A4
+	subq.L	#2,A4		; use this as a scratch location to assist ADDX
+
+	MOVE.W	(A1),D0
+	MOVE.W	D0,D2
+	MULU	D6,D2
+	MOVE.L	D2,(A3)		; A3
+
+	MOVE.W	D0,D2
+	MULU	D4,D2
+	MOVE.L	D2,-(A3)	; A3-4
+	CLR.w	-(A3)		; A3-6 clears high word
+	LEA	4(A3),A3	; A3-2
+
+	MOVE.W	D0,D2
+	MULU	D5,D2
+	ADD.L	D2,(A3)		; A3-2
+
+	MULU	D3,D0
+	MOVE.L	D0,(A4)+	; Silly but necessary
+	ADDX.L	-(A4),-(A3)	; A3-6
+
+	MOVE.L	D1,A2		; save length & use D1 as loop counter
+	SUBQ.W	#1,D1
+	BMI.s	@2
+
+@1:
+	LEA	4(A3),A3	; A3-2
+	MOVE.W	-(A1),D0
+	MOVE.W	D0,D2
+	MULU	D6,D2
+	ADD.L	D2,(A3)		; A3-2
+
+	MOVE.W	D0,D2
+	MULU	D4,D2
+	MOVE.L	D2,(A4)+	; Silly but necessary
+	ADDX.L	-(A4),-(A3)	; A3-6
+	bcc.s	@98
+	MOVE.w	#1,-(A3)	; A3-8 clears high word
+	BRA.S	@99
+@98:
+	MOVE.w	#0,-(A3)	; A3-8 clears high word
+@99:
+	LEA	4(A3),A3	; A3-4
+
+	MOVE.W	D0,D2
+	MULU	D5,D2
+	ADD.L	D2,(A3)		; A3-4
+
+	MULU	D3,D0
+	MOVE.L	D0,(A4)+	; Silly but necessary
+	ADDX.L	-(A4),-(A3)	; A3-8
+
+	DBRA	D1,@1
+
+@2:
+	MOVE.L	A2,D1		; restore length of loop
+	ADDQ.w	#4,D1		; number of words
+	MOVE.W	D1,D6
+	ADDQ.w	#1,D6
+	ASL.W	#4,D6		; # bits = 16 * # words
+	ADD.W	D7,D6		; # number of integer bits
+	moveq	#0,d5		; d5 >= 0 => binary to decimal
+
+Roundit:
+	TST.W	D6
+	bge.s	@2		; at least one digit to the left of binary point
+;
+; Make sure at least one digit is to the left of the binary point
+;
+	cmpi.w	#-66,d6		; d6 + 66
+	bpl.s	@1
+	move.w	#-66,d6
+@1:
+	clr.w	-(a3)		; add zero word
+	addQ.w	#1,D1		; adjust length (number of words)
+	addI.W	#16,D6		; number - 1 of bits left of the binary point
+	blt.s	@1			; no digits to the left of binary point
+
+@2:
+	BSR	RndStk
+	TST.W	D5
+	BEQ.s	@8		; no round or sticky => no rounding
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	Determines if least significant bit is set
+;	sets lsb of D5 if lsb of significand is set
+;	D3 = bit location in word (A2) of lsb
+
+	MOVE.W	D6,D2
+	LSR.W	#4,D2		; divide by 16, (round bit word location)
+	LSL.W	#1,D2		; multiply by 2, to obtain byte offset
+	LEA	0(A3,D2.W),A2
+	MOVE.W	(A2),D4		; put word into D reg for BTST
+	MOVE.W	D6,D3		; # of bits in significand
+	ANDI.W	#15,D3		; location of round bit within word
+	MOVE.W	#$8000,D0	; initialize mask
+	ROR.W	D3,D0		; align mask to round bit
+	AND.W	D0,D4
+	BEQ.S	@3		; least significant bit clear
+	ADDQ.W	#1,D5
+
+@3:
+	bset	#ERRX,(FPSTATE).W	; signal INEXACT
+
+	move.w	(FPSTATE).W,D2	; D2 <- environment
+
+	move.w	d2,d4
+	and.w	#$00e0,d4	; check for rounding precision or type coercion '0080'
+	beq.s	@91
+	or.W	D0,(A2)		; or in sticky bit
+	bra.s	@8
+
+@91:
+	BTST	#14,D2		; bit for +/-infinity rounding directions
+	BNE.S	@10		; DOWNWARD or TOWARDZERO
+	BTST	#13,D2
+	BNE.S	@11		; UPWARD
+
+	CMP.W	#5,D5		; D5 - 5
+	BLT.S	@8		; no rounding
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Increment the significand (BumpIt)
+
+@4:
+	ADD.W	D0,(A2)		; test for least significant bit
+	BCC.S	@8
+
+@5:
+	cmpa.L	A2,A3
+	beq.s	@6		; register overflowed
+	ADDQ.W	#1,-(A2)
+	BCS.S	@5
+	bra.s	@8
+
+; MAKE SURE THIS GETS EXCERCISED ALL FOUR WAYS (bin <--> dec & mul | div)
+
+@6:
+	move.w	#1,-(a3)	; add overflow word
+	addQ.w	#1,D1		; adjust length (number of words)
+	addI.W	#16,D6		; number - 1 of bits left of the binary point
+	lea	16(a1),a1	; for DivD case
+
+@8:
+	TST.W	(A3)
+	BNE.S	@9
+	LEA	2(A3),A3	; location of first word - 1
+	SUBQ	#1,D1		; number of words
+	SUBI.W	#16,D6		; number - 1 of bits left of the binary point
+@9:
+		RTS
+
+@10:
+	BTST	#13,D2		; DOWNWARD or TOWARDZERO
+	BNE.S	@8		; TOWARD-ZERO
+	MOVE.L	x(A6),A4	; x(A6) contains the address of x
+	MOVE.W	(A4),D2		; contains sign and biased exponent
+	BMI.S	@4		; - & DOWNWARD, bumpit
+	BRA.S	@8		; + & DOWNWARD, don't bumpit
+		
+@11:
+	MOVE.L	x(A6),A4	; UPWARD
+	MOVE.W	(A4),D2		; contains sign and biased exponent
+	BPL.S	@4		; + & UPWARD, bumpit
+	BRA.S	@8		; - & UPWARD, don't bumpit
+		
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Determines if round or sticky bits exist
+;	D5 = 0	=> no round & no sticky
+;	D5 = 2	=> no round &    sticky
+;	D5 = 4	=>    round & no sticky
+;	D5 = 6	=>    round &    sticky
+
+RndStk:
+	clr.w	d5		; initialize D5
+	MOVE.W	D6,D3		; # of bits in significand
+	ADDQ.W	#1,D3		; round bit location w.r.t. left of significand
+	MOVE.L	D3,D4
+	LSR.W	#4,D4		; divide by 16, (round bit word location)
+	CMP.W	D1,D4		; D4 - D1
+	BLE.S	@1
+	RTS			; no round or sticky bits, no rounding
+
+@1:
+	ANDI.W	#15,D3		; location of round bit within word
+	MOVE.W	#$8000,D0	; initialize mask
+	ROR.W	D3,D0		; align mask to round bit
+	MOVE.W	D4,D2
+	LSL.W	#1,D2		; multiply by 2, to obtain byte offset
+	LEA	0(A3,D2.W),A2
+	AND.W	(A2),D0		; test for round bit
+	BEQ.S	@2		; no round bit found
+	MOVEQ	#4,D5
+
+@2:
+	MOVE.W	#$7FFF,D0	; initialize mask
+	LSR.W	D3,D0		; align mask to sticky bits
+	AND.W	(A2)+,D0	; test for sticky bits
+	BEQ.S	@5		; sticky bits not found yet
+@3:
+	ADDQ.W	#2,D5
+	RTS
+
+@4:
+	TST.W	(A2)+
+	BNE.S	@3		; sticky bit found
+@5:
+	ADDQ.W	#1,D4
+	CMP.W	D1,D4		; D4 - D1
+	BLE.S	@4		; keep looking for sticky bits
+	RTS			; no sticky bits found
+
+GetX:
+	MOVE.L	x(A6),A0	; x(A6) contains the address of x
+	MOVE.W	(A0)+,D6	; contains sign and biased exponent
+	BCLR.L	#15,D6		; test and clear sign bit
+	SUBI.W	#$400C,D6	; adjusted location of binary point
+	movea.L	DAdr(A6),A3
+	suba.w	#52,A3
+	MOVE.L	(A0)+,(A3)	; get significand of extended
+	MOVE.L	(A0)+,4(A3)	; get significand of extended
+	MOVEQ	#3,D3		; initial length of D3
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Extended input located at (A3), length of D3 + 1 words,
+; binary point D6 bits to the right of word (A3)
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; We must first normalize the power of ten.
+; Then align extended value such that the last 16 bit divide will
+; yield the round bit in the least significant bit.
+; Then do the divide.
+
+Nrmlz10:
+	MOVE.W	D1,D7
+	ASL.W	#4,D7		; times 16
+	movea.L	s(a6),a0
+	addq	#2,a0
+	SUB.W	(A0),D7		; location of binary point to the right
+			 	;	of first word (address (A1))
+	MOVE.W	D1,D5		; get word displacement
+	ASL.W	#1,D5		; set byte displacement, save for FinDiv
+	MOVE.W	(A1),D0		; get most significant word of divisor
+	BMI.S	@3			; power of ten normalized
+@1:
+	SUBQ.W	#1,D7		; adjust binary point
+	MOVE.W	D1,D4		; set counter
+	LEA	2(A1,D5.W),A0
+	MOVE.W	#0,CCR		; clear 'X'
+@2:
+	ROXL.W	-(A0)		; normalize power of ten
+	DBRA	D4,@2
+	BPL.S	@1		; power of ten still not normalized
+	MOVE.W	(A1),D0		; get most significant word of divisor
+@3:
+	RTS
+		
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Power of ten located at (A1), length of D1 + 1 words,
+; binary point D7 bits to the right of word (A1)
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+DivX:
+	SUB.W	D7,D6		; # bits to generate
+	BLE	noDiv
+
+	MOVE.W	D6,D4
+	ASR.W	#4,D6		; D6.W + 1 = # of DIVU steps required
+	ANDI.W	#15,D4		; # of shifts necessary to align final answer
+	BEQ.S	BeginD
+
+	ADDQ.w	#1,D3		; append a zero word to A3
+	CLR.W	-(A3)
+
+	SUBQ	#1,D4		; adjust counter for DBRA below
+@4:
+	ASL.W	8(A3)
+	ROXL.W	6(A3)
+	ROXL.W	4(A3)
+	ROXL.W	2(A3)
+	ROXL.W	(A3)
+	DBRA	D4,@4
+	BRA.S	BgnDiv
+
+BeginD:
+	CMP.W	(A3),D0		; DO - (A3)
+	BHI.S	@1		; Divide will succeed, no padding necessary	<klh 11apr90>
+	ADDQ.w	#1,D3		; append a zero word to A3
+	CLR.W	-(A3)
+	BRA.S	BgnDiv
+@1:
+	SUBQ	#1,D6		; D6.W + 1 = # of DIVU steps required
+BgnDiv:
+	BSR.s	PadIt
+
+	MOVEA.L	A3,A0
+DivLoop:
+	MOVE.L	(A0),D2		; Address of quotient
+	DIVU	D0,D2
+	BVS	divOver
+	SWAP	D2
+	MOVE.L	D2,(A0)		; put result and rem back into (A3)
+	SWAP	D2		; used in FinDiv
+	LEA	2(A0),A0
+	CMPI.W	#2,D5		; byte offset of last word of divisor
+	BLT.S	CtnDv
+
+	BEQ.S	OneDiv
+	MOVE.W	D5,D7		; number of bytes - 2
+	BCLR.L	#1,D7
+	BSR.s	MandS
+	MOVEQ	#0,D4
+	MOVE.W	-(A4),D1
+	SUBX.W	D4,D1
+	MOVE.W	D1,(A4)		; 'C' Cleared, 'X' not affected.
+	NEGX.W	D7		; test 'X' bit, 'X' - D7
+	TST.W	D7
+	BNE.S	OneDiv		; no 'X' bit
+
+	BSR.s	DecrIt
+
+OneDiv:
+	MOVE.W	D5,D7
+	BTST.L	#1,D7
+	BNE.S	@1
+	SUBQ.W	#2,D7
+@1:
+	BSR.S	MandS
+	NEGX.W	D7		; test 'X' bit, 'X' - D7
+	TST.W	D7
+	BNE.S	CtnDv		; no 'X' bit
+
+	BSR.s	DecrIt
+
+CtnDv:
+	DBRA	D6,DivLoop
+
+DvFin:
+	SUBA.L	A3,A0
+	MOVE.W	A0,D6
+	MOVE.W	D3,D1		
+	ASL.W	#3,D6		; multiply by 8
+	SUBQ	#3,D6		; # number of integer bits
+	rts		
+
+noDiv:
+	MOVEA.L	A3,A0
+	CLR.W	-(A3)
+	BRA.S	DvFin
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; PadIt
+; D1 length of divisor
+; D3 length of dividend
+; D6 necessary length of DIVU required (similar to length i.e, 0 => 1
+;
+; Extended input located at (A3), length of D3 + 1 words,
+; binary point D5 bits to the right of word (A3)
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+				
+PadIt:
+	MOVE.W	D1,D7
+	ADD.W	D6,D7
+	ADDQ.W	#1,D7		; number of words necessary for dividend
+	SUB.W	D3,D7		; (D1 + D6 + 1) - D3
+	BLE.S	@2		; quotient has sufficent length
+
+	move.w	d3,d2
+	asl.w	#1,d2		; times 2
+	LEA	2(A3,D2.W),A2	; address of first block to be cleared
+
+	ADD.W	D7,D3		; adjust length
+	ASR.W	#1,D7		; divide by 2
+@1:		
+	CLR.L	(A2)+
+	DBRA	D7,@1
+
+@2:
+	RTS		
+
+MandS:
+	LEA	2(A1,D7.W),A2
+	LEA	2(A0,D7.W),A4
+	SUBQ.W	#2,D7
+	ASR.W	#2,D7		; use as a counter for DBRA
+	MOVE.W	#0,CCR		; clear 'X'
+@1:
+	MOVE.L	-(A2),D4
+	MULU	D2,D4
+	MOVE.L	-(A4),D1
+	SUBX.L	D4,D1
+	MOVE.L	D1,(A4)		; 'C' Cleared, 'X' not affected.
+	DBRA	D7,@1
+	RTS
+		
+DecrIt:
+	SUBQ.W	#1,-2(A0)
+	MOVE.L	D5,D1		; #of bytes - 2 in divisor
+	LEA	2(A1,D1.W),A2
+	LEA	2(A0,D1.W),A4
+	ASR.W	#1,D1		; use as a counter for DBRA
+	MOVE.W	#0,CCR		; clear 'X'
+@1:
+	ADDX.W	-(A2),-(A4)
+	DBRA	D1,@1
+	BCC.S	DecrIt
+	RTS
+
+divOver:
+	CLR.W	(A0)+
+	MOVE.W	D5,D7		; #of bytes - 2 in divisor 
+	beq.s	DecrIt
+	LEA	2(A1,D7.W),A2
+	LEA	0(A0,D7.W),A4
+	ASR.W	#1,D7		; use as a counter for DBRA
+	subq.w	#1,D7
+	MOVE.W	#0,CCR		; clear 'X'
+@1:
+	SUBX.W	-(A2),-(A4)
+	DBRA	D7,@1
+
+	BSR.S	DecrIt
+
+	BRA	CtnDv
+
+SizeExtN:
+	neg.w	D0
+	cmpi.w	#5208,D0	; D0 - 5208
+	bcs.s	allct		; D0 < 5208
+	MOVE.W	#5207,D0	; initialize mask
+	move.w	d0,d1
+	neg.w	d1
+	move.w	d1,(a0)		; reset s(a6)	
+	bra.s	allct
+
+SizeExt:
+	cmpi.w	#5008,D0	; D0 - 5008
+	bcs.s	allct		; D0 < 5008
+	MOVE.W	#5007,D0	; initialize mask
+	move.w	d0,(a0)		; reset s(a6)	
+allct:
+	moveq	#0,d4		; zero d4 (for longword comparison below)
+	move.w	d0,d4
+	add.w	#527,d4		; minimum value for d4
+	and.b	#$f8,d4		; force multiple of 8
+	cmpi.w	#4*bgSz,d4	; d5 - #4*bgSz, check for max value
+	bcs.s	@1
+	move.w	#4*bgSz,d4
+@1:
+	move.w	d4,d5
+	asr.w	#2,d5		; divide by 4 [*** result must be even ***]
+
+	move.l	d0,d1		; save d0
+	_StackSpace		; results will be in A0 and D0
+	CMP.L	d4,D0		; do we have enough StackSpace?
+	BPL.S	@2
+	MOVEQ	#28,D0		; Stack overflow error.  The stack has expanded into the heap
+	_SysError
+@2:
+	move.l	d1,d0		; restore d0
+
+	move.l	(sp)+,a1	; save return address
+	suba.w	d4,sp		; allocate more space on the stack
+	move.l	a1,-(sp)	; restore return address
+
+	lea	areg(A6),A1
+	move.L	A1,AAdr(A6)
+
+	suba.w	d4,a1		; -4*d5
+	move.L	A1,DAdr(A6)
+		
+	adda.w	d5,a1		; -3*d5
+	move.L	A1,CAdr(A6)
+
+	adda.w	d5,a1		; -2*d5
+	move.L	A1,BAdr(A6)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Algorithm for generating powers of ten.  D0 intially contains
+; the requested power of ten.  On completion areg (see description
+; below) will contain the actual integer power of 5.
+;
+
+Ten2AReg:
+	movea.L	AAdr(A6),A1
+	MOVEQ	#0,D2		; make sure hi part of D2 is clear
+	MOVE.W	D0,D2
+	DIVU	#21,D2
+	MOVE.W	D2,D0
+	SWAP	D2		; get remainder into D2.LO
+	CMPI.W	#7,D2		; D2 - 7
+	BLT.S	Frst7
+	CMPI.W	#14,D2		; D2 - 14
+	BGE.S	Third7
+
+	MOVEQ	#1,D1		; set length word
+	LEA	Tbl2,A2
+	SUBQ.W	#7,D2
+	ASL.W	#2,D2		; times 4, byte offset
+	MOVE.L	0(A2,D2.W),-(A1)
+	BRA.S	GotTen2
+
+Third7:
+	MOVEQ	#2,D1		; set length word
+	LEA	Tbl3,A2
+	SUBI.W	#14,D2
+	MULU	#6,D2		; times 6, byte offset
+	MOVE.L	2(A2,D2.W),-(A1)
+	BRA.S	GotTen
+
+
+Frst7:
+	MOVEQ	#0,D1		; set length word
+	LEA	Tbl1,A2
+	ASL.W	#1,D2		; times 2, byte offset
+GotTen:
+	MOVE.W	0(A2,D2.W),-(A1)
+
+GotTen2:
+	TST.W	D0
+	BNE.S	MakeTen
+	RTS
+
+MakeTen:
+	BSR.s	a2c
+
+	MOVEQ	#3,D2		; initialize length of 10^21
+	movea.L	BAdr(A6),A2
+	subq.L	#4,A2
+	MOVE.L	#$4D6E2EF5,(A2)
+	MOVE.L	#$0001B1AE,-(A2)
+
+	bra.s	BigLoop
+
+DoItAgn:
+	bsr.s	a2c
+notOdd:
+	bsr.s	bXb2b
+BigLoop:
+	asr.w	#1,d0
+	bcc.s	notOdd
+	bsr.s	cXb2a
+	tst.w	d0
+	bgt.s	DoItAgn
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; a, b & c reside in locations areg2(A6), breg2(A6), creg2(A6),
+; respectively.  They are stored in a string of words counting backwards
+; from their starting location.  The higher order words are appended
+; to the lower address.  D1, D2 & D3 contain their respective word
+; lengths - 1.
+;
+
+cXb2a:
+	move.w	d2,d1
+	add.w	d3,d1
+	addq.w	#1,d1		; maximum length for areg
+	move.w	d3,d7		; use as counter
+	addq.w	#1,d7		; initial length for areg
+	lsr.w	#1,d7		; divide by 2, (clear 2 words at a time)
+	movea.L	AAdr(A6),A1
+@2:		
+	clr.l	-(a1)		; zero out areg(a6)
+	dbra	d7,@2
+
+	movea.L	AAdr(A6),A4
+	subq.L	#2,A4
+	movea.L	BAdr(A6),A2
+	subq.L	#2,A2
+	move.w	d2,d5		; set outer counter
+	bra.s	@4
+
+@3:
+	clr.w	-(a1)
+	subq.L	#2,a2
+	subq.L	#2,a4
+@4:
+	move.L	a4,a1
+	movea.L	CAdr(A6),A3
+	move.w	d3,d6		; set inner loop counter for C
+@5:
+	move.w	-(a3),d7
+	mulu	(a2),d7
+	suba.w	#2,a1		; adjust address of a1
+	add.l	d7,(a1)
+	bcc.s	@7		; check for carry propagation
+
+	move.l	a1,a0
+@6:
+	addq.l	#1,-(a0)	; propagate carry
+	bcs.s	@6
+
+@7:
+	dbra	d6,@5
+	dbra	d5,@3
+
+	tst.w	(a1)
+	bne.s	@10
+	lea	2(a1),a1	; adjust address of a1
+	subq.w	#1,d1		; adjust length
+@10:
+	rts
+		
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+a2c:
+	move.w	d1,d3		; areg -> creg
+	movea.L	AAdr(A6),A1
+	movea.L	CAdr(A6),A3
+	lsr.w	#1,d1		; divide by 2		
+@1:
+	move.l	-(a1),-(a3)
+	dbra	d1,@1
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+bXb2b:
+	move.w	d2,d1
+	move.w	d1,d7		; use as counter
+	asl.w	#1,d1		; double it
+	addq.w	#1,d1		; new length
+	movea.L	AAdr(A6),A1
+@2:
+	clr.l	-(a1)		; zero out areg(a6)
+		dbra	d7,@2
+
+	move.w	d2,d5		; set counter for cross products of square
+	subq.w	#1,d5
+	bmi.s	doSqrs		; no cross products
+	movea.L	AAdr(A6),A4	; save address
+	subq.L	#4,A4
+	movea.L	BAdr(A6),A2
+	subq.L	#2,A2
+	bra.s	@4
+
+@3:
+	suba.w	#2,a2
+	suba.w	#4,a4
+@4:
+	move.l	a4,a1
+	move.l	a2,a3
+	move.w	d5,d6		; set inner loop counter for C
+@5:
+	move.w	-(a3),d7
+	mulu	(a2),d7
+	suba.w	#2,a1		; adjust address of a1
+	add.l	d7,(a1)
+	bcc.s	@7
+
+	move.l	a1,a0		; COULD PUSH & RESTORE FROM STACK!!!
+@6:
+	addq.l	#1,-(a1)
+	bcs.s	@6
+	move.l	a0,a1		; restore
+
+@7:
+	dbra	d6,@5
+@8:
+	dbra	d5,@3
+
+dblIt:
+	movea.L	AAdr(A6),A1
+	move.w	#0,CCR		; clear 'X'
+	move.w	d1,d7		; use as counter
+
+@1:
+	roxl.w	-(a1)
+	dbra	d7,@1
+
+doSqrs:
+	movea.L	AAdr(A6),A1
+	movea.L	BAdr(A6),A2
+@5:
+	move.w	-(a2),d7
+	mulu	d7,d7
+	add.l	d7,-(a1)
+	bcc.s	@7
+
+	move.l	a1,a0		; COULD PUSH & RESTORE FROM STACK!!!
+@6:
+	addq.l	#1,-(a1)
+	bcs.s	@6
+	move.l	a0,a1		; restore
+
+@7:
+	dbra	d2,@5
+
+	tst.w	(a1)
+	bne.s	@10
+	lea	2(a1),a1	; adjust address of a1
+	subq.w	#1,d1		; adjust length
+
+@10:
+	tst.w	d0
+	bne.s	a2b
+	rts
+
+a2b:
+	move.w	d1,d2		; areg -> breg
+	movea.L	AAdr(A6),A1
+	movea.L	BAdr(A6),A2
+	lsr.w	#1,d1		; divide by 2		
+@1:
+	move.l	-(a1),-(a2)
+	dbra	d1,@1
+	rts
+
+Tbl1:
+	DC.W	 $0001		;	5^0
+	DC.W	 $0005		;	5^1
+	DC.W	 $0019		;	5^2
+	DC.W	 $007D		;	5^3
+	DC.W	 $0271		;	5^4
+	DC.W	 $0C35		;	5^5
+	DC.W	 $3D09		;	5^6
+
+
+Tbl2:
+	DC.W	 $0001
+	DC.W	 $312D		;	5^7
+	DC.W	 $0005
+	DC.W	 $F5E1		;	5^8
+	DC.W	 $001D
+	DC.W	 $CD65		;	5^9
+	DC.W	 $0095
+	DC.W	 $02F9		;	5^10
+	DC.W	 $02E9
+	DC.W	 $0EDD		;	5^11
+	DC.W	 $0E8D
+	DC.W	 $4A51		;	5^12
+	DC.W	 $48C2
+	DC.W	 $7395		;	5^13
+
+
+Tbl3:
+	DC.W	 $0001
+	DC.W	 $6BCC
+	DC.W	 $41E9		;	5^14
+	DC.W	 $0007
+	DC.W	 $1AFD
+	DC.W	 $498D		;	5^15
+	DC.W	 $0023
+	DC.W	 $86F2
+	DC.W	 $6FC1		;	5^16
+	DC.W	 $00B1
+	DC.W	 $A2BC
+	DC.W	 $2EC5		;	5^17
+	DC.W	 $0378
+	DC.W	 $2DAC
+	DC.W	 $E9D9		;	5^18
+	DC.W	 $1158
+	DC.W	 $E460
+	DC.W	 $913D		;	5^19
+	DC.W	 $56BC
+	DC.W	 $75E2
+	DC.W	 $D631		;	5^20
+		
+
+

@@ -1,0 +1,484 @@
+;
+;	File:		StandardFileLDEF.a
+;
+;	Contains:	an LDEF to draw a small icon and name next to it for Standard File
+;
+;	Copyright:	© 1990-1992 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM2>	 11/6/92	SWC		Changed PackMacs.a->Packages.a.
+;		 <1>	 10/1/91	JSM		first checked in
+;		 <0>	 10/1/91	JSM		Created from StandardFile3.LDEF.a.
+;
+;	Modification history from StandardFile3.LDEF.a below:
+;
+;		<14>	12/13/90	ngk		<KSM>now gray disabled icons in color window on 1-bit monitor
+;		<13>	10/29/90	ngk		Now gray out icons of disabled items.
+;		<12>	 9/17/90	ngk		change _PenMode to _TextMode to sync with changes to gray text
+;									also have a hack to set TextMode back to srcOr.
+;		<11>	 8/17/90	gbm		make grayishTextCopy into grayishTextOr
+;		<10>	 8/11/90	ngk		fix bug where it could trash rowBytes of a B&W grafport
+;		 <9>	  8/5/90	ngk		Use trueGray for drawing dimmed text. repack FileEntry. use rgb
+;									array instead of pltt for colorized icons.
+;		 <8>	  7/2/90	ngk		Now use hilite color for selecting items. Added color to icons.
+;									The userHandle of the listrec is assumed to contain a "palette",
+;									and each file entry contains the index into the table. It does
+;									not use the palette manager, just the stucture for holding a
+;									list of colors.
+;		 <7>	  6/6/90	ngk		reduced include files
+;		 <6>	  5/2/90	ngk		include IntlUtilsPriv.a
+;		 <5>	 4/11/90	ngk		fix plotMini bug if SICN not found
+;		 <4>	 3/18/90	ngk		Fix 68000 bug of hilite on draw not working.
+;		 <3>	  3/5/90	PKE		Added smTruncEnd as truncWhere parameter for TruncString call,
+;									since TruncString interface now matches former NTruncString
+;									interface.
+;		 <2>	 2/25/90	ngk		Added ability to put icon of left or right, and justify text
+;		 <1>	 2/17/90	ngk		Made into real stand-alone LDEF
+;
+;	1.8	ngk 11/14/1989 	Changed FileEntry to be a real record.
+;	1.7	ngk 11/08/1989 	fixed bug where incorrectly test data len often caused missing items
+; 	1.6	JRM 10/30/1989 	changes because script and style are part of in file
+;						record
+; 	1.5	ngk 09/13/1989 	fixed bug where you could select a dimmed item
+;						fixed bug where incorrectly test data len often caused missing items
+; 	1.4	JRM 08/11/1989 	Add back in 604 conditionals that Darin said I could
+;						take out
+; 	1.3	JRM 08/08/1989	7.0d10 release
+; 	1.2	JRM 06/08/1989	sf conditionals for bigbang and 604
+; 	1.1	JRM 06/05/1989	big bang standard file - see StandardFilePACK.a
+; 	1.0	CCH 11/16/1988	Added to EASE.
+;
+;	To Do:
+;		maybe use icon utils to plot icon
+;
+
+			LOAD		'StandardEqu.d'
+			INCLUDE		'Packages.a'					; for list manager
+			INCLUDE		'StandardFilePriv.a'			; for LDEF record structure
+
+Point		RECORD	0					;	Point = RECORD CASE INTEGER OF
+v			DS.W	1	          		;		1: (v: INTEGER;
+h			DS.W	1	              	;			h: INTEGER);
+			ORG	v
+vh			DS.W	h	         		; 		2: (vh: ARRAY[1..2] OF INTEGER)
+			ENDR		        		;		END;
+
+Rect		RECORD	0					;	Rect   = RECORD CASE INTEGER OF
+top			DS.W	1	           		;		1: (top:    INTEGER;
+left		DS.W	1	               	;			left:   INTEGER;
+bottom		DS.W	1	               	;			bottom: INTEGER;
+right		DS.W	1	               	;			right:  INTEGER);
+			ORG	top	         			;
+topLeft		DS		Point	           	;		2:  (topLeft:  Point;
+botRight	DS		Point	           	;		3:  (botRight: Point)
+			ENDR		         		;		END;
+
+BitMap		RECORD	0					;	BitMap = RECORD
+baseAddr	DS.L	1	           		;		baseAddr: QDPtr;
+rowBytes	DS.W	1	           		;		rowBytes: INTEGER;
+bounds		DS		Rect	           	;		bounds:   Rect
+			ENDR		         		;		END;
+
+LFrame		RECORD	{A6Link},DECR
+LParamSize   	EQU     *-8         ; prameters to remove on return
+lMessage     	DS.W	1	    	; selector
+lSelect	    	DS.W	1	  		; item selected?
+lRect  			DS.L	1	        ; ptr to rectangle
+lCell   		DS.L	1	    	; ?
+lDataOffset    	DS.W	1	     	; offset into data
+lDataLen    	DS.W	1	     	; length of data
+lHandle	    	DS.L	1	     	; which list
+ReturnAddr		DS.L	1
+A6Link			DS.L	1
+; locals go here
+savedFont		DS.W	1			; saved copy of port font number
+savedSize		DS.W	1			; saved copy of port font size
+savedFace		DS.W	1			; saved copy of port font face
+savedForeColor	DS.B	6			; saved copy of fore ground color while plotting icon
+theBackColor	DS.B	6			; back ground color while plotting icon
+grayForeColor	DS.B	6			; gray fore ground color while plotting dimmed icon
+iconForeColor	DS.B	6			; color of icon to plot 
+tempString		DS.B	64			; copy of string to be truncated
+sicnBitMap		DS		BitMap		; BitMap to hold SICN for copyBits
+canUseTrueGray	DS.B	1			; boolean of whether to use true gray or patterned gray
+isDimmed		DS.B	1			; boolean of whether to dim the item 
+colorChanged	DS.B	1			; boolean of whether color needs to be restored after plot
+				ALIGN
+LFrameSize   	EQU      *          ; size of link
+			ENDR
+
+
+			BLANKS ON
+			STRING ASIS
+
+
+;-------------------------------------------------------------
+;
+; LDEF for Standard File
+;
+;
+; PROCEDURE    DrawCell(lMessage:INTEGER; lSelect:BOOLEAN; lRect: Rect; lCell: Cell;
+;          				 lDataOffset, lDataLen:INTEGER; lHandle:Handle);
+
+LDefEntry 	MAIN	EXPORT
+			bra.s	LDefStart			; bra around std header
+
+			DC.W	0					; flags
+			DC.L	('LDEF')
+			DC.W	 -4000				; pack id
+			DC.W	 0 					; version 
+
+
+			WITH LFrame
+
+LDefStart	LINK    A6,#LFrameSize 		; set up a stack frame
+            MOVEM.L D2-D7/A2-A4,-(SP)   ; save the usual stuff
+            MOVE.L  lHandle(A6),A4      ; get handle to list record
+            MOVE.L  (A4),A3             ; get pointer to (locked) record
+
+            MOVE.W  lMessage(A6),D0     ; why am I being called?
+
+            SUBQ    #1,D0           	; draw message?
+            BEQ.s   Draw          		; br if so
+            SUBQ    #1,D0          		; hilite message?
+            BEQ.S   Hilite         		; br if so
+			; ignore other messages
+			
+LDefExit    MOVEM.L (SP)+,D2-D7/A2-A4    ; restore the usual stuff
+            UNLK    A6                   ; unlink our frame
+            MOVE.L  (SP)+,A0             ; get return address
+            ADD.L   #LParamSize,SP       ; strip off parameters
+            JMP     (A0)                 ; and return
+
+;---------------
+; LHilite -- Here is the code that hilights/unhilights the
+; cell.  We know that it's drawn, and that we're only called
+; if it needs to be de/selected, so inverrect is all we need.
+
+Hilite     
+            move.w  lDataOffset(a6),d0  ; offset to cell data
+           	move.l  cells(A3),a0        ; get data handle
+            move.l  (a0),a0             ; dereference data handle
+
+            tst.b   FileEntry.feFile.dimmed(a0,d0)     ; dimmed?
+           	bne.s   LDefExit            ; br if so, skip hiliting
+
+			bclr	#7,HiliteMode		; now in color! 
+			move.l  lRect(A6),-(SP) 	; push rect
+            _InverRect                  ; and invert it
+            bra.s   LDefExit            ; all done
+
+;---------------
+; LDraw -- Here is the code that does the drawing
+; for the defProc.  Sets up most registers and lets DrawIconAndFileName do the work.
+
+Draw
+			_PenNormal
+			move.l  lRect(A6),-(sp)
+			_EraseRect					; clear background area
+			
+			MOVE.L  cells(A3),A4        ; A4 = data handle
+			
+			MOVE.L  A4, A0				; get handle						2mar87
+			_HGetState					; get lock state					2mar87
+			MOVE.B	d0, -(SP)			; save handle state for exit		2mar87
+			_HLock						; and lock it						2mar87
+		
+		; figure if true gray exists
+			clr.b	canUseTrueGray(a6)
+			cmp.w	#$3FFF,ROM85		; do we have color QD?
+			bhi.s	@usePattern			; no, this system has B&W QD
+			move.l  GrafGlobals(A5),A0	;										<10>
+			move.l  thePort(A0),A0		; get QuickDraw globals					<10>
+			move.w	portVersion(A0),d0	;										<10>
+			and.w	#$C000,d0			; are we using a color grafport?		<10>
+			beq.s	@usePattern			; if not use patterned gray
+			st		canUseTrueGray(a6)
+@usePattern	
+		; figure if the item is dimmed
+			move.l  (a4),a0            					; dereference data handle
+			move.w  lDataOffset(a6),d0  				; offset to cell data
+			tst.b   FileEntry.feFile.dimmed(a0,d0.w)    ; dimmed?
+			sne		isDimmed(a6)
+	
+		; draw it !
+			bsr.s 	 DrawIconAndFileName ; and draw the cell
+	
+		; see if this needs to be dimmed
+			tst.b	isDimmed(a6)
+			beq.s	@skipDim
+
+			tst.b	canUseTrueGray(a6)	; is it already dimmed via TrueGray?
+			bne.s	@skipDim			; if so don't pattern over it
+			
+		; bit clear the rect with gray
+            move.l  (A5),A0             ; get QuickDraw globals
+            pea     Gray(A0)            ; push gray
+            _PenPat                     ; set pen to it
+            move.w	#PatBIC,-(SP)       ; push patBIC penMode
+            _PenMode                    ; set penMode
+			move.l  lRect(A6),-(sp)
+            _PaintRect                  ; or on the dim pattern
+            _PenNormal
+
+@skipDim
+			MOVE.L  cells(A3),A0        ; data handle
+			MOVE.B	(SP)+, D0			; and saved handle state			<2mar87>
+			_HSetState					; restore lock state				<2mar87>
+			
+@quickInvert
+			tst.b   lSelect(A6)         ; selected?
+            bne.s   Hilite
+            bra     LDefExit            ; and return
+			
+
+;-----------------------------------------------------------------
+;
+; a3 = locked list record ptr
+;
+DrawIconAndFileName	
+			move.l	cells(a3),a4
+			move.l	(a4),a4	
+			move.w	lDataOffset(a6),d0
+			lea		(a4,d0.w),a4				; a4 will be pointer to the file entry
+			sf		colorChanged(a6)			; default
+
+; set up the mini icon color
+			tst.b	isDimmed(a6)
+			beq.s	@notDimmed					; if not dimmed, try using colors
+			tst.b	canUseTrueGray(a6)	
+			beq.s	@colorSetUp					; if dimmed, but can't truegray, then will be dithered
+		; get gray color to use
+			pea		theBackColor(a6)		
+			_GetBackColor						; get back color, for GetGray() 
+			pea		savedForeColor(a6)
+			_GetForeColor						; remember fore color, for restoring
+			pea		grayForeColor(a6)
+			_GetForeColor						; get fore color, for GetGray() 
+			subq	#2,sp						; room for GetGray result
+			subq	#4,sp						; room for device handle ### this should be window's device
+			_GetMainDevice
+			pea		theBackColor(a6)			; in: backColor
+			pea		grayForeColor(a6)			; in: foreColor, out: grayColor (mix of fore and back)
+			_GetGray
+			move.b	(sp)+,canUseTrueGray(a6)	; returns true if made gray
+			beq.s	@colorSetUp					; if true gray failed, don't set foreground
+			pea		grayForeColor(a6)
+			bra.s	@setFColor					; set foreground to draw in gray
+
+@notDimmed	tst.l	userHandle(a3)
+			beq.s	@colorSetUp						; NIL means no color info 
+			tst.b	lSelect(a6)   					; only do color on non-selected lines
+            bne.s	@colorSetUp
+			pea		savedForeColor(a6)				; save current foregrounc color
+			_GetForeColor
+			move.w	FileEntry.feIconColor(a4),d0	; no label -> no color
+			beq.s	@colorSetUp
+			subq.w	#1,d0							; zero based
+			asl.w	#1,d0							; * SizeOf(RGBColor)
+			move.w	d0,d1
+			asl.w	#1,d1
+			add.w	d1,d0
+			move.l	userHandle(a3),a0			; get ptr to colors
+			pea		(a0,d0.w)								
+@setFColor	_RGBForeColor						; switch foreground to that color
+			st		colorChanged(a6)			; mark that color was changed
+@colorSetUp	move.l  lRect(a6),a0       			; A0 ^rect
+			move.l	Rect.topLeft(a0),d1			; get topleft
+            add.w	indent+h(a3),d1      		; add in horizontal indent
+			tst.b	FileEntry.feIconLeft(a4)	; is icon on left?
+			bne.s	@1
+			move.w	Rect.Right(a0),d1			; get topRight
+			sub.w	#iconWidth,d1				; need to pass topLeft corner to PlotMini
+            sub.w	indent+h(a3),d1      		; factor in horizontal indent
+@1			sub.l	#$00010000,d1				; vertical fudge
+			move.w	FileEntry.feIcon(a4),d0		; icon selector
+			bsr		PlotMini					
+			tst.b	colorChanged(a6)
+			beq.s	@colorRestored
+			pea		savedForeColor(a6)
+			_RGBForeColor						; restore foreground color
+@colorRestored
+
+; make a copy of the string so we don't destroy it
+			lea		tempString(a6),a1			; destination string
+			lea 	FileEntry.feFile.text(a4),a0; get ptr to source string
+			moveq	#0,d0						; get a long count
+			move.b	(a0),d0 					; get the count
+			addq.b	#1,d0						; add in the length byte
+			_BlockMove							; get name to be trunc'd
+
+; save off port font info before changing
+			move.l	port(a3),a1					; get its grafport
+			move.w	txFont(a1),savedFont(a6)	; save off font state
+			move.w	txFace(a1),savedFace(a6)
+			move.w	txSize(a1),savedSize(a6)
+
+@checkFont	move.w	FileEntry.feFile.font(a4),d0 ; get font
+			cmp.w	savedFont(a6),d0 			; same as port's font?
+			beq.s	@checkFace 					; br if so, skip set
+			move	d0,-(sp)
+			_TextFont							; set font
+
+@checkFace	move.b	FileEntry.fefile.style(a4),d0 ; get face
+			cmp.w	savedFace(a6),d0 			; same as port's face?
+			beq.s	@checkSize 					; br if so, skip set
+			move	d0,-(sp)
+			_TextFace							; set face
+
+@checkSize	move.w	FileEntry.feFile.size(a4),d0 ; get size
+			cmp.w	savedSize(a6),d0 			; same as port's size?
+			beq.s	@checkWidth 				; br if so, skip set
+			move	d0,-(sp)
+			_TextSize							; set size
+
+@checkWidth
+			move.l  lRect(a6),a0       		
+			move.w	Rect.right(a0),d3
+			sub.w	Rect.left(a0),d3		; got width of rectangle
+			sub.w	indent+h(a3),d3			; got width less indent
+			sub.w	#iconWidth+iconPad,d3 	; less icon and its padding
+			
+			subq	#2,SP				; space for result
+			pea		tempString(a6)
+			_StringWidth
+			cmp.w	(sp)+,d3
+			bgt.s	@truncDone
+			
+			; text doesn't fit, so let's try using condensed mode
+			move.b	FileEntry.feFile.style(a4),d0	; get current style
+			bset	#condenseBit,d0					; add condensed to current style
+			move.w	d0,-(SP)						; and set it
+			_TextFace
+
+			; let _TruncString truncate the string if needed
+			subq	#2,SP				; returns whether string truncated
+			move.w	D3,-(SP)			; width
+			pea		tempString(a6)		; the string
+			move.w	#smTruncEnd,-(SP)	; truncate at end								<3>
+			_TruncString
+			addq	#2,SP				; ignore result
+
+@truncDone
+
+; position the pen to draw the file name
+			move.l  lRect(a6),a0       		; A0 = rect
+			move.l	Rect.topLeft(a0),d1		; get topleft
+            add.l	indent(a3),d1   	   	; add in horizontal and vertical indent
+			tst.b	FileEntry.feIconLeft(a4); is icon on left?
+			beq.s	@2						; if not, don't move over for icon
+			add.w	#iconWidth+iconPad,d1	; shift over width of icon plus pad on each side			
+@2			cmp.b	#teJustLeft,FileEntry.feJust(a4)	; normal left justification?
+			beq.s	@moveTo								; is so, go on
+			cmp.b	#teJustRight,FileEntry.feJust(a4)	; right justification?
+			bne.s	@moveTo								; if not, can't handle it, go on
+			
+			; need to move pen over so draw will end on the right border
+			move.l	d1,-(sp)			; save d1
+			subq	#2,SP				; space for result
+			pea		tempString(a6)
+			_StringWidth
+			move.w	(sp)+,d0			; d0.w = string width
+			move.l	(sp)+,d1			; restore d1
+			move.l  lRect(A6),a0
+			move.w	Rect.right(a0),d2
+			tst.b	FileEntry.feIconLeft(a4); is icon on left?
+			bne.s	@3						; if not, don't move over for icon
+			sub.w	#iconWidth+iconPad+3,d2	; shift over width of icon plus pad			
+@3			sub.w	d1,d2				; got width in which to draw
+			sub.w	d0,d2				; got width of no drawn
+			add.w	d2,d1				; d1 now shifted over to start draw
+			
+@moveTo		move.l	d1,-(sp)			
+			_MoveTo 						; position the pen
+			
+			tst.b	isDimmed(a6)			; is this item dimmed?
+			beq.s	@drawIt
+			tst.b	canUseTrueGray(a6)		; can we true-gray it?
+			beq.s	@drawIt
+			move.w	#grayishTextOr,-(SP)	; yes => set the pen mode to grayishTextOr
+			_TextMode						; 					<12 ngk 17Sept90 >
+
+@drawIt
+	; draw the file name
+			pea		tempString(a6)			; the string
+			_DrawString
+			_PenNormal
+			move.w	#srcOr,-(SP)			;  force gray off	<12 ngk 17Sept90 >  is this required? 
+			_TextMode						; 					<12 ngk 17Sept90 >  is this required? 
+			
+			; restore port's font state
+			move.l	port(a3),a1					; get its grafport
+			
+@restoreFont
+			move.w	savedFont(a6),d0			; get old font
+			cmp.w	txFont(a1),d0				; was font not changed?
+			beq.s	@restoreFace 				; br if so, skip reseting
+			move.w	d0,-(sp)
+			_TextFont							; reset font
+
+@restoreFace
+			move.w	savedFace(a6),d0			; get old face
+			cmp.w	txFace(a1),d0				; was face not changed?
+			beq.s	@restoreSize 				; br if so, skip reseting
+			move.w	d0,-(sp)
+			_TextFace							; reset face
+
+@restoreSize
+			move.w	savedSize(a6),d0			; get old size
+			cmp.w	txSize(a1),d0				; was size not changed?
+			beq.s	@restoreDone 				; br if so, skip reseting
+			move.w	d0,-(sp)
+			_TextSize							; reset size
+
+@restoreDone
+			rts
+
+
+
+;---------------------------------------------------
+;
+;	Plot one of the mini icons. d0 = sicn ID
+;								d1 = topleft for icon
+;								a3 = locked list record
+;			Trashes:	a0,d1
+PlotMini
+			lea		sicnBitMap(a6),a0
+			move	#2,BitMap.rowBytes(a0) 					; QD Rowbytes for 16x16
+			clr.l	BitMap.bounds.topLeft(a0)				; boundsrect 0,0,16,16
+			move.l	#$00100010,BitMap.bounds.botRight(a0)	;
+			
+			subq	#4, sp				; space for handle
+			move.l	#'SICN', -(sp)		; get a small icon
+			move	d0, -(sp)			; pass SICN id
+			_GetResource
+			move.l	(sp)+,d0
+			beq.s	@exit				; br if not, exit
+			move.l	d0,a0
+			move.l	(a0),sicnBitMap+BitMap.baseAddr(a6)	; replace in bitmap
+
+			pea		sicnBitMap(a6)		; pass local var as source bit map
+			move.l	port(a3),a0			; get its grafport
+			pea 	portBits(a0)		; pass window bitmap as dest bitmap
+
+			pea		sicnBitMap+BitMap.bounds(a6) ; use bounds as src rect
+
+			lea 	Scratch20,a0		; use Scratch20 as dst rect
+			move.l	a0,-(sp)			; save the address
+			move.l	d1,(a0)+			; point to topleft
+			move.l	d1,(a0) 			; copy topLeft to botRight
+			add.w 	#16,(a0)+			; bottom = top+size
+			add.w 	#16,(a0)			; right = left+size
+
+			move	#srcCopy,-(sp)		; copy mode
+			clr.l	-(sp)				; NIL MaskRgn
+			_CopyBits					; finally
+@exit
+			rts
+			
+			
+	ENDWITH
+
+
+			END

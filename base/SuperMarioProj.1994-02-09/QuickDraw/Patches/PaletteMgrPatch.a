@@ -1,0 +1,3730 @@
+;EASE$$$ READ ONLY COPY of file “PaletteMgrPatch.a”
+; 1.0	BAL 11/19/1989 Changed name to avoid conflicts between system 6.0 and
+;		ROM/32-Bit QD versions.
+;  --  Revisions Of PaletteMgr.a Below  --
+; 1.5	SES 08/28/1989  Removed references to nFiles. Updated equates accordingly.
+; 1.4	BAL 06/26/1989 dvb For 6.0.4 Moved grayrgn test into initpalettes, removed initmenus
+; 1.3	BAL 06/12/1989 Altered patch to InitMenus to check grayRgn before calling _InitPalettes
+;•1.2	CEL 06/10/1989 Moved Private.a QuickDraw Equates into proper QuickDraw
+;		private file (colorequ.a), got rid of QuickDraw nFiles dependencies
+;		and fixed up necessary files…
+;•1.1	CCH 11/16/1988 Updated to newest version.
+;
+;_______________________________________________________________________________________
+; File: PaletteMgr.a
+;
+; Version 6.0.1
+;
+; Copyright 1987-1988 Apple Computer, Inc. All Rights Reserved
+;
+;_______________________________________________________________________________________
+;
+; modification history
+;
+; <02feb87>		 	AWC		new this date
+; <26mar87>	PB103	AWC		non-window manager version completed
+; <27mar87>			AWC		interface changed to support window manager
+; <27mar87>			EHB		window manager calls added
+; <29mar87> PB150   AWC     fixed nil pointers (RGBForeColor) and added WindowCopy
+; <30mar87> 		AWC/EHB background updates, ExitToShell fix, System Palette
+; <30Mar87>			JTC		Daisy chain the IAZInit routine properly.
+; <15Jul87>			AWC/FJL	SetPalette(Ptr(-1),...), Menu fix, update problems
+; <20Jul87> PB212	DAF		Removed GetNewCWindow portion of NewCWindow fix.  Changed
+;							myDisposeWindow to fix CloseWindow.  
+; <22Jul87> PB221	AWC		fix to crash when there are no menus (see note @PB225)
+; <22Jul87> PB222	AWC		CopyPalette implemented (see note @PB225)
+; <22Jul87> PB223	AWC		fix to bug causing too many updates (see note @PB225)
+; <22Jul87> PB224	AWC		added support for Juggler (see note @PB225)
+; <22Jul87> PB225	AWC		NewPWindow implemented; NOTE: fixes PB221 through PB225
+;							were all added at once.  They are unique numbers solely
+;							for bureaucratic reasons.
+; <12Aug87> C864	RWH		Added ROMPaletteMgr Conditional flag (its defined outside this file
+;							in order to make Rom78Fix build work). Conditional-ed out calls
+;							at end of this file so it can be put in ROM.  Search for ;!!!!!
+;							Made ReDrawMenuBar an RTS for the ROM version.  Made the call to
+;							SortPoints use the macro from QDHooks.a.  
+; <01Sep87> PB259	AWC		Fixed NewPWindow so it doesn't polymerize the stack.
+; 			C872			Same as PB259
+; <04Sep87> PB262	AWC		Fixed ActivatePalette to generate fewer color updates
+;			C886			Same as PB262
+; <16Nov87> PB302	AGH		Made changes for use with A/UX toolbox.
+; <01Feb88> PB377	AWC		Fixed 5 minor bugs in the Palette Manager (1st entry bug, screen
+;							dev. bug, D0 error bugs, protection bits bugs, PmBackColor/explicit
+;							bug)
+; <02Feb88> PB378	AWC		Oops, I forgot one.  The 16th palette causes a crash...
+; <12Feb88>	PB392	AWC		Fixed a fix which short circuits the menu bar update code.
+; <23Mar88> PB438	DAF		Removed InitWindows fix, since it wasn't installed anyway.
+; <24Mar88>	PB439	AWC		Fixed SetPalette; removed pmWindow references
+; <07Apr88> PB457	AWC		Fixed ColorMore crash, implemented AppPalette, DisposeBit
+; <08Apr88>	PB462	AWC		Fixed lines out of order bug created in PB459
+; <18Apr88>	PB469	AWC		Blocked InitGraf from using the system resource file
+; <26Apr88>	PB480	AWC		Fixed PaletteMgr updates, animation of black, and set Palettes NoPurge
+; <29Apr88> PB485   AWC     Blocked spurious ActivatePalette's by checking wHilited
+; <13Jun88> PB500	AWC		Fixed AnimateEntry; made Palette Manager active even if
+;							no 'clut' devices are present
+; <17Jun88> PB506	AWC		Moved InitGraf fix to InitMenus; IAZNotify routine clears WindowList
+; <22Jun88> PB508	AWC		Added MenuBar updates and SingleFinder Desktop updates; made routines
+;							draw using the AppPalette; added DirtySeeds to correct update problem;
+;							blocked InitMenus from initializing AppPalette twice; now clear
+;							AppPalette in the event that its palette is disposed
+; <27Jun88>	PB520	AWC		Save grafPort across PaintOne; put InitMenus stuff into InitPalettes;
+;							removed NewPWindow (which was never publicized); generally cleaned
+;							things up for the ROM version.  Fixed unlocked handle in PmForeColor.
+; <12Jul88>	PB530	AWC		Fixed CopyPalette resize problem; changed behavior of explicit
+;							colors on direct devices
+;
+;___________________________________________________________________________
+
+XPalettes	PROC	EXPORT			; dummy procedure; return to globals			AWC.PB457
+			ENDPROC					;												AWC.PB457
+
+AppPalette	Equ		$DCC			; low memory global for layer palette			AWC.PB457
+UpdateMask	Equ		$E000			; bits used to record update flags in pmPrivate	AWC.PB457
+AllUpdates	Equ		$C000			; combination of CForeBit and CBackBIt			AWC.PB457
+plttUpdates	Equ		$0002			; value passed to SetPalette [short]			AWC.PB457
+
+; Here is what is left of the Patch Collator stuff.  The Palette Manager routines have never
+; been patches to the ROM - they were never in the original ROM, so there was nothing to
+; patch.  This is all there is.  The window manager patches are shown below and are marked
+; near the routine with another patch signal.  To find one, double click on the Patch Name
+; and search for that (Command-H under MPW 2.0).
+;
+;					File			Date		Patch#	PMgr Routines		Trap#
+;AppleSystemPatch 	PaletteMgr.a	10Mar87		#PB103	(InitPalettes)		$AA90
+;AppleSystemPatch 	PaletteMgr.a	10Mar87		#PB103	(NewPalette)		$AA91
+;AppleSystemPatch 	PaletteMgr.a	10Mar87		#PB103	(GetNewPalette)		$AA92
+;AppleSystemPatch 	PaletteMgr.a	10Mar87		#PB103	(DisposePalette)	$AA93
+;AppleSystemPatch 	PaletteMgr.a	10Mar87		#PB103	(ActivatePalette)	$AA94
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(SetPalette)		$AA95
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(GetPalette)		$AA96
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(PmForeColor)		$AA97
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(PmBackColor)		$AA98
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(AnimateEntry)		$AA99
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(AnimatePalette)	$AA9A
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(GetEntryColor)		$AA9B
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(SetEntryColor)		$AA9C
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(GetEntryUsage)		$AA9D
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(SetEntryUsage)		$AA9E
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(CTab2Palette)		$AA9F
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103	(Palette2CTab)		$AAA0
+;AppleSystemPatch 	PaletteMgr.a 	22Jul87		#PB222	(CopyPalette)		$AAA1
+;
+;					Fix File		Date		Patch#	Fixed Routines		Patch Routine Name
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(RGBForeColor) 		(RGBForeColor)
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(RGBBackColor) 		(RGBBackColor)
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB506 	(InitMenus) 		(myInitMenus)
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(NewCWindow) 		(myNewCWindow)
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(NewWindow) 		(myNewWindow)
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(HiliteWindow) 		(myHiliteWindow)
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(MoveWindow) 		(myMoveWindow)
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(SizeWindow) 		(mySizeWindow)
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(CloseWindow) 		(myClose)
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(ShowHide) 			(myShowHide)
+;AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(MyExit) 			(myExit)
+;
+;	Another routine which must be included for proper Palette Manager operation is
+;	GetNewCWindow which is patched in PatchIIROM.a
+
+;---------------------------------------------------
+;
+; PROCEDURE	InitPalettes; INLINE $AA90;
+;
+
+InitPalettes	PROC	EXPORT
+				IMPORT	RecordPalette
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			MoveM.L D3-D4/A2-A4,-(SP) 		; save registers
+
+			moveq	#-1,d0					; get a useful value						<1.3>
+			cmp.l	grayRgn,d0				; has it been initialized?					<1.3>
+			beq		goHome					; no, don't call the brinker				<1.3>
+
+
+; Start by running down the device list, finding all active CLUT devices.  Count how many
+; there are and record them in PListHandle.
+
+			Move.L	PMgrHandle,D0			; get the Palette Manager handle
+			Cmp.L	#PMgrNil,D0				; is it nil?
+			Bne		ChkAppPltt				; we're initializaed - check for AppPalette	AWC.PB520
+
+; To start things up, allocate enough room for static Palette Manager data and 32 device table
+; slots.  Note that the current implementation of Color Quickdraw (not the architecture) sets
+; a limit on the color index model of 256 entries.  THIS NUMBER IS ASSUMED BY THE CODE BELOW,
+; but the structure will allow modification once 'clut's bigger than 256 entries are allowed.
+; This code also assumes that the cards have the potential of being 256 entry cards even if
+; set at a lower resolution, so it always allocates 256 entries in each device map (integer sized).
+
+; Note - the total space allocated for pm device table space is presumed (below) to
+; be long word aligned.  See the loop below at Clearing.
+
+			Move.L	#PMgrDataSz,D4			; set D4 to the required size				AWC.PB500
+			Move.L	D4,D0					; copy size to D0
+			_NewHandle ,SYS,CLEAR			; allocate our data area in the system heap
+			Bne		GoHome					; we got an error, so we quit
+			Move.L	A0,A3					; copy to A3 for later use
+			Move.L	A0,PMgrHandle			; and remember it in low memory
+			MoveQ	#0,D3					; zero our device count
+			Move.L	(A3),A4					; dereference PMgrHandle
+			AddA	#DevHandles,A4			; point A4 at our local device list
+			Clr.L	-(SP)					; push room for device handle				AWC.PB500
+			_GetDeviceList					; get the start of the device list			AWC.PB500
+			Move.L	(SP)+,A2				; put the device list in A2					AWC.PB500
+			Bra.S	DeviceEnd				; jump to the end of the loop				AWC.PB500
+
+DeviceLoop	Move.L	(A2),A0					; dereference device handle
+			Move	gdFlags(A0),D0			; get flags; is it an active device?
+			Bpl.S	NextDevice				; no => examine next device
+			BTst	#ScreenDevice,D0		; is it a screen device?
+			Beq.S	NextDevice				; no => examine next device					AWC.PB377
+			Move	gdType(A0),D0			; get the type of the device				AWC.PB377
+			Cmp		#ClutType,D0			; is it a Clut device?
+			Bne.S	NextDevice				; no => we only track Clut devices
+			AddQ	#1,D3					; yes => bump our device count by 1
+			Move.L	A2,DevHandle(A4)		; copy device handle						AWC.PB500
+			Clr.L	DevFrontMost(A4)		; clear device FrontMost field
+			AddQ	#DevInfoSz,A4			; bump A4 to the next device slot
+			Add.L	#256*PmDevSz,D4			; each device table is 1024 bytes (for now)
+			Cmp		#DevLimit,D3			; are we at the limit the PMgr can handle?	AWC.PB500
+			Bpl.S	EnoughDevs				; if so, we'll ignore any remaining devices
+NextDevice	Move.L	gdNextGD(A0),A2			; grab next device							AWC.PB500
+DeviceEnd	Move.L	A2,D0					; CmpA #Nil,A2; is it nil?					AWC.PB500
+			Bne.S	DeviceLoop				; no => let's do it again
+EnoughDevs	Move.L	(A3),A4					; redereference PMgrHandle
+			Move	D3,nDevs(A4)			; save length of device list
+			Move	D3,D0					; make a copy of D3
+			Bne.S	SeedSizeOk				; make sure we have a minimum size seed		AWC.PB500
+			AddQ	#1,D0					; a kludge, but it's easier this way		AWC.PB500
+SeedSizeOk	Lsl		#2,D0					; multiply by 4								AWC.PB500
+			Move	D0,SeedHSize(A4)		; save size of SeedHSize handle
+			Clr		APalettes(A4)			; no animating palettes yet
+			Move	#ListSpace,FreeSpaces(A4)	; 16 free slots; we'll add more if needed
+			Move.L	D4,D0					; D4 is the required size of PMgrHandle
+			Move.L	A3,A0					; put handle in A0 for the call
+			_SetHandleSize					; and expand the handle up
+			Bne.S	ResizeFails				; it went badly
+			Move.L	#ListSpace,D0			; start with initial space for handles
+			Lsl 	#3,D0					; multiply by 8
+			_NewHandle SYS,CLEAR			; allocate and clear the handle
+			Beq.S	ClearAll				; if it works, continue
+			Move.L	A3,A0					; prepare to dispose the handle
+			_DisposHandle					; get rid of it			
+ResizeFails	Move.L	#PMgrNil,PMgrHandle		; it didn't work - zero the handle
+			Bra		GoHome					; head home with error in D0				AWC.PB508
+
+ClearAll	Move.L	(A3),A4					; redereference PMgrHandle
+			Move.L	A0,PListHandle(A4)		; save the list of handles
+			Move.L	A3,A0					; put PMgrHandle into A0
+			_HLock							; lock it down
+			Move	D3,D0					; get the number of devices
+			Lsl		#8,D0					; multiply by 1024/4 (1024 per device/4 per CLR.L)
+			Lea		PMgrDataSz(A4),A0		; calculate start of device links
+			Bra.S	ClearEnd				; jump into loop
+
+ClearLoop	Clr.L	(A0)+					; clear a long word - see! long word aligned
+ClearEnd	DBra	D0,ClearLoop			; repeat for all long words
+
+			Move.L	theZone,-(SP)			; save the current zone
+			Move.L	SysZone,theZone			; set the system zone
+
+			Clr.L	-(SP)					; clear some space for a handle
+			Clr		-(SP)					; push PaletteId = 0
+			_GetNewPalette					; try to get the system palette
+			Move.L	(SP)+,SysPalette(A4)	; save it; was it nil?
+			Bne.S	NoError					; no => we're done
+
+			Lea		SysColors,A0			; get a pointer to our default table
+			Move.L	#17*8,D0				; get size
+			_PtrToHand						; make a handle out of it
+			Move.L	A0,D3					; save it
+
+			Clr.L	-(SP)					; space for result
+			Move	#16,-(SP)				; push the number of entries
+			Move.L	A0,-(SP)				; push our handle
+			Move	#pmTolerant,-(SP)		; all tolerant entries
+			Move	#$4000,-(SP)			; reasonably tolerant entries, too
+			_NewPalette						; let's call ourselves to get a new palette
+			Move.L	(SP)+,SysPalette(A4)	; save the palette; we sure hope we got one
+			Move.L	D3,A0					; put handle back in A0
+			_DisposHandle					; snuff it
+
+NoError		Move.L	SysPalette(A4),A0			; get the palette for a moment
+			CmpA.L	#Nil,A0						; is there one?
+			Beq.S	Cleanup						; no => cleanup
+			Move.L	(A0),A0						; dereference SysPalette
+			BSet	#CForeBit,pmPrivate(A0)		; set the system update bits
+			BSet	#CBackBit,PmPrivate(A0)
+Cleanup		Move.L	(SP)+,theZone				; restore the current zone
+			Move.L	A3,A0						; get PMgrHandle
+			_HUnlock							; unlock it
+			Clr.L	AppPalette					; clear the applications's palette		AWC.PB457
+			Bra.S	LookForIt					; jump ahead							AWC.PB520
+			
+;	Notice that we rely upon AppPalette being initialized (or -1) every time we arrive here.  If
+;	it is non-zero, we assume this is an extra call to InitPalettes so we just leave.
+
+ChkAppPltt	Move.L	AppPalette,D0			; fetch AppPalette; is it nil?				AWC.PB520
+			Beq.S	LookForIt				; yes => look for a palette resource 0		AWC.PB508
+			AddQ.L	#1,D0					; bump it by 1; was it $FFFFFFFF?			AWC.PB508
+			Bne.S	GoHome					; no => must be good; abort					AWC.PB520
+			Move.L	D0,AppPalette			; clear the AppPalette						AWC.PB508
+LookForIt	Tst		CurApRefNum				; are we using the system resource file?	AWC.PB469
+			Beq.S	GoHome					; yes => forget installing an AppPalette	AWC.PB520
+			Clr		-(SP)					; function result							AWC.PB457
+			_CurResFile						; get the current resfile					AWC.PB457
+			Move	(SP)+,D3				; put it in D3								AWC.PB457
+			Cmp		CurApRefNum,D3			; need we change it?						AWC.PB457
+			Beq.S	ResFileOkay				; no => we've already got it				AWC.PB457
+			Move	CurApRefNum,-(SP)		; push the refnum back						AWC.PB457
+			_UseResFile						; use this resfile							AWC.PB457
+			Clr		-(SP)					; result word								AWC.PB506
+			_ResError						; see if this worked						AWC.PB506
+			Move	(SP)+,D0				; get the result							AWC.PB506
+			Bne.S	GoHome					; quit if we didn't get it					AWC.PB520
+ResFileOkay	Clr.L	-(SP)					; function result							AWC.PB457
+			Move.L	#'pltt',-(SP)			; push the resource type					AWC.PB457
+			Clr		-(SP)					; id 0										AWC.PB457
+			_Get1Resource					; fetch an application palette, if any		AWC.PB457
+			Move.L	(SP)+,A2			 	; get handle off the stack					AWC.PB457
+			Move.L	A2,D0					; CmpA.L #Nil,A2; did we get a resource?	AWC.PB457
+			Beq.S	Cleanup2			 	; if nil we go home							AWC.PB457
+			Move.L	A2,-(SP)				; push it for the DetachResource			AWC.PB457
+			_DetachResource 				; disconnect from resource manager			AWC.PB457
+			Move.L	(A2),A0					; dereference palette						AWC.PB457
+			Move	#AllUpdates,D1			; set D1 to the default						AWC.PB457
+			Move	plttUpdates(A0),D0		; get update bits							AWC.PB457
+			Bpl.S	NoResUpdate				; the user didn't specify any				AWC.PB457
+			Lsl		#1,D0					; put the bits in the correct place			AWC.PB457
+			Move	D0,D1					; put the result into D1					AWC.PB457
+NoResUpdate	Move	D1,pmPrivate(A0)		; put them in the correct place				AWC.PB457
+			Move.L	A2,-(SP)				; push palette for the RecordPalette		AWC.PB457
+			Jsr		RecordPalette			; allocates seeds handle, records palette	AWC.PB457
+			Bne.S	Cleanup2				; it disposed palette if failed				AWC.PB457
+			Move.L	A2,AppPalette			; copy it to AppPalette						AWC.PB457
+			Move.L	(A2),A0					; dereference AppPalette					AWC.PB457
+			BSet	#DisposeBit,pmPrivate(A0)	; set for automatic disposal			AWC.PB457
+			Clr.L	pmWindow(A0)			; clear the window field just for grins		AWC.PB457
+			Clr.L	pmDevices(A0)			; clear device bitmap						AWC.PB457
+Cleanup2	Cmp		CurApRefNum,D3			; did we change the current resfile?		AWC.PB457
+			Beq.S	GoHome					; no => don't put it back					AWC.PB457
+			Move	D3,-(SP)				; push the old current resfile				AWC.PB457
+			_UseResFile						; and restore the old one					AWC.PB457
+GoHome		MoveM.L (SP)+,D3-D4/A2-A4 			; restore registers
+			Unlk	A6							; clear stack frame
+			Rts									; go home
+
+SysColors	DC.W	$0000,$0003,$0000,$000F	; seed [long], transIndex [word], ctSize [word]
+			DC.W	$0000,$FFFF,$FFFF,$FFFF	; white
+			DC.W	$0001,$0000,$0000,$0000	; black
+			DC.W	$0002,$C000,$C000,$C000	; light gray
+			DC.W	$0003,$8000,$8000,$8000	; medium gray
+			DC.W	$0004,$4000,$4000,$4000	; dark gray
+			DC.W	$0005,$DD6B,$08C2,$06A2	; Apple red
+			DC.W	$0006,$FFFF,$648A,$028C	; Apple orange
+			DC.W	$0007,$FC00,$F37D,$052F	; Apple yellow
+			DC.W	$0008,$1F21,$B793,$1431	; Apple green
+			DC.W	$0009,$0000,$0000,$D400	; Apple blue
+			DC.W	$000A,$46E3,$0000,$A53E	; Apple violet
+			DC.W	$000B,$F2D7,$0856,$84EC	;
+			DC.W	$000C,$90D7,$7160,$3A34	;
+			DC.W	$000D,$0241,$AB54,$EAFF	;
+			DC.W	$000E,$0000,$64AF,$11B0	;
+			DC.W	$000F,$5600,$2C9D,$0524	;
+SysColorEnd			
+
+;---------------------------------------------------
+;
+; PROCEDURE	RecordPalette(myPalette: PaletteHandle); LOCAL;
+;
+;	Copies myPalette into the PListHandle and records (in the pmPrivate field) where
+;	it lies in that list.  If there are no free spaces in the PListHandle then that
+;	handle is resized.  If it can't be resized, RecordPalette returns an error in D0.
+;	Otherwise a new handle is allocated for myPalette's pmSeeds field.  If one can't
+;	be allocated, RecordPalette returns an error.  It will also return an error if the
+;	PMgrHandle is nil.  If RecordPalette returns an error, it first disposes of
+;	myPalette so the caller doesn't have to worry about watching the error code.
+
+RecordPalette	PROC	EXPORT
+
+ParamSize	equ		4						; total bytes of params
+myPalette	equ		ParamSize+8-4			; source Palette handle
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			MoveM.L D3/A2-A4,-(SP) 			; save registers
+
+			Move.L	myPalette(A6),A4		; get my palette first in case we branch to Error
+			Move.L	PMgrHandle,A2			; get the PMgrHandle
+			CmpA.L	#PMgrNil,A2				; has it been initialized?
+			Beq		Error					; no => handle the error (.S won't reach)
+			Move.L	(A2),A0					; dereference the PMgrHandle
+			Move.L	PListHandle(A0),A3		; get the handle to the list of palettes
+			MoveQ	#0,D0					; clear high word
+			Move	SeedHSize(A0),D0		; get length of seeds handles
+			_NewHandle ,CLEAR				; allocate it; did we succeed?
+			Bne		Error					; no => handle the error (.S won't reach)
+
+			Move.L	(A4),A1					; dereference myPalette
+			Move.L	A0,pmSeeds(A1)			; store the seeds handle in it
+
+			Move.L	(A2),A1					; redereference the PMgrHandle
+			Move	FreeSpaces(A1),D0		; get number of free slots; are any left?
+			Bne.S	FindOne					; yes => don't resize it; search for a free one
+
+			MoveQ	#0,D3					; clear high word
+			Move	APalettes(A1),D3		; get current size
+			Move.L	D3,D0					; copy it
+			Add		#ListSpace,D0			; bump it to add more room
+			Bmi.S	Error					; return an error if it wraps
+			Lsl.L	#3,D0					; multiply by 8
+			Move.L	A3,A0					; copy PListHandle to A0
+			_SetHandleSize					; resize it
+			Bne.S	Error					; we couldn't do it
+
+; Now we have to clear all of the new entries we just created.
+
+			Move.L	A3,A0						; get PListHandle
+			Move.L	(A0),A0						; redereference this
+			Lea		(A0,D3.W*8),A0				; point us at the block to clear
+			Move.L	#ListSpace,D0				; get how many entries to clear
+			Bra.S	ClearEnd					; jump into loop
+
+ClearLoop	Clr.L	(A0)+						; clear the Palette field
+			Clr.L	(A0)+						; clear the animation field
+ClearEnd	DBra	D0,ClearLoop				; loop for ListSpace entries
+			
+			AddQ	#1,D3						; D3 is palette's position in PListHandle
+			Move.L	(A3),A0						; dereference PListHandle
+			Lea		(A0,D3.W*8),A0				; point A0 at the current position
+			Move.L	(A2),A1						; redereference the PMgrHandle
+			Move	#ListSpace-1,FreeSpaces(A1)	; number of spaces we've added		AWC.PB378
+			Bra.S	Cleanup						; share common code
+
+; We have a free one somewhere in the list.  Search forwards until we find one we can use.
+; A1 is still pointing at the dereferenced PMgrHandle.
+
+FindOne		Move	APalettes(A1),D0		; get number of active handles
+			Add		FreeSpaces(A1),D0		; calculate total number of entries
+			MoveQ	#0,D3					; initialize our counter
+			Move.L	(A3),A0					; dereference PListHandle
+			Bra.S	FindEnd					; jump into loop
+
+FindLoop	Move.L	PaletteRef(A0),D1		; get first entry
+			Beq.S	FoundIt					; we've got one
+			AddQ	#PLstEntrySz,A0			; bump to the next entry
+			AddQ	#1,D3					; bump our counter
+FindEnd		DBra	D0,FindLoop				; repeat for all spaces
+			Bra.S	Error					; this should not happen
+			
+; when we reach this section of common code, A1 = PMgrHandle^, D3 is the position of
+; the palette, and A0 points to PListHandle^^[D3]
+
+FoundIt		SubQ	#1,FreeSpaces(A1)		; decrement the number free
+Cleanup		AddQ	#1,APalettes(A1)		; bump the number used
+
+			Move.L	A4,PaletteRef(A0)		; record the palette handle in PListHandle
+			Clr.L	Reserves(A0)			; clear the number of entries it reserves
+
+			Move.L	(A4),A0					; dereference the Palette
+			Move	pmPrivate(A0),D0		; grab the current update values			AWC.PB457
+			And		#UpdateMask,D0			; clear away all but the update bits		AWC.PB457
+			Or		D0,D3					; OR palette number with the update bits	AWC.PB457
+			Move	D3,pmPrivate(A0)		; this is the number of the palette
+			MoveQ	#0,D0					; no error
+			Bra.S	GoHome					; we're done-oh!
+			
+Error		Move.L	A4,A0					; get Palette handle
+			_DisposHandle					; get rid of it
+			MoveQ	#1,D0					; set an error
+GoHome		Tst.L	D0						; set condition codes for return
+			MoveM.L (SP)+,D3/A2-A4 			; restore registers
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; FUNCTION	NewPalette(entries: INTEGER; srcColors: CTabHandle; srcUsage,srcTolerance:
+;	INTEGER) : PaletteHandle; INLINE $AA91;
+;
+;	Allocate a new palette and fill it with information from myColors.  Set the usage
+;	field of each ciInfo to myUsage and set the tolerance to myTolerance.  If myColors
+;	is nil we initialize all the colors to black.
+
+NewPalette	FUNC  EXPORT
+
+ParamSize		equ		10					; total bytes of params
+Palette			equ		ParamSize+12-4		; function result
+entries			equ		Palette-2			; number of entries in Palette
+srcColors		equ		entries-4			; Color table handle
+srcUsage		equ		srcColors-2			; default usage for each color in Palette
+srcTolerance	equ		srcUsage-2			; default tolerance for each color in Palette
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			MoveM.L D3/A2,-(SP) 			; save registers
+			Clr.L	Palette(A6)				; set the result to nil
+			Move	entries(A6),D3			; fetch number of entries
+			MoveQ	#0,D0					; clear it out
+			Move	D3,D0					; copy it for a calculation
+			AddQ	#1,D0					; add one for the header
+			Lsl.L	#4,D0					; multiply by 16
+			_NewHandle ,CLEAR				; get the handle; did we get an error?
+			Bne.S	GoHome					; yes => we're done for
+			Move.L	A0,A2					; no => save the handle
+			Move.L	A2,-(SP)				; push handle
+			Jsr		RecordPalette			; allocates a seed's handle and records palette
+			Bne.S	GoHome					; it disposed the palette handle if it failed
+
+; A2 contains the handle to the new Palette.  Return the handle, then start by dereferencing it.
+; For now we'll just clear everything.  Note that we're making use of the fact that
+; the size of the header is the same as an entry itself, so we can fall straight
+; into the DBra and expect it to clear Entries+1 records!  Also, zero the window field
+; so we know that this palette is floating
+
+			Move.L	A2,Palette(A6)				; return the result
+			Move.L	(A2),A0						; dereference Palette handle
+			Move	D3,pmEntries(A0)			; copy pmEntries
+			Clr.L	pmWindow(A0)				; zero the window field
+
+			Move	D3,D0						; get entries into D0
+			Move	srcUsage(A6),D1				; copy usage to D1
+			Swap	D1							; put usage into high word
+			Move	srcTolerance(A6),D1			; put tolerance into low word
+			Lea		pmInfo+ciUsage(A0),A0		; point A0 at first ColorInfo
+			Bra.S	EntryEnd					; jump into the loop
+			
+EntryLoop	Move.L	D1,(A0)					; set ciUsage (high word) and ciTolerance (low word)
+			AddA	#ciSize,A0				; bump A0 to the next ciUsage field
+EntryEnd	Dbra	D0,EntryLoop			; loop for all entries
+
+			Move.L	srcColors(A6),A1		; get ctabhandle
+			CmpA.L	#Nil,A1					; is it nil?
+			Beq.S	NoCTab					; yes => skip the copy
+			Move.L	(A1),A1					; dereference the source color table
+			Move	ctSize(A1),D0			; get last color table entry
+			AddQ	#1,D0					; make it number of entries; is it >= 1?
+			Ble.S	NoCTab					; no => we're done
+			
+			Move.L	(A2),A0					; redereference PaletteHandle
+			AddA.L	#pmInfo+ciRGB+red,A0	; bump A0 to pmInfo.ciRGB.red
+			AddA.L	#ctTable+rgb+red,A1		; bump A1 to ctTable.red
+
+; put min(ctSize+1,pmEntries) into D0
+
+			Cmp		D0,D3					; compare color table size to palette size
+			Bge.S	UseAsIs					; if D0 is less than D3, we'll use it as is
+			Move	D3,D0					; copy the lower value into D0
+UseAsIs		MoveQ	#0,D1					; D1 points at this entry
+			Bra.S	CopyEnd					; jump into loop
+
+CopyLoop	Move.L	red(A1),red(A0)			; copy red and green
+			Move	blue(A1),blue(A0)		; copy blue
+			AddQ.L	#ColorSpecSize,A1		; bump A1 to next ColorSpec
+			AddA.L	#ciSize,A0				; bump A0 to next ColorInfo
+CopyEnd		Dbra	D0,CopyLoop				; loop until the copy is complete
+
+NoCTab		MoveQ	#0,D0					; no error
+GoHome		MoveM.L (SP)+,D3/A2 			; restore registers
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; FUNCTION GetNewPalette(paletteID: INTEGER) : PaletteHandle; INLINE $AA92;
+;
+; GetNewPalette gets a resource of type 'pltt' with the specified ID and clears
+; all the private fields.  It then returns the data structure as a PaletteHandle.
+;
+
+GetNewPalette	FUNC	EXPORT
+
+ParamSize	equ		2						; total bytes of params
+Palette		equ		ParamSize+12-4			; function result
+paletteID	equ		Palette-2				; number of entries in Palette
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			Move.L	A2,-(SP)				; save registers
+			Clr.L	Palette(A6) 			; set result to Nil
+			
+; Load the data and detach it from resource manager
+					
+			Clr.L	-(SP)					; make space for result
+			Move.L	#'pltt',-(SP)			; push resource type
+			Move	paletteID(A6),-(SP)		; push resource ID
+			_GetResource 					; get the resource
+			Move.L	(SP)+,D1			 	; get handle off the stack
+			Beq.S	GoHome				 	; if nil we go home
+			Move.L	D1,A2					; copy it to A2
+			Move.L	D1,-(SP)				; push it back on the stack
+			_DetachResource 				; disconnect from resource manager
+			
+			Move.L	A2,A0					; copy it for the HNoPurge					AWC.PB480
+			_HNoPurge						; we can't handle purged palettes			AWC.PB480
+			Tst		D0						; did it return an error?					AWC.PB480
+			Bne.S	GoHome					; yes => go home							AWC.PB480
+
+			Move.L	(A2),A0					; dereference palette						AWC.PB457
+			Move	#AllUpdates,D1			; set D1 to the default						AWC.PB457
+			Move	plttUpdates(A0),D0		; get update bits							AWC.PB457
+			Bpl.S	NoResUpdate				; the user didn't specify any				AWC.PB457
+			Lsl		#1,D0					; put the bits in the correct place			AWC.PB457
+			Move	D0,D1					; put the result into D1					AWC.PB457
+NoResUpdate	Move	D1,pmPrivate(A0)		; put them in the correct place				AWC.PB457
+			Move.L	A2,-(SP)				; push the handle
+			Jsr		RecordPalette			; allocates a seeds handle and records palette
+			Bne.S	GoHome					; it disposed the palette handle if it failed
+			Move.L	A2,Palette(A6)			; save Palette in result space
+
+; clear the window field and also the private fields
+
+			Move.L	(A2),A2						; dereference it
+			Clr.L	pmWindow(A2)				; set window field; this palette floats
+			Clr.L	pmDevices(A2)				; clear device bitmap
+
+GoHome		Move.L	(SP)+,A2					; restore registers
+			Unlk	A6							; clear stack frame
+			Rtd		#ParamSize					; strip parameters and go home
+				
+
+;---------------------------------------------------
+;
+; PROCEDURE	ClearPalette(cPalette: PaletteHandle); LOCAL;
+;
+
+ClearPalette	PROC	EXPORT
+
+ParamSize	equ		4						; total bytes of params
+cPalette	equ		ParamSize+8-4			; source Palette handle
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			MoveM.L D2-D3/A2-A4,-(SP) 		; save registers
+
+			Move.L	PMgrHandle,A3			; get palette manager handle
+			CmpA.L	#PMgrNil,A3				; are we initialized?
+			Beq		GoHome					; no => quit				AWC.PB377
+			Move.L	(A3),A3					; dereference it
+
+			Move.L	cPalette(A6),A1			; get palette handle						AWC.PB457
+			Move.L	(A1),A2					; dereference it							AWC.PB457
+
+; Examine and remember the number of reserves this palette still has.  Clear the number.
+
+			Move	pmPrivate(A2),D0		; get the number of this palette
+			And		#PIdMask,D0				; clear away update bits
+			Move.L	PListHandle(A3),A0		; get the palette list handle
+			Move.L	(A0),A0					; dereference it
+			CmpA.L	PaletteRef(A0,D0.W*8),A1	; is this the correct handle?			AWC.PB462
+			Bne		BadPalette					; no => don't dispose anything			AWC.PB462
+			Move	Reserves(A0,D0.W*8),D3	; remember how many animating entries it has
+			Clr.L	Reserves(A0,D0.W*8)		; clear the count
+
+; Now clear each of the seeds this palette knows about, so that we'll update if we
+; become active again.
+
+			Clr.L	pmDevices(A2)			; clear devices field
+			Move.L	pmSeeds(A2),A0			; get seeds handle
+			Move.L	(A0),A0					; dereference it
+			Move	SeedHSize(A3),D0		; get size of handle
+			Lsr		#2,D0					; divide by 4
+			Bra.S	SeedEnd					; start clear loop
+
+SeedLoop	Clr.L	(A0)+					; clear the remembered seed
+SeedEnd		DBra	D0,SeedLoop				; do it again
+			MoveQ	#0,D0					; no error
+
+; Now check to see if we have any animating entries which we can dispose
+
+			Tst		D3						; were there any animating entries?
+			Beq.S	GoHome					; no => quit
+
+; run through every color to make sure it is not reserving any entries on any device
+; by examining what the PaletteManager has to say about this palette as well as what
+; each entry's ciPrivate field has to say about the subject.  Leave pmPrivate field
+; (which tells PMgr which palette we ought to be) alone.
+
+			Move	pmEntries(A2),D0		; get number of entries
+			AddA.L	#pmInfo,A2				; bump A2 to the first ColorInfo
+			Lea		DevHandles(A3),A4		; point A4 at PMgrDevices
+			AddA.L	#LinkTabs,A3			; point	A3 to LinkTabs
+			Bra.S	EntryEnd				; jump into loop
+			
+EntryLoop	Move	ciPrivate(A2),D3		; get the current link information
+			Bpl.S	NextEntry				; if positive it's not a link
+
+NextLink	BfExtU	D3{19:5},D1					; grab device number (0..31)
+			BfExtU	D3{24:8},D2					; grab index number (0..255)
+			Move.L	DevHandle(A4,D1.W*8),A0		; get the device handle
+			Move.L	(A0),A0						; dereference it
+			Move.L	gdPMap(A0),A0				; get handle to pixmap
+			Move.L	(A0),A0						; dereference pixmap
+			Move.L	pmTable(A0),A0				; get handle to CTab
+			Move.L	A0,DevCTab(A6)				; save color table handle, too
+			Move.L	(A0),A0						; dereference CTab
+			Cmp		ctSize(A0),D2				; is index number <= entries - 1?
+			Bhi.S	IgnoreIt					; no => don't unreserve it
+			Clr		ctTable+value(A0,D2.W*8)	; unreserve it
+IgnoreIt	Lsl		#8,D1						; calculate offset to link table/4
+			Add		D2,D1						; offset to entry/4
+			Lea		(A3,D1.L*4),A0				; point A0 at next forward link
+			Move	ForeLink(A0),D3				; get next link
+			Clr.L	ForeLink(A0)				; clear it for the next guy
+			Tst		D3							; is there another link to examine?
+			Bmi.S	NextLink					; yes => go unlink it
+NextEntry	Clr		ciFlags(A2)				; shut down any crap
+			Clr.L	ciPrivate(A2)			; clear it
+			AddA.L	#ciSize,A2				; bump A0 to the next ColorInfo
+EntryEnd	DBra	D0,EntryLoop			; loop for all pmEntries
+GoHome		MoveQ	#0,D0					; clear error condition
+BadPalette	MoveM.L (SP)+,D2-D3/A2-A4		; restore registers							AWC.PB457
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+;---------------------------------------------------
+;
+; PROCEDURE	ErasePalette(ePalette: PaletteHandle); LOCAL;
+;
+
+ErasePalette	PROC	EXPORT
+
+ParamSize	equ		4						; total bytes of params
+ePalette	equ		ParamSize+8-4			; PaletteHandle to dispose
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			MoveM.L A2-A3,-(SP) 			; save registers
+
+			Move.L	ePalette(A6),A3			; get the handle
+			Move.L	(A3),A2					; dereference it
+			Move.L	pmSeeds(A2),A0			; get the seeds handle while we have it
+			CmpA	#Nil,A0					; is it nil?
+			Beq.S	DontDispose				; yes => punt
+			_DisposHandle					; it's gone
+DontDispose	Move.L	WindowList,A0			; get the window list for this layer		AWC.PB506
+			Bra.S	ListLoop				; continue									AWC.PB439
+
+CheckWindow	Tst		PortBits+Rowbytes(A0)	; by chance is it an old window?			AWC.PB439
+			Bpl.S	IgnoreWind				; yes => ignore it							AWC.PB439
+			Move.L	GrafVars(A0),A1			; get GrafVars handle						AWC.PB439
+			Move.L	(A1),A1					; dereference it							AWC.PB439
+			Move.L	PmFgColor(A1),D0		; get the palette							AWC.PB439
+			Cmp.L	ePalette(A6),D0			; is it correct?							AWC.PB439
+			Bne.S	IgnoreWind				; no => don't clear it						AWC.PB439
+			Clr.L	PmFgColor(A1)			; mark the window as Paletteless			AWC.PB439
+IgnoreWind	Move.L	nextWindow(A0),A0		; grab the next window						AWC.PB439
+ListLoop	Move.L	A0,D0					; CmpA.L #Nil,A0; another window?			AWC.PB439
+			Bne.S	CheckWindow				; yes => keep looking						AWC.PB439
+
+			CmpA.L	AppPalette,A3			; are we disposing AppPalette?				AWC.PB508
+			Bne.S	NotAppPltt				; no => whew!								AWC.PB508
+			Clr.L	AppPalette				; okay, we won't try to find it anymore		AWC.PB508
+
+NotAppPltt	Move	pmPrivate(A2),D0		; grab the last field we need from A2		AWC.PB439
+			And		#PIdMask,D0				; clear away flag bits
+			Move.L	PMgrHandle,A2			; get the main handle
+			CmpA.L	#PMgrNil,A2				; is it nil?
+			Beq.S	GoHome					; yes => don't try to find it
+			Move.L	(A2),A2					; dereference it
+			Move	APalettes(A2),D1		; start with number of active palettes
+			Add		FreeSpaces(A2),D1		; add free spaces to get length of list
+			Cmp		D1,D0					; are we within the correct range?
+			Bpl.S	GoHome					; no => punt
+
+			Move.L	PListHandle(A2),A1		; get handle to list of palettes
+			Move.L	(A1),A1					; dereference it
+			
+			CmpA.L	(A1,D0.W*8),A3			; get this handle; do they match?
+			Bne.S	GoHome					; no => in the future we may scan for it; for now, punt
+			Clr.L	(A1,D0.W*8)				; it's no longer referenced
+			AddQ	#1,FreeSpaces(A2)		; add 1 to free spaces
+			SubQ	#1,APalettes(A2)		; subtract 1 from total palettes
+GoHome		MoveM.L (SP)+,A2-A3 			; restore registers
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE	DisposePalette(srcPalette: PaletteHandle); INLINE $AA93;
+;
+
+DisposePalette	PROC	EXPORT
+
+ParamSize	equ		4						; total bytes of params
+srcPalette	equ		ParamSize+8-4			; PaletteHandle to dispose
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			Move.L	A2,-(SP)				; save register
+			Move.L	srcPalette(A6),A2		; get the handle
+			CmpA.L	#Nil,A2					; is it nil?
+			Beq.S	GoHome					; yes => go home
+			Move.L	A2,-(SP)				; push handle
+			Jsr		ClearPalette			; release any animating entries
+			Bne.S	GoHome					; if nonzero the palette was bad			AWC.PB457
+			Move.L	A2,-(SP)				; push it again
+			Jsr		ErasePalette			; erase palette from PMgrHandle and its window
+			Move.L	A2,A0					; fetch palette handle into A0
+			_DisposHandle
+GoHome		Move.L	(SP)+,A2				; restore register
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------;
+;													;
+;	Here begins a number of routines called by		;
+;	ActivatePalette.  These routines share its		;
+;	stack frame built on A6, building their own		;
+;	stack frames on A4.								;
+;													;
+;---------------------------------------------------;
+
+;---------------------------------------------------
+;
+; FUNCTION FindLink(LinkInfo:integer):integer; LOCAL;
+;
+;	FindLink searches the device links until it encounters a device that matches Device or
+;	until it reaches the end of the list.  It returns the index if it finds one.  It
+;	returns 0 (which is an illegal index since it matches white) if it can't find one.
+
+FindLink	PROC	EXPORT
+
+ParamSize	equ		2						; total bytes of params
+theIndex	equ		ParamSize+10-2			; index result
+LinkInfo	equ		theIndex-2				; this palette's key to previously reserved entries
+
+VarSize		equ		0
+
+			Link	A4,#VarSize				; build stack frame
+			Move.L 	D3,-(SP) 				; save a register
+			
+; We will use D3 as a watchdog counter.  We set it to the maximum number of devices that we
+; might have to search so that if things go very wrong we stand a chance of finding out about it.
+
+			Clr		theIndex(A4)			; set result to "illegal"
+			Move	LinkInfo(A4),D0			; get link data
+			BfExtU	D0{16:3},D1				; grab top 3 bits
+			Cmp		#4,D1					; are they set correctly
+			Bne.S	GoHome					; no => the LinkInfo is invalid
+			Move	Devices(A6),D3			; get number of devices
+			Move.L	PMgrPtr(A6),A0			; PMgrHandle^
+			AddA.L	#LinkTabs,A0			; calculate start of LinkTabs
+			Bra.S	IndexEnd				; start watchdog loop
+			
+IndexLoop	BfExtU	D0{19:5},D1				; grab device number (0..31)
+			BfExtU	D0{24:8},D2				; grab index number (0..255)
+			Cmp		CurDevice(A6),D1		; is it this device?
+			Beq.S	FoundIt					; yes => we've got it
+			Lsl		#8,D1					; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Move	(A0,D1.L*4),D0			; get next link; is the top bit set?
+			Bpl.S	GoHome					; no => stop because we ran out of tries
+IndexEnd	DBra	D3,IndexLoop			; examine another index until our watchdog runs out
+
+; Our watchdog counter ran out, so something is terribly wrong.  We'll be polite about it and
+; say we were just unable to find it.
+
+			Bra.S	GoHome
+
+; We found the index.  Set true and return the appropriate index to theIndex(A4)
+
+FoundIt		And		#$00FF,D2				; clear everything except the index
+			Move	D2,theIndex(A4)			; set the result
+GoHome		Move.L (SP)+,D3		 			; restore registers
+			Unlk	A4						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE AnalyzeDev; LOCAL;
+;
+
+AnalyzeDev	PROC	EXPORT
+
+			MoveM.L D3-D6/A2-A3,-(SP) 		; save registers
+			
+			Move	DevIndexes(A6),D0		; get number of device entries
+			MoveQ	#0,D1					; clear high word, put starting index in low word
+			Move.L	InfoPtr(A6),A3			; get pointer to scratch area
+			Bra.S	ClearEnd				; jump into loop
+
+ClearLoop	Move.L	D1,(A3)+				; clear high word, put index in low word
+			AddQ	#1,D1					; bump D1 to the next index
+ClearEnd	DBra	D0,ClearLoop			; continue for the entire Histogram
+			Clr		Histogram(A6)
+
+			Move.L	PMgrPtr(A6),A2			; put PMgrHandle^ into A2
+			Move	APalettes(A2),D3		; get number of active palettes
+			Cmp		#1,D3					; is there just the one?
+			Ble.S	GoHome					; yes => we're done
+			Add		FreeSpaces(A2),D3		; make D3 the total space count
+			Move.L	InfoPtr(A6),A3			; point A3 at beginning of Histogram
+			Move.L	PListHandle(A2),A0		; get PListHandle (locked down)
+			Move.L	(A0),D5					; save pointer to next PaletteHandle in D5
+			Move	CurDevice(A6),D6		; put current device into D4
+			Bra.S	HistoEnd				; jump into loop
+
+HistoLoop	Move.L	D5,A0					; get next palette
+			AddQ.L	#PLstEntrySz,D5			; bump D5 to next palette
+			MoveA.L	(A0),A0					; get next palette into A0
+			CmpA.L	#Nil,A0					; is this a free space?
+			Beq.S	HistoEnd				; yes => go examine another one
+			CmpA.L	PaletteH(A6),A0			; is it the current palette?
+			Beq.S	HistoEnd				; yes => go examine another one
+			Move.L	(A0),A0					; dereference the palette
+			Move.L	pmDevices(A0),D0		; get devices
+			BTst	D6,D0					; is it using this device?
+			Beq.S	HistoEnd				; no => go examine another palette
+			Move	pmEntries(A0),D4		; get number of palette entries
+			Lea		pmInfo(A0),A2			; put first ColorInfo into A2 where we can keep it
+			Bra.S	PaletteEnd				; jump into loop
+
+PaletteLoop	Clr.L	-(SP)					; push space for result
+			Pea		ciRGB(A2)				; push address of current color
+			_Color2Index					; get best fit
+			Move.L	(SP)+,D0				; pull the index
+			AddQ	#1,HistCount(A3,D0.W*4)	; add to histogram reference count for this index
+			Bpl.S	NotNegative				; a safeguard
+			SubQ	#1,HistCount(A3,D0.W*4)	; put it back positive
+NotNegative	AddA.L	#ciSize,A2				; bump A2 to the next ColorInfo
+PaletteEnd	DBra	D4,PaletteLoop			; continue for all pmEntries
+HistoEnd	DBra	D3,HistoLoop			; continue for all palettes
+
+; well you may have wondered what's going on here.  We now have an array of reference
+; counts for all palettes that use this device.  Each index was allowed a longint of
+; space, though, and the index itself was placed in the low word of that longint during
+; initialization.  If we view this combination as a "point" we can use the Quickdraw
+; procedure "SortPoints" to do all the sorting work for us.  It uses a stack-based
+; non-recursive QuickSort algorithm.  The reference count in the high word is the main
+; key.  If two of them happen to match, we won't much worry about the fact that secondary
+; sorting occurs on the index itself.  However, the sort will move the indexes around, too,
+; so we'll end up with a sorted list of indexes with low reference counts at the beginning
+; of the list.  We've taken pains to make sure we have no negative reference counts, though
+; that probably wasn't necessary.
+
+			Move.L	A3,-(SP)				; push address of "points"
+			Move	DevIndexes(A6),-(SP)	; push number of points
+;			Jsr		([SortPoints])			; call Quickdraw sort routine <C864>
+			_SortPoints						; call Quickdraw sort routine <C864>
+GoHome		MoveM.L (SP)+,D3-D6/A2-A3		; restore registers
+			Rts								; go home
+
+
+;---------------------------------------------------
+;
+; Function Pillage:Integer; LOCAL;
+;
+
+Pillage		PROC	EXPORT
+
+ParamSize	equ		0						; total bytes of params
+EntryResult	equ		ParamSize+10-2			; best index we can find
+
+VarSize		equ		0
+
+			Link	A4,#VarSize				; build stack frame
+			MoveM.L D3/D4,-(SP) 			; save registers
+
+			Clr		EntryResult(A4)			; clear the result to illegal
+			Move.L	DevCTab(A6),A1			; get pointer to device color table
+			Move.L	(A1),A1					; dereference it
+			AddA.L	#ctTable,A1				; bump A1 to the first ColorSpec
+			Move	DevIndexes(A6),D3		; get number of indexes
+			Bra.S	PillageEnd				; jump int the loop
+
+PillageLoop	BTst	#5,value(A1,D3.W*8)		; is this one available for pillaging?
+			Bne.S	PillageIt				; yes => go pillage it
+PillageEnd	DBra	D3,PillageLoop			; continue for DevIndexes entries			
+			Bra		GoHome					; quit in utter failure!
+
+PillageIt	BfClr	value(A1,D3.W*8){0:3} 	; unprotected, unreserved, pillaged
+			SubQ	#1,Pillages(A6)			; one less worth pillaging
+			Move	D3,EntryResult(A4)		; return the pillaged index
+
+; Now, what fun!  We get to fix up all the device links!
+
+			Move	CurDevice(A6),D0		; get current device
+			Lsl		#8,D0					; multiply by table size/4
+			Add		D3,D0					; add in entry offset
+			Move.L	PMgrPtr(A6),A0			; get base pointer
+			AddA.L	#LinkTabs,A0			; bump base pointer to start of LinkTabs
+			Move	ForeLink(A0,D0.W*4),D3	; get forward links
+			Move	BackLink(A0,D0.W*4),D4	; get forward links
+			Clr.L	(A0,D0.W*4)				; clear the links away
+			Tst		D3						; examine forward link
+			Bmi.S	MultiLinks1				; if < 0 we have more than one assigned
+			Tst		D4						; examine backward link
+			Bmi.S	MultiLinks2				; if < 0 we have more than one assigned
+
+; This was a quickie.  D3 contains the palette number, D4 the entry number.  All we
+; need do is tell the palette it no longer has it.
+
+			And		#$1FFF,D3					; clear key bits
+			Move.L	PListPtr(A6),A0				; get the palette list
+			SubQ	#1,Reserves(A0,D3*8)		; it has one less entry reserved
+			Move.L	PaletteRef(A0,D3*8),A0		; get the palette
+			Move.L	(A0),A0						; dereference it
+			And.L	#$00001FFF,D4				; clear high word and key bits
+			Lsl.L	#4,D4						; make it an offset to the ColorInfo
+			Clr.L	pmInfo+ciPrivate(A0,D4.L)	; clear the link
+			Bra		GoHome						; we did it!
+
+; The forward link goes somewhere.  See if the backward one does too.  If so,
+; jump to BothLinks.
+
+MultiLinks1	Tst		D4						; examine backward link
+			Bmi.S	BothLinks				; both of them go somewhere
+
+; The forward link goes somewhere, but the backward one does not.  We must remember
+; the first forward link so we can copy it into the palette, then we advance
+; forward by one, copy the palette entry into that, and continue searching until we find
+; out what palette this is.
+
+			Move	D3,D0					; remember the forward link
+			BfExtU	D3{19:5},D1				; grab device number (0..31)
+			BfExtU	D3{24:8},D2				; grab index number (0..255)
+			Lsl		#8,D1					; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Lea		(A0,D1.L*4),A1			; point A1 at next forward link
+			Move	D4,BackLink(A1)			; copy the back link
+			Move	ForeLink(A1),D3			; get next link
+			Bpl.S	GotPalette1				; if > 0, we've found the palette
+MultiFLoop	BfExtU	D3{19:5},D1				; grab device number (0..31)
+			BfExtU	D3{24:8},D2				; grab index number (0..255)
+			Lsl		#8,D1					; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Move	ForeLink(A0,D1.L*4),D3	; get next link; is it positive?
+			Bmi.S	MultiFLoop				; no => continue
+
+GotPalette1	And		#$1FFF,D3						; clear key bits
+			Move.L	PListPtr(A6),A0					; get the palette list
+			SubQ	#1,Reserves(A0,D3*8)			; it has one less entry reserved
+			Move.L	PaletteRef(A0,D3*8),A0			; get the palette
+			Move.L	(A0),A0							; dereference it
+			And.L	#$00001FFF,D4					; clear high word of entry
+			Lsl.L	#4,D4							; make it an offset to the ColorInfo
+			Move	D0,pmInfo+ciPrivate(A0,D4.L)	; set a new link
+			Bra.S	GoHome							; we did it!
+
+; The backward link goes somewhere, but the forward one does not.  We must advance
+; backward by one, copy the palette id into it, and continue searching until we find out
+; what palette this is.
+
+MultiLinks2	BfExtU	D4{19:5},D1				; grab device number (0..31)
+			BfExtU	D4{24:8},D2				; grab index number (0..255)
+			Lsl		#8,D1					; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Lea		(A0,D1.L*4),A1			; point A1 at next backward link
+			Move	D3,ForeLink(A1)			; copy the forward link
+			Move	BackLink(A1),D4			; get next link
+			Bpl.S	GotPalette2				; if > 0, we've found the palette
+MultiBLoop	BfExtU	D4{19:5},D1				; grab device number (0..31)
+			BfExtU	D4{24:8},D2				; grab index number (0..255)
+			Lsl		#8,D1					; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Move	BackLink(A0,D1.L*4),D4	; get next link; is it positive?
+			Bmi.S	MultiBLoop				; no => continue
+			Bra.S	GotPalette2				; share common code
+
+; We're in the middle of the list somewhere.  We'll step one backward and copy
+; the forelink from the current entry, then we'll step one foreward and copy
+; the backlink from the current entry.  Then we'll keep going forward until we
+; find the palette.  All we need do is decrement its reference count, so we don't
+; need the entry number.
+
+BothLinks	BfExtU	D4{19:5},D1				; grab device number (0..31)
+			BfExtU	D4{24:8},D2				; grab index number (0..255)
+			Lsl		#8,D1					; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Lea		(A0,D1.L*4),A1			; point A1 at next backward link
+			Move	D3,ForeLink(A1)			; copy the forward link
+
+			BfExtU	D3{19:5},D1				; grab device number (0..31)
+			BfExtU	D3{24:8},D2				; grab index number (0..255)
+			Lsl		#8,D1					; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Lea		(A0,D1.L*4),A1			; point A1 at next foreward link
+			Move	D4,BackLink(A1)			; copy the backward link
+			Move	ForeLink(A1),D3			; get next foreward link
+			Bpl.S	GotPalette2				; if > 0, we've found the palette
+
+BothLoop	BfExtU	D3{19:5},D1				; grab device number (0..31)
+			BfExtU	D3{24:8},D2				; grab index number (0..255)
+			Lsl		#8,D1					; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Move	ForeLink(A0,D1.L*4),D3	; grab next forward link
+			Bmi.S	BothLoop				; if < 0, we keep looking
+
+GotPalette2	Move.L	PListPtr(A6),A0			; get the palette list
+			And		#$1FFF,D3				; clear away key bits
+			SubQ	#1,Reserves(A0,D3*8)	; it has one less entry reserved
+GoHome		MoveM.L (SP)+,D3/D4	 			; restore registers
+			Unlk	A4						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE ReserveColor(myEntry:integer); LOCAL;
+;
+
+ReserveColor	PROC	EXPORT
+
+ParamSize	equ		2						; total bytes of params
+myEntry		equ		ParamSize+8-2			; number of ColorInfo to reserve
+
+VarSize		equ		0
+
+			Link	A4,#VarSize				; build stack frame
+			Move	Histogram(A6),D0		; get next entry to examine
+			Move	DevIndexes(A6),D1		; get number of indexes for this device
+			Sub		D0,D1					; calculate number of possibilites left
+			Ble.S	NoneLeft				; none => quit, leaving color unhandled
+			Move.L	InfoPtr(A6),A0			; get pointer to histogram
+			Move.L	DevCTab(A6),A1			; get device CTabHandle
+			Move.L	(A1),A1					; dereference it
+			AddQ.L	#ctTable,A1				; bump it to the first ColorSpec
+			Bra.S	CheckEnd				; jump into the loop
+
+CheckLoop	Move	HistIndex(A0,D0.W*4),D2		; get the next index
+			AddQ	#1,D0						; bump Histogram to next entry
+			Tst		D2							; is it "white"?
+			Beq.S	CheckEnd					; yes => ignore it
+			Cmp		BlackIndex(A6),D2			; is it "black"?
+			Beq.S	CheckEnd					; yes => ignore it
+			BTst	#reserveBit,value(A1,D2.W*8); is this entry reserved?				<1.5>
+			Beq.S	FoundOne					; no => we've got it!
+CheckEnd	DBra	D1,CheckLoop				; continue for all remaining indexes
+
+; We've used all available unreserved entries.  Now we look to see if we can pillage
+; anything from the device table.
+
+NoneLeft	Move	D0,Histogram(A6)		; mark Histogram as done
+			Tst		Pillages(A6)			; is there anything to pillage?
+			Beq		GoHome					; no => quit
+			Clr		-(SP)					; function result
+			Jsr		Pillage					; get an entry by pillaging
+			Move.L	DevCTab(A6),A1			; restore A1								AWC.PB480
+			Move.L	(A1),A1					; dereference it							AWC.PB480
+			AddQ.L	#ctTable,A1				; bump it to the first ColorSpec			AWC.PB480
+			Move	(SP)+,D2				; put it in D2; is it legal?
+			Bne.S	TakeEntry				; yes => roust it out
+			Bra		GoHome					; no => miserable failure
+			
+FoundOne	Move	D0,Histogram(A6)					; mark used portion of Histogram
+TakeEntry	Move.L	PalettePtr(A6),A0					; get palette pointer
+			MoveQ	#0,D0								; clear high word
+			Move	myEntry(A4),D0						; get entry number
+			Lsl.L	#4,D0								; calculate offset to ColorInfo
+			Lea		pmInfo(A0,D0.L),A0					; point A0 at ColorInfo
+			BSet	#HandledBit,ciFlags(A0)				; mark this entry as handled
+			Move.L	ciRGB+red(A0),RGB+red(A1,D2.W*8)	; update red and green
+			Move	ciRGB+blue(A0),RGB+blue(A1,D2.W*8)	; update blue
+			AddQ	#1,Updates(A6)						; we've changed something
+			BSet	#reserveBit,value(A1,D2.W*8)		; reserve it						<1.5>
+
+; For old or new links, the BackLink will still point at the entry number | $6000
+
+			Move.L	DevLinks(A6),A1			; point A1 at LinkTab
+			Move	myEntry(A4),D0			; grab entry number
+			And		#$7FFF,D0				; ensure that the top bit is off
+			Or		#$6000,D0				; set the top bits to 011
+			Move	D0,BackLink(A1,D2.W*4)	; set backward link to entry | $6000
+
+; Calculate a link to this new guy in D0.  This will go in ciPrivate and, if we already
+; had a link, into the BackLink of the old guy.
+
+			Move	CurDevice(A6),D0		; get current device again
+			Lsl		#8,D0					; shift device into upper byte
+			Or		D2,D0					; OR in the device number
+			BSet	#15,D0					; set the three highest bits to 100
+
+; Copy the old link then set the new one.  Then look to see if the old link was real.
+; If so, we have some work to do.  If not, initialize the link by setting the forelink
+; to the palette number.  The back link has already been set to the entry number.
+
+			Move	ciPrivate(A0),D1		; copy the old link
+			Move	D0,ciPrivate(A0)		; point ciPrivate at the new guy
+			Tst		D1						; did we have any old links?
+			Bne.S	OldLinks				; yes => relink it
+
+			Move.L	PalettePtr(A6),A0		; get pointer to palette
+			Move	pmPrivate(A0),D0		; grab number of this palette
+			And		#PIdMask,D0				; clear the flag bits
+			Or		#$6000,D0				; to make it non-zero, set the top bits to 011
+			Move	D0,ForeLink(A1,D2.W*4)	; set forward link to palette | $6000
+			Bra.S	FixRefCount				; fix up the palette
+
+OldLinks	Move	D1,ForeLink(A1,D2.W*4)	; point Dev[FoundIndex] at old ciPrivate
+			BfExtU	D1{24:8},D2				; grab index number (0..255)
+			BfExtU	D1{19:5},D1				; grab device number (0..31)
+			Lsl		#8,D1					; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Move.L	PMgrPtr(A6),A1			; get base pointer
+			AddA.L	#LinkTabs,A1			; bump it to the LinkTabs
+			Move	D0,BackLink(A1,D1.L*4)	; set the backward link
+FixRefCount	Move.L	PListPtr(A6),A0			; get PListPtr
+			Move.L	PalettePtr(A6),A1		; get palette
+			Move	pmPrivate(A1),D0		; get palette number
+			And		#PIdMask,D0				; clear the flag bits
+			AddQ	#1,Reserves(A0,D0.W*8)	; bump number of reserves
+GoHome		Unlk	A4						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE Allocate; LOCAL;
+;
+
+Allocate	PROC	EXPORT
+
+; We have one or more animating entries.  For each entry in myPalette, look to see if it is
+; animating.  If so, look to see if it exists on this device.  If not, look to see if we can
+; allocate it on this device.
+
+			MoveM.L D3/D4/A2,-(SP) 			; save registers
+			Jsr		AnalyzeDev				; analyze the entries used on the device
+			Move.L	PalettePtr(A6),A2		; get palette pointer
+			Move	pmEntries(A2),D3		; get number of entries
+			MoveQ	#0,D4					; D4 is the entry number
+			AddA.L	#pmInfo,A2				; bump A2 to the first ColorInfo
+			Bra.S	AnimateEnd				; jump into loop
+
+AnimateLoop	Move	ciFlags(A2),D0			; examine "handled"
+			Bmi.S	NextAnimate				; it was explicit or courteous; ignore it
+			BTst	#AnimatedBit,D0			; are we animating?
+			Beq.S	NextAnimate				; no => ignore it
+			Clr		-(SP)					; clear index result
+			Move	ciPrivate(A2),-(SP)		; push animation link info (first word only)
+			Jsr		FindLink				; FindLink(Device,myPalette^^.pmInfo[i].ciPrivate)
+			Move	(SP)+,D0				; pop the index result
+			Bne.S	GotEntry				; true => it's still there - mark it as "handled"
+
+; We will be allocating an entry for animation.  If this is the first allocation, call
+; AnalyzeDev to fill the scratch handle with the histogram for this device.
+
+			Move	D4,-(SP)				; push entry number
+			Jsr		ReserveColor			; try to reserve it
+
+			BTst	#HandledBit,ciFlags(A2)	; did it succeed?
+			Bne.S	NextAnimate				; yes => keep trying
+			Clr		Tolerators(A6)			; don't bother with tolerators
+			Bra.S	GoHome					; and go home
+			
+GotEntry	BSet	#HandledBit,ciFlags(A2)	; set "handled" bit
+NextAnimate	AddA.L	#ciSize,A2				; bump us to the next ColorInfo
+			AddQ	#1,D4					; bump entry number
+AnimateEnd	DBra	D3,AnimateLoop			; loop for all pmEntries
+
+GoHome		MoveM.L (SP)+,D3/D4/A2 			; restore registers
+			Rts								; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; FUNCTION DeltaRGB(ColorInfo,ColorSpec:Ptr):integer; LOCAL;
+;
+
+DeltaRGB	FUNC	EXPORT
+
+ParamSize	equ		8						; total bytes of params
+
+Delta		equ		ParamSIze+10-2			; integer result
+RGB1		equ		Delta-4					; palette entry pointer
+RGB2		equ		RGB1-4					; color table entry pointer
+
+VarSize		equ		0						; size of variables
+
+			Link	A6,#VarSize				; build stack frame
+			
+			Move.L	RGB1(A6),A0				; get first RGBColor
+			Move.L	RGB2(A6),A1				; get second RGBColor
+			
+			Move	(A1)+,D0				; grab index red
+			Sub		(A0)+,D0				; subtract entry red
+			Bhs.S	NotNeg1					; take abs(Index.Red-ColorInfo.Red)
+			Neg		D0						; negate it
+NotNeg1		Move	(A1)+,D1				; grab index green
+			Sub		(A0)+,D1				; subtract entry green
+			Bhs.S	NotNeg2					; take abs(Index.Green-ColorInfo.Green)
+			Neg		D1						; negate it
+NotNeg2		Cmp		D0,D1					; leave greater unsigned value in D0
+			Blo.S	DontSwitch1				; D1 < D0 => D0 is already greater
+			Move	D1,D0					; green value is greater
+DontSwitch1	Move	(A1),D1					; grab index blue
+			Sub		(A0),D1					; subtract entry blue
+			Bhs.S	NotNeg3					; take abs(Index.Blue-ColorInfo.Blue)
+			Neg		D1						; negate it
+NotNeg3		Cmp		D0,D1					; leave greater unsigned value in D0
+			Blo.S	FixResult				; D1 < D0 => D0 is already greater
+			Move	D1,D0					; blue value is greater
+FixResult	Move	D0,Delta(A6)			; set result
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+				
+			ENDF
+
+
+;---------------------------------------------------
+;
+; PROCEDURE	Correlate; LOCAL;
+;
+;	This function uses the stack frame built upon A6 and builds its own stack frame on A4.
+
+Correlate	PROC	EXPORT
+
+ParamSize	equ		0						; total bytes of params
+
+			MoveM.L D3-D7/A2-A4,-(SP) 		; save registers
+
+; The InfoHandle is actually twice as large as we need, so we can just clear half of it
+; without worrying about boundary conditions.  We do, however, assume that DevIndexes is
+; a multiple of 2.
+
+			Move.L	InfoPtr(A6),A0			; get pointer to scratch area
+			Move	DevIndexes(A6),D0		; maximum number of device indexes
+			Lsr		#1,D0					; divide by 2 because we clear longs
+			Bra.S	ZeroEnd					; jump into the DBra
+
+ZeroLoop	Clr.L	(A0)+					; clear two palette reference fields
+ZeroEnd		DBra	D0,ZeroLoop				; loop for half of all indexes
+
+; The ciPrivate longint is used as a record containing two distinct fields.  The first
+; is in the high word and is reserved for the best index we can find.  The low word is
+; used to hold the DeltaRGB value for that index.
+;
+;   A2 - points to pmInfo
+;	A3 - points to DevCTab^^.ctTable
+;	A4 - points to device scratch table
+;
+;	D3 - keeps track of number of entries left to examine
+;	D4 - keeps track of offset to current ColorInfo
+;	D5 - holds best index and offset to colliding ColorInfo
+;	D6 - holds number of available device entries
+;	D7 - hold index of current ColorInfo
+
+			Move	myEntries(A6),D3		; get number of palette entries
+			Move.L	PalettePtr(A6),A2		; get pointer to palette
+			Lea		pmInfo(A2),A2			; bump A2 to first ColorInfo
+			Move.L	DevCTab(A6),A0			; get device color table handle
+			_HLock							; lock it down
+			Move.L	(A0),A3					; dereference it and copy it to A4
+			AddQ.L	#ctTable,A3				; bump it to the first ColorSpec
+
+			Move.L	InfoPtr(A6),A4			; get pointer to our info table, freshly zeroed
+			MoveQ	#0,D4					; initialize D4 to first ColorInfo in palette
+			MoveQ	#0,D7					; initialize D7 to 0
+			Clr		Collisions(A6)			; clear number of collisions
+			Move	Regulators(A6),D6		; D6 holds number of available entries
+			Bra		AllocEnd				; jump into loop that initializes tree (no .S)
+
+AllocLoop	Move	ciFlags(A2,D4.L),D1		; grab flags; is the HandledBit set? ( < 0 )
+			Bmi		Chosen					; yes => we've done it already
+			BTst	#TolerantBit,D1			; no => are we tolerating?
+			Beq		Chosen					; no => continue
+			Tst		D6						; have we run out of entry space?
+			Bgt.S	NotYet					; no => keep going
+			Tst		Pillages(A6)			; is there an entry to pillage?
+			Beq.S	HandleIt				; no => we can punt
+			Clr		-(SP)					; function result
+			Jsr		Pillage					; we'll pillage so we'll have another color
+			Move	(SP)+,D5				; get the result
+			Bra.S	Pillaged				; share common code
+
+NotYet		SubQ	#1,D6					; one more available entry consumed
+			Clr.L	-(SP)					; push longint result
+			Pea		ciRGB(A2,D4.L)			; push address of RGBColor field
+			_Color2Index					; find the best match for this color
+			Move.L	(SP)+,D5				; get best index
+
+Pillaged	Clr		-(SP)					; push DeltaRGB result
+			Pea		ciRGB(A2,D4.L)			; push the address of the ColorInfo.ciRGB
+			Pea		RGB(A3,D5.W*8)			; push address of index's RGBColor
+			Jsr		DeltaRGB				; calculate and set ciPrivate+2=color distance
+			Move	(SP)+,D0				; fetch distance
+
+			Tst		D5						; was the index white?
+			Beq.S	CheckWhite				; yes => see if white is okay
+			Cmp		BlackIndex(A6),D5		; was the index black?
+			Bne.S	NotBlack				; no => continue
+
+; we have matched white or black.  If we're within tolerance we'll mark this color as
+; handled and continue.  If not, we'll skip trying to pick the best entry stuff.  We add
+; 1 to D6 because we know we subtracted 1 at NotYet above and didn't mean to.  We should
+; never get here with a pillaged entry since black or white are never supposed to be
+; reserved and therefore should never be pillaged.  So, it should be safe to add one
+; back to D6.
+
+CheckWhite	Cmp		ciTolerance(A2,D4.L),D0	; are we within tolerance?
+			Bls.S	BlackWhite				; yes => mark these as handled
+			Clr.L	ciPrivate(A2,D4.L)		; clear ColorInfo.ciPrivate field
+			AddQ	#1,Collisions(A6)		; bump number of collisions
+			Bra.S	Chosen					; share common code
+
+BlackWhite	AddQ	#1,D6							; don't count black or white
+HandleIt	BSet	#HandledBit,ciFlags(A2,D4.L)	; set the handled bit
+			Bra.S	Chosen							; share common code
+
+NotBlack	Lea		(A4,D5.W*2),A1			; point A1 at the DevTab entry for this index
+			MoveQ	#0,D1					; clear high word
+			Move	(A1),D1					; is there an entry here already (<> 0)
+			Beq.S	PickCurrent				; no => mark the current entry as chosen
+
+; We have a collision.  The index to which we just matched is already used.  Look
+; to see which of the two entries has the lower DeltaRGB.
+
+			And		#$7FFF,D1				; clear away the "taken" bit		AWC.PB377
+			AddQ	#1,Collisions(A6)		; bump number of collisions
+			Lsl.L	#4,D1					; convert D1 to an offset to its ColorInfo
+			Move	ciPrivate+2(A2,D1.L),D2	; get tolerance of colliding entry
+			Cmp		D0,D2					; which unsigned value is lower?
+			Bhi.S	SwapEntries				; current value => swap them			PB262/C886
+			Clr.L	ciPrivate(A2,D4.L)		; clear current index
+			Bra.S	Chosen					; share common code
+
+SwapEntries	Clr.L	ciPrivate(A2,D1.L)		; mark former entry index as unassigned
+PickCurrent	Move	D5,ciPrivate(A2,D4.L)	; set index of current ColorInfo
+			Move	D0,ciPrivate+2(A2,D4.L)	; set tolerance of current ColorInfo
+			Move	D7,(A1)					; put it in the device index table
+			BSet	#7,(A1)					; mark it as taken				AWC.PB377
+Chosen		Add.L	#ciSize,D4				; bump D4 to offset of next ColorInfo
+			AddQ	#1,D7					; bump D7 to next ColorInfo
+AllocEnd	DBra	D3,AllocLoop			; loop for all pmEntries
+
+			Tst		Collisions(A6)			; have we any more work to do
+			Beq.S	SetColors				; no => go examine tolerances
+
+; STAGE 2 - make sure jumping to SetColors is warranted - notice we still look for
+; unresolved colors the way it is currently written.
+
+; In this section we try to find a unique index for each entry in the color table. We start
+; by examining each index in the device for the reserved bit.  If it is reserved we enter
+; a value in our dev table so we won't try to match with it (we enter black's index).  We
+; run down the palette and find each entry which is a) not handled, b) tolerant, and
+; c) unassigned (ciPrivate field is 0, white).  Then we search the available colors one
+; by one, finding the best match among the ones left by using DeltaRGB.
+
+;	A3 - points to DevCTab^^.ctTable
+;	A4 - points to device scratch table
+;	D0 - keeps track of number of ColorSpecs left to examine
+;	D1 - holds value of BlackIndex, used to mark indexes as reserved
+
+			Move	DevIndexes(A6),D0			; number of entries to mark
+			Move	BlackIndex(A6),D1			; mark entries as taken using "black"
+			Bra.S	MarkEnd						; jump into loop
+MarkLoop	BTst	#reserveBit,value(A3,D0.W*8); is this entry reserved?					<1.5>
+			Beq.S	MarkEnd						; no => continue
+			Move	D1,(A4,D0.W*2)				; mark it as reserved in device info list
+MarkEnd		DBra	D0,MarkLoop					; continue
+
+			Move	D1,(A4)					; mark white as taken
+			Move	D1,(A4,D1.W*2)			; mark black as taken
+
+;   A2 - points to current ColorInfo
+;	A3 - still points to DevCTab^^.ctTable
+;	D0 - used as a temp
+;	D3 - keeps track of number of entries left to examine
+
+SetColors	Move	myEntries(A6),D3		; potential number of entries to resolve
+			MoveQ	#0,D4					; ColorInfo entry counter
+			Bra		ResolveEnd				; jump into loop
+
+; By the time we reach this point a ColorInfo is either Tolerant or Handled.
+
+ResolveLoop	Tst		ciFlags(A2)				; has this ColorInfo been handled?
+			Bmi		NextCInfo				; yes => continue (.S won't fit)
+			Tst		ciPrivate(A2)			; have we assigned an index yet?
+			Bne.S	Resolved				; yes => continue
+
+; Resolve this entry by searching for the best match from the available indexes
+
+			Move.L	InfoPtr(A6),A1			; get device info pointer
+			MoveQ	#0,D0					; clear entry counter
+			Move	DevIndexes(A6),D1		; get number of device entries
+			Move	#$FFFF,ciPrivate+2(A2)	; set fit to worst
+			Bra.S	FindEnd					; start loop
+
+FindLoop	Tst		(A1,D0.W*2)				; is this index available?
+			Bne.S	NextGuy					; no => try the next guy
+			MoveM.L	D0-D1/A1,-(SP)			; save the current registers
+			Clr		-(SP)					; push DeltaRGB result
+			Pea		ciRGB(A2)				; push the address of the ColorInfo.ciRGB
+			Pea		RGB(A3,D0.W*8)			; push address of index's RGBColor
+			Jsr		DeltaRGB				; calculate and set ciPrivate+2=color distance
+			Move	(SP)+,D0				; fetch the distance
+			Tst		ciPrivate(A2)			; have we anything yet?
+			Beq.S	StuffIt					; no => use it
+			Cmp		ciPrivate+2(A2),D0		; is it closer or equal to what we last had?
+			Bhs.S	NotBetter				; no => continue
+StuffIt		Move	D0,ciPrivate+2(A2)		; remember better fit
+			MoveM.L	(SP)+,D0-D1/A1			; restore registers
+			Move	D0,ciPrivate(A2)		; remember better index
+			Bra.S	NextGuy					; continue
+
+NotBetter	MoveM.L	(SP)+,D0-D1/A1			; restore registers
+NextGuy		AddQ	#1,D0
+FindEnd		DBra	D1,FindLoop
+			Move	ciPrivate(A2),D0		; get best index
+
+; if the result is 0 we've not found it, and we have a system error.  While it would be
+; good to find this, it's better to do something "robust" for a released version, so we'll
+; jump ahead to GoodEnough and avoid any updates.
+
+			Beq.S	GoodEnough				; internal palette manager error; leave quietly
+;			MoveQ	#1,D0					; clear the index					<AWC>
+FoundIt		Move	D0,ciPrivate(A2)		; shove the index into the field
+			Move	#1,(A1,D0.W*2)			; mark dev info list as being taken
+
+			Clr		-(SP)					; push DeltaRGB result
+			Pea		ciRGB(A2)				; push the address of the ColorInfo.ciRGB
+			Move	ciPrivate(A2),D0		; fetch the entry we just assigned
+			Pea		RGB(A3,D0.W*8)			; push address of index's RGBColor
+			Jsr		DeltaRGB				; calculate and set ciPrivate+2=color distance
+			Move	(SP)+,ciPrivate+2(A2)	; fetch distance
+Resolved	Move	ciTolerance(A2),D0		; get preferred tolerance
+			Cmp		ciPrivate+2(A2),D0		; is the unsigned current fit good enough?
+			Bhs.S	GoodEnough				; yes => leave it alone
+			Move	ciPrivate(A2),D0		; get the index
+			Move.L	ciRGB+red(A2),RGB+red(A3,D0.W*8)	; copy red and green to device CTab
+			Move	ciRGB+blue(A2),RGB+blue(A3,D0.W*8)	; copy blue to device CTab
+			AddQ	#1,Updates(A6)			; remember we've done one
+GoodEnough	Clr.L	ciPrivate(A2)			; to keep everybody honest
+NextCInfo	Clr		ciFlags(A2)				; we're all done with ciFlags
+			AddA.L	#ciSize,A2				; bump to the next ColorInfo
+ResolveEnd	DBra	D3,ResolveLoop			; loop for all pmEntries
+
+NoTolerant	Move.L	DevCTab(A6),A0			; get handle to device color table
+			_HUnlock						; unlock it
+
+			MoveM.L (SP)+,D3-D7/A2-A4		; restore registers
+			Rts								; strip parameters and go home
+
+;---------------------------------------------------
+;
+; PROCEDURE	RedrawDesktop; LOCAL;
+;
+
+RedrawDesktop	PROC	EXPORT
+
+			Tst		GrayRgnPrep(A6)			; have we set up the GrayRgn stuff?			AWC.PB508
+			Bmi		NoColorDesk				; yes => but there's nothing to do			AWC.PB508
+			Bne.S	DrawDesktop				; yes => skip the setup						AWC.PB508
+			Move	#-1,GrayRgnPrep(A6)		; initialize it to "nothing to do"			AWC.PB508
+			Tst.B	pCDeskPat				; test bit 7 of pCDeskPat					AWC.PB508
+			Bpl.S	NoColorDesk				; don't update the desktop					AWC.PB508
+			Move.L	DeskCPat,D0				; is there a desktop pattern?				AWC.PB508
+			Beq.S	NoColorDesk				; no => don't update the desktop			AWC.PB508
+			Move.L	D0,A0					; put the desktop pattern into A0			AWC.PB508
+			Move.L	(A0),A0					; dereference it							AWC.PB508
+			Move.L	PatMap(A0),A0			; get the pixmaphandle						AWC.PB508
+			Move.L	(A0),A0					; dereference it							AWC.PB508
+			Move.L	pmTable(A0),A0			; get the CTabHandle						AWC.PB508
+			Move.L	(A0),A0					; dereference it							AWC.PB508
+			Move	ctSize(A0),D1			; get the size								AWC.PB508
+			AddQ	#1,D1					; adjust it so the DBra works correctly		AWC.PB508
+			AddA.L	#ctTable+rgb,A0			; bump A0 to first color spec				AWC.PB508
+			Bra.S	DeskEnd					; check for not black or white				AWC.PB508
+
+DeskLoop	Move.L	(A0)+,D2				; get first									AWC.PB508
+			Bne.S	NotBlack				; not black; check white					AWC.PB508
+			Move	(A0)+,D2				; get blue component						AWC.PB508
+			Bne.S	ColorDesk				; not black or white; do an update			AWC.PB508
+			Bra.S	DeskNext				; continue									AWC.PB508
+
+NotBlack	Cmp.L	#-1,D2					; is it white?								AWC.PB508
+			Bne.S	ColorDesk				; not white; do an update					AWC.PB508
+			Move	(A0)+,D2				; get blue component						AWC.PB508
+			Cmp		#-1,D2					; is it white?								AWC.PB508
+			Bne.S	ColorDesk				; not white; do an update					AWC.PB508
+DeskNext	AddQ.L	#2,A0					; bump A0 to next color						AWC.PB508
+DeskEnd		DBra	D1,DeskLoop				; continue									AWC.PB508
+			Bra.S	NoColorDesk				; nothing but black or white; skip it		AWC.PB508
+
+ColorDesk	Clr.L	-(SP)					; function result							AWC.PB508
+			_NewRgn							; get a new region							AWC.PB508
+			Move.L	(SP)+,DeskRgn(A6)		; save it for later use; was it nil?		AWC.PB508
+			Beq.S	NoColorDesk				; yes => can't redraw anything				AWC.PB508
+			Move	#1,GrayRgnPrep(A6)		; signal that we have work to do			AWC.PB508
+DrawDesktop	Move.L	A3,-(SP)				; save a register							AWC.PB508
+			Clr.L	-(SP)					; function result							AWC.PB508
+			_NewRgn							; get another new region					AWC.PB508
+			Move.L	(SP),A3					; save it where we can keep an eye on it	AWC.PB508
+			Move.L	A3,D0					; check for nil handle						AWC.PB508
+			Beq.S	NoRgn					; couldn't get one, so quit					AWC.PB508
+			Move.L	A2,-(SP)				; push pointer to device rect				AWC.PB508
+			_RectRgn						; make a rectangular region out of it		AWC.PB508
+			Move.L	DeskRgn(A6),-(SP)		; push DeskRgn								AWC.PB508
+			Move.L	A3,-(SP)				; push temp region							AWC.PB508
+			Move.L	DeskRgn(A6),-(SP)		; put result back in DeskRgn				AWC.PB508
+			_UnionRgn						; UnionRgn(DeskRgn,tempRgn,deskRgn)			AWC.PB508
+			Move.L	A3,-(SP)				; push temp region							AWC.PB508
+			_DisposRgn						; dump it									AWC.PB508
+NoRgn		Move.L	(SP)+,A3				; restore a register						AWC.PB508
+NoColorDesk	Rts								; and go home								AWC.PB508
+
+;---------------------------------------------------
+;
+; PROCEDURE	SetDev; LOCAL;
+;
+;	Renders or allocates myPalette as appropriate for the given device.  If myPalette
+;	is polite it accumulates reference counts.  If it is intolerant it assigns indexes
+;	according to closest match and makes these colors available in the color table.  If
+;	it is adamant (animated) it chooses indexes according to lowest reference counts
+;	and reserves the entries on the device (setting the reserve bit).
+;
+;	This function uses the stack frame built upon A6 and builds its own stack frame on A4.
+
+SetDev		PROC	EXPORT
+
+ResultRect	equ		-8						; temp rect
+OldPort		equ		ResultRect-4			; a place to stuff the port while we InvalRect
+SysUpdates	equ		OldPort-2				; flag that tells whether the system wants updates
+OldUpdates	equ		SysUpdates-2			; flag => 1 if Old Quickdraw colors got changed AWC
+VarSize		equ		OldUpdates				; number of bytes of variables			AWC PB223
+
+			Link	A4,#VarSize				; build stack frame
+			MoveM.L	D3-D5/A2-A3,-(SP)		; save registers						<AWC>
+
+; Grab the device handle and shove it into theGDevice
+
+			Move	CurDevice(A6),D3		; get device offset
+			Move.L	PDevPtr(A6),A0			; get pointer to internal list of devices
+			Move.L	(A0,D3.W*8),A0			; get the device handle
+			Move.L	A0,theGDevice			; set theGDevice
+
+; Removed code that calculated device info - see CalcDevs below						AWC PB223
+
+			Move.L	(A0),A0					; dereference it
+			Move.L	gdPMap(A0),A0			; get handle to pixmap
+			Move.L	(A0),A0					; dereference pixmap
+			Move.L	pmTable(A0),A0			; get handle to CTab
+			Move.L	A0,DevCTab(A6)			; save color table handle, too
+			Move.L	(A0),A0					; dereference CTab
+			Move	ctSize(A0),D0			; grab number of entries - 1
+			Move	D0,BlackIndex(A6)		; save it
+			AddQ	#1,D0					; bump it to number of entries
+			Move	D0,DevIndexes(A6)		; save the number of indexes, too
+
+; Compare the palette's seed for this device to the ctSeed belonging to the
+; device.  If they match, no environment or palette change has occurred.  The routines
+; which modify palettes make sure that the appropriate seed fields get changed.  If
+; the user modifies the palette herself, she must take responsibility for changing
+; the seeds accordingly.
+
+			Move.L	ctSeed(A0),D0			; read the current device seed
+			Move.L	PalettePtr(A6),A0		; get the Palette pointer
+			BTst	#DirtyBit,pmPrivate(A0)	; does it need an update anyway?
+			Bne.S	DirtyBird				; yes => activate it anyway
+
+			Move.L	pmSeeds(A0),A0			; get the handle to the seeds
+			Move.L	(A0),A0					; dereference it
+			Cmp.L	(A0,D3.W*4),D0			; does the Palette's seed match the device's?
+			Beq		GoHome					; yes => skip this whole mess
+
+; Set up some useful pointers
+
+DirtyBird	Move.L	PDevPtr(A6),A0			; get pointer to internal list of devices
+			Lea		(A0,D3.W*8),A0			; point A0 at the device entry
+			Move.L	A0,DevEntry(A6)			; save a pointer to the current device's entry
+			Move.L	PMgrPtr(A6),A0			; copy base pointer
+			AddA.L	#LinkTabs,A0			; add offset to first link table
+			Move	D3,D0					; get the device number (0..31)
+			Lsl		#8,D0					; multiply by link table size (max 31*1024)
+			Lea		(A0,D0.W*4),A0			; point A0 at link table
+			Move.L	A0,DevLinks(A6)			; save pointer to device links table
+
+; Set Updates to 0 so we'll know if a SetEntries is necessary.  Make a copy
+; of ciUsage flags in ciFlags.
+
+			Clr		Updates(A6)				; clear number of updates to CTab we've done
+			Move	myEntries(A6),D0		; get myPalette^^.pmEntries
+			Move.L	PalettePtr(A6),A0		; get the pointer to the palette
+			Lea		pmInfo(A0),A0			; bump it to the first ColorInfo
+			Bra.S	InitEnd					; jump into the fray
+
+InitLoop	Move	ciUsage(A0),ciFlags(A0)	; copy ciUsage to ciFlags
+			AddA.L	#ciSize,A0				; bump A0 to the next ColorInfo
+InitEnd		DBra	D0,InitLoop				; loop for pmEntries
+
+			Move.L	PalettePtr(A6),A0		; get the palette
+			Move	pmPrivate(A0),D3		; get the number of this palette
+			And		#PIdMask,D3				; clear the flag bits
+			Move.L	DevCTab(A6),A0			; get device CTabHandle
+			Move.L	(A0),A0					; dereference it
+			AddA.L	#ctTable,A0				; bump A0 to the start of the table
+			Move.L	DevLinks(A6),A1			; get device links table
+			Move	DevIndexes(A6),D0		; get number of entries on this device
+			MoveQ	#0,D4					; clear number that belong to us
+			MoveQ	#0,D5					; clear number available for pillaging
+			Move.L	PMgrPtr(A6),A2			; get the base pointer into A2
+			AddA.L	#LinkTabs,A2			; bump A2 to the start of the link tabs
+			Bra.S	CountEnd				; jump into loop
+
+CountLoop	Move	ForeLink(A1,D0.W*4),D1	; fetch the link info for this entry, theGDevice
+			Beq.S	ClearIt					; if 0, we didn't reserve it			AWC.PB377
+			Bpl.S	EndOfLink				; if >0 then we've found the end
+NextIndex	BfExtU	D1{24:8},D2				; get the index number (0..255)
+			BfExtU	D1{19:5},D1				; grab device number (0..31)
+			Lsl		#8,D1					; multiply by table size/4
+			Add		D2,D1					; add index to table offset
+			Move	ForeLink(A2,D1.W*4),D1	; get the next index; is it an endlink?
+			Bmi.S	NextIndex				; no => find the next link
+EndOfLink	And		#PIdMask,D1				; clear all but the important bits
+			Cmp		D3,D1					; is this ours?
+			Bne.S	NotThisOne				; no => bump Pillages
+			AddQ	#1,D4					; bump number we still have
+			Move	#$4000,value(A0,D0.W*8)	; devctab => no protect, reserve, nopillage, our id
+			Bra.S	CountEnd				; share code to force the device table
+
+NotThisOne	AddQ	#1,D5					; bump number we can pillage
+FixCTab		Move	#$6000,value(A0,D0.W*8)	; devctab => no protect, reserve, pillage, our id
+			Bra.S	CountEnd				; continue
+
+ClearIt		Clr		value(A0,D0.W*8)		; device ctab => unused
+CountEnd	DBra	D0,CountLoop			; continue for DevIndexes device entries
+			Move	D5,Pillages(A6)			; remember how many we can pillage
+			Cmp		Animators(A6),D4		; have we all we want already?
+			Bpl.S	QuickHandle				; yes => mark them handled					<AWC>
+			Jsr		Allocate				; yes => call allocation routine
+			Bra.S	CheckTolrnt				; do the tolerant entries					<AWC>
+
+QuickHandle	Move	myEntries(A6),D0		; get the number of entries					<AWC>
+			Move.L	PalettePtr(A6),A0		; get palette pointer						<AWC>
+			Lea		pmInfo(A0),A0			; bump A0 to the first ColorInfo			<AWC>
+			Bra.S	QuickEnd				; jump into loop							<AWC>
+
+QuickLoop	Tst		ciFlags(A0)					; is it handled?						<AWC>
+			Bmi.S	NextQuick					; yes => continue						<AWC>
+			BTst	#AnimatedBit,ciFlags+1(A0)	; is it animating?						<AWC>
+			Beq.S	NextQuick					; no => leave it alone					<AWC>
+			BSet	#HandledBit,ciFlags(A0)		; mark it handled						<AWC>
+NextQuick	AddA.L	#ciSize,A0					; bump A0 to the next ColorInfo			<AWC>
+QuickEnd	DBra	D0,QuickLoop				; continue for pmEntries				<AWC>
+
+CheckTolrnt	Tst		Tolerators(A6)			; are there any tolerant entries?
+			Beq.S	CheckUpdate				; no => tidy up
+			Move	DevIndexes(A6),D0		; get maximum number of entries
+			SubQ	#2,D0					; subtract black and white
+			Sub		Animators(A6),D0		; subtract our animators
+			Sub		Pillages(A6),D0			; subtract other reserved entries
+			Move	D0,Regulators(A6)		; this is the number of regular entries left
+			Jsr		Correlate				; yes => resolve collisions
+
+; Now we are ready to set some colors (for real, man!).  We have been changing colors
+; in the device's color table all along.  Now we just need to promulgate them through
+; to the device with a sequential SetEntries call, but only if Updates is greater than
+; zero.  In order to make the call we have to unprotect each color and set it's client
+; id to "none".  Then we do the SetEntries call, after which we restore the protection
+; and client id (255) of all colors.  Next we copy the seed from the device color table
+; to the palette so we'll know we've been here.  Finally we generate update events for
+; all windows of palettes which have been rendered on this device, including of course
+; the current palette.
+
+CheckUpdate	Tst		Updates(A6)				; have we changed anything?
+			Beq.S	NoUpdate				; no => ignore this stuff
+
+; Perform a sequential SetEntries call using the device's own color table.
+
+			Move.L	theGDevice,A0			; get the device
+			Move.L	(A0),A0					; dereference it
+			Clr		gdId(A0)				; no client id's, please
+
+			Clr		-(SP)					; push starting count of 0 for SetEntries
+			Move	BlackIndex(A6),-(SP)	; push number of entries-1
+			Move.L	DevCTab(A6),A0			; get color table
+			Move.L	(A0),A0					; dereference it
+			Pea		ctTable(A0)				; push address of the first ColorSpec
+			_SetEntries						; do it
+
+NoUpdate	Move.L	DevCTab(A6),A0			; get color table
+			Move.L	(A0),A0					; dereference it
+			Move.L	ctSeed(A0),D0			; read the current device seed
+			Move.L	PalettePtr(A6),A0		; get the Palette pointer
+			Move.L	pmSeeds(A0),A1			; get the handle to the seeds
+			Move.L	(A1),A1					; dereference it
+			Move	CurDevice(A6),D3		; get device number back
+			Move.L	D0,(A1,D3.W*4)			; update the Palette's seed
+
+; If we did not do the SetEntries, skip this part, too.
+
+			Tst		Updates(A6)				; did we do a SetEntries?
+			Beq		GoHome					; no => jump over the update code
+
+; Here is where we add the portion of the port that touches this device to
+; the palette's window's update region.
+
+			Pea		OldPort(A4)				; where to put current GrafPtr
+			_GetPort						; get it
+
+			Move.L	theGDevice,A0			; get theGDevice
+			Move.L	(A0),A0					; dereference it
+			Lea		gdRect(A0),A2			; get address of device rect into A2
+			Move	gdFlags(A0),D0			; get flags
+			BTst	#mainScreen,D0			; is it the main screen?
+			Beq.S	NoMenuFix				; no => don't update the menu
+			Move.L	MenuList,D0 			; get the MenuList handle; is it nil?		AWC.PB508
+			Beq.S	NoMenuFix				; yes => don't redraw the menu bar			AWC.PB508
+			Move.L	D0,A0					; get ready to dereference it				AWC.PB508
+			Tst.L	(A0)					; has it been purged?						AWC.PB508
+			Beq.S	NoMenuFix				; yes => don't redraw the menu bar			AWC.PB508
+			_DrawMenuBar					; redraw the menu bar						AWC.PB508
+NoMenuFix	MoveQ	#0,D0					; we want no updates if no SysPalette		AWC PB223
+			Move.L	AppPalette,A0			; fetch the application's palette, if any	AWC.PB457
+			Move.L	A0,D1					; CmpA.L #Nil,A0; is it nil?				AWC.PB457
+			Bne.S	UseAppPltt				; no => use the application's palette		AWC.PB457
+			Move.L	PMgrPtr(A6),A0			; fetch our data pointer
+			Move.L	SysPalette(A0),A0		; fetch the system palette
+			Move.L	A0,D1					; CmpA.L #Nil,A0; is it nil?				AWC.PB457
+			Beq.S	NoSysP					; yes => we update
+UseAppPltt	Move.L	(A0),A0					; dereference AppPalette or SysPalette		AWC.PB457
+			Move	pmPrivate(A0),D0		; get update information					AWC PB224
+			And		#$C000,D0				; and it with the proper flags				AWC PB224
+NoSysP		Move	D0,SysUpdates(A4)		; set update information					AWC PB224
+			Move	#JugglerTrap,D0			; #$A88F									AWC PB224
+			_GetTrapAddress					; find out what the trap is					AWC PB224
+			Move.L	A0,-(SP)				; save it									AWC PB224
+			Move	#UnimplementedTrap,D0	; #$A89F									AWC PB224
+			_GetTrapAddress					; where do unimplemented traps go			AWC PB224
+			CmpA.L	(SP)+,A0				; are we Juggler™ing?						AWC PB224
+			Beq.S	NotJuggling				; no => handle updates the old way			AWC PB224
+			Move.L	A2,-(SP)				; push device rect on the stack				AWC PB224
+			Move	CurDevice(A6),-(SP)		; push PaletteMgr device number				AWC PB224
+			Move	SysUpdates(A4),-(SP)	; push default updates for old ports		AWC PB224
+			Move	#ColorInvalRect,-(SP)	; push the selector for _ColorInvalRect		AWC PB224
+			_Juggler						; call Erich's disgusting C code			AWC PB224
+			bra		EndJuggling				; skip over the regular update code			AWC PB224
+
+NotJuggling	Move.L	WindowList,A3			; get start of window list					AWC PB224
+WindowLoop	Move	SysUpdates(A4),D1		; reset the default update value			AWC.PB480
+			Move	#CBackBit,D0			; grab a constant							AWC PB224
+			CmpA.L	WindowCopy(A6),A3		; is it us?
+			Bne.S	NotCurrent				; no => check for background updates
+			Move	#CForeBit,D0			; grab a different constant					AWC PB223
+NotCurrent	Tst.B	wVisible(A3)			; is this window visible?
+			Beq.S	NextWind				; no => do the next window					<C864>
+			Tst		PortBits+RowBytes(A3)	; is it a color window?
+			Bpl.S	UseDefault				; no => handle an old style window			AWC.PB480
+			Move.L	GrafVars(A3),A0			; get the extended variables handle
+			Move.L	(A0),A0					; dereference it
+			Move.L	PmFgColor(A0),A0		; get the window's palette, if any
+			CmpA.L	#Nil,A0					; is it nil?
+			Beq.S	UseDefault				; yes => default to the system value		AWC.PB480
+			Move.L	(A0),A0					; dereference the palette
+			Move	pmPrivate(A0),D1		; fetch the palette's update values			AWC.PB480
+UseDefault	BTst	D0,D1					; does the caller want this update?			AWC.PB480
+			Beq.S	NextWind				; no => do the next window
+
+; We now must check to see if the window we're examining intersects the device
+; we're working upon.  We'll GlobalToLocal the device rect and simultaneously
+; intersect it with the window's portRect.  If we detect an intersection then
+; we'll have calculated the rectangle we'll need for the InvalRect.  First we
+; point A0 at the Bounds rect for the port so we can put DevRect in local space.
+
+			Lea		PortBits(A3),A0				; point A0 at potential bitmap				AWC.PB480
+			Tst		RowBytes(A0)				; bitmap or pixmap?							AWC.PB480
+			Bpl.S	GotBitmap					; no high bit in Rowbytes => bitmap			AWC.PB480
+			Move.L	BaseAddr(A0),A0				; get Port's Pixmap handle					AWC.PB480
+			Move.L	(A0),A0						; get Pixmap pointer						AWC.PB480
+GotBitmap	Lea		Bounds(A0),A0				; advance A0 to Bounds rect					AWC.PB480
+			Move	Top(A2),D0					; get device top							AWC.PB480
+			Add		Top(A0),D0					; subtract bounds top						AWC.PB480
+			Cmp		PortRect+Bottom(A3),D0		; is Dest.Top >= Port.Bottom?				AWC.PB480
+			Bge.S	NextWind					; yes => no intersection					AWC.PB480
+			Move	D0,ResultRect+Top(A4)		; save it									AWC.PB480
+			Move	Left(A2),D0					; get device left							AWC.PB480
+			Add		Left(A0),D0					; subtract bounds left						AWC.PB480
+			Cmp		PortRect+Right(A3),D0		; is Dest.Left >= Port.Right?				AWC.PB480
+			Bge.S	NextWind					; yes => no intersection					AWC.PB480
+			Move	D0,ResultRect+Left(A4)		; save left									AWC.PB480
+			Move	Bottom(A2),D0				; get bottom								AWC.PB480
+			Add		Top(A0),D0					; subtract bounds top						AWC.PB480
+			Cmp		PortRect+Top(A3),D0			; is Dest.Bottom <= Port.Top?				AWC.PB480
+			Ble.S	NextWind					; yes => no intersection					AWC.PB480
+			Move	D0,ResultRect+Bottom(A4)	; save bottom								AWC.PB480
+			Move	Right(A2),D0				; get right									AWC.PB480
+			Add		Left(A0),D0					; subtract bounds left						AWC.PB480
+			Cmp		PortRect+Left(A3),D0		; is Dest.Right <= Port.Left?				AWC.PB480
+			Ble.S	NextWind					; yes => no intersection					AWC.PB480
+			Move	D0,ResultRect+Right(A4)		; save right								AWC.PB480
+			Move.L	A3,-(SP)					; push this window's pointer				AWC.PB480
+			_SetPort							; make it the current port					AWC.PB480
+			Pea		ResultRect(A4)				; move device rect (local) onto the stack	AWC.PB480
+			_InvalRect							; invalidate it								AWC.PB480
+
+NextWind	Move.L	NextWindow(A3),A3		; grab the next window in the list
+			CmpA.L	#Nil,A3					; is it nil?
+			Bne		WindowLoop				; no => continue
+			Bsr		RedrawDesktop			; redraw the desktop						AWC.PB508
+EndJuggling	Move.L	OldPort(A4),-(SP)		; push old port
+			_SetPort						; restore old port
+GoHome		MoveQ	#0,D0					; clear error condition						AWC.PB377
+			MoveM.L	(SP)+,D3-D5/A2-A3		; restore registers							<AWC>
+			Unlk	A4						; clear stack frame
+			Rts								; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE CalcDevs; LOCAL;
+;
+
+CalcDevs	PROC	EXPORT
+
+ResultRect	equ		-8						; temp rect									AWC PB223
+SpotLight	equ		ResultRect-2			; boolean for WindowCopy = FrontWindow		AWC PB223
+VarSize		equ		SpotLight				; bytes of variables						AWC PB223
+
+			Link	A4,#VarSize				; build stack frame							AWC PB223
+			MoveM.L D3-D5/A2-A3,-(SP) 		; save registers							AWC PB223
+			MoveQ	#0,D3					; clear device set							AWC PB223
+			MoveQ	#0,D4					; clear front set							AWC PB223
+
+; Point A0 at the Bounds rect of WindowCopy
+
+			Move.L	WindowCopy(A6),A3		; get window pointer						AWC PB223
+			Lea		PortBits(A3),A0			; point A0 at potential bitmap				AWC PB223
+			Tst		RowBytes(A0)			; is it a color window?						AWC PB223
+			Bpl.S	OldPort					; no => it's an old port					AWC PB223
+			Move.L	BaseAddr(A0),A0			; get Port's Pixmap handle					AWC PB223
+			Move.L	(A0),A0					; get Pixmap pointer						AWC PB223
+OldPort		Move.L	ScrnBase,D0				; get main screen							AWC PB223
+			Cmp.L	BaseAddr(A0),D0			; do we point at the main screen?			AWC PB223
+			Bne		GoHome					; no => it doesn't count; go home			AWC PB223
+			Lea		Bounds(A0),A0			; advance A0 to Bounds rect					AWC PB223
+			Lea		PortRect(A3),A1			; advance A1 to Port rect					AWC PB223
+
+; Calculate PortRect in global coordinates
+
+			Move	Top(A1),D0					; get port top							AWC PB223
+			Sub		Top(A0),D0					; subtract bounds top					AWC PB223
+			Move	D0,WindowRect+Top(A6)		; save it								AWC PB223
+			Move	Left(A1),D0					; get port left							AWC PB223
+			Sub		Left(A0),D0					; subtract bounds left					AWC PB223
+			Move	D0,WindowRect+Left(A6)		; save left								AWC PB223
+			Move	Bottom(A1),D0				; get port bottom						AWC PB223
+			Sub		Top(A0),D0					; subtract bounds top					AWC PB223
+			Move	D0,WindowRect+Bottom(A6)	; save bottom							AWC PB223
+			Move	Right(A1),D0				; get port right						AWC PB223
+			Sub		Left(A0),D0					; subtract bounds left					AWC PB223
+			Move	D0,WindowRect+Right(A6)		; save right							AWC PB223
+
+; Determine whether or not this is the FrontWindow
+
+			Clr		SpotLight(A4)			; SpotLight := false						AWC.PB485
+			Clr.L	-(SP)					; function result							AWC.PB223
+			_FrontWindow					; get the current front window				AWC.PB223
+			CmpA.L	(SP)+,A3				; is this FrontWindow?						AWC.PB223
+			Bne.S	NotSpotted				; no => continue							AWC.PB485
+			Move.B	wHilited(A3),SpotLight(A4)	; FrontWindow if highlighted			AWC.PB485
+
+NotSpotted	Move.L	PMgrHandle,A2			; get PMgrHandle							AWC PB223
+			Move.L	(A2),A2					; dereference it							AWC PB223
+			MoveQ	#0,D3					; clear Devices in D3						AWC PB223
+			Move	nDevs(A2),D5			; keep device number in D5					AWC PB223
+			Lea		DevHandles(A2),A2		; point to the first PMgr device			AWC PB223
+			Bra.S	DeviceEnd				; jump into calc loop						AWC PB223
+
+DeviceLoop	Move.L	(A2,D5.W*8),A0			; copy device handle						AWC PB223
+			Move.L	(A0),A0					; dereference it							AWC PB223
+			Clr		-(SP)					; boolean result of SectRect				AWC PB223
+			Pea		WindowRect(A6)			; port rect in global coordinates			AWC PB223
+			Pea		gdRect(A0)				; device rect								AWC PB223
+			Pea		ResultRect(A4)			; where to shove result						AWC PB223
+			_SectRect						; calculate intersection					AWC PB223
+			Move	(SP)+,D0				; do they intersect?						AWC PB223
+			Beq.S	DeviceEnd				; no => don't set device bit				AWC PB223
+			BSet	D5,D3					; set device bit in D3						AWC PB223
+			Move.L	PDevPtr(A6),A0			; get pointer to CLUT device list			AWC PB223
+			Tst.B	SpotLight(A4)			; is this the FrontWindow?					AWC PB223
+			Beq.S	CheckPrior				; no => see if it is FrontMost instead		AWC PB223
+			Move.L	A3,DevFrontMost(A0,D5*8); save it as the new FrontMost				AWC PB223
+			Bra.S	SetFront				; and skip ahead							AWC PB223
+
+CheckPrior	CmpA.L	DevFrontMost(A0,D5*8),A3; is this window frontmost on this device?	AWC PB223
+			Bne.S	DeviceEnd				; no => don't set frontmost bit				AWC PB223
+SetFront	BSet	D5,D4					; set frontmost bit in D4					AWC PB223
+DeviceEnd	DBra	D5,DeviceLoop			; check next device							AWC PB223
+
+GoHome		Move.L	D3,DeviceSet(A6)		; save device set							AWC PB223
+			Move.L	D4,FrontSet(A6)			; save frontmost set						AWC PB223
+			MoveM.L (SP)+,D3-D5/A2-A3		; restore registers							AWC PB223
+			Unlk	A4						; clear stack frame							AWC PB223
+			Rts								; strip parameters and go home				AWC PB223
+
+
+;---------------------------------------------------
+;
+; PROCEDURE	ActivatePalette(dstWindow: WindowPtr); INLINE $AA94;
+;
+
+ActivatePalette	PROC	EXPORT
+
+ParamSize	equ		4						; total bytes of params
+dstWindow	equ		ParamSize+8-4			; source Palette handle
+
+; The ActivatePalette stack frame is defined at the global level so it can be accessed
+; by each of the routines subsidiary to ActivatePalette and thereby avoid gross parameter
+; passing.  All such subsidiary routines will link with A4 and not A6 thus keeping
+; ActivatePalette's stack frame intact.  D3 is used to hold any error condition.
+; It is moved to D0 before we quit.
+
+			Link	A6,#spVarSize			; build stack frame
+			MoveM.L D3-D4/A2-A4,-(SP) 		; save registers
+			
+			MoveQ	#1,D3					; set error flag in case we branch
+			Move.L	PMgrHandle,A2			; get global handle
+			CmpA.L	#PMgrNil,A2				; is it nil?
+			Beq		GoHome					; it has to be initialized
+			
+			Move.L	(A2),A0					; dereference PMgrHandle				AWC.PB500
+			Move	nDevs(A0),D0			; are there any clut devices?			AWC.PB500
+			Beq		GoHome					; no => punt							AWC.PB500
+
+			Move.L	dstWindow(A6),A3		; get the window pointer
+			CmpA.L	#Nil,A3					; is it real?
+			Beq		GoHome					; no => go home 						<AWC/PB150>
+			Move.L	A3,WindowCopy(A6)		; save a copy for those who need it
+
+			Tst		PortBits+RowBytes(A3)	; is it a new port?
+			Bpl.S	TrySystem				; no => try for a system palette
+			Move.L	GrafVars(A3),A0			; get the GrafVars handle
+			Move.L	(A0),A0					; dereference it
+			Move.L	PmFgColor(A0),A3		; save the palette handle in GrafVars
+			CmpA.L	#Nil,A3					; is it nil?
+			Bne.S	FoundPltt				; no => we've found it
+TrySystem	Move.L	AppPalette,A3			; get the layer's palette, if any			AWC.PB457
+			Move.L	A3,D0					; CmpA.L #Nil,A0; is AppPalette nil?		AWC.PB457
+			Bne.S	FoundPltt				; no => use AppPalette						AWC.PB457
+			Move.L	(A2),A0					; dereference PMgrHandle
+			Move.L	SysPalette(A0),A3		; get the system palette, if any
+			Move.L	A3,D0					; CmpA.L #Nil,A3; is SysPalette nil?		AWC.PB457
+			Beq		GoHome					; yes => we can't do it
+FoundPltt	Move.L	A3,PaletteH(A6)			; save the palette for later
+
+; past this point we will have locked PMgrHandle and PaletteH.  We also save theGDevice
+; and clear the InfoHandle variable.
+
+			Move.L	A2,A0					; copy PMgrHandle
+			_HLock							; lock it down
+			Move.L	A3,A0					; copy PaletteH
+			_HLock							; lock it down as well
+			Move.L	(A2),A4					; dereference PMgrHandle
+			Move.L	A4,PMgrPtr(A6)			; save a copy of the pointer
+			Move.L	PListHandle(A4),A0		; get PListHandle
+			_HLock							; lock it down
+			Move.L	(A0),PListPtr(A6)		; save pointer to palette list
+			Move	nDevs(A4),Devices(A6)	; save number of devices in our list
+			Lea		DevHandles(A4),A0		; point A4 at first device handle
+			Move.L	A0,PDevPtr(A6)			; save pointer to start of device list
+			Move.L	theGDevice,SaveGDev(A6)	; save theGDevice handle
+			Clr.L	InfoHandle(A6)			; mark it as unallocated
+			Move.L	(A3),A4					; dereference PaletteH
+			Move.L	A4,PalettePtr(A6)		; save it for posterior
+			Move	pmEntries(A4),D4		; fetch number of entries
+			Move	D4,myEntries(A6)		; save it for posterity
+			Clr		MAnimators(A6)			; MAnimators := 0
+			Clr		MTolerators(A6)			; MTolerators := 0
+
+; Check to see on which devices the window is now rendered
+
+			Jsr		CalcDevs				; determine the new and frontmost device sets
+			Tst.L	FrontSet(A6)			; is this window frontmost on any device?
+			Beq		NoFunStuff				; no => skip our wonderful rendering code
+			
+; Count the number of animating and tolerant colors.  Mark explicit, dithered, and
+; courteous colors as "handled" so we won't bother with them in SetDev et al.
+
+			Lea		pmInfo(A4),A4			; point us at the first ColorInfo
+			Bra.S	ExamEnd					; jump into DBra loop
+
+ExamLoop	Move	ciUsage(A4),D1			; copy ciUsage field of current entry
+			Cmp		#pmDithered,D1			; is it pmDithered or pmCourteous?
+			Ble.S	HandleColor				; pmCourteous => mark as handled
+			BTst	#ExplicitBit,D1			; pmExplicit?
+			Bne.S	HandleColor				; yes => mark it as handled, too
+			BTst	#AnimatedBit,D1			; pmAnimated?
+			Beq.S	CheckTolrnt				; no => check for other kinds of usage
+			AddQ	#1,MAnimators(A6)		; bump number of animating colors
+			Bra.S	NextColor				; continue
+
+; Any color which can match black or white within tolerance is removed from consideration.
+; We guarantee that black and white will be around, so as long as you don't have to change
+; their values you can match them normally.  When we correlate colors we won't allow you
+; to match black or white because we'll know you would have to change them.
+
+CheckTolrnt	AddQ	#1,MTolerators(A6)		; yes => bump number of tolerant colors
+			Bra.S	NextColor				; continue
+
+HandleColor	BSet	#HandledBit,ciUsage(A4)	; mark explicit and normal colors as handled
+NextColor	Add		#ciSize,A4				; bump address to next ColorInfo
+ExamEnd		DBra	D4,ExamLoop				; loop for all pmEntries
+
+; See if we have any animating or tolerant entries.  If not, we can skip most of this
+
+			Move	MAnimators(A6),D0		; do we have any animating					AWC PB223
+			Or		MTolerators(A6),D0		; or tolerant entries?						AWC PB223
+			Beq		NoFunStuff				; no => just clean up the world				AWC.PB508
+
+; Allocate a scratch buffer
+
+			Move.L	#InfoHandSz,D0			; size of our scratch area					AWC
+			_NewHandle	,CLEAR				; allocate a scratch area
+			Bne		UnlockEm				; we couldn't get it - D3 still says "error" AWC.PB508
+			Move.L	A0,InfoHandle(A6)		; save it
+			_HLock							; lock it
+			Move.L	(A0),A0					; dereference it
+			Move.L	A0,InfoPtr(A6)			; save dereferenced ptr
+
+; Call SetDev to render or record the Palette on each device, as appropriate.
+
+;			Clr.L	DeviceSet(A6)					; zero bitmap of devices
+			MoveQ	#0,D4							; clear device counter
+			Clr		GrayRgnPrep(A6)					; GrayRgnPrep := false				AWC.PB508
+DeviceLoop	Move.L	FrontSet(A6),D0					; grab the front device set			AWC PB223
+			BTst	D4,D0							; frontmost on this clut device?	AWC PB223
+			Beq.S	NoDevError						; no => jump across SetDev			AWC PB223
+			Move	MAnimators(A6),Animators(A6)	; copy MAnimators
+			Move	MTolerators(A6),Tolerators(A6)	; copy MTolerators
+			Move	D4,CurDevice(A6)				; copy it for SetDev
+			Jsr		SetDev							; render palette; did we get an error?
+			Beq.S	NoDevError						; did we find an error?
+			AddQ	#1,D3							; bump our error count
+NoDevError	AddQ	#1,D4							; we've examined another device
+			Cmp		Devices(A6),D4					; have we done them all
+			Bmi.S	DeviceLoop						; no => do another
+
+			Move.L	SaveGDev(A6),theGDevice			; restore theGDevice handle			AWC.PB508
+			Move	GrayRgnPrep(A6),D0				; see how we faired on the desktop	AWC.PB508
+			Beq.S	NoFunStuff						; no => nothing to do				AWC.PB508
+			Cmp		#-1,D0							; did we detect no work to do?		AWC.PB508
+			Beq.S	NoFunStuff						; yes => nothing to do				AWC.PB508
+			SubQ.L	#4,SP							; open room for the old port		AWC.PB520
+			Pea		(SP)							; push a pointer to that location	AWC.PB520
+			_GetPort								; save the old port					AWC.PB520
+			Move.L	WMgrCPort,-(SP)					; gpush WMgrPort for SetPort		AWC.PB520
+			_SetPort								; do it								AWC.PB520
+			Move.L	DeskRgn(A6),-(SP)				; push DeskRgn						AWC.PB520
+			_SetClip								; clip to DeskRgn					AWC.PB520
+			Clr.L	-(SP)							; push nil							AWC.PB520
+			_ClipAbove								; set GrayRgn						AWC.PB520
+			Move.L	DeskHook,D0						; is there a DeskHook?				AWC.PB520
+			Bne.S	CallHook						; yes => call the deskhook			AWC.PB508
+			Clr.L	-(SP)							; push nil							AWC.PB508
+			Move.L	DeskRgn(A6),-(SP)				; push DeskRgn						AWC.PB508
+			_PaintOne								; update the desktop				AWC.PB508
+			Bra.S	RestorePort						; catch up with the latest news		AWC.PB520
+
+CallHook	Move.L	D0,A0							; put DeskHook address into A0		AWC.PB508
+			MoveQ	#0,D0							; pass a paint message in D0		AWC.PB508
+			Jsr		(A0)							; let the Hook do the painting		AWC.PB508
+RestorePort	_SetPort								; pop the old port					AWC.PB520
+			Move.L	DeskRgn(A6),-(SP)				; push DeskRgn						AWC.PB508
+			_DisposRgn								; get rid of it						AWC.PB508
+NoFunStuff	Move.L	PMgrPtr(A6),A0			; get the PMgrHandle pointer				AWC PB223
+			Move.L	PListHandle(A0),A0		; get the PListHandle
+			Move.L	(A0),A0					; dereference it
+			Move.L	PalettePtr(A6),A1		; get the Palette
+			Move	pmPrivate(A1),D0		; get the entry number
+			And		#PIdMask,D0				; clear the flag bits
+			Move	Reserves(A0,D0.W*8),D0	; does this palette have anything reserved?
+			Beq.S	NoneRsrvd				; no => forget about clearing				AWC PB223
+
+; Clear any unused devices and update device bitmap
+
+			Move.L	PalettePtr(A6),A0		; get palette pointer
+			Move.L	pmDevices(A0),D0		; get former device set
+			Move.L	DeviceSet(A6),D1		; get new device set
+			Not.L	D1						; complement the current set
+			And.L	D1,D0					; remove any current bits
+			Beq.S	NoneRsrvd				; if none needing unreserving, quit
+
+; STAGE 1 - implement
+;
+; Loop, clearing each device we once did but no longer touch.  This is a good thing to
+; add in the future.  For now, it won't have a lot of impact.  The entries it still has
+; reserved can always be pillaged by somebody else if they need them.  But, in the next
+; version we shall release entries as we move off a device.
+
+			Nop
+
+NoneRsrvd	Move.L	DeviceSet(A6),pmDevices(A1)	; copy the new device set
+			SubQ	#1,D3					; if now 0 then we got through with no errors
+UnlockEm	Move.L	PMgrPtr(A6),A0			; get the master pointer
+			Move.L	PListHandle(A0),A0		; get this handle
+			_HUnlock						; unlock it
+			Move.L	A2,A0					; copy PMgrHandle
+			_HUnLock
+
+; clear the dirty bit and restore the user's ciUsage fields
+
+			Move.L	PalettePtr(A6),A0		; get Palette pointer
+			BClr	#DirtyBit,pmPrivate(A0)	; clear the dirty bit
+			Move	pmEntries(A0),D0		; fetch number of entries
+			Lea		pmInfo(A0),A0			; point us at the first ColorInfo
+			Bra.S	UnsetEnd				; jump into DBra loop
+
+UnsetLoop	Move	ciUsage(A0),D1			; copy ciUsage field of current entry
+			And		#ClearBits,D1			; clear all but the user's flags
+			Move	D1,ciUsage(A0)			; restore it
+			AddA.L	#ciSize,A0				; bump A4 to the next color info
+UnsetEnd	DBra	D0,UnsetLoop			; loop for all pmEntries ColorInfo's
+
+			Move.L	A3,A0					; copy PaletteHandle to A0
+			_HUnlock						; unlock it
+			Move.L	InfoHandle(A6),A0		; get scratch handle
+			CmpA.L	#Nil,A0					; was it allocated
+			Beq.S	NoError					; no => don't dispose it
+			_DisposHandle					; get rid of it
+NoError		MoveQ	#0,D3					; clear error flag
+GoHome		Move.L	D3,D0					; copy error flag
+			MoveM.L (SP)+,D3-D4/A2-A4		; restore registers
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE DirtySeeds(dstPalette: PaletteHandle); LOCAL;
+;
+
+DirtySeeds	PROC	EXPORT
+
+ParamSize	equ		4						; total bytes of params
+dstPalette	equ		ParamSize+8-4			; destination Palette handle
+
+VarSize		equ		0						; size of variables
+
+			Link	A6,#VarSize				; build stack frame							AWC.PB508
+			Move.L	PMgrHandle,A0			; get the PMgrHandle (we assume its safe)	AWC.PB508
+			Move.L	(A0),A0					; dereference it							AWC.PB508
+			Move	SeedHSize(A0),D0		; get the seed handle size					AWC.PB508
+			Lsr		#2,D0					; divide it by 4 to get number of longs		AWC.PB508
+			SubQ	#1,D0					; decrement it for the DBra loop			AWC.PB508
+			Move.L	DstPalette(A6),A0		; get the palette							AWC.PB508
+			Move.L	(A0),A0					; dereference it							AWC.PB508
+			BSet	#DirtyBit,pmPrivate(A0)	; set the dirty bit							AWC.PB508
+			Move.L	pmSeeds(A0),A0			; get the seeds handle						AWC.PB508
+			Move.L	(A0),A0					; dereference it							AWC.PB508
+ClearLoop	Clr.L	(A0)+					; clear a seed								AWC.PB508
+			DBra	D0,ClearLoop			; continue									AWC.PB508
+GoHome		Unlk	A6						; clear stack frame							AWC.PB508
+			Rtd		#ParamSize				; strip parameters and go home				AWC.PB508
+			
+
+;---------------------------------------------------
+;
+; PROCEDURE SetPalette(dstWindow: WindowPtr; srcPalette: PaletteHandle; CUpdates: BOOLEAN);
+;	INLINE $AA95;
+;
+
+SetPalette	PROC	EXPORT
+
+ParamSize	equ		10						; total bytes of params
+dstWindow	equ		ParamSize+8-4			; source Palette handle
+srcPalette	equ		dstWindow-4				; new window, if any
+CUpdates	equ		srcPalette-2			; whether we want background color updates
+
+VarSize		equ		0						; size of variables
+
+			Link	A6,#VarSize				; build stack frame
+
+			Move.L	PMgrHandle,A1			; we have to be initialized
+			CmpA.L	#PMgrNil,A1				; is it initialized?
+			Beq		GoHome					; no => punt
+
+			Move.L	dstWindow(A6),A0		; get the window pointer
+			CmpA.L	#-1,A0					; does the caller want to set AppPalette?
+			Bne.S	NotSystem				; no => go look for the window
+
+			Move.L	AppPalette,D0			; get the application palette; is it nil?	AWC.PB457
+			Beq.S	NoAppPltt				; yes => don't dispose it					AWC.PB457
+			Move.L	D0,A0					; put it in an address register				AWC.PB457
+			Move.L	(A0),A0					; dereference it							AWC.PB457
+			BTst	#DisposeBit,pmPrivate(A0)	; should we clobber it?					AWC.PB457
+			Beq.S	NoAppPltt					; no => the caller deals with it		AWC.PB457
+			Move.L	D0,-(SP)					; push the palette						AWC.PB457
+			_DisposePalette						; can you say "bye bye"?				AWC.PB457
+NoAppPltt	Move.L	SrcPalette(A6),A0		; get the palette parameter					AWC.PB457
+			Move.L	A0,AppPalette			; set the layer palette; is it nil?			AWC.PB457
+			Bne.S	AppNotNil				; no => activate the layer palette			AWC.PB457
+			Move.L	(A1),A0					; dereference PMgrHandle					AWC.PB457
+			Move.L	SysPalette(A0),A0		; get the system palette					AWC.PB457
+			Move.L	A0,D0					; CmpA.L #Nil,A0; is it nil?				AWC.PB457
+			Beq.S	GoHome					; yes => shouldn't happen, but quit anyway	AWC.PB457
+AppNotNil	Move.L	A0,-(SP)				; push the palette pointer					AWC.PB508
+			Bsr		DirtySeeds				; clear the device seeds so we'll update	AWC.PB508
+			Clr.L	-(SP)					; push function result						AWC.PB439
+			_FrontWindow					; push the front window						AWC.PB439
+			Bra.S	DontClear				; activate it								AWC PB223
+
+NotSystem	Tst		PortBits+RowBytes(A0)	; is it a new port?
+			Bpl.S	GoHome					; if not, we're out of here
+			Move.L	srcPalette(A6),D0		; get the palette handle
+
+			Move.L	GrafVars(A0),A1			; get handle to GrafVars
+			Move.L	(A1),A1					; dereference GrafVars
+			Move.L	PmFgColor(A1),D1		; save whatever's there currently
+			Move.L	D0,PmFgColor(A1)		; store the palette in GrafVars.PmFgColor; is it nil?
+			Beq.S	BitsOkay				; yes => that's okay, but we won't dereference it
+			Move.L	D0,A1					; put the Palette handle into A1
+			Move.L	(A1),A1					; dereference it
+;			Move.L	A0,pmWindow(A1)			; store the window in the palette			AWC.PB439
+			
+			BClr	#CBackBit,PmPrivate(A1)	; clear background update bit				AWC PB223
+			BSet	#CForeBit,PmPrivate(A1)	; set foreground update bit					AWC PB223
+			Tst.B	CUpdates(A6)			; does she want background updates?			AWC PB223
+			Beq.S	BitsOkay				; 0 => default case, CUpdates = false		AWC PB223
+			Bpl.S	AllowBacks				; 1 => CUpdates = true						AWC PB223
+			BTst	#NForeBit,CUpdates(A6)	; does he want foreground updates?			AWC PB223
+			Bne.S	YesFores				; yes => leave it as is						AWC PB223
+			BClr	#CForeBit,PmPrivate(A1)	; turn foreground updates off				AWC PB223
+YesFores	BTst	#NBackBit,CUpdates(A6)	; does she want background updates?			AWC PB223
+			Beq.S	BitsOkay				; no => skip it								AWC PB223
+AllowBacks	BSet	#CBackBit,PmPrivate(A1)	; set the foreground update bit				AWC PB223
+BitsOkay	Cmp.L	D0,D1					; are they identical?						AWC PB223
+			Beq.S	GoHome					; don't bother activating anything
+			Move.L	A0,-(SP)				; push the window pointer for the activate palette
+			Tst.L	D1						; is this nil?
+			Beq.S	DontClear				; don't clear it
+			Move.L	D1,A0					; copy it to an address register			AWC.PB457
+			Move.L	(A0),A0					; dereference it							AWC.PB457
+			BTst	#DisposeBit,pmPrivate(A0)	; should we dispose it?					AWC.PB457
+			Beq.S	DontClear				; no => leave it alone						AWC.PB457
+			Move.L	D1,-(SP)				; push the old handle
+			_DisposePalette					; can you say "bye bye"?  I knew you could	AWC.PB457
+DontClear	_ActivatePalette				; set the palette if it happens to be FrontWIndow
+GoHome		Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; FUNCTION GetPalette(srcWindow: WindowPtr) : PaletteHandle; INLINE $AA96;
+;
+
+GetPalette	PROC	EXPORT
+
+ParamSize	equ		4						; total bytes of params
+GetResult	equ		ParamSize+12-4			; result palette handle
+srcWindow	equ		GetResult-4				; source window to help find the palette
+
+VarSize		equ		0						; size of variables
+
+			Link	A6,#VarSize				; build stack frame
+			Clr.L	GetResult(A6)			; clear the result handle
+
+			Move.L	PMgrHandle,A1			; we have to be initialized
+			CmpA.L	#PMgrNil,A1				; is it initialized?
+			Beq.S	GoHome					; no => punt
+
+			Move.L	srcWindow(A6),A0			; get the window pointer
+			CmpA.L	#Nil,A0						; is it real?
+			Beq.S	GoHome						; no => punt
+			CmpA.L	#-1,A0						; do they want the system palette?
+			Bne.S	NotSystem					; no, not the system
+			Move.L	AppPalette,GetResult(A6)	; grab AppPalette; is it nil?			AWC.PB457
+			Bne.S	GoHome						; no => we're done						AWC.PB457
+
+			Move.L	(A1),A1					; dereference PMgrHandle					AWC.PB457
+			Move.L	SysPalette(A1),A0		; get SysPalette							AWC.PB457
+			Move.L	A0,D0					; CmpA.L #Nil,A0; is it nil?				AWC.PB457
+			Beq.S	GoHome					; yes => how did this happen? oh well, quit	AWC.PB457
+			_HandToHand						; make a copy of it							AWC.PB457
+			Tst		D0						; did the call succeed?						AWC.PB457
+			Bne.S	GoHome					; no => go home with result nil				AWC.PB457
+			Move.L	A0,AppPalette			; now we'll use the copy					AWC.PB457
+			Move.L	A0,GetResult(A6)		; give them the copy's handle				AWC.PB457
+			Move.L	A0,-(SP)				; push the handle for RecordPalette			AWC.PB457
+			Move.L	(A0),A0					; dereference it							AWC.PB457
+			Clr.L	pmSeeds(A0)				; kill the copy of the seeds handle			AWC.PB457
+			BClr	#DisposeBit,pmPrivate(A0)	; caller must now dispose it			AWC.PB457
+			Jsr		RecordPalette			; insert it into our list of known things	AWC.PB457
+			Beq.S	GoHome					; scurry out of here						AWC.PB457
+			Clr.L	AppPalette				; sorry, it failed							AWC.PB457
+			Clr.L	GetResult(A6)			; so clear the result, too					AWC.PB457
+			Bra.S	GoHome					; continue									AWC.PB457
+
+NotSystem	Tst		PortBits+RowBytes(A0)	; is it a new port?
+			Bpl.S	GoHome					; if not, we're out of here
+			Move.L	GrafVars(A0),A0			; get handle to GrafVars
+			Move.L	(A0),A0					; dereference GrafVars
+			Move.L	PmFgColor(A0),A0		; get the palette							AWC.PB457
+			Move.L	A0,GetResult(A6)		; give it to the caller; is it nil?			AWC.PB457
+			Beq.S	GoHome					; yes => don't bother with the dispose flag	AWC.PB457
+			Move.L	(A0),A0					; dereference it							AWC.PB457
+			BClr	#DisposeBit,PmPrivate(A0)	; turn off the auto dispose				AWC.PB457
+GoHome		Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+				
+
+;---------------------------------------------------
+;
+; PROCEDURE	FindIndex; IMMEDIATE;
+;
+;	On entry:
+;		A2 - Palette pointer
+;		A3 - ColorInfo
+;
+;	On exit:
+;		D0 - index of animating entry; 0 if not found (0 is illegal for animation)
+
+FindIndex	PROC	EXPORT
+
+			MoveM.L	D3/D4,-(SP)				; save registers
+			Move	ciPrivate(A3),D0		; get link info
+			BfExtU	D0{16:3},D1				; grab top 3 bits
+			Cmp		#4,D1					; are they set correctly
+			Bne.S	BadIndex				; no => the LinkInfo is invalid
+			Move.L	PMgrHandle,A0			; get main handle
+			CmpA.L	#PMgrNil,A0				; is it nil?
+			Beq.S	BadIndex				; yes => punt
+			Move.L	(A0),A0					; dereference the palette manager
+			Move	nDevs(A0),D3			; get number of devices to search in D3
+			Beq.S	BadIndex				; no devices => can't animate				AWC.PB500
+			Lea		DevHandles(A0),A1		; point A1 at the device info stuff
+			Bra.S	DevEnd					; jump into loop
+
+DevLoop		Move.L	DevHandle(A1,D3.W*8),D4	; get device handle
+			Cmp.L	theGDevice,D4			; is this it?
+			Beq.S	FoundDevice				; yes => continue
+DevEnd		DBra	D3,DevLoop				; no => look at another device
+			Bra.S	BadIndex				; we fell through - punt
+
+FoundDevice	Move	nDevs(A0),D4			; get number of devices, this time as a watchdog
+			AddA.L	#LinkTabs,A0			; bump A0 to the base of LinkTabs
+			Bra.S	IndexEnd				; start watchdog loop
+			
+IndexLoop	BfExtU	D0{19:5},D1				; grab device number (0..31)
+			BfExtU	D0{24:8},D2				; grab index number (0..255)
+			Cmp		D3,D1					; is it this device?
+			Beq.S	FoundIndex				; yes => we've got it
+			Lsl		#8,D1					; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Move	ForeLink(A0,D1.L*4),D0	; get next link; is the top bit set?
+			Bpl.S	BadIndex				; no => stop because we ran out of tries
+IndexEnd	DBra	D4,IndexLoop			; examine another index until our watchdog runs out
+BadIndex	Bra.S	SetBadIndex				; set index to "illegal"		AWC.PB377
+
+; We found the index.  Ensure that we don't exceed the bit depth, set "true" by returning
+; a value <> 0.
+
+FoundIndex	And		#$00FF,D2				; clear everything except the index
+			Move	D2,D0					; set the result				AWC.PB377
+			Move.L	theGDevice,A0			; get theGDevice				AWC.PB377
+ 			Move.L	(A0),A0					; dereference it				AWC.PB377
+ 			Move.L	gdPMap(A0),A0			; get handle to pixmap			AWC.PB377
+ 			Move.L	(A0),A0					; dereference pixmap			AWC.PB377
+ 			Move.L	pmTable(A0),A0			; get handle to CTab			AWC.PB377
+ 			Move.L	(A0),A0					; dereference color table		AWC.PB377
+ 			Cmp		ctSize(A0),D0			; compare link to maximum index	AWC.PB377
+			Blt.S	GoHome					; if D0-ctSize <= 0 then cool	AWC.PB480
+SetBadIndex	MoveQ	#0,D0					; set index to "illegal" white	AWC.PB377
+GoHome		MoveM.L (SP)+,D3/D4		 		; restore registers
+			Rts								; go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE	PmForeColor(dstEntry: INTEGER); INLINE $AA97;
+;
+
+PmForeColor		PROC	EXPORT
+				EXPORT	PmBackColor
+
+; In most cases we can rely upon RGBForeColor to do all the work for us.  If a simple color,
+; it's the perfect thing to call.  If a true color, SetPalette did the important work for us
+; and it's still correct.  If it's an animating entry, we might not be on a device which can
+; animate this color, so we want the foreground color preestablished so we can just quit if
+; our attempt to use an animating entry fails.
+;
+; STAGE 2 - dithering patterns are not yet provided
+
+ParamSize	equ		2						; total bytes of params
+dstEntry	equ		ParamSize+8-2			; which entry to use Palette handle
+
+CallType	equ		-2						; foreground = 1, background = 0
+PWindow		equ		CallType-4				; window pointer
+GrafVarsPtr	equ		PWindow-4				; GrafVars^
+SrcPalette	equ		GrafVarsPtr-4			; whichever palette we decide to use		AWC.PB520
+VarSize		equ		SrcPalette				; size of local variables					AWC.PB520
+
+			MoveQ	#1,D0					; we're coming from PmForeColor
+			Bra.S	PmSetColor				; share code
+
+PmBackColor	MoveQ	#0,D0					; we're coming from PmBackColor
+
+PmSetColor	Link	A6,#VarSize				; build stack frame
+			MoveM.L A2-A3,-(SP) 			; save registers
+			Move	D0,CallType(A6)			; save the type of call
+
+			Move.L	PMgrHandle,A1			; get the main handle
+			CmpA.L	#PMgrNil,A1				; are we initialized?
+			Beq		GoHome					; no => punt								AWC.PB377
+
+			Move.L	GrafGlobals(A5),A0		; get the QuickDraw globals pointer
+			Move.L	ThePort(A0),A0			; point at the port
+			Tst		PortBits+Rowbytes(A0)	; is it a new port?
+			Bpl		GoHome					; no => punt								AWC.PB377
+
+			Move.L	A0,PWindow(A6)			; save it because we use it several times
+			Move.L	GrafVars(A0),A0			; get the data handle
+			Move.L	(A0),A0					; dereference it
+			Move.L	A0,GrafVarsPtr(A6)		; save GrafVars pointer for later			AWC.PB508
+			Move.L	PmFgColor(A0),A2		; get the palette handle (finally)
+			Move.L	A2,D0					; CmpA.L #Nil,A2; is there a palette?		AWC.PB508
+			Bne.S	FoundAPltt				; yes => we're cool so far					AWC.PB508
+			Move.L	AppPalette,A2			; grab the AppPalette for use				AWC.PB508
+			Move.L	A2,D0					; CmpA.L #Nil,A2; is there an AppPalette	AWC.PB508
+			Beq		GoHome					; no => punt								AWC.PB508
+FoundAPltt	Move.L	A2,SrcPalette(A6)		; save it so we can unlock it				AWC.PB520
+			Move.L	A2,A0					; put the handle into A0					AWC.PB520
+			_HLock							; lock it down								AWC.PB520
+			Move.L	(A2),A2					; dereference myPalette						AWC.PB508
+			MoveQ	#0,D0					; clear the high word
+			Move	dstEntry(A6),D0			; capture the index
+			Cmp		pmEntries(A2),D0		; D0 - pmEntries; is myEntry out of range?
+			Bhs		UnlockPltt				; yes, so we quit							AWC.PB520
+			Asl.L	#4,D0					; multiply by record size of 16
+			Lea		pmInfo(A2,D0.L),A3		; set A3 to entry's ColorInfo
+			Pea		ciRGB(A3)				; push address of ciRGB field
+			Tst		CallType(A6)			; was it a background call
+			Bne.S	DoForegrnd				; no => do the foreground call
+			_RGBBackColor					; yes => do the background call
+			Bra.S	DoContinue				; keep going
+
+DoForegrnd	_RGBForeColor					; let this do almost all the work
+DoContinue	Move	ciUsage(A3),D1			; get flags
+			MoveQ	#0,D0					; clear high word
+			Move	dstEntry(A6),D0			; set D0 in case it is an explicit index
+			BTst	#ExplicitBit,D1			; is it explicit?
+			Bne.S	DoExplicit				; yes => blast index into port
+			MoveQ	#0,D0					; set no error in case we go home
+			BTst	#AnimatedBit,D1			; no => test animation bit
+			Beq.S	UnlockPltt				; yes => we're done							AWC.PB520
+			Jsr		FindIndex				; uses our registers - put reserved index in D0
+			Tst		D0						; was the result "white"?
+			Beq.S	FixPort					; yes => give up, but set up the port first
+			Bra.S	ShoveIndex				; share common code
+
+DoExplicit	Move.L	theGDevice,A0			; get theGDevice
+			Move.L	(A0),A0					; dereference it
+			Cmp		#directType,gdType(A0)	; is it a direct device?					AWC.PB530
+			Beq.S	UnlockPltt				; yes => we're done							AWC.PB530
+			Move.L	gdPMap(A0),A0			; get handle to pixmap
+			Move.L	(A0),A0					; dereference pixmap
+			Move.L	pmTable(A0),A0			; get handle to CTab
+			Move.L	(A0),A0					; dereference color table
+			And		ctSize(A0),D0			; and D0 with maximum index
+
+ShoveIndex	Move.L	PWindow(A6),A0				; get the window pointer again
+			Tst		CallType(A6)				; foreground? 							AWC.PB377
+			Beq.S	SetBackgrnd					; no => set background 					AWC.PB377
+			Move.L	D0,FgColor(A0)				; jam the index
+			Bra.S	FixPort						; continue 								AWC.PB377
+
+SetBackgrnd	Move.L	D0,BkColor(A0)				; jam the index 						AWC.PB377
+FixPort		Move.L	GrafVarsPtr(A6),A0			; get the GrafVars pointer again
+			Tst		CallType(A6)				; was it background?
+			Beq.S	DoBackgrnd					; yes => set background information
+			Move	dstEntry(A6),PmFgIndex(A0)	; save the entry number
+			BSet	#PmFgBit,PmFlags+1(A0)		; tell the world that we set the FgColor
+			Bra.S	UnlockPltt					; clean up and go home					AWC.PB520
+
+DoBackgrnd	Move	dstEntry(A6),PmBkIndex(A0)	; save the entry number
+			BSet	#PmBkBit,PmFlags+1(A0)		; tell the world that we set the BkColor
+UnlockPltt	Move.L	SrcPalette(A6),A0			; get whichever palette we used			AWC.PB520
+			_HUnlock							; unlock it								AWC.PB520
+GoHome		MoveQ	#0,D0						; no error
+			MoveM.L (SP)+,A2-A3					; restore register
+			Unlk	A6							; clear stack frame
+			Rtd		#ParamSize					; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE AnimateEntry(dstWindow: WindowPtr; dstEntry: INTEGER; srcRGB: RGBColor); INLINE $AA99;
+;
+
+AnimateEntry	PROC	EXPORT
+
+ParamSize	equ		10						; total bytes of params				<AWC>
+dstWindow	equ		ParamSize+8-4			; target window						<AWC>
+dstEntry	equ		dstWindow-2				; palette entry to animate			<AWC>
+srcRGB		equ		dstEntry-4				; new color to use
+
+SaveGDev	equ		-4						; room for saving theGDevice
+Mc			equ		SaveGDev-6				; RGBColor
+OldSeed		equ		Mc-4					; old color table seed
+VarSize		equ		OldSeed					; size of the variables
+
+			Link	A6,#VarSize				; build stack frame
+			MoveM.L D3-D5/A2-A4,-(SP) 		; save registers
+
+			Move.L	PMgrHandle,A3			; get the main handle
+			CmpA.L	#PMgrNil,A3				; are we initialized?
+			Beq		GoHome					; no => punt								AWC.PB377
+
+			Move.L	dstWindow(A6),A0		; get the target window
+			CmpA.L	#Nil,A0					; is it nil?
+			Beq		GoHome					; yes => we're done							AWC.PB377
+
+			Tst		PortBits+Rowbytes(A0)	; is it a new port?
+			Bpl		GoHome					; no => punt								AWC.PB377
+
+			Move.L	GrafVars(A0),A0			; get the data handle
+			Move.L	(A0),A0					; dereference it
+			Move.L	PmFgColor(A0),A2		; get the palette handle (finally)
+			Move.L	A2,D0					; CmpA.L #Nil,A2; is there a palette?		AWC.PB508
+			Bne.S	FoundAPltt				; yes => use it								AWC.PB508
+			Move.L	AppPalette,A2			; look for an AppPalette					AWC.PB508
+			Move.L	A2,D0					; CmpA.L #Nil,A2; is there an AppPalette?	AWC.PB508
+			Beq		GoHome					; no => punt								AWC.PB377
+FoundAPltt	Move.L	(A2),A0					; dereference the palette					AWC.PB508
+			Move	pmEntries(A0),D0		; get the number of entries
+			MoveQ	#0,D1					; clear high word
+			Move	dstEntry(A6),D1			; get the index
+			Cmp		D0,D1					; is the index in range?
+			Bhs		GoHome					; no => we're done							AWC.PB377
+
+			Lsl		#4,D1						; multiply by ciSize
+			Lea		pmInfo(A0,D1.L),A2			; point A2 at the entry
+			BTst	#ExplicitBit,ciUsage+1(A2)	; is it explicit?
+			Bne		GoHome						; yes => by definition not animating
+			BTst	#AnimatedBit,ciUsage+1(A2)	; is it animating?
+			Beq		GoHome						; no => quit
+
+; Copy the colors to the palette before we check to see if we have links or not so that it
+; will get copied even if we have no 'clut' devices
+
+			Move.L	srcRGB(A6),A0				; get pointer to his RGB				AWC.PB500
+			Move.L	red(A0),D0					; copy red and green					AWC.PB500
+			Move.L	D0,ciRGB+red(A2)			; copy it to the palette				AWC.PB500
+			Move.L	D0,mc+red(A6)				; save red and green on the stack		AWC.PB500
+			Move	blue(A0),D0					; copy blue								AWC.PB500
+			Move	D0,ciRGB+blue(A2)			; copy it to the palette				AWC.PB500
+			Move	D0,mc+blue(A6)				; save blue on the stack				AWC.PB500
+
+			Move	ciPrivate(A2),D3		; get the ForeLink field
+			BfExtu	D3{16:3},D1				; get the key bits
+			Cmp		#4,D1					; were they 100?
+			Bne		GoHome					; no => not a valid ForeLink; go home
+
+; Now, finally, we have something to do.  Let's follow those links and see where they take us
+
+			Move.L	A3,A0						; copy PMgrHandle
+			_HLock								; lock it down
+			Move.L	theGDevice,SaveGDev(A6)		; save it
+
+;	Register usage:
+;
+;		D0 : holds ForeLink temporarily
+;		D3 : holds device number
+;		D4 : holds index number
+;		D5 : watchdog loop counter
+;
+;		A2 : base address of LinkTabs
+;		A3 : PMgrHandle (locked)
+;		A4 : base address of DevHandles
+			
+			Move.L	(A3),A2					; dereference PMgrHandle
+			Move	nDevs(A2),D5			; maximum number of devices (watchdog counter)
+			Lea		DevHandles(A2),A4		; point A4 at the device list
+			AddA.L	#LinkTabs,A2			; point A2 at start of LinkTabs
+			Move	D3,D0					; copy ForeLink into D0
+			Bra.S	DevEnd					; jump into the loop
+
+DevLoop		BfExtU	D0{19:5},D3				; grab device number (0..31)
+			BfExtU	D0{24:8},D4				; grab index number (0..255)
+			Move.L	DevHandle(A4,D3.W*8),A0	; get the device handle
+			Move.L	A0,theGDevice			; now we're on that device
+			Move.L	(A0),A0					; dereference it
+			Clr		gdId(A0)				; no client id's, please
+			Move.L	gdPMap(A0),A0			; get handle to pixmap
+			Move.L	(A0),A0					; dereference pixmap
+			Move.L	pmTable(A0),A0			; get handle to CTab
+			Move.L	(A0),A0					; dereference CTab
+			Move	ctSize(A0),D0			; grab number of entries - 1
+			Cmp		D4,D0					; compare our index to the max index
+			Ble.S	NextDevice				; out of range => look at next device		AWC.PB480
+			Move.L	ctSeed(A0),OldSeed(A6)	; save the seed so we can restore it
+			Move.L	mc+red(A6),ctTable+RGB+red(A0,D4.W*8)
+			Move	mc+blue(A6),ctTable+RGB+blue(A0,D4.W*8)
+
+; Now perform a sequential _SetEntries using the device's color table as the source
+
+			Clr		-(SP)					; push starting count of 0 for SetEntries
+			Move	D0,-(SP)				; push number of entries-1
+			Pea		ctTable(A0)				; push address of the first ColorSpec
+			_SetEntries						; do it
+
+			Move.L	theGDevice,A0			; get the device again
+			Move.L	(A0),A0					; dereference it
+			Move.L	gdPMap(A0),A0			; get handle to pixmap
+			Move.L	(A0),A0					; dereference pixmap
+			Move.L	pmTable(A0),A0			; get handle to CTab
+			Move.L	(A0),A0					; dereference CTab
+			Move.L	OldSeed(A6),ctSeed(A0)	; we didn't really want it to change
+
+NextDevice	Lsl		#8,D3					; calculate offset to link table/4
+			Add		D4,D3					; offset to entry/4
+			Move	ForeLink(A2,D3.L*4),D0	; get next link; is the top bit set?		AWC.PB500
+DevEnd		DBpl	D5,DevLoop				; keep going until D0 is positive or D5 runs out
+
+			Move.L	SaveGDev(A6),theGDevice	; restore theGDevice
+			Move.L	A3,A0					; copy PMgrHandle
+			_HUnlock						; unlock it
+GoHome		MoveQ	#0,D0					; no error							AWC.PB377
+			MoveM.L (SP)+,D3-D5/A2-A4		; restore registers
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE AnimatePalette(dstWindow:WindowPtr; srcCTab: CTabHandle; srcIndex,
+;	dstEntry,dstLength: INTEGER; INLINE $AA9A;
+;
+
+AnimatePalette	PROC	EXPORT
+
+ParamSize	equ		14						; total bytes of params					<AWC>
+dstWindow	equ		ParamSize+8-4			; window to animate						<AWC>
+srcCTab		equ		dstWindow-4				; new source colors
+srcIndex	equ		srcCTab-2				; first source entry to use
+dstEntry	equ		srcIndex-2				; first destination entry to set
+dstLength	equ		dstEntry-2				; how many to set
+
+SaveGDev	equ		-4						; room for saving theGDevice
+SaveSeed	equ		SaveGDev-4				; old color table seed
+NumDev		equ		SaveSeed-2				; copy of nDevs
+DevCTabH	equ		NumDev-DevLimit*4		; enough room for a CTabHandle per device
+VarSize		equ		DevCTabH				; size of the variables
+
+			Link	A6,#VarSize				; build stack frame
+			MoveM.L D3-D6/A2-A4,-(SP) 		; save registers
+
+			Move.L	PMgrHandle,A4			; get the main handle
+			CmpA.L	#PMgrNil,A4				; are we initialized?
+			Beq		GoHome					; no => punt							AWC.PB377
+
+			Move.L	dstWindow(A6),A0		; get the target window					<AWC>
+			CmpA.L	#Nil,A0					; is it nil?							<AWC>
+			Beq		GoHome					; yes => we're done						AWC.PB377
+
+			Tst		PortBits+Rowbytes(A0)	; is it a new port?
+			Bpl		GoHome					; no => punt							AWC.PB377
+
+			Move.L	GrafVars(A0),A0			; get the data handle
+			Move.L	(A0),A0					; dereference it
+			Move.L	PmFgColor(A0),A2		; get the palette handle (finally)
+			Move.L	A2,D0					; CmpA.L #Nil,A2; is there a palette?		AWC.PB508
+			Bne.S	FoundAPltt				; yes => use it								AWC.PB508
+			Move.L	AppPalette,A2			; look for an AppPalette					AWC.PB508
+			Move.L	A2,D0					; CmpA.L #Nil,A2; is there an AppPalette?	AWC.PB508
+			Beq		GoHome					; no => punt								AWC.PB508
+FoundAPltt	Move.L	srcCTab(A6),A3			; get source color table					AWC.PB508
+			Move.L	A3,D0					; CmpA.L #Nil,A3; is it nil?				AWC.PB508
+			Beq		GoHome					; yes => again punt							AWC.PB377
+
+			Move.L	(A2),A2					; dereference the palette
+			Move	pmEntries(A2),D0		; get the number of entries; are there any?
+			Beq		GoHome					; no => still punt							AWC.PB377
+			MoveQ	#0,D3					; clear high word (so we can Lsl.L later)
+			Move	dstEntry(A6),D3			; get the starting index
+			Cmp		D0,D3					; is the start after the end?
+			Bhs		GoHome					; yes => keep punting
+			
+			Move.L	(A3),A3					; dereference the color table
+			Move	srcIndex(A6),D4			; get the starting index
+			Cmp		ctSize(A3),D4			; is the starting index within range?
+			Bhi		GoHome					; no => once more, punt
+
+; We have something worth copying!  Now we can determine the length of the copy and
+; place it in D5.
+
+			Sub		D3,D0					; calculate maximum length of a palette copy
+			Move	D0,D5					; save it in D5
+			Move	ctSize(A3),D0			; fetch the length of the color table
+			AddQ	#1,D0					; add 1 to make it 1-based
+			Sub		D4,D0					; calculate maximum length of a CTab copy
+			Cmp		D0,D5					; is D5 too big?
+			Bls.S	NotTooBig				; no => don't replace it
+			Move	D0,D5					; copy smaller value to D5
+NotTooBig	Cmp		dstLength(A6),D5		; is D5 bigger than the request?
+			Bls.S	StillOkay				; no => leave it alone
+			Move	dstLength(A6),D5		; copy smaller value to D5
+StillOkay	Move.L	(A4),A1					; dereference the palette manager handle
+			Move	nDevs(A1),D0			; put number of devices into D0
+			Move	D0,NumDev(A6)			; remember number of devices
+			Lea		DevHandles(A1),A4		; point A4 at the clut device list			AWC
+			Lea		DevCTabH(A6),A0			; point A0 at our temporary table			AWC
+			Bra.S	ClearEnd				; jump into loop
+
+ClearLoop	Clr.L	(A0)+					; clear room for a handle					AWC
+ClearEnd	DBra	D0,ClearLoop			; continue for nDevs devices				AWC
+
+			AddA.L	#LinkTabs,A1			; bump A1 to the link tables
+			Lsl.L	#4,D3					; multiply D3 by ciSize
+			Lea		pmInfo(A2,D3.L),A2		; bump A2 to first ColorInfo
+			Lea		ctTable(A3,D4.W*8),A3	; bump A3 to first ColorSpec
+			Bra		EntryEnd				; jump into loop
+
+EntryLoop	BTst	#ExplicitBit,ciUsage+1(A2)	; is it explicit?
+			Bne.S	NextEntry					; yes => by definition not animating	AWC.PB500
+			BTst	#AnimatedBit,ciUsage+1(A2)	; is it animating?
+			Beq.S	NextEntry					; no => continue
+			Move.L	RGB+red(A3),ciRGB+red(A2)	; copy red and green into palette
+			Move	RGB+blue(A3),ciRGB+blue(A2)	; copy blue into palette
+			Move	ciPrivate(A2),D0			; get the ForeLink field
+			BfExtu	D0{16:3},D1					; get the key bits
+			Cmp		#4,D1						; were they 100?
+			Bne.S	NextEntry					; no => not a valid ForeLink; go home
+			Move	NumDev(A6),D6				; get maximum number of devices to examine
+			SubQ	#1,D6						; decrement by 1 so we may fall through
+
+; We fall through because the usual trick of branching to the end won't work when the
+; end is a DBpl, not a DBf (DBra).
+
+DevLoop		BfExtU	D0{19:5},D3				; grab device number (0..31)
+			BfExtU	D0{24:8},D4				; grab index number (0..255)
+			Lea		DevCTabH(A6),A0			; point A0 at temporary table
+			Move.L	(A0,D3.W*4),A0			; get CTabHandle
+			CmpA.L	#Nil,A0					; have we seen this device yet?
+			Bne.S	SeenDevice				; yes => skip setup
+			Move.L	DevHandle(A4,D3.W*8),A0	; get the device handle
+			Move.L	(A0),A0					; dereference it
+			Clr		gdId(A0)				; no client id's, please
+			Move.L	gdPMap(A0),A0			; get handle to pixmap
+			Move.L	(A0),A0					; dereference pixmap
+			Move.L	pmTable(A0),D0			; get handle to CTab
+			Lea		DevCTabH(A6),A0			; point A0 at temporary table			
+			Move.L	D0,(A0,D3.W*4)			; save it for later
+			Move.L	D0,A0					; copy CTabHandle back into A0		AWC PB223
+SeenDevice	Move.L	(A0),A0					; dereference CTab
+			Move	ctSize(A0),D0			; grab number of entries - 1
+			Cmp		D4,D0					; compare our index to the max index
+			Ble.S	NextDevice				; out of range => look at next device			AWC.PB480
+			Move.L	ciRGB+red(A2),ctTable+RGB+red(A0,D4.W*8)
+			Move	ciRGB+blue(A2),ctTable+RGB+blue(A0,D4.W*8)
+NextDevice	Lsl		#8,D3					; calculate offset to link table/4
+			Add		D4,D3					; offset to entry/4
+			Move	ForeLink(A1,D3.L*4),D0	; get next link; is the top bit set?
+DevEnd		DBpl	D6,DevLoop				; keep going until D0 is positive or D5 runs out
+
+NextEntry	AddA.L	#ciSize,A2				; bump A2 to next ColorInfo
+			AddA.L	#ColorSpecSize,A3		; bump A3 to next ColorSpec
+EntryEnd	DBra	D5,EntryLoop			; continue for all animating entries
+
+			Move.L	theGDevice,SaveGDev(A6)	; save the old GDevice
+			Move	NumDev(A6),D6			; get number of devices to examine
+			Lea		DevCTabH(A6),A2			; point A2 at our temporary table
+			Bra.S	SetEnd					; jump into loop
+
+SetLoop		Move.L	(A2)+,A3					; get next CTabHandle
+			CmpA.L	#Nil,A3						; did we initialize it?
+			Beq.S	NextSet						; no => continue
+			Move.L	DevHandle(A4),theGDevice	; put us on that device
+			Move.L	(A3),A0						; dereference it
+			Move.L	ctSeed(A0),SaveSeed(A6)		; save the current seed
+			Clr		-(SP)						; push starting count of 0 for SetEntries
+			Move	ctSize(A0),-(SP)			; push number of entries-1
+			Pea		ctTable(A0)					; push address of the first ColorSpec
+			_SetEntries							; do it
+			Move.L	(A3),A0						; dereference CTab again
+			Move.L	SaveSeed(A6),ctSeed(A0)		; put the old seed back into place
+NextSet		AddQ.L	#DevInfoSz,A4				; bump A4 to the next device
+SetEnd		DBra	D6,SetLoop					; loop for all devices
+
+			Move.L	SaveGDev(A6),theGDevice	; restore the old GDevice
+GoHome		MoveQ	#0,D0					; clear error condition				AWC.PB377
+			MoveM.L (SP)+,D3-D6/A2-A4		; restore registers
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE GetEntryColor(srcPalette: PaletteHandle; srcEntry: INTEGER; VAR dstRGB: RGBColor);
+;	INLINE $AA9B;
+;
+
+GetEntryColor	PROC	EXPORT
+
+ParamSize	equ		10						; total bytes of params
+srcPalette	equ		ParamSize+8-4			; source Palette handle
+srcEntry	equ		srcPalette-2			; entry to get
+dstRGB		equ		srcEntry-4				; where to put color
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			Move.L	srcPalette(A6),A0		; get palette
+			CmpA.L	#Nil,A0					; is it nil?
+			Beq.S	GoHome					; yes => punt						AWC.PB377
+			Move.L	(A0),A0					; dereference it
+			Move	pmEntries(A0),D0		; get the number of entries
+			MoveQ	#0,D1					; clear high word
+			Move	srcEntry(A6),D1			; get the index
+			Cmp		D0,D1					; is the index in range?
+			Bhs.S	GoHome					; no => we're done					AWC.PB377
+			Lsl.L	#4,D1					; multiply by number of records
+			Lea		pmInfo(A0,D1.L),A0		; point A0 at the correct ColorInfo
+			Move.L	dstRGB(A6),A1			; get the destination
+			Move.L	ciRGB+red(A0),red(A1)	; copy red and green
+			Move	ciRGB+blue(A0),blue(A1)	; copy blue
+GoHome		MoveQ	#0,D0					; clear error condition
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE SetEntryColor(dstPalette: PaletteHandle; dstEntry: INTEGER; srcRGB: RGBColor);
+;	INLINE $AA9C;
+;
+
+SetEntryColor	PROC	EXPORT
+
+ParamSize	equ		10						; total bytes of params
+dstPalette	equ		ParamSize+8-4			; source Palette handle
+dstEntry	equ		dstPalette-2			; entry to set
+srcRGB		equ		dstEntry-4				; new color
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			Move.L	dstPalette(A6),A0		; get palette
+			CmpA.L	#Nil,A0					; is it nil?
+			Beq.S	GoHome					; yes => punt						AWC.PB377
+			Move.L	(A0),A0					; dereference it
+			Move	pmEntries(A0),D0		; get the number of entries
+			MoveQ	#0,D1					; clear high word
+			Move	dstEntry(A6),D1			; get the index
+			Cmp		D0,D1					; is the index in range?
+			Bhs.S	GoHome					; no => we're done					AWC.PB377
+			Lsl.L	#4,D1					; multiply by number of records
+			Lea		pmInfo(A0,D1.L),A0		; point A0 at the correct ColorInfo
+			Move.L	srcRGB(A6),A1			; get the source
+			Move.L	red(A1),ciRGB+red(A0)	; copy red and green
+			Move	blue(A1),ciRGB+blue(A0)	; copy blue
+			Move.L	dstPalette(A6),-(SP)	; push the palette handle					AWC.PB508
+			Bsr		DirtySeeds				; clear the device seeds					AWC.PB508
+GoHome		MoveQ	#0,D0					; clear error condition				AWC.PB377
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE GetEntryUsage(srcPalette: PaletteHandle; srcEntry: INTEGER; VAR dstUsage,
+;	dstTolerance: INTEGER); INLINE $AA9D;
+;
+
+GetEntryUsage	PROC	EXPORT
+
+ParamSize		equ		14					; total bytes of params
+srcPalette		equ		ParamSize+8-4		; source Palette handle
+srcEntry		equ		srcPalette-2			; entry number
+dstUsage		equ		srcEntry-4			; where to put usage
+dstTolerance	equ		dstUsage-4			; where to put tolerance
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			Move.L	srcPalette(A6),A0		; get palette
+			CmpA.L	#Nil,A0					; is it nil?
+			Beq.S	GoHome					; yes => punt						AWC.PB377
+			Move.L	(A0),A0					; dereference it
+			Move	pmEntries(A0),D0		; get the number of entries
+			MoveQ	#0,D1					; clear high word
+			Move	srcEntry(A6),D1			; get the index
+			Cmp		D0,D1					; is the index in range?
+			Bhs.S	GoHome					; no => we're done					AWC.PB377
+			Lsl.L	#4,D1					; multiply by number of records
+			Lea		pmInfo(A0,D1.L),A0		; point A0 at the correct ColorInfo
+			Move.L	dstUsage(A6),A1			; get the destination
+			Move	ciUsage(A0),(A1)		; copy usage
+			Move.L	dstTolerance(A6),A1		; get the second destination
+			Move	ciTolerance(A0),(A1)	; copy tolerance
+GoHome		MoveQ	#0,D0					; clear error condition				AWC.PB377
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE SetEntryUsage(dstPalette: PaletteHandle; dstEntry,srcUsage,srcTolerance: INTEGER);
+;	INLINE $AA9E;
+;
+
+SetEntryUsage	PROC	EXPORT
+
+ParamSize		equ		10					; total bytes of params
+dstPalette		equ		ParamSize+8-4		; source Palette handle
+dstEntry		equ		dstPalette-2		; entry number
+srcUsage		equ		dstEntry-2			; new usage
+srcTolerance	equ		srcUsage-2			; new tolerance
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			Move.L	dstPalette(A6),A0		; get palette
+			CmpA.L	#Nil,A0					; is it nil?
+			Beq.S	GoHome					; yes => punt						AWC.PB377
+			Move.L	(A0),A0					; dereference it
+			Move	pmEntries(A0),D0		; get the number of entries
+			MoveQ	#0,D1					; clear high word
+			Move	dstEntry(A6),D1			; get the index
+			Cmp		D0,D1					; is the index in range?
+			Bhs.S	GoHome					; no => we're done					AWC.PB377
+			Lsl.L	#4,D1					; multiply by number of records
+			Lea		pmInfo(A0,D1.L),A0		; point A0 at the correct ColorInfo
+			Move	srcUsage(A6),ciUsage(A0)			; copy usage
+			Move	srcTolerance(A6),ciTolerance(A0)	; copy tolerance
+			Move.L	dstPalette(A6),-(SP)	; push the palette handle					AWC.PB508
+			Bsr		DirtySeeds				; clear the device seeds					AWC.PB508
+GoHome		MoveQ	#0,D0					; clear error condition				AWC.PB377
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE	CTab2Palette(srcCTab: CTabHandle; dstPalette: PaletteHandle; myUsage,
+;	myTolerance: INTEGER); INLINE $AA9F;
+;
+
+CTab2Palette	PROC	EXPORT
+
+ParamSize		equ		12						; total bytes of params
+srcCTab			equ		ParamSize+8-4			; source ColorTable handle
+dstPalette		equ		srcCTab-4				; destination Palette handle
+srcUsage		equ		dstPalette-2			; default usage value
+srcTolerance	equ		srcUsage-2				; default usage tolerance
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			MoveM.L D3/A2-A3,-(SP) 			; save registers
+
+			Move.L	dstPalette(A6),A2		; get palette
+			CmpA.L	#Nil,A2					; is it nil?
+			Beq.S	GoHome					; can't deal with nil here either		AWC.PB377
+			
+			Move.L	dstPalette(A6),-(SP)	; push Palette
+			Jsr		ClearPalette			; clear animating entries and seed handle
+			Bne.S	GoHome					; if not zero it was a bad palette		AWC.PB457
+
+			Move.L	srcCTab(A6),A3			; get color table
+			CmpA	#Nil,A3					; is it nil?
+			Beq.S	GoHome					; can't deal with a nil handle			AWC.PB377
+			Move.L	(A3),A1					; dereference it
+			MoveQ	#0,D3					; clear high word of D3
+			Move	ctSize(A1),D3			; get size-1 of CTab
+			AddQ	#1,D3					; D3 is number of entries in palette
+
+			Move.L	A2,A0					; copy myPalette handle			
+			Move.L	D3,D0					; copy size
+			AddQ	#1,D0					; include palette header
+			Asl		#4,D0					; multiply by 16 bytes per entry | header
+			_SetHandleSize					; do it
+			Bne.S	GoHome					; and quit if we couldn't do it			AWC.PB377
+
+			Move.L	A2,-(SP)				; push the palette handle					AWC.PB508
+			Bsr		DirtySeeds				; clear the device seeds					AWC.PB508
+			Move.L	(A2),A0					; dereference our handle
+			Move	D3,pmEntries(A0)		; copy size
+			AddA.L	#pmInfo,A0				; bump us to the first ColorInfo
+
+			Move.L	(A3),A1					; dereference source handle again
+			AddQ.L	#ctTable,A1				; bump A1 to the first ColorSpec
+			Move	srcUsage(A6),D1			; grab myUsage from parameters
+			Swap	D1						; put it in high word
+			Move	srcTolerance(A6),D1		; grab myTolerance into low word
+			Bra.S	CopyEnd					; jump into DBra loop
+			
+CopyLoop	Move.L	RGB+red(A1),ciRGB+red(A0)	; copy red and green
+			Move	RGB+blue(A1),ciRGB+blue(A0)	; copy blue
+			Move.L	D1,ciUsage(A0)				; copy myUsage and myTolerance
+			Clr		ciFlags(A0)					; clear private flags
+			Clr.L	ciPrivate(A0)				; clear private links
+			AddA.L	#ciSize,A0					; bump A0 to next ColorInfo
+			AddQ.L	#ColorSpecSize,A1			; bump A1 to next ColorSpec
+CopyEnd		DBra	D3,CopyLoop					; decrement and branch until copy is done
+GoHome		MoveQ	#0,D0					; clear error							AWC.PB377
+			MoveM.L (SP)+,D3/A2-A3			; restore registers
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE Palette2CTab(srcPalette: PaletteHandle; dstCTab: CTabHandle); INLINE $AAA0;
+;
+
+Palette2CTab	PROC	EXPORT
+
+ParamSize	equ		8						; total bytes of params
+srcPalette	equ		ParamSize+8-4			; source Palette handle
+dstCTab		equ		srcPalette-4				; destination CTabHandle
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			MoveM.L D3/A2-A3,-(SP) 			; save registers
+
+; first grab MyPalette and myCTab and compare them to nil
+
+			Move.L	srcPalette(A6),A2		; get source into A2
+			CmpA	#Nil,A2					; is it nil?
+			Beq.S	GoHome					; punt if no palette					AWC.PB377
+			Move.L	dstCTab(A6),A3			; get destination into A3
+			CmpA	#Nil,A3					; is it nil?
+			Beq.S	GoHome					; punt if no ctab						AWC.PB377
+			
+; leave size in D0; dereference both handles and capture pmEntries
+
+			Move.L	(A2),A0					; dereference myPalette
+			MoveQ	#0,D3					; clear high word
+			Move	pmEntries(A0),D3		; get number of palette entries
+			Move.L	D3,D0					; copy length
+			AddQ.L	#1,D0					; add 1 for the header
+			Lsl.L	#3,D0					; multiply by size of ColorSpec
+			Move.L	A3,A0					; put handle in A0
+			_SetHandleSize					; resize it
+			Bne.S	GoHome					; <> 0 => couldn't handle it			AWC.PB377
+			
+			Move.L	(A2),A0					; redereference myPalette
+			Move.L	(A3),A1					; dereference CTab
+			Move	D3,D0					; copy size to a temp
+			SubQ	#1,D0					; ctSize is really last entry
+
+; CHECK - what should we do with the seed?  Get name of call from Ernie, again.
+
+			Clr.L	ctSeed(A1)				; clear seed
+			Move	D0,ctSize(A1)			; set size
+			Clr		transIndex(A1)			; this is not a device ColorTable (clear hi bit)
+			AddQ	#ctTable,A1				; bump color table to start
+			AddA	#pmInfo,A0				; bump palette to start
+			MoveQ	#0,D1					; clear index for pixel value
+			Bra.S	CopyEnd					; jump to start of copy
+
+CopyLoop	Move	D1,value(A1)				; set pixel value
+			Move.L	ciRGB(A0),RGB(A1)			; copy red and green
+			Move	ciRGB+blue(A0),RGB+blue(A1)	; copy blue
+			AddA.L	#ciSize,A0					; bump A0 to next ColorInfo
+			AddQ.L	#ColorSpecSize,A1			; bump A1 to next ColorSpec
+			AddQ	#1,D1						; bump pixel value
+CopyEnd		DBra	D3,CopyLoop					; loop for all entries
+GoHome		MoveQ	#0,D0					; clear error condition
+			MoveM.L (SP)+,D3/A2-A3 			; restore registers						<AWC>
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE	ClearOne(eInfo:CiInfo; BasePtr:Ptr); LOCAL;
+;
+
+ClearOne	PROC	EXPORT
+
+ParamSize	equ		4						; total bytes of params
+eInfo		equ		ParamSize+8-4			; entry to clear
+BasePtr		equ		eInfo-4					; pointer to PMgrHandle^^
+
+VarSize		equ		0
+
+			Link	A6,#VarSize				; build stack frame
+			Move.L	A2,-(SP)				; save a register
+			Move.L	eInfo(A6),A0			; get the ColorInfo address
+			Move.L	CiPrivate(A0),D0		; get the current link information
+			Clr		ciFlags(A0)				; shut down any crap
+			Clr.L	ciPrivate(A0)			; clear it
+			Move.L	BasePtr(A6),A1			; set up DevListPtr
+			Lea		DevHandles(A1),A2		; A2 points at DevHandles
+			AddA.L	#LinkTabs,A1			; A1 points at LinkTabs
+NextLink	BfExtU	D0{19:5},D1				; grab device number (0..31)
+			BfExtU	D0{24:8},D2				; grab index number (0..255)
+			Move.L	(A2,D1.W*8),A0			; get the device handle
+			Move.L	(A0),A0					; dereference it
+			Move.L	gdPMap(A0),A0			; get handle to pixmap
+			Move.L	(A0),A0					; dereference pixmap
+			Move.L	pmTable(A0),A0			; get handle to CTab
+			Move.L	(A0),A0					; dereference CTab
+			Cmp		ctSize(A0),D2			; is index number <= entries - 1?
+			Bhi.S	IgnoreIt					; no => don't unreserve it
+			Clr		ctTable+value(A0,D2.W*8)	; unreserve it
+IgnoreIt	Lsl		#8,D1						; calculate offset to link table/4
+			Add		D2,D1					; offset to entry/4
+			Lea		(A1,D1.L*4),A0			; point A0 at next forward link
+			Move	ForeLink(A0),D0			; get next link
+			Clr.L	ForeLink(A0)			; clear it for the next guy
+			Tst		D0						; is there another link to examine?
+			Bmi.S	NextLink				; yes => go unlink it
+			Move.L	(SP)+,A2				; restore A2
+			Unlk	A6						; clean up our mess
+			Rtd		#ParamSize				; go home
+
+
+;---------------------------------------------------
+;
+; PROCEDURE CopyPalette(srcPalette,dstPalette: PaletteHandle; srcEntry,dstEntry,dstLength:
+;	INTEGER); INLINE $AAA1;
+;
+
+CopyPalette	PROC	EXPORT
+
+ParamSize	equ		14						; total bytes of params
+srcPalette	equ		ParamSize+8-4			; source Palette handle
+dstPalette	equ		srcPalette-4			; destination palette handle
+srcEntry	equ		dstPalette-2			; source starting entry
+dstEntry	equ		srcEntry-2				; destination starting entry
+dstLength	equ		dstEntry-2				; length of the copy
+
+TrimLen		equ 	-2
+VarSize		equ		TrimLen
+
+			Link	A6,#VarSize				; build stack frame
+			MoveM.L D3-D4/A2-A4,-(SP) 		; save registers
+
+			Move.L	PMgrHandle,A4			; get the main handle
+			CmpA.L	#PMgrNil,A4				; are we initialized?
+			Beq		GoHome					; no => punt						AWC.PB377
+
+			Move.L	dstPalette(A6),A2		; get destination palette
+			CmpA.L	#Nil,A2					; is it nil?
+			Beq		GoHome					; can't deal with nil here either	AWC.PB377
+			
+			Move.L	srcPalette(A6),A3		; get source palette
+			CmpA.L	#Nil,A3					; is it nil?
+			Beq		GoHome					; can't deal with a nil handle		AWC.PB377
+
+			CmpA.L	A2,A3					; does source = destination?
+			Beq		GoHome					; we can't handle this yet			AWC.PB377
+
+			MoveQ	#0,D0					; clear D0
+			Move	dstLength(A6),D0		; get the length of the copy
+			Ble		GoHome					; we can quit if it's too small
+			Move.L	D0,D3					; copy the length
+			Add		SrcEntry(A6),D0			; D0 is the required length of the source
+
+			Move.L	(A3),A1					; dereference source palette
+			Move	pmEntries(A1),D1		; get size of source palette
+			Sub		D0,D1					; D1, if negative, is how much we must trim D3
+			Bpl.S	DontTrimSrc				; no => don't trim it
+			Add		D1,D3					; trim back the length of the copy			AWC.PB530
+DontTrimSrc	Move.L	(A2),A0					; dereference the destination
+			Move	pmEntries(A0),D4		; get the length
+			Move	DstEntry(A6),D0			; calculate the potential new pmEntries
+			Add		D3,D0					; by adding the trimmed length
+			Cmp		D4,D0					; need we add handle room?
+			Ble.S	BigEnough				; no => skip _SetHandleSize					AWC.PB530
+			
+			Move	D0,D4					; save new length
+			Move.L	A2,A0					; copy DstPalette
+			AddQ	#1,D0					; include palette header
+			Asl		#4,D0					; multiply by 16 bytes per entry | header
+			_SetHandleSize					; do it
+			Bne		GoHome					; and quit if we couldn't do it			AWC.PB377
+
+			Move.L	(A2),A0					; dereference the destination handle
+			Move	D4,D2					; make a copy of the new length
+			MoveQ	#0,D1					; clear the high word
+			Move	PmEntries(A0),D1		; this is where to start clearing
+			Sub		D1,D2					; this is now many to clear
+			Move	D4,pmEntries(A0)		; save size
+			Lea		PmInfo(A0),A1			; point us at the start of the table
+			Asl		#4,D1					; this is the offset to the start of the clear
+			AddA.L	D1,A1					; bump A1 to the start of the clear
+			Bra.S	ClearEnd				; jump to the DBra
+			
+; The main reason for clearing is so we can correctly detect and clear entries that are
+; going to be clobbered.
+
+ClearLoop	Clr.L	(A1)+					; clear 16 bytes
+			Clr.L	(A1)+
+			Clr.L	(A1)+
+			Clr.L	(A1)+
+ClearEnd	DBra	D2,ClearLoop
+			
+BigEnough	CmpA.L	A2,A3					; does SrcPalette = DstPalette?
+			Beq.S	GoHome					; yes => can't handle this					AWC.PB377
+			Move.L	A3,-(SP)				; push the palette handle					AWC.PB508
+			Bsr		DirtySeeds				; clear the device seeds					AWC.PB508
+			Move.L	(A3),A1					; dereference source palette			
+			MoveQ	#0,D0					; clear the high word
+			Move	DstEntry(A6),D0			; get the first destination
+			Asl.L	#4,D0					; multiply by 16
+			Move.L	(A2),A0					; dereference destination palette again		AWC.PB508
+			Lea		PmInfo(A0,D0),A0		; point A0 at the first destination
+			MoveQ	#0,D1					; clear the high word
+			Move	SrcEntry(A6),D0			; get the first source
+			Asl.L	#4,D0					; point A0 at the first destination
+			Lea		PmInfo(A1,D0),A1		; point A1 at the first source
+			Bra.S	CopyEnd					; jump into the loop
+
+CopyLoop	Move.L	ciPrivate(A0),D0		; get the link info
+			Beq.S	NoLinks					; no => it doesn't need clearing
+			MoveM.L	A0-A1,-(SP)				; save registers
+			Move.L	A0,-(SP)				; ciInfo to clear
+			Move.L	(A4),-(SP)				; dereference PMgrHandle and push it
+			Jsr		ClearOne				; clear the links
+			MoveM.L (SP)+,A0-A1				; restore interesting registers
+
+NoLinks		Move.L	ciRGB(A1),ciRGB(A0)				; copy first two words
+			Move.L	ciRGB+Blue(A1),ciRGB+blue(A0)	; copy blue and usage
+			Move	ciTolerance(A1),ciTolerance(A0)	; copy tolerance
+			Clr		ciFlags(A0)						; clear the flags field
+			Clr.L	ciPrivate(A0)					; clear the links field
+			AddA.L	#CiSize,A0				; bump both pointers
+			AddA.L	#CiSize,A1
+CopyEnd		DBra	D3,CopyLoop				; loop for (trimmed) length entries
+GoHome		MoveQ	#0,D0					; clear error code					AWC.PB377
+			MoveM.L (SP)+,D3-D4/A2-A4		; restore registers
+			Unlk	A6						; clear stack frame
+			Rtd		#ParamSize				; strip parameters and go home
+
+
+; Thus ends the PaletteManager - ah, a sad thing it is, to be done.  But WAIT!  There's
+; MORE!  Let's patch RGBFORECOLOR and RGBBACKCOLOR just for grins!  Yeah!
+
+			IF not ROMPaletteMgr THEN		; no patches for the ROM version			RWH.C864
+
+;---------------------------------------------------
+;
+; procedure RGBForeColor (Color : RGBColor);
+;
+;	This routine takes an RGB triple and sets the current Graf- or CGrafPort
+;	fields so that drawing will take place with the best match of the
+;	requested color, using the current GDevice's color matching rules.  The
+;	appropriate fields are set depending on portType
+;
+;	AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(RGBForeColor) 		(RGBForeColor)
+
+RGBForeColor	PROC	EXPORT
+				EXPORT	RGBBackColor,RGB2OLD
+
+StdDevCall		Equ		$1D2A0					; RGBForeColor; RGBBackColor is $4081D2B0 <PB302>
+StdDevMask		Equ		$FFFFFFEF				; the calls are different only at bit 4!
+
+			MOVEQ		#FGCOLOR,D0				; get offset to index field
+			MOVEQ		#RGBFgColor,D1			; get offset to RGB field
+		
+SHARE		MOVE.L		4(SP),A1				; point at the RGB color
+			MOVE.L		GRAFGLOBALS(A5),A0		; get the QuickDraw globals pointer
+			MOVE.L		THEPORT(A0),A0			; point at the port
+			PEA			0(A0,D0)				; save pointer to the index field
+			
+			TST			PORTBITS+ROWBYTES(A0)	; is it a new port?
+			BMI.S		NEWPORT					; => yes, set RGB components
+			JSR			RGB2OLD					; else convert RGB to old color
+			BRA			DONE					; =>
+
+; To keep the stack correct we will momentarily preempt A1.  We can restore it in a bit.
+; Also, since we no longer need the offset to the index field
+
+NewPort		Move.L		GrafVars(A0),A1			; get the GrafVars handle
+			CmpA.L		#Nil,A1					; is it nil?
+			Beq.S		PuntPmCalls				; yes => punt and do the normal call
+			Move.L		(A1),A1					; dereference it into A1
+			Move.L		4(SP),D2				; get the return address
+			Sub.l		ROMBase, D2				;   Make it offset within ROM,			<PB302>
+			And.L		#StdDevMask,D2			; and it with the std mask
+			Cmp.L		#StdDevCall,D2			; is it from StdDevLoop?
+			Bne.S		NormalCall				; no => make the normal call
+			Tst.L		PmFgColor(A1)			; is there a palette?					EHB.PBnnn
+			Bne.S		FoundAPltt				; yes => we can do it					AWC.PB508
+			Tst.L		AppPalette				; is there an AppPalette?				AWC.PB508
+			Beq.S		NormalCall				; => no, do normal call					EHB.PBnnn
+FoundAPltt	Move		PmFlags(A1),D2			; get the Palette Manager flags			AWC.PB508
+			Cmp			#FgColor,D0				; was it forecolor?
+			Bne.S		GetBack					; no => get back color flag
+
+			BTst		#PmFgBit,D2				; did PmForeColor set up this port?
+			Beq.S		PuntPmCalls				; no => continue normally
+			AddQ		#4,SP					; we won't need the pointer to the index
+			Move		pmFgIndex(A1),-(SP)		; push the entry number
+			_PmForeColor						; set the port using PmForeColor
+			Bra.S		GoHome					; all finished
+
+GetBack		BTst		#PmBkBit,D2				; did PmBackColor set up this port?
+			Beq.S		PuntPmCalls				; no => continue normally
+			AddQ		#4,SP					; we won't need the pointer to the index
+			Move		pmBkIndex(A1),-(SP)		; push the entry number
+			_PmBackColor						; set the port using PmBackColor
+			Bra.S		GoHome					; all through
+			
+NormalCall	Move		PmFlags(A1),D2			; get flags
+			Cmp			#FgColor,D0				; is this a foreground call?
+			Bne.S		NotFgCall				; no => clear PmBkBit
+			BClr		#PmFgBit,D2				; clear the foreground flag bit
+			Bra.S		CommonFlags				; reunite it
+
+NotFgCall	BClr		#PmBkBit,D2				; clear the background flag bit
+CommonFlags	Move		D2,PmFlags(A1)			; save the flags to GrafVars
+PuntPmCalls	Move.L		8(SP),A1				; restore the pointer to the RGBColor
+
+; Here is the normal RGBForeColor code code
+
+			MOVE.L		red(A1),red(A0,D1)		; copy red and green components to the port
+			MOVE.W		blue(A1),blue(A0,D1)	; and blue too
+		
+; make an rgbColor on the stack					
+
+			MOVE.L		green(A1),-(SP)			; copy green and blue
+			MOVE.W		red(A1),-(SP)			; copy red
+			SUBQ		#4,SP					; make room for function return
+			PEA			4(SP)					; push pointer to rgb
+			_Color2Index						; convert it to an index
+	
+			MOVE.L		(SP)+,D0				; get the index result
+			ADDQ		#6,SP					; get rid of the rgbColor
+
+Done		MOVE.L		(SP)+,A0				; get pointer to index field
+			MOVE.L		D0,(A0)					; and set the index field
+GoHome		Rtd			#4						; all done
+		
+RGB2OLD	
+;-----------------------------------------------
+;
+; UTILITY TO CONVERT AN RGB (POINTED TO BY A1) VALUE
+; TO AN OLD STYLE COLOR VALUE.  RETURNS VALUE IN D0.  CLOBBERS A0,D1
+;
+; USES HIGH BIT OF EACH COMPONENT TO SELECT RGB OFF (0) OR ON (1)
+
+		MOVEQ		#0,D1						; clear out D1
+		MOVE		(A1)+,D1					; get red
+		LSL.L		#1,D1						; get high bit
+		MOVE		(A1)+,D1					; get green
+		LSL.L		#1,D1						; get high bit
+		MOVE		(A1)+,D1					; get blue
+		LSL.L		#1,D1						; get high bit
+		SWAP		D1							; get RGB index
+				
+noBlue	LEA			MapTbl,A0					; get translate table
+		MOVEQ		#0,D0						; clear out high word
+		MOVE		0(A0,D1*2),D0				; convert to planar value
+		RTS										; => all done
+		
+; TABLE TO MAP FROM 3 BIT RGB TO OLD-STYLE COLOR INDICES
+
+MapTBL	DC.W		blackColor					; RBG = 0,0,0 -> black
+		DC.W		blueColor					; RBG = 0,0,1 -> blue
+		DC.W		greenColor					; RBG = 0,1,0 -> green
+		DC.W		cyanColor					; RBG = 0,1,1 -> cyan
+		DC.W		redColor					; RBG = 1,0,0 -> red
+		DC.W		magentaColor				; RBG = 1,0,1 -> magenta
+		DC.W		yellowColor					; RBG = 1,1,0 -> yellow
+		DC.W		whiteColor					; RBG = 1,1,1 -> white
+				
+;---------------------------------------------------
+;
+; procedure RGBBackColor (Color : RGBColor);
+;
+;	This routine takes an RGB triple and sets the current Graf- or CGrafPort
+;	fields so that drawing will take place with the best match of the
+;	requested color, using the current GDevice's color matching rules.  The
+;	appropriate fields are set depending on portType.
+;
+;	AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(RGBBackColor) 		(RGBBackColor)
+
+RGBBackColor
+
+		MOVEQ		#BKCOLOR,D0					; get offset to the index field
+		MOVEQ		#RGBBkColor,D1				; get offset to RGB field
+		BRA			SHARE						; => and use common code
+
+
+;---------------------------------------------------
+;
+; procedure myNewCWindow()
+;
+;	Initialize the palette manager fields of the new window.
+;
+;	AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(NewCWindow) 		(myNewCWindow)
+
+myNewCWindow	PROC	EXPORT
+
+ROMNewCWindow EQU	$0F9F6						; normal NewCWindow routine				<PB302>
+
+; shuffle parameters so it will return to us
+
+			MOVE.L	SP,A0						; get src for params
+			MOVE.L	SP,A1						; get dst for params
+			MOVE.L	(A0)+,D1					; save RTS
+			MOVEQ	#7,D0						; move 8 longs
+@NxtLong	MOVE.L	(A0)+,(A1)+					; move a long
+			DBRA	D0,@NxtLong					; repeat for all longs
+			MOVE.L	D1,30(SP)					; stuff original RTS
+
+			JSRROM	ROMNewCWindow				; call NewCWindow						<PB302>
+			
+; always set the default palette to 0
+
+			MOVE.L	(SP),A1						; get the window
+			MOVE.L	GrafVars(A1),A0				; get handle to vars
+			MOVE.L	(A0),A0						; point to vars
+			CLR.L	PMFgColor(A0)				; and clear palette
+			MOVE.L	(SP)+,A1					; get window pointer
+			MOVE.L	(SP),A0						; get return address
+			MOVE.L	A1,(SP)						; stuff wPtr
+			JMP		(A0)						; and return
+			
+
+;---------------------------------------------------
+;
+; procedure myNewWindow();
+;
+;	When NewWindow is called, do an ActivatePalette in case there's a default palette.
+;
+;	AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(NewWindow) 		(myNewWindow)
+
+myNewWindow	PROC	EXPORT
+
+ROMNewWindow EQU	$0FA08						; normal NewWindow routine				<PB302>
+
+; shuffle parameters so it will return to us
+
+			MOVE.L	SP,A0						; get src for params
+			MOVE.L	SP,A1						; get dst for params
+			MOVE.L	(A0)+,D1					; save RTS
+			MOVEQ	#7,D0						; move 8 longs
+@NxtLong	MOVE.L	(A0)+,(A1)+					; move a long
+			DBRA	D0,@NxtLong					; repeat for all longs
+			MOVE.L	D1,30(SP)					; stuff original RTS
+
+			JSRROM	ROMNewWindow				; call NewWindow						<PB302>
+			
+			MOVE.L	(SP),-(SP)					; push the window
+			_ActivatePalette					; and activate the system palette
+
+@DONE		MOVE.L	(SP)+,A1					; get window pointer
+			MOVE.L	(SP),A0						; get return address
+			MOVE.L	A1,(SP)						; stuff wPtr
+			JMP		(A0)						; and return
+			
+
+;---------------------------------------------------
+;
+; procedure HiliteWindow();
+;
+;	Patch HiliteWindow to call ActivatePalette if called from SelectWindow
+;	AND if it is not called from MoveWindow!
+;
+;	AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(HiliteWindow) 		(myHiliteWindow)
+
+myHiliteWindow	PROC	EXPORT
+
+FromSelect	EQU		$1016A						; RTS if called from select				<PB302>
+FromMove	EQU		$10396						; RTS if selected from Move				<PB302>
+ROMHilite 	EQU		$0FFCE						; real HiliteWindow						<PB302>
+
+			CMPRA	FromSelect,(SP)				; from selectWindow?					<PB302>
+			BNE.S	@JustHilite					; => no, just hilite
+			CMPRA	FromMove,$38(SP)			; from Move?							<PB302>
+			BEQ.S	@JustHilite					; => yes, just hilite
+			TST.B	4(SP)						; hiliting?
+			BEQ.S	@JustHilite					; => no, just (un)hilite
+			LEA		6(SP),A0					; point to window
+			MOVE.L	(A0),-(SP)					; push window
+			MOVE	-(A0),-(SP)					; push boolean
+			JSRROM	ROMHilite					; call hilite in ROM 					<PB302>
+			
+			MOVE.L	6(SP),-(SP)					; push window pointer
+			_ActivatePalette					; and activate its palette
+			RTD		#6							; strip 6 bytes params and return
+			
+@JustHilite	JMPROM	ROMHilite					; and complete the call					<PB302>
+
+
+;---------------------------------------------------
+;
+; procedure MyMoveWindow
+;
+;	Patch MoveWindow to call ActivatePalette
+;
+;	AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(MoveWindow) 		(myMoveWindow)
+
+MyMoveWindow	PROC	EXPORT
+
+ROMMove 	EQU		$0FD9C						; real MoveWindow						<PB302>
+
+			LEA		10(SP),A0					; point to window
+			MOVE.L	(A0),-(SP)					; push window
+			MOVE.L	-(A0),-(SP)					; push dst location
+			MOVE	-(A0),-(SP)					; push frontflag
+			JSRROM	ROMMove						; call movewindow						<PB302>
+
+			MOVE.L	10(SP),-(SP)				; push window
+			_ActivatePalette					; and activate its palette
+			RTD		#10							; strip 10 bytes and return
+			
+
+;---------------------------------------------------
+;
+; procedure MySizeWindow
+;
+;	Patch SizeWindow to call MySetPalette
+;
+;	AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(SizeWindow) 		(mySizeWindow)
+
+MySizeWindow	PROC	EXPORT
+
+ROMSize 	EQU		$1000E						; real SizeWindow						<PB302>
+
+			LEA		10(SP),A0					; point to window
+			MOVE.L	(A0),-(SP)					; push window
+			MOVE.L	-(A0),-(SP)					; push dst location
+			MOVE	-(A0),-(SP)					; push frontflag
+			JSRROM	ROMSize						; call SizeWindow						<PB302>
+
+			MOVE.L	10(SP),-(SP)				; push window
+			_ActivatePalette					; and activate its palette
+			RTD		#10							; strip 10 bytes and return
+			
+
+;---------------------------------------------------
+;
+; procedure MyClose
+;
+;	Patch CloseWindow to call DisposPalette.  In the initial system disk release, this
+;	patch mistakenly operated on DisposeWindow instead of CloseWindow.
+;
+;	AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(CloseWindow) 		(myClose)
+
+MyClose	PROC	EXPORT
+
+ROMClose 	EQU		$0FB6E						; real CloseWindow						<PB302>
+
+			MOVE.L	4(SP),A0					; get the window
+			TST		PORTBITS+ROWBYTES(A0)		; is it new?
+			BPL.S	@NotNew						; => no
+			
+			MOVE.L	GrafVars(A0),A0				; get grafVar handle
+			MOVE.L	(A0),A0						; point at grafVars
+			MOVE.L	PmFgColor(A0),D0			; is there a palette
+			BEQ.S	@NotNew						; => no
+			
+			Move.L	D0,A0						; let's use an address register			AWC.PB457
+			Move.L	(A0),A0						; dereference it						AWC.PB457
+			BTst	#DisposeBit,pmPrivate(A0)	; should we dispose of it?				AWC.PB457
+			Beq.S	@NotNew						; no => the user has to dispose of it	AWC.PB457
+			
+			MOVE.L	D0,-(SP)					; else push palette
+			_DisposePalette						; and dump it
+
+@NotNew		JMPROM	ROMClose					; and dispose the window				<PB302>
+			
+
+;---------------------------------------------------
+;
+; procedure MyShowHide();
+;
+;	Patch MyShowHide to call ActivatePalette.  If it is being called to show a hidden window,
+;	then do the ActivatePalette.
+;
+;	AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(ShowHide) 			(myShowHide)
+
+MyShowHide	PROC	EXPORT
+
+ROMShow 	EQU		$0F742						; real MoveWindow						<PB302>
+
+			TST.B	4(SP)						; is it show?
+			BEQ.S	@NoShow						; =>no, no go show
+			
+			MOVE.L	6(SP),A0					; get the window
+			TST.B	WVisible(A0)					; is it showtime
+			BNE.S	@NoShow						; =>no, not yet
+			
+			LEA		6(SP),A0					; point to window
+			MOVE.L	(A0),-(SP)					; push window
+			MOVE	-(A0),-(SP)					; push marquis
+			JSRROM	ROMShow						; call showwindow						<PB302>
+
+			MOVE.L	A1,-(SP)					; save A1 for ShowHide!
+			MOVE.L	10(SP),-(SP)				; push window
+			_ActivatePalette					; and activate its palette
+			MOVE.L	(SP)+,A1					; restore A1 for ShawHide
+			RTD		#6							; strip 10 bytes and return
+			
+@NoShow		JMPROM	ROMShow						; the ROM must begin					<PB302>
+			
+
+;---------------------------------------------------
+;
+; procedure MyExit;
+;
+;	Patch MyExit to call DisposePalette for all palettes in the app heap.  In addition, jam
+;	theGDevice and srcDevice with MainDevice.  As if that weren't enough, make sure that
+;	cursor interrupts are enabled.
+;
+;	This patch is not installed by A/UX or under MultiFinder.
+;
+;	AppleSystemPatch 	PaletteMgr.a 	10Mar87		#PB103 	(MyExit) 			(myExit)
+
+MyExit		PROC	EXPORT
+
+			EXPORT	myExitExit				; address of JMP target to daisy chain	<PB158>
+			
+ROMIAZInit	EQU		$4080DEF8				; jump back into ROM
+ROMAppZoneAddr	EQU $4080D434				; a useful routine
+
+			MOVEM.L	A0-A3/D0-D3,-(SP)		; save all registers
+			MOVE.L	PMgrHandle,A2			; get paletteMgr handle
+			CMP.L	MinusOne,A2				; is it there?
+			BEQ.S	GoHome					; => no, just return
+			MOVE.L	(A2),A1					; point to data structure
+			MOVE.L	PListHandle(A1),A0		; get handle to palette list
+			_HLock							; and lock it down
+			MOVE.L	(A0),A3					; point to palette list
+			
+			Move	APalettes(A1),D3		; get number of active handles
+			Beq.s	NoPals					; no friends => go home
+			Add		FreeSpaces(A1),D3		; calculate total number of entries
+			Clr.L	WindowList				; clear the list of windows for FrontWindow		AWC.PB506
+			BRA.S	FindEnd					; => check for no entries
+
+FindLoop	Move.L	PaletteRef(A3),D1		; get first entry
+			BEQ.S	FindNext				; => no palette in entry
+			MOVE.L	D1,D0					; and get for routine
+			JSR		ROMAppZoneAddr			; in application area (or zero)?				<C699>
+			BNE.S	FindNext				; => not in app heap
+			MOVE.L	D1,-(SP)				; push palette handle
+			_DisposePalette					; and dispose it in place
+FindNext	AddQ	#PLstEntrySz,A3			; bump to the next entry
+FindEnd		DBra	D3,FindLoop				; repeat for all spaces
+			
+NoPals		MOVE.L	(A2),A1					; point to palette stuff
+			MOVE.L	PListHandle(A1),A0		; get handle to palette list
+			_HUnlock						; and unlock it
+
+GoHome		Clr.L	AppPalette				; set us up for the next guy				AWC.PB508
+			MOVE.L	MainDevice,A0			; get the main device
+			MOVE.L	A0,SrcDevice			; set the src device
+			MOVE.L	A0,theGDevice			; and the current device
+			
+			MOVE	#$2000,SR				; make sure interrupts enabled
+
+			MOVEM.L	(SP)+,A0-A3/D0-D3		; restore all registers
+			JMP		$4080000A				; jump to next code in chain				<PB158>
+myExitExit	EQU		*-4						; address of JMP target						<PB158>
+
+			ENDIF							; end of patches commented out for ROM		RWH.C864
+
+; Okay, that's it.  We're out of here!
+

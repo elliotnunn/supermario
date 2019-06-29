@@ -1,0 +1,265 @@
+;
+;	File:		BinDec.a
+;
+;	Contains:	Binary-To-Decimal conversion routines
+;
+;	Written by:	Larry Kenyon et al
+;
+;	Copyright:	© 1983-1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:   Mac32
+;
+;	Change History (most recent first):
+;
+;		 <3>	 9/15/90	BG		Removed <2>. 040s are behaving more reliably now.
+;		 <2>	  7/4/90	BG		Added EclipseNOPs for flakey 040s.
+;	   <1.1>	11/11/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	  <•1.1>	 9/23/88	CCH		Got rid of inc.sum.d and empty nFiles
+;	   <1.0>	 2/12/88	BBM		Adding file for the first time into EASE…
+
+; File:  BinDec.asm
+;_______________________________________________________________________
+;
+;  Package 7
+;
+;	Contains LBIN2DEC and LDEC2BIN code from from original Pack7 and new
+;	code for _cstr2dec, _pstr2dec, and _dec2str (.include	str2dec
+;												 .include	dec2str ).
+;
+;	Calls:
+;		0000: LBIN2DEC
+;		0001: LDEC2BIN
+;		0002: FOPSTR2DEC						<19Aug85>
+;		0003: FODEC2STR 						<19Aug85>
+;		0004: FOCSTR2DEC						<19Aug85>
+;
+;	Change traps as follows:
+;
+;		_LBin2Dec ->	CLR.W	-(SP)
+;				_Pack7
+;
+;		_LDec2Bin ->	MOVE.W	#1,-(SP)
+;				_Pack7
+;
+; 13 Nov 83  LAK  Created the package . . .
+; 15 Jan 85  JTC  convert to MDS.
+; 14 Feb 85  JTC  added res name.
+; 19 Aug 85  KLH  added _cstr2dec, _pstr2dec, and _dec2str.
+; 16 Sep 85  JTC  modified pathnames for ROM build. 									<16Sep85>
+; <C206/09oct86> bbm Changed to mpw equates.
+;_______________________________________________________________________
+
+
+			BLANKS		ON
+			STRING		ASIS
+
+			LOAD		'StandardEqu.d'
+			INCLUDE		'SANEMacs.a'											;<16Sep85>
+
+fsymok		EQU 	0					; debug flag from Lisa Workshop version 		;<19Aug85>
+
+Pkg7		PROC	EXPORT
+			IMPORT	_pstr2dec,_dec2str,_cstr2dec										;<19Aug85>
+
+			BRA.S	@0					; skip around header
+
+			DC.W	0					; flags word
+			DC.B	'PACK'				; I am a PACK
+			DC.W	7					; whose ID is 7:
+			DC.W	1					; and version is 1. 							;<19Aug85>
+
+@0			SUBQ.W	#1,4(SP)			; PACK SELECT 0 = LBin2Dec
+			Bpl.s	select1 			; PACK SELECT >= 1, LDec2Bin, _pstr2dec, _dec2str, _cstr2dec or nothing.
+																						;<19Aug85>
+			MOVE.L	(SP),2(SP)			; RETURN ADDRESS (KILL PACK SELECT) 			;<19Aug85>
+			ADDQ	#2,SP																;<19Aug85>
+
+;---------------------------------------------------
+; Signed long integer binary-decimal conversion.
+; Written by Jerome T. Coonen, 29 June 83.
+;
+; Takes long integer in D0, string pointer in A0.
+; Converts D0 to decimal in Pascal string at A0.
+; The sign is placed in the string only if D0 is
+; negative.  Leading zeros are suppressed, except
+; that the value zero is printed as '0'.
+; All registers are preserved, including D0 and A0.
+;
+; Modification History:
+;
+;---------------------------------------------------
+
+LBIN2DEC
+			MOVEM.L D0-D6/A1,-(SP)		; SAVE WORKING REGISERS
+			MOVEQ	#0,D1				; 10-DIGIT	VALUE HELD IN
+			MOVEQ	#0,D2				; D1.B THROUGH D5.B AT
+			MOVEQ	#0,D3				; TWO DIGITS PER BYTE.
+			MOVEQ	#0,D4
+			MOVEQ	#0,D5
+			MOVEQ	#31,D6				; LOOP COUNTER, FOR LATER
+
+;
+; First check for zero or negative value.
+;
+			LEA 	1(A0),A1			; POINTER TO STRING CHARS
+			TST.L	D0					; CHECK INPUT OPERAND SIGN
+			BGT.S	BDPOSVAL
+			BMI.S	BDNEGVAL
+
+			MOVE.B	#'0',(A1)+			; VALUE IS	ZERO
+			BRA.S	BDFIN
+BDNEGVAL
+			MOVE.B	#'-',(A1)+			; LEADING MINUS
+			NEG.L	D0
+BDPOSVAL
+
+;
+; Loop, finding successive bits from left to right.   At
+; each step, double the decimal buffer in D1.B to D5.B and add in
+; the next digit.
+;
+BDLOOP
+			ADD.L	D0,D0				; NEXT BIT	TO X BIT
+			ABCD	D5,D5				; DOUBLE, ADDING X	BIT IN
+			ABCD	D4,D4
+			ABCD	D3,D3
+			ABCD	D2,D2
+			ABCD	D1,D1
+			DBRA	D6,BDLOOP			; FINISH WITH D6.W	= $FFFF
+
+;
+; The hard part is delivering the ascii digits, stripping leading
+; zeros.  Use D6 as a marker:  if minus then skipping leading zeros; if
+; plus print any digit.
+;
+			BSR.S	BD1OUT
+			MOVE.B	D2,D1
+			BSR.S	BD1OUT
+			MOVE.B	D3,D1
+			BSR.S	BD1OUT
+			MOVE.B	D4,D1
+			BSR.S	BD1OUT
+			MOVE.B	D5,D1
+			BSR.S	BD1OUT
+
+;
+; Finally, stuff the string length, restore the registers, and exit.
+; A0 points to the length byte, A1 points to the next character after
+; the string; so  (A1 - A0 - 1) is the true length.
+;
+BDFIN
+			MOVE.W	A1,D0
+			SUB.W	A0,D0
+			SUBQ.B	#1,D0
+			MOVE.B	D0,(A0)
+			MOVEM.L (SP)+,D0-D6/A1
+			RTS 						; exit package
+
+;
+; Utility routine to print two digits from nibbles in D1, skipping
+; leading zeros, according to sign of D6.  Recall that ascii digits
+; have the hex form $3x.
+;
+BD1OUT
+			ROR.W	#4,D1				; ALIGN D1: $0000L00H
+			BSR.S	BD1DIGOUT
+			ROL.W	#4,D1				; ALIGN D1: $0000000L
+										; FALL THROUGH AND	RETURN
+;
+; Place a character from D1.B into the string (A1).
+; Skip a leading 0 if D6.W is negative.
+;
+BD1DIGOUT
+			TST.W	D6
+			BPL.S	BDDOIT
+
+			TST.B	D1					; 0 NIBBLE?
+			BEQ.S	BDSKIPIT
+
+			MOVEQ	#0,D6				; MARK NONZERO FOUND
+BDDOIT
+			ORI.B	#$30,D1 			; MAKE ASCII DIGIT
+			MOVE.B	D1,(A1)+
+			SUB.B	D1,D1				; CLEAR FOR NEXT ROTATE
+BDSKIPIT
+			RTS
+
+select1 																						;<19Aug85>
+			move.w	4(sp),d0																	;<19Aug85>
+			MOVE.L	(SP),2(SP)			; RETURN ADDRESS (KILL PACK SELECT) 					;<19Aug85>
+			ADDQ	#2,SP																		;<19Aug85>
+
+			SUBQ.W	#1,d0				; d0 = LDec2Bind(-1), _pstr2dec (0), _dec2str (1), _cstr2dec (2) or nothing (>1).
+			Bpl.s	select2 			; PACK SELECT >= 2,_pstr2dec,_dec2str,_cstr2dec or nothing. ;<19Aug85>
+;
+; Convert decimal string to signed long integer.  A0 points to
+; a Pascal format string; D0 is assigned an integer value according
+; to (A0).	A0 is not changed.	Overflow is not detected; the value
+; produced is the true decimal value, modulo 2^32, with sign according
+; to optional leading sign character ('+' or '-').
+; A null string produces 0.
+;
+LDEC2BIN
+			MOVEM.L D1-D3/A0,-(SP)
+			MOVEQ	#0,D0				; RESULT SLOT
+			MOVEQ	#0,D1				; TEMP FOR	MULT BY 10
+			MOVEQ	#0,D3				; D3.B IS 0 FOR +,	1 FOR -
+
+			MOVE.B	(A0)+,D2			; STRING LENGTH BYTE
+			BEQ.S	DBFIN
+
+			CMPI.B	#'+',(A0)			; SKIP LEADING +?
+			BEQ.S	DBPOSSIGN
+			CMPI.B	#'-',(A0)			; RECORD LEADING -?
+			BNE.S	DBNOSIGN
+
+			MOVEQ	#1,D3				; MARK NEGATIVE
+DBPOSSIGN
+			ADDQ.L	#1,A0				; SKIP OVER SIGN CHAR
+			SUBQ.B	#1,D2				; AND DELETE SIGN FROM STRING COUNT
+			BEQ.S	DBFIN				; PERVERSE	CASE OF SIGN ONLY
+DBNOSIGN
+
+;
+; Loop through string, successively multiplying by 10 and adding
+; in the low nibble of the character.
+;
+DBLOOP
+			MOVEQ	#$0F,D1
+			AND.B	(A0)+,D1			; GET LOW NIBBLE
+			ADD.L	D0,D0				; LONG * 2
+			ADD.L	D0,D1				; (LONG * 2) + NIBBLE
+			LSL.L	#2,D0				; LONG * 8
+			ADD.L	D1,D0				; (LONG * 10) + NIBBLE
+			SUBQ.B	#1,D2
+			BNE.S	DBLOOP
+
+;
+; Finally, negate if necessary.
+;
+			TST.B	D3
+			BEQ.S	DBFIN
+			NEG.L	D0
+DBFIN
+			MOVEM.L (SP)+,D1-D3/A0
+
+			RTS
+
+select2 																						;<19Aug85>
+			SUBQ.W	#1,d0				; d0 = _pstr2dec (-1), _dec2str (0), _cstr2dec (1) or nothing (>1).
+			bmi.s	@2					; PACK SELECT = 2										;<19Aug85>
+			beq.s	@3					; PACK SELECT = 3										;<19Aug85>
+			cmp.W	#1,d0																		;<19Aug85>
+			beq.s	@4					; PACK SELECT = 4										;<19Aug85>
+			rts 						; PACK SELECT > 4										;<19Aug85>
+
+@2			jmp 	_pstr2dec																	;<19Aug85>
+@3			jmp 	_dec2str																	;<19Aug85>
+@4			jmp 	_cstr2dec																	;<19Aug85>
+
+			INCLUDE    'Str2Dec.A' 												;<16Sep85>
+			INCLUDE    'Dec2Str.A' 												;<16Sep85>
+
+			END 
+

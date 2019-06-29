@@ -1,0 +1,2027 @@
+;
+;	File:		CCrsrCore.a
+;
+;	Contains:	system cursor/mouse routines.	Contains the mouse interrupt receivers
+;				and cursor drawing and hiding routines.
+;
+;	Written by:	Bud Tribble       2-Oct-81
+;
+;	Copyright:	© 1981-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM6>	 9/12/93	SAM		Changed all instances of _Translate24to32 to _rTranslate24to32
+;									so they can conditionalized out of the build.
+;	   <SM5>	  2/4/93	CSS		Update from Horror:
+;		<H3>	 7/13/92	djw		<GED> Overpatched DrawCursor, EraseCursor and SetCrsrData,
+;									vectorizing them to allow access later.
+;	   <SM4>	 6/11/92	stb		<sm 6/9/92>stb Add comments from QDciPatchROM.a to ShowCursor,
+;									SetCCursor
+;	   <SM3>	 5/16/92	kc		Add forRom conditionals around last change.
+;	   <SM2>	 5/16/92	kc		Roll in Horror. Comments follow:
+;		<H2>	 2/12/92	SWC		Patched out most of CrsrVBLTask since the new cursor
+;									acceleration code does things differently.
+;		 <7>	 7/10/91	dba		end of the forPost70 conditional; we are past 7.0 for good
+;		 <6>	 5/31/91	KON		Register A2 gets trashed when setting a color cursor and there
+;									is more than one GDevice.
+;		 <5>	 9/17/90	BG		Removed <4>. 040s are now behaving more reliably.
+;		 <4>	 6/25/90	BG		Added EclipseNOPs for flakey 040s.
+;		 <3>	 6/25/90	KON		Obscure-show-hide leaves crsr hidden only, Obscure-hide-show
+;									leaves crsr obscured only.
+;		 <2>	  1/3/90	BAL		Updated to latest local source version.
+;	  <•1.7>	 7/14/89	BAL		For Aurora: Final CQD
+;	   <1.6>	 6/10/89	CEL		Moved Private.a QuickDraw Equates into proper QuickDraw private
+;									file (colorequ.a), got rid of QuickDraw nFiles dependencies and
+;									fixed up necessary files…
+;	  <•1.5>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;				  4/7/89	BAL		Moved crsrVBLTask to head of file and scrnAddress to end of file
+;									for VM.
+;				  9/7/88	BAL		Altered showCursor to clear crsrObscure if showing cursor.
+;				 6/28/88	BAL		Use special 1 to 24 bit pixel expansion routine.
+;				 6/21/88	BAL		Finally fixed SetCCursor; Needed to Lock input handle across
+;									routine.
+;				 3/25/88	BAL		Altered Show/Hide Cursor to use 32 bit clean addresses.
+;				 3/23/88	BAL		Fixed bug in CrsrRect.right for pixel depth > 1.
+;	  <C944>	 11/7/87	BAL		Rolled in patches to SetCCursor to preserve A2.
+;				 5/27/87	EHB		Added fix to SetCCursor for trashed A2
+;	  <C856>	 5/26/87	CSL		Fixed absolute cursor positioning problem.
+;				10/13/86	EHB		Rolled in new version of CrsrVBLTask
+;				10/13/86	EHB		Added AllocCrsr; called by AllocCursor.
+;				 10/6/86	EHB		Added SetCCursor; redid other routines to support color.
+;				 10/2/86	EHB		Redid inner loop of ShowCursor for color support
+;				 7/14/86	EHB		Don't draw cursor if CRSRPTR not set up.
+;	   <C63>	  7/2/86	EHB		CLEAR D0 BEFORE CALLING EXTBL ROUTINES. Multiply offset amount
+;									by depth for left pinning Check 8 longs of cursor
+;	   <C63>	  7/2/86	EHB		Include colorequ in great equate purge
+;	   <C60>	 6/30/86	EHB		New ShowCursor/HideCursor for depth support Fixed branch bug in
+;									ShieldCursor
+;	   <C28>	 5/30/86	CSL		Added changes for Aladdin, and Aladdin Front desk bus support.
+;		<C1>	  5/6/86	RDC		Added fixes in ShowCursor routine
+;		<C1>	 4/15/86	RDC		Added changes for new 68020 Reno project (NuMac) - Added include
+;									for newequ.text to get at low mem equates for screen vars -
+;									Added changes in Cursor routines to use low mem for screen
+;									values
+;				 2/19/86	BBM		Made some modifications to work under MPW
+;_______________________________________________________________________
+;
+; Before Lonely Hearts
+;_______________________________________________________________________
+;				 11/5/85	JTC		for ELR (on telephone) Fix loop termination condition in
+;									HideCursor that killed MacPaint, e.g.
+;				 7/25/85	RDC		Added include for HWequ file
+;				 7/23/85	RDC		Moved mouse interrupt routines to IntHnd.Text
+;				 4/23/85	JTC		Change to PIN hotSpot between 0 and 16, not 15. <23Apr85>
+;				  4/5/85	JTC		Fix discontinuity in PinGuts; mask hotSpot with $000F000F in
+;									SetCursor; add ScreenAddress and ScreenSize to SysDef traplist;
+;									fix 'changed' test in SetCursor. Punted on desired call to get
+;									Cursor ID ... see Change note for details.
+;				 8/20/83	LAK		Just uses CrsrThresh for scaling params.
+;				 8/18/83	LAK		Changed name of CrsrTask to CrsrVBLTask (but why?).
+;				 7/20/83	SC		Cleaned up after code review
+;				 4/28/83	AJH		moved PinRect into crsrCore
+;				 1/28/83	AJH		made SetCursor display it if its different
+;				 1/23/83	LAK		Adapted for new equate files.
+;				 1/13/83	SC		Decouple and scaled Cursor stuff
+;				 11/7/82	AJH		Made ObscureCursor unbusy cursor if already obscured
+;				10/16/82	LAK		Modified for new LisaGraf cursor interface
+;				  9/5/82	LAK		IntHnd now handles ext/sts interrupt resetting
+;				 8/26/82	LAK		updated for 512-dots
+;				  8/5/82	LAK		modified for INTHND change (no need to modify A0-1 for SCC port
+;									A) or read status reg.
+;				  5/4/82	LAK		Updated MV1INT, MH1INT for SCC hardware
+;				  4/9/82	AJH		Changed SHOWCURSOR to clip ala Rick Meyer's Lisa routines
+;				10/31/81	AJH		Hardwired the CRSR task into the VBL manager
+;				10/19/81	bmw		fixed a bug andy found in getscreen
+;				  7/3/81	AJH		Installed "ObscureCursror" entry point and support
+;
+
+			BLANKS		ON
+			STRING		ASIS
+
+			MACHINE	MC68020									;<C60/30JUN86>
+
+cursorShadow	EQU		0
+
+CRSRCORE	PROC	EXPORT
+			EXPORT	CrsrVBLTask
+
+			EXPORT	InitCrTable
+			EXPORT	PinRect
+
+			IMPORT	ScrnAddress
+			IMPORT	ScrnSize
+			IMPORT	ScrnBitMap
+			IMPORT	PATCONVERT						; expand routine for color cursors/patterns
+			IMPORT	AllocCrsr						; proc at end of file
+			IMPORT	SETCRSRDATA						; PROC AT END OF FILE
+			IMPORT	SHFTTBL							; TO CONVERT DEPTH TO SHIFT
+			IMPORT	RGetHSize
+
+			IMPORT	BLITCURSOR,UNBLITCURSOR			; Cursor Pixelling		<dvb 19sep88>
+			EXPORT	DRAWCURSOR,ERASECURSOR			; Cursor Displaying		<dvb 19sep88>
+			EXPORT	CursorSect
+			EXPORT	GETMAINCRSR						;JUST USED INTERNALLY
+;
+; offset table for jump table initialization
+;
+InitCrTable
+				DC.W	HideCursor-InitCrTable
+				DC.W	ShowCursor-InitCrTable
+				DC.W	ShieldCursor-InitCrTable
+				DC.W	ScrnAddress-InitCrTable
+				DC.W	ScrnSize-InitCrTable
+				DC.W	InitCursor-InitCrTable
+				DC.W	SetCursor-InitCrTable
+				DC.W	ObscureCursor-InitCrTable
+				DC.W	AllocCrsr-InitCrTable
+				DC.W	SetCCursor-InitCrTable
+
+
+;_______________________________________________________________________
+;
+; CrsrVBLTask - executed once each vertical retrace
+;
+
+; ugly equs - stay here for now!
+adbCount	EQU	0						; word: number of valid error deltas
+MaxCnt		EQU	adbCount+2				; word: limit on number of error deltas
+Err7		EQU	MaxCnt+2				; word: time-7 error magnitude
+Err6		EQU	Err7+2					; word: time-6 error magnitude
+Err5		EQU	Err6+2					; word: time-5 error magnitude
+Err4		EQU	Err5+2					; word: time-4 error magnitude
+Err3		EQU	Err4+2					; word: time-3 error magnitude
+Err2		EQU	Err3+2					; word: time-2 error magnitude
+Err1		EQU	Err2+2					; word: time-1 error magnitude
+Error		EQU	Err1+2					; word: accumulated error
+GSize		EQU	Error+2
+
+CrsrVBLTask 							;COME HERE ON VERTICAL RETRACE
+
+	If	Not forRom	Then ; <H2>
+		TST.B	CrsrNew					; Mouse changed?
+		BEQ		TrackDone				; No … return
+		TST.B	CrsrBusy				; Cursor locked?
+		BNE		TrackDone				; Yes … return
+
+		TST.B	CrsrCouple				; Cursor coupled to mouse?
+		BEQ		NoComp					; No … skip computation	<DSV>
+
+		MOVE.W	MTemp+H,D0				; Find ∆Mx
+		SUB.W	RawMouse+H,D0
+
+		MOVE.W	MTemp+V,D1				; Find ∆My
+		SUB.W	RawMouse+V,D1
+
+		MOVE.W	D0,D2					; x := |∆Mx|
+		BGE.S	AbslXl
+		NEG.W	D2
+AbslXl
+
+		MOVE.W	D1,D3					; y := |∆My|
+		BGE.S	AbslYl
+		NEG.W	D3
+AbslYl
+
+		move.l	MickeyBytes,a0			; <10/7/86 SMH> get globals			<c856/26May87>
+		CMP.W	D2,D3					; D3 := magnitude(x,y)
+		BLS.S	MagDone
+		EXG	D2,D3
+MagDone	ASR.W	#1,D3
+		ADD.W	D2,D3
+
+		BNE.S		DoComp				; Zero magnitude … don’t compute	<c856/26May87>
+		MOVE.W		#1,adbCount(A0)		; No hits							<c856/26May87>
+		CLR.W		Error(A0)			; No errors							<c856/26May87>
+		BRA			DoPin				; Update the cursor					<c856/26May87>
+DoComp
+;
+		MOVEM.L	D4-D5,-(A7)				; Save off registers
+		MOVE.W	adbCount(A0),D4			; D4 is the number of samples
+		CMP.W	MaxCnt(A0),D4			; Is Count less than MaxCnt
+		BGE.S	CountOK
+		ADD.W	#1,adbCount(A0)			; Yes … we will have one more error
+CountOK
+
+		MOVE.W	D3,D5					; Magnitude at current time
+
+		MOVE.W	D4,D2					; Get Count
+		SUB.W	#1,D2					; Index into JTab
+		ASL.W	#1,D2					; REQUIRES BRA.S’s IN JUMP TABLES
+		JMP	JTab(PC,D2.W)				; Jump to the right code per Count
+
+JTab	BRA.S	E1						; Count = 1
+		BRA.S	E2						; Count = 2
+		BRA.S	E3						; Count = 3
+		BRA.S	E4						; Count = 4
+		BRA.S	E5						; Count = 5
+		BRA.S	E6						; Count = 6
+		BRA.S	E7						; Count = 7
+
+E8		ADD.W	Err7(A0),D5				; Accumulate time-7 magnitude
+
+E7		ADD.W	Err6(A0),D5				; Accumulate time-6 magnitude
+		MOVE.W	Err6(A0),Err7(A0)		; Shift out  time-6 magnitude
+
+E6		ADD.W	Err5(A0),D5				; Accumulate time-5 magnitude
+		MOVE.W	Err5(A0),Err6(A0)		; Shift out  time-5 magnitude
+
+E5		ADD.W	Err4(A0),D5				; Accumulate time-4 magnitude
+		MOVE.W	Err4(A0),Err5(A0)		; Shift out  time-4 magnitude
+
+E4		ADD.W	Err3(A0),D5				; Accumulate time-3 magnitude
+		MOVE.W	Err3(A0),Err4(A0)		; Shift out  time-3 magnitude
+
+E3		ADD.W	Err2(A0),D5				; Accumulate time-2 magnitude
+		MOVE.W	Err2(A0),Err3(A0)		; Shift out  time-2 magnitude
+
+E2		ADD.W	Err1(A0),D5				; Accumulate time-1 magnitude
+		MOVE.W	Err1(A0),Err2(A0)		; Shift out  time-1 magnitude
+
+E1		MOVE.W	D3,Err1(A0)				; Shift out current magnitude
+
+		MOVE.W	D4,D2					; Round up the divide
+		ASR.W	#1,D2					;   by half the denominator
+		ADD.W	D2,D5
+		EXT.L	D5						; Set up for the divide
+		DIVU	D4,D5					; Find the average magnitude
+
+		MOVE.W	D3,D4					; Get the original magnitude
+		SUB.W	D5,D3					; Find distance to average magnitude
+		ADD.W	Error(A0),D3			; Add on the accumulated error
+		CMP.W	#-1,D3					; Define -1 div 2 = 0
+		BNE.S	DivOK
+		CLR.W	D3
+DivOK	ASR.W	#1,D3					; Get half of it
+		MOVE.W	D3,Error(A0)			; Update it
+		ADD.W	D5,D3					; Desired mag is average+Error
+
+		CMP.W	#255,D5					; mag := MAX(mag,255)
+		BLS.S	MaxDone
+		MOVE.B	#255,D5
+MaxDone
+
+		move.l	MickeyBytes,a0			; <10/7/86 SMH> get at globals
+		add	#GSize,a0					; <10/24/86 SMH> point to table
+
+		CLR.W	D2						; i := 0
+
+Search	ADD.B	#1,D2					; repeat
+		CMP.B	(A0)+,D5				;   i := i+1
+		BHI.S	Search					; until mag ≤ Table[i]
+
+		MULS	D2,D3					; D4 := i*(Mag(∆M)+Error)
+
+		MULS	D3,D0					; ∆Cx := (∆Mx*i*(Mag(∆M)+Error))/Mag(∆M)
+		DIVS	D4,D0					;             <<<<<< D3 >>>>>>>
+		BMI.S	@1						; branch if minus
+		ANDI.W	#$007F,D0				; control max displacement (fix mouse jump)
+		BRA.S	@3
+@1
+		ORI.W	#$FF80,D0				; control max displacement (fix mouse jump)
+@3
+		MULS	D3,D1					; ∆Cy := (∆My*i*(Mag(∆M)+Error))/Mag(∆M)
+		DIVS	D4,D1					;             <<<<<< D3 >>>>>>>
+		BMI.S	@5						; branch if minus
+		ANDI.W	#$007F,D1				; control max displacement (fix mouse jump)
+		BRA.S	@7
+@5
+		ORI.W	#$FF80,D1				; control max displacement (fix mouse jump)
+@7
+		MOVEM.L	(A7)+,D4-D5				; Restore registers
+		ADD.W	D0,RawMouse+H			; Update raw mouse location
+		ADD.W	D1,RawMouse+V
+;
+DoPin									;							<c456/26May87>
+		LEA		CrsrPin,A0				; Bounding rect for cursor
+		MOVE.L	RawMouse,D0				; Pin mouse inside rect
+
+	Endif	; Not forRom <H2>
+
+		BSR.S	ScrnPin					; return to SHOWIT if screen changes
+
+		MOVE.L	D0,RawMOUSE 			; update cursor loc with clipped pt
+		MOVE.L	D0,MTEMP				; Update real mouse location with ""
+
+		AND.L	MOUSEMASK,D0			; do jerky masking to drop low order bits
+		MOVE.L	MOUSEOffset,D1			; Get the offset
+		BEQ.S	skipPin 				; and skip 2nd pin if not
+		ADD.L	D1,D0					; do jerky offset
+		BSR.S	ScrnPin 				; return to SHOWIT if screen changes
+
+skipPin	MOVE.L	D0,MOUSE
+
+NotCup	BSR		ERASECURSOR				; HIDE THE CURSOR					<dvb 19sep88>
+SHOWIT	CLR.B	CRSRNEW 				; RESET THE CURSOR CHANGED FLAG
+		CLR.B	CRSROBSCURE				; it's no longer obscured
+		BSR 	DRAWCURSOR				; AND SHOW CURSOR IN NEW POSITION	<dvb 19sep88>
+
+CRSRDONE								;AND RETURN
+		RTS
+
+TrackDone
+		move.l	MickeyBytes,a0			; <10/7/86 SMH> get globals
+		MOVE.W	#1,adbCount(A0)			; No hits
+		CLR.W	Error(A0)				; No errors
+		RTS								; Goodbye
+
+NoComp	move.l	MickeyBytes,a0			; <10/7/86 SMH> get globals
+		MOVE.W	#1,adbCount(A0)			; No hits
+		CLR.W	Error(A0)				; No errors
+		BRA.S	NotCup					; Update the cursor
+
+
+; --------end of ugly jcrsrcoreTask
+
+
+
+ScrnPin			CMP 	LEFT(A0),D0 			;less than left?
+				BGE.S	LEFTOK					;if not, no problem
+				BSR.S	FindScreen				;=>look for new screen
+				MOVE	LEFT(A0),D0 			;pin to the left
+
+LEFTOK			CMP 	RIGHT(A0),D0			;greater than right?
+				BLT.S	RIGHTOK					;if not, no problem  WAS BLE!!			<05Apr85>
+				BSR.S	FindScreen				;=>look for new screen
+				MOVE	RIGHT(A0),D0			;pin to the right
+				SUBQ	#1,D0					;really want one less
+
+RIGHTOK			SWAP	D0						;consider y
+				CMP 	TOP(A0),D0				;less than top?
+				BGE.S	TOPOK					;if not, no problem
+				SWAP	D0
+				BSR.S	FindScreen				;=>look for new screen
+				SWAP	D0
+				MOVE	TOP(A0),D0				;pin to the top
+
+TOPOK			CMP 	BOTTOM(A0),D0			;greater than bottom?
+				BLT.S	BOTOK					;if not, no problem  WAS BLE!!			<05Apr85>
+				SWAP	D0
+				BSR.S	FindScreen				;=>look for new screen
+				SWAP	D0
+				MOVE	BOTTOM(A0),D0			;pin to the bottom
+				SUBQ	#1,D0					;really want one less
+
+BOTOK			SWAP	D0
+				RTS								;and return
+
+;  Check to see if cursor has moved to another screen.
+;  If not, returns with D0 unchanged.
+;  If so, hides the cursor, updates cursor globals and does messy return.
+;
+;  Clobbers D1-D3/A0-A3 which are preserved by interrupt handler
+
+FindScreen		MOVE	D0,D3					;pt.h in D3
+				MOVE.L	D0,D1					;pt.v in D1
+				SWAP	D1						;pt.v in D1
+				MOVE.L	DeviceList,D2			;get the first GDevice
+				BMI.S	NoDev					;=>just in case no GDevice
+DoDev			MOVE.L	D2,A3					;get device handle
+				MOVE.L	(A3),A3					;get device pointer
+				TST		GDFlags(A3)				;is screen active?
+				BPL.S	NxtDev					;=>no, try next device
+				LEA		GDRect(A3),A1			;point to rect
+				CMP		(A1)+,D1				;above top?
+				BLT.S	NxtDev					;=>yes, check next device
+				CMP		(A1)+,D3				;to left of screen?
+				BLT.S	NxtDev					;=>yes, check next device
+				CMP		(A1)+,D1				;to bottom of screen?
+				BGE.S	NxtDev					;=>yes, check next device
+				CMP		(A1)+,D3				;to right of screen?
+				BLT.S	GotDev					;=>no, cursor is on this screen
+NxtDev			MOVE.L	GDNextGD(A3),D2			;get next device in chain
+				BNE.S	DoDev					;=>there is one, check it
+NoDev			RTS								;else return and pin to current screen
+
+; cursor has changed devices, update depth and rowbytes for current device
+
+GotDev			MOVE.L	CRSRPTR,A0				;get handle to cursor data
+				MOVE.L	(A0),A0					;get pointer to cursor data
+				MOVE.L	CrsrDevice,A1			;get handle to current device
+				MOVE.L	(A1),A1					;point to current device
+				MOVE	CCDEPTH(A0),GDCCDEPTH(A1)	;copy depth
+				MOVE	CCBYTES(A0),GDCCBYTES(A1)	;copy expanded rowbytes
+
+; now get the data, depth and rowbytes for the new device
+
+				BSR		ERASECURSOR				;else erase the cursor
+@0				SWAP	D3						;get pt.h in high word
+				MOVE	D1,D3					;get pt.v in low word
+				SWAP	D3						;now get them in the right order
+				MOVE.L	D3,MTEMP				;update real mouse location with ""
+				MOVE.L	D3,RawMOUSE 			;update cursor loc with clipped pt
+				MOVE.L	D3,MOUSE				;update mouse position
+				MOVE.L	D2,CrsrDevice			;set the current cursor device
+				MOVE.L	A3,A1					;get pointer to grafDevice
+				JSR		SetCrsrData				;and set up low-memory stuff for cursor
+
+				MOVE	GDREFNUM(A3),D0			;get the refNum
+				NOT		D0						;refNum -> unitnum
+				ASL		#2,D0					;get offset in unitTable
+				MOVE.L	UTableBase,A0			;get the base of the unit table
+				MOVE.L	(A0,D0),A3				;A3 = handle to the DCE
+				MOVE.L	(A3),A0					;get pointer to the DCE
+				MOVEQ	#0,D0					;clear out D0
+				MOVE.B	dCtlSlot(A0),D0			;get the slot number
+				_ATTACHVBL						;attach vbl to this slot
+
+				ADDQ	#8,SP					;strip 2 RTS's from stack
+				BRA		SHOWIT					;=>and go display cursor on new screen
+
+
+; This routine is used by the pinrect routine below and is also called directly
+; by CrsrVBLTask above to save time
+; A0 should be pinning rect and D0 is the point to be pinned
+; Fixed to avoid discontinuity on right and bottom. 									<05Apr85>
+
+PinGuts
+				CMP 	LEFT(A0),D0 			;less than left?
+				BGE.S	@1						;if not, no problem
+				MOVE	LEFT(A0),D0 			;pin to the left
+
+@1				CMP 	RIGHT(A0),D0			;greater than right?
+				BLT.S	@2						;if not, no problem  WAS BLE!!			<05Apr85>
+				MOVE	RIGHT(A0),D0			;pin to the right
+				SUBQ	#1,D0					;really want one less
+
+@2				SWAP	D0						;consider y
+				CMP 	TOP(A0),D0				;less than top?
+				BGE.S	@3						;if not, no problem
+				MOVE	TOP(A0),D0				;pin to the top
+
+@3				CMP 	BOTTOM(A0),D0			;greater than bottom?
+				BLT.S	@4						;if not, no problem  WAS BLE!!			<05Apr85>
+				MOVE	BOTTOM(A0),D0			;pin to the bottom
+				SUBQ	#1,D0					;really want one less
+
+@4				SWAP	D0
+
+				RTS
+;
+; Utility  FUNCTION PinRect(theRect: Rect; thePt: Point): Point;
+;
+;	 given a rectangle and a point, pin the point inside the rectangle
+;
+PinRect
+				MOVE.L	4(SP),D0				;get the point
+				MOVE.L	8(SP),A0				;get the rect ptr
+
+				BSR.S	PinGuts 				; go pin it
+
+				MOVE.L	(SP)+,A0				;get return address
+				ADDQ	#8,SP					;strip parameters
+				MOVE.L	D0,(SP) 				;return pinned pt as result
+				JMP 	(A0)					;return to caller
+
+
+;_______________________________________________________________________	;<dvb 19Sep88>
+;																			;<dvb 19Sep88>
+;	 PROCEDURE CursorSect -- called by shieldcursor, showcursor				;<dvb 19Sep88>
+;																			;<dvb 19Sep88>
+;	Does a sectrect of CrsrRect and ShieldRect, all global-coörd like.		;<dvb 19Sep88>
+;	CLEAR the z-flag if they DO intersect: BNE YesTheyIntersect.
+;	This code is was moved out of ShieldCursor.								;<dvb 19Sep88>
+;
+;	Since CrsrRect is in local screen coörds, and ShieldRect is in globals,
+;	the CrsrDevice's GDRect is used as an offset.
+;_______________________________________________________________________	;<dvb 19Sep88>
+CursorSect	MOVEM.L	A0/A1/D0,-(SP)					;save the approprate regs  <dvb 19Sep88>
+
+			TST		ShieldDepth						;Any shielding?
+			BEQ.s	@NoSect
+
+			LEA 	CrsrRect,A0 					;point to crsr rect		;<dvb 19Sep88>
+			MOVE.L	CrsrDevice,A1					;GET CURSOR DEVICE		;<dvb 19Sep88>
+			MOVE.L	(A1),A1							;POINT TO CURSOR DEVICE	;<dvb 19Sep88>
+			ADD		#GDRECT,A1						;POINT TO DEVICE'S RECT	;<dvb 19Sep88>
+
+			MOVE	ShieldRect+Bottom,D0 			;GET SHIELD BOTTOM		;<dvb 19Sep88>
+			SUB		TOP(A1),D0						;CONVERT TO SCREEN LOCAL;<dvb 19Sep88>
+			CMP 	(A0)+,D0						;IS SHIELDBOTTOM < SAVETOP ?	;<dvb 19Sep88>
+			BLT.S	@NOSECT							;YES, NO INTERSECTION	;<dvb 19Sep88>
+
+			MOVE	ShieldRect+Right,D0				;GET SHIELD RIGHT			<dvb 19Sep88>
+			SUB		LEFT(A1),D0						;CONVERT TO SCREEN LOCAL	<dvb 19Sep88>
+			CMP 	(A0)+,D0						;IS SHIELDRIGHT <= SAVELEFT ? <dvb 19Sep88>
+			BLE.S	@NOSECT							;YES, NO INTERSECTION		<dvb 19Sep88>
+
+			MOVE	ShieldRect+Top,D0				;GET SHIELD TOP				<dvb 19Sep88>
+			SUB		TOP(A1),D0						;CONVERT TO SCREEN LOCAL	<dvb 19Sep88>
+			CMP 	(A0)+,D0						;IS SHIELDTOP >= SAVEBOTTOM ? <dvb 19Sep88>
+			BGE.S	@NOSECT							;YES, NO INTERSECTION		<dvb 19Sep88>
+
+			MOVE	ShieldRect+Left,D0				;GET SHIELD LEFT			<dvb 19Sep88>
+			SUB		LEFT(A1),D0						;CONVERT TO SCREEN LOCAL	<dvb 19Sep88>
+			CMP 	(A0),D0 						;IS SHIELDLEFT >= SAVERIGHT ? <dvb 19Sep88>
+			BGE.S	@NOSECT							;YES, NO INTERSECTION		<dvb 19Sep88>
+
+@SECT		MOVEQ	#1,D0							;Clear the Z-flag			<dvb 19Sep88>
+			BRA.S	@out														;<dvb 19Sep88>
+
+@NOSECT		CLR		D0								;Set the Z-flag				<dvb 19Sep88>
+@out		MOVEM.L	(SP)+,A0/A1/D0					;Restore regs				<dvb 19Sep88>
+			RTS										;bye.
+
+;_______________________________________________________________________
+;
+;	 PROCEDURE ObscureCursor -- called via the jump table
+;
+;	 Removes the cursor from the screen without hiding it, so the next
+;	 time the mouse moves, it will show up again.
+;
+;_______________________________________________________________________
+
+ObscureCursor
+		MOVE.B	#1,CrsrBusy						;"Occupado"			<dvb 19sep88>
+		MOVE.B	#1,CrsrObscure					;Mark it as obscure	<dvb 19sep88>
+		BRA.S	EraseCursor						;and erase it
+
+;_______________________________________________________________________
+;
+;  HIDECURSOR - is called from CrsrVBLTask, and via jump table.
+;
+;  Subtracts 1 from crsrstate and hides the cursor if visible.
+;
+;
+HideCursor
+		MOVE.B	#1,CrsrBusy 					;MARK CHANGE IN PROGRESS
+		SUB 	#1,CRSRSTATE					;CURSOR HIDDEN ONE DEEPER
+
+		;Fall into EraseCursor
+
+;________________________________________________________________________
+;	<SM5> CSS Horror vectorized this vector.  We are supporting this to be
+;   compatible with Horror.
+;	EraseCursor calls a vectorized version of the routine via lomem.
+;	EraseCursor is vectorized to gain access to low level cursor blit routines.
+;	(NOTE: Vector is initialized in StartInit.a to routine named VEraseCursor.)
+
+; EraseCursor is much like HideCursor, but doesn't decrement the CrsrState	<dvb 19sep88>
+
+EraseCursor
+		move.l	EraseCrsrVector,-(sp)			;<SM5> CSS
+		rts										;jump to the vectored routine <SM5> CSS
+DoneHid	CLR.B	CRSRBUSY						;CHANGE COMPLETE
+		RTS
+
+
+;_______________________________________________________________________
+;
+;  PROCEDURE InitCursor;
+;
+;  Definitely redisplay the cursor, independent of previous calls to
+;  HideCursor, ShieldCursor and ObscureCursor.	It falls into showCursor.
+;
+InitCursor
+		MOVE.B	#1,CrsrBusy 			;mark it busy
+		CLR.B	CrsrObscure				;we wont be obscure no more
+		CLR 	CrsrState				;reset state to 0
+		CLR		ShieldDepth
+;
+; fall into ShowCursor
+;
+
+;_______________________________________________________________________
+;
+;  SHOWCURSOR  - Called from CrsrVBLTask and via Jump Table.
+;
+;  Adds 1 to CRSRSTATE and paints cursor if zero and cursor is
+;  not already visible.
+;
+; this reflects the fix from QDciPatchROM.a where obscure/show/hide left		<sm 6/9/92>stb
+; the cursor hidden only, and obscure/hide/show left the cursor obscured only.	<sm 6/9/92>stb
+
+ShowCursor
+		MOVE.B	#1,CRSRBUSY 					;MARK CHANGE IN PROGRESS
+
+		TST		ShieldDepth						;Any shielding?
+		BEQ.s	@2
+
+@1		SUBQ	#1,ShieldDepth					;If so, this ShowCursor unshields,
+		BRA.s	DrawCursor						;but doesn't up the cursor level.
+
+@2		ADDQ	#1,CRSRSTATE					;CURSOR HIDDEN ONE LESS DEEP
+		bmi.s	DoneSho
+		beq.s	DrawCursor						;<KON 25JUN90>
+		clr.b	CrsrObscure						;unobscure cursor if level went past zero	<KON 25JUN90>
+
+		;fall into DrawCursor
+
+;________________________________________________________________________
+;	<SM5> CSS Horror vectorized this vector.  We are supporting this to be
+;   compatible with Horror.
+;   DrawCursor calls a vectorized version of the routine via lomem.
+;	DrawCursor is vectorized to gain access to low level cursor blit routines.
+;	(NOTE: Vector is initialized in StartInit.a to routine named VDrawCursor.)
+
+; DrawCursor is much like ShowCursor, but doesn't increment the CrsrState	<dvb 19sep88>
+
+DrawCursor
+		move.l	DrawCrsrVector,-(sp)			; <SM5> CSS
+		rts										;jump to the vectored routine <SM5> CSS
+
+DoneSho	CLR.B	CRSRBUSY						;CHANGE COMPLETE
+		RTS
+
+;_______________________________________________________________________
+;
+;  CURSHIELD  - Called via Jump Table
+;
+;  PROCEDURE ShieldCursor(left,top,right,bottom: INTEGER);
+;
+;  Subtracts 1 from CRSRSTATE, hides cursor only if it intersects SHIELDRECT.
+;  left,top,right bottom is the shieldRect in global coordinates
+;
+;  ALL REGISTERS RESTORED.
+;
+
+ShieldVars	RECORD	{return},DECREMENT					;<dvb 19Sep99>
+ShieldLeft	DS.W	1									;<dvb 19Sep99>
+ShieldTop	DS.W	1									;<dvb 19Sep99>
+ShieldRight	DS.W	1									;<dvb 19Sep99>
+ShieldBot	DS.W	1									;<dvb 19Sep99>
+return		DS.L	1									;<dvb 19Sep99>
+			ENDR
+
+			WITH	ShieldVars
+ShieldCursor
+			TST		ShieldDepth							;Any shielding already?	;<dvb 19Sep88>
+			BEQ.s	@2									;No=>don't unionrect
+
+			MOVEM.L	D0/A0,-(SP)							;Save some regs (and +8 our vars below*)
+			LEA		ShieldRect+right,A0					;A0->ShieldRect.right
+
+			MOVE.L	ShieldBot+8(SP),D0					;D0 = New shield bot,right (*)
+			CMP		(A0),D0								;Compare to ShieldRect.right
+			BLE.s	@u1									;Is the new right bigger?
+			MOVE	D0,(A0)
+
+@u1			SWAP	D0									;D0 = New shield bottom
+			CMP		-(A0),D0							;Compare to ShieldRect.bottom
+			BLE.s	@u2									;Is the new bottom bigger?
+			MOVE	D0,(A0)								;If so, replace with it.
+
+@u2			MOVE.L	ShieldTop+8(SP),D0					;D0 = New shield top,left (*)
+			CMP		-(A0),D0							;Compare to ShieldRect.left
+			BGE.s	@u3									;Is the new left smaller?
+			MOVE	D0,(A0)
+
+@u3			SWAP	D0									;D0 = New shield top
+			CMP		-(A0),D0							;Compare to ShieldRect.top
+			BGE.s	@u4									;Is the new top smaller?
+			MOVE	D0,(A0)
+
+@u4			MOVEM.L	(SP)+,D0/A0
+			BRA.s	@3
+
+@2			MOVE.L	ShieldBot(SP),ShieldRect+botRight	;save shieldrect		;<dvb 19Sep88>
+			MOVE.L	ShieldTop(SP),ShieldRect+topLeft							;<dvb 19Sep88>
+@3			ADDQ	#1,ShieldDepth						;Shielding officially on
+			MOVE.B	#1,CrsrBusy
+			BSR		CursorSect													;<dvb 19Sep88>
+			BEQ.s	@1															;<dvb 19Sep88>
+
+			BSR 	EraseCursor							;IT DOES INTERSECT, REMOVE IT
+
+@1			CLR.B	CrsrBusy
+			MOVE.L	(SP)+,(SP)							;STRIP 8 bytes of PARAMETERS, MOVING
+			MOVE.L	(SP)+,(SP)							;RETURN ADDR UP ON STACK
+			RTS
+
+			ENDWITH
+
+			IMPORT	CopyHandle,PatConvert
+;_______________________________________________________________________
+;
+; PROCEDURE SetCCursor(cCrsr: CCrsrHandle);
+;
+; This procedure copies the data in the specified color cursor into the
+; system's cursor save area.  If the depth > 2, it expands it.
+
+; this routine was taken from QDciPatchROM.a because A2 was getting trashed <sm 6/9/92>stb
+; when setting CCursor on multiple device systems							<sm 6/9/92>stb
+
+SetCCursor	MOVEM.L	D3-D4/A2-A4,-(SP)			;save work registers
+			move.l	24(sp),a2					;get ccrsrHandle			<BAL 21Jun88>
+			move.l	a2,a0						;make a copy
+			_HGetState
+			move	d0,-(sp)					;save state for later
+			move.l	a2,a0						;make a copy
+			_HLock
+			MOVE.L	(a2),A2						;GET POINTER TO NEW CURSOR
+
+			MOVE.L	([CRSRPTR]),A3				;point to current cursor (LOCKED)
+			MOVE.L	crsrID(A2),D0				;and get ID of new cursor
+			CMP		#CCrsrPat,ccType(A3)		;is current cursor a color cursor?
+			BNE.S	NotCC						;=>no, it has definitely changed
+			CMP.L	ccID(A3),D0					;same as current one?
+			BEQ		SCCDONE						;=>yes, just return
+
+NotCC		MOVE.B	#1,CRSRBUSY					;flag the cursor as busy
+			MOVE.L	D0,ccID(A3)					;set new ID
+			LEA		crsr1Data(A2),A0			;point to old-cursor data
+			LEA		THECRSR,A1					;put it here
+			MOVEQ	#16,D0						;data+mask+hotspot = 17 longs
+@0			MOVE.L	(A0)+,(A1)+					;copy data
+			DBRA	D0,@0						;until done
+
+			LEA		crsr1Data(A2),A0			;point to old-cursor data
+			LEA		CCLASTCRSR(A3),A1			;save here to indicate cursor changed
+			MOVEQ	#7,D0						;move 8 longs
+@1			MOVE.L	(A0)+,(A1)+					;copy data
+			DBRA	D0,@1						;=>loop until done
+
+			MOVE	crsrType(A2),ccType(A3)		;copy the type
+
+; NOTE:  ALL THE DST HANDLES ARE LOCKED, BUT THEY HAVE BEEN SET TO THE PROPER SIZE
+
+			MOVE.L	crsrMap(A2),-(SP)			;push src pixMap handle
+			MOVE.L	ccMap(A3),-(SP)				;push dst pixMap handle
+			_CopyPixMap							;copy the pixMap
+
+			MOVE.L	crsrData(A2),-(SP)			;push src data handle
+			MOVE.L	ccData(A3),-(SP)			;push dst data handle
+			_CopyHandle							;copy the cursor data
+
+; FOR EACH ACTIVE SCREEN DEVICE, EXPAND CURSOR, IF NECESSARY
+
+			MOVE.L	DEVICELIST,D4				;D4 = CURRENT DEVICE
+			MOVE.L	D4,A4						;GET HANDLE TO CURRENT DEVICE
+NXTSCR		MOVE.L	(A4),A4						;A4 = POINTER TO CURRENT DEVICE
+			TST.W	GDFLAGS(A4)					;IS THE DEVICE ACTIVE?
+			BPL		CHKNXT						;=>NO, CHECK NEXT DEVICE
+												;ACTIVE DEVICES ARE LOCKED DOWN
+			MOVE.L	GDPMAP(A4),A0				;GET HANDLE TO DEVICE'S PIXMAP
+			MOVE.L	(A0),A0						;POINT TO DEVICE'S PIXMAP
+			MOVE	PIXELSIZE(A0),D3			;GET DEVICE'S PIXELSIZE
+
+; IF THE PATTERN IS PRE-EXPANDED TO THE RIGHT DEPTH, JUST COPY THAT DATA
+
+			CLR		GDCCDEPTH(A4)				;flag to expand one-bit data
+			MOVE	CRSRXVALID(A2),D0			;is there pre-expanded data?
+			BEQ.S	GOEXP						;=>no, do expansion
+			CMP		D3,D0						;is the expanded data the right depth?
+			BNE.S	GOEXP						;=>no, expand from the source
+			MOVE	D0,GDCCDEPTH(A4)			;else copy the expanded depth
+			MOVE.L	crsrXData(A2),-(SP)			;push the src xdata handle
+			MOVE.L	CCXDATA(A3),-(SP)			;push the dst xdata handle
+			_CopyHandle							;and copy it
+			BRA.S	CHKNXT						;=>data already expanded, just exit
+
+GOEXP		CMP		#CCRSRPAT,CCTYPE(A3)		;IS IT A COLOR CURSOR?
+			BNE.S	DONEONE						;=>NO, EXIT WITH DEPTH = 0
+			CMP		#2,D3						;IS DEPTH GREATER THAN 2?
+			BLE.S	DONEONE						;=>NO, EXIT WITH DEPTH = 0
+
+			MOVE	D3,GDCCDEPTH(A4)			;RECORD THE EXPANDED DEPTH
+			MOVE.L	GDCCXDATA(A4),CCXDATA(A3)	;GET DEVICE'S EXPANDED DATA FOR PATCONVERT
+			MOVE.L	THEGDEVICE,-(SP)			;SAVE GRAFDEVICE (USED BY PATCONVERT)
+			MOVE.L	D4,THEGDEVICE				;SET IT TO CURRENT DEVICE
+			MOVE.L	CRSRPTR,-(SP)				;PUSH HANDLE TO CURSOR (LOCKED)
+			_PATCONVERT							;AND EXPAND TO CURRENT DEPTH
+			MOVE.L	(SP)+,THEGDEVICE			;RESTORE GRAFDEVICE
+
+;  EXPAND THE MASK TO THE CURRENT DEPTH
+
+			MOVE	D3,D0						;GET DEPTH
+			MOVEQ	#0,D1						;DEFAULT SHIFT = 0
+NXTSHFT1	LSR		#1,D0						;CHECK NEXT DEPTH BIT
+			BCS.S	GOTSHFT1					;=>GOT SHIFT
+			ADDQ	#1,D1						;ELSE ADD ONE TO SHIFT
+			BRA.S	NXTSHFT1					;LOOP UNTIL WE HIT A ONE
+
+GOTSHFT1	LEA		THECRSR+MASK,A0				;SRC = CURSOR MASK
+			MOVE.L	([GDCCXMASK,A4]),A1			;POINT TO EXPANDED MASK (LOCKED)
+
+			move.l	a2,d4						;save pointer to new cursor			<25APR91 KON>
+			MOVE.L	A1,A2						;GET START OF DST BUFFER			<27May87 EHB>
+			MOVE	#32,D0						;GET #BYTES OF SOURCE				<27May87 EHB>
+			LSL		D1,D0						;MULTIPLY BY DEPTH					<27May87 EHB>
+			ADD		D0,A2						;POINT TO END OF BUFFER				<27May87 EHB>
+
+			move.l	ExTblPtr,A3					;POINT TO ROUTINE TABLE
+			add.l	0(A3,D1*4),A3				;USE DEPTH TO SELECT ROUTINE
+			MOVEQ	#0,D0						;CLEAR HIGH PART OF D0
+			JSR		(A3)						;EXPAND 32*DEPTH BYTES
+			MOVE.L	([CRSRPTR]),A3				;GET BACK POINTER TO CURSOR (LOCKED)
+			move.l	d4,a2						;restore pointer to new cursor		<25APR91 KON>
+
+DONEONE		MOVE	GDCCDEPTH(A4),D0			;GET EXPANDED DEPTH
+			ADD		D0,D0						;DOUBLE IT
+			MOVE	D0,GDCCBYTES(A4)			;AND SAVE AS CURSOR'S ROWBYTES
+
+CHKNXT		MOVE.L	GDNEXTGD(A4),D4				;IS THERE A NEXT DEVICE?
+			MOVE.L	D4,A4						;GET HANDLE TO NEXT DEVICE
+			BNE		NXTSCR						;=>THERE IS ONE, PREPARE ITS CURSOR
+
+			BSR.S	GETMAINCRSR					;RESTORE EXPAND DATA FOR MAIN CURSOR
+			BSR		ERASECURSOR					;HIDE THE OLD CURSOR
+			BSR		DRAWCURSOR					;DISPLAY THE NEW CURSOR
+SCCDONE		CLR.B	CRSRBUSY					;CURSOR NOT BUSY ANYMORE
+			move	(sp)+,d0					;get ccrsrhandle state
+			move.l	24(sp),a0					;get ccrsrHandle
+			_HSetState
+			MOVEM.L	(SP)+,D3-D4/A2-A4			;restore work registers
+			MOVE.L	(SP)+,(SP)					;strip parameter
+			RTS									;and return
+
+;_______________________________________________________________________
+
+GETMAINCRSR	MOVE.L	CRSRDEVICE,A0				;GET HANDLE TO CURSOR DEVICE
+			MOVE.L	(A0),A0						;GET POINTER TO CURSOR DEVICE
+			MOVE.L	CRSRPTR,A1					;GET HANDLE TO CURSOR SAVE AREA
+			MOVE.L	(A1),A1						;GET POINTER TO CURSOR SAVE
+			MOVE.L	GDCCXDATA(A0),CCXDATA(A1) 	;GET CURRENT EXPANDED DATA
+			MOVE.L	GDCCXMASK(A0),CCXMASK(A1)	;GET CURRENT EXPANDED MASK
+			MOVE	GDCCDEPTH(A0),CCDEPTH(A1)	;GET EXPANDED DEPTH
+			MOVE	GDCCBYTES(A0),CCBYTES(A1)	;GET EXPANDED ROWBYTES
+			RTS									;AND RETURN
+
+;_______________________________________________________________________
+;
+; PROCEDURE SetCursor(hotSpot: Point; height: INTEGER; data: Ptr; mask:Ptr);
+;
+; This procedure sets THECRSR pointer in the system global area.
+; A reasonable hotSpot is ENFORCED!  Also fix bug to note changed when only hotspot does.  <05Apr85>
+;
+;  WARNING: to save code, this routine really doesn't use the above interface.
+;  It ignores the height and mask parameters.  It assumes that the mask immediately
+;  follows the data (as it does when called from LisaGraf)
+;
+SetCursor	MOVE.L	([CRSRPTR]),A0			;point to crsr data structure (LOCKED)
+			move.b	#1,crsrBusy				;don't allow vbl drawing until we're done <09Aug88>
+			MOVE	#oldCrsrPat,ccType(A0)	;say that it's an old cursor
+
+			MOVE.L	8(SP),A0				;get address of data mask
+			LEA 	THECRSR,A1				;point to system cursor buffer
+			MOVEQ	#15,D2					;have 16 longs to move
+			MOVEQ	#0,D1					;flag that its not different
+
+SetCurLoop	MOVE.L	(A0)+,D0				;get next longWord of new cursor
+			CMP.L	(A1),D0 				;is it the same as what's there
+			BEQ.S	@1						;if so, skip
+			ADDQ	#1,D1					;flag that its different
+@1			MOVE.L	D0,(A1)+				;move it into the cursor buffer
+			DBRA	D2,SetCurLoop			;move all 64 bytes
+
+			MOVE.L	14(SP),D0				;get the alleged hotspot				<23Apr85>
+
+; Clean up the two coordinates to lie between 0 and 16. 							<23Apr85>
+
+			MOVEQ	#16,D2					; VERY handy temp, from loop above		<23Apr85>
+			CMP.W	D2,D0					;										<23Apr85>
+			BLS.S	@31 					; D0 LowerorSame as 16 is ok			<23Apr85>
+			MOVE.W	D2,D0					;pin it at 16							<23Apr85>
+
+@31			SWAP	D0						;align the high-order coord 			<23Apr85>
+			CMP.W	D2,D0					;										<23Apr85>
+			BLS.S	@33 					; D0 LowerorSame as 16 is ok			<23Apr85>
+			MOVE.W	D2,D0					;										<23Apr85>
+
+@33			SWAP	D0						;realign coords 						<23Apr85>
+			CMP.L	TheCrsr+HotSpot,D0		;is it new? 							<05Apr85>
+			BEQ.S	@3						;										<05Apr85>
+			ADDQ	#1,D1					;flag it's different                    <05Apr85>
+			MOVE.L	D0,TheCrsr+HotSpot		;move in the hotSpot					<05Apr85>
+@3
+
+; DID THE CURSOR CHANGE?
+
+			clr.b	crsrBusy				;re-allow vbl drawing					<09Aug88>
+			TST 	D1						;did it change?
+			BEQ.S	@6						;skip if it didn't
+
+; IF SO, FORCE THE CURSOR TO BE REDISPLAYED BY HIDING AND THEN SHOWING IT
+
+			BSR 	EraseCursor				;hide it
+			BSR 	DrawCursor				;then show it again to redraw it
+
+@6			MOVE.L	(SP)+,A0				;get return address
+			ADD 	#14,SP					;strip parameters
+			JMP 	(A0)					;return to caller
+
+
+
+SetCrsrData		PROC	EXPORT
+;------------------------------------------------
+;  UTILITY SetCrsrData
+;
+;  This routine is called to initialize low-memory locations
+;  to the necessary values for the grafDevice pointer in A1.
+;
+				IMPORT	SetCrsrDelay			;<SM5> CSS
+				bsr.l	SetCrsrDelay			;<SM5> CSS
+				MOVE.L	CRSRPTR,A0				;get handle to cursor data
+				MOVE.L	(A0),A0					;get pointer to cursor data
+
+;  initialize the grafDevice's cursor variables
+
+				MOVE.L	GDCCXDATA(A1),CCXDATA(A0)	;copy handle to expanded data
+				MOVE.L	GDCCXMASK(A1),CCXMASK(A0)	;copy handle to expanded mask
+				MOVE	GDCCDEPTH(A1),CCDEPTH(A0)	;copy depth
+				MOVE	GDCCBYTES(A1),CCBYTES(A0)	;copy expanded rowbytes
+
+;  set the pinning rectangle to the current screen
+
+				LEA		GDRect(A1),A0			;get rect for current device
+				MOVE.L	(A0)+,crsrPin			;and set pinning rectangle
+				MOVE.L	(A0),crsrPin+4			;from device's rectangle
+
+;  set the depth, rowbytes, height, and width of the current screen
+
+				MOVE.L	GDPMap(A1),A0			;get pixMap of current device
+				MOVE.L	(A0),A0					;point at pixmap
+				MOVE	PixelSize(A0),chunkyDepth ;set depth of cursor's screen
+				MOVE.L	(A0)+,crsrBase			;update base address for cursor
+				MOVE	(A0)+,D0				;get rowbytes
+				AND		#nuRBMask,D0				;clear flag bits
+				MOVE	D0,crsrRow				;set cursor rowbytes
+				MOVE	bottom(A0),D0			;get bottom of cursor's screen
+				SUB		top(A0),D0				;calc height of cursor's screen
+				MOVE	D0,ColLines				;save height of cursor's screen
+				MOVE	right(A0),D0			;get right of cursor's screen
+				SUB		left(A0),D0				;calc width of cursor's screen
+				MOVE	D0,RowBits				;save width of cursor's screen
+				RTS
+
+
+ALLOCCRSR		PROC	EXPORT
+				IMPORT	PatConvert,GETMAINCRSR,SetCrsrData
+				IMPORT	RNEWHANDLE,ERASECURSOR,DRAWCURSOR
+;--------------------------------------------------
+;
+;  PROCEDURE AllocCrsr;
+;
+;  Allocates all global cursor data structures.  A maximum depth of 8 is assumed.
+;
+; CRSRPTR IS USED AS A HANDLE TO AN EXTENDED PATTERN WHICH CONTAINS THESE FIELDS:
+;
+; CCTYPE		EQU		0				;[WORD] CURSOR TYPE
+; CCMAP			EQU		CCTYPE+2		;[LONG] HANDLE TO CURSOR'S PIXMAP
+; CCDATA		EQU		CCMAP+4			;[LONG] HANDLE TO CURSOR'S COLOR DATA
+; CCXDATA		EQU		CCDATA+4		;[LONG] HANDLE TO EXPANDED DATA
+; CCXMASK		EQU		CCXDATA+4		;[LONG] HANDLE TO EXPANDED MASK
+; CCSAVE		EQU		CCXMASK+4		;[LONG] HANDLE TO SAVE BITS UNDER CURSOR
+; CCLASTCRSR	EQU		CCSAVE+4		;[32 BYTES] DATA FOR LAST B/W CURSOR DRAWN
+; CCID			EQU		CCLASTCRSR		;[LONG] ID FOR LAST COLOR CURSOR DRAWN
+; CCTABLE		EQU		CCID+4			;[LONG] TABLE ID FOR LAST COLOR CURSOR
+; CCDEPTH		EQU		CCLASTCRSR+32	;[WORD] DEPTH FOR LAST CURSOR DRAWN
+; CCSTATEREGS	EQU		CCDEPTH+2		;[20 BYTES] STATE INFO OF SAVED DATA
+; CCBYTES		EQU		CCSTATEREGS+16	;[WORD] ROWBYTES OF EXPANDED DATA
+; CCMAXDEPTH	EQU		CCBYTES+2		;[WORD] MAXIMUM CURSOR DEPTH
+
+
+			MOVEM.L	D0-D6/A0-A4/A6,-(SP)		;PRESERVE ALL REGS
+			MOVE.L	THEZONE,-(SP)				;SAVE THE CURRENT HEAP ZONE
+			MOVE.L	SYSZONE,THEZONE				;SET CURRENT ZONE TO SYS ZONE
+
+; ALLOCATE MAIN CURSOR STRUCTURE AND DATA AREAS IF NECESSARY
+
+			BSR		ERASECURSOR					;HIDE THE CURSOR
+			MOVE.B	#1,CRSRBUSY 				;MARK CHANGE IN PROGRESS
+
+			MOVE.L	CRSRPTR,D0					;GET CRSRPTR (REALLY HANDLE)
+			CMP.L	MINUSONE,D0					;IS IT ALLOCATED?
+			BNE.S	MAINOK						;=>ALREADY ALLOCATED, CONTINUE
+
+; RESERVE MEMORY FOR AND ALLOCATE CURSOR STRUCTURE.
+; THE CURSOR SAVE RECORD CONTAINS A PIXMAP, A DATA HANDLE, AND A SAVE HANDLE.
+
+			clr.b	CrsrObscure					;we wont be obscure no more
+			clr 	CrsrState					;reset state to 0
+			clr		ShieldDepth					;no more shielding
+
+			MOVEQ	#CCSAVEREC,D1				;GET SIZE OF CURSOR SAVE RECORD
+			BSR		GETLOWHANDLE				;ALLOCATE RECORD DOWN LOW AND LOCK
+			MOVE.L	A0,CRSRPTR					;SAVE HANDLE TO CURSOR
+			MOVE.L	(A0),A4						;KEEP POINTER IN A4
+
+			MOVEQ	#PMREC,D0					;WE'RE GOING TO LOCK THIS
+			_RESRVMEM							;SO RESERVE SPACE DOWN LOW
+			CLR.L	-(SP)						;MAKE ROOM FOR FUNCTION RESULT
+			_NEWPIXMAP							;ALLOCATE A PIXMAP
+			MOVE.L	(SP)+,A0					;GET HANDLE TO PIXMAP
+			MOVE.L	A0,CCMAP(A4)				;SAVE PIXMAP IN CURSOR RECORD
+			_HLOCK								;LOCK IT DOWN
+
+			MOVEQ	#2,D0						;DEFAULT SIZE OF DATA HANDLE
+			JSR		RNEWHANDLE					;ALLOCATE IT
+			MOVE.L	A0,CCDATA(A4)				;AND SAVE FOR CURSOR DATA
+
+; RESERVE AND ALLOCATE MEMORY IN WHICH TO SAVE THE BITS BEHIND THE CURSOR.
+; MAGIC AMOUNT OF MEMORY RESERVED IS FOR 32 BIT DEEP, LONG ALIGNED CURSOR.
+
+	if cursorShadow then
+			MOVE.L	#$400*4,D1					;GET REQUIRED SIZE 32*32*4
+	else
+			MOVE.L	#$400,D1					;GET REQUIRED SIZE 16*16*4
+	endif
+			BSR		GETLOWHANDLE				;GET LOW,LOCKED HANDLE
+			MOVE.L	A0,CCSAVE(A4)				;SAVE INTO RECORD
+
+; INITIALIZE THE CURSOR TO THE ARROW CURSOR.
+
+			MOVE	#OLDCRSRPAT,CCTYPE(A4)		;SAY THAT IT'S AN OLD CURSOR
+			CLR		CCDEPTH(A4)					;CLEAR DEPTH TO SAY NOT EXPANDED
+
+			MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO GRAFGLOBALS
+			LEA		ARROW(A0),A0				;POINT TO ARROW CURSOR
+			LEA		THECRSR,A1					;PUT IT HERE
+			MOVEQ	#16,D0						;DATA+MASK+HOTSPOT = 17 LONGS
+@2			MOVE.L	(A0)+,(A1)+					;COPY DATA
+			DBRA	D0,@2						;UNTIL DONE
+
+
+; FOR EACH ACTIVE SCREEN DEVICE, ALLOCATE EXPANDED CURSOR MEMORY IF NECESSARY
+; ALL DEVICES ARE GUARANTEED TO BE LOCKED.
+
+MAINOK		MOVE.L	CRSRPTR,A4					;GET HANDLE TO CURSOR STUFF
+			MOVE.L	(A4),A4						;GET POINTER (LOCKED)
+			MOVE.L	DEVICELIST,D4				;D4 = CURRENT DEVICE
+			MOVE.L	D4,A6						;GET HANDLE TO CURRENT DEVICE
+NXTDEVICE	MOVE.L	(A6),A6						;A6 = POINTER TO CURRENT DEVICE
+			TST.W	GDFLAGS(A6)					;IS THE DEVICE ACTIVE?
+			BPL		CHKNEXT						;=>NO, CHECK NEXT DEVICE
+
+			TST		GDCCDEPTH(A6)				;HAS MEMORY BEEN ALLOCATED?
+			BNE.S	DOEXPAND					;=>YES, EXPAND CURSOR IF NECESSARY
+
+			MOVE.L	GDCCXDATA(A6),A0			;GET HANDLE TO EXPANDED DATA
+			_DISPOSHANDLE						;DISPOSE THE CURRENT HANDLE
+			MOVE.L	#$400,D1					;GET SIZE OF EXPANDED HANDLE @@@@ used to be $100
+			BSR		GETLOWHANDLE				;GET A LOW, LOCKED HANDLE
+			MOVE.L	A0,GDCCXDATA(A6)			;AND SAVE IT
+
+			MOVE.L	GDCCXMASK(A6),A0			;GET HANDLE TO EXPANDED DATA
+			_DISPOSHANDLE						;DISPOSE THE CURRENT HANDLE
+			BSR		GETLOWHANDLE				;GET A LOW, LOCKED HANDLE
+			MOVE.L	A0,GDCCXMASK(A6)			;AND SAVE IT
+
+DOEXPAND
+; MAKE SURE ALL THE HANDLES ARE THE RIGHT SIZE FOR THE CURRENT DEPTH.
+; IF COLOR CURSOR AND DEPTH IS > 2 BITS PER PIXEL, THEN EXPAND TO CURRENT DEPTH.
+; BLACK AND WHITE (AND 2 BIT) CURSORS ARE EXPANDED BY SHOWCURSOR.
+
+			MOVE.L	GDPMAP(A6),A0				;GET HANDLE TO DEVICE'S PIXMAP
+			MOVE.L	(A0),A0						;POINT TO DEVICE'S PIXMAP
+			MOVE	PIXELSIZE(A0),D3			;GET DEVICE'S PIXELSIZE
+			CMP		GDCCDEPTH(A6),D3			;HAS DEPTH CHANGED?
+			BEQ.S	CHKNEXT						;=>NO, THIS DEVICE IS OK
+
+;  CONVERT DEPTH TO SHIFT AMOUNT IN D6
+
+			MOVE	D3,D0						;GET DEPTH
+			MOVEQ	#0,D6						;DEFAULT SHIFT = 0
+NXTSHFT		LSR		#1,D0						;CHECK NEXT DEPTH BIT
+			BCS.S	GOTSHFT						;=>GOT SHIFT
+			ADDQ	#1,D6						;ELSE ADD ONE TO SHIFT
+			BRA.S	NXTSHFT						;LOOP UNTIL WE HIT A ONE
+
+GOTSHFT		CMP		#CCRSRPAT,CCTYPE(A4)		;IS IT A COLOR CURSOR?
+			BNE.S	CHKNEXT						;=>NO
+			CMP		#2,D3						;IS DEPTH GREATER THAN 2?
+			BLE.S	CHKNEXT						;=>NO
+
+			MOVE.L	GDCCXDATA(A6),CCXDATA(A4)	;GET EXPAND HANDLE FOR PATCONVERT
+			MOVE.L	THEGDEVICE,-(SP)			;SAVE GRAFDEVICE
+			MOVE.L	D4,THEGDEVICE				;SET IT TO CURRENT DEVICE
+			MOVE.L	CRSRPTR,-(SP)				;PUSH HANDLE TO CURSOR
+			_PATCONVERT							;AND EXPAND TO CURRENT DEPTH
+			MOVE.L	(SP)+,THEGDEVICE			;RESTORE GRAFDEVICE
+
+;  EXPAND THE MASK TO THE CURRENT DEPTH
+
+			LEA		THECRSR+MASK,A0				;SRC = CURSOR MASK
+			MOVE.L	([GDCCXMASK,A6]),A1			;POINT TO EXPANDED MASK (LOCKED)
+			MOVE.L	A1,A2						;GET START OF DST BUFFER
+			MOVE	#32,D0						;GET #BYTES OF SOURCE
+			LSL		D6,D0						;MULTIPLY BY DEPTH
+			ADD		D0,A2						;POINT TO END OF BUFFER
+
+			move.l	ExTblPtr,A3					;POINT TO ROUTINE TABLE
+			add.l	0(A3,D6*4),A3				;USE DEPTH TO SELECT ROUTINE
+			MOVEQ	#0,D0						;CLEAR HIGH PART OF D0
+			JSR		(A3)						;EXPAND 32*DEPTH BYTES
+
+			MOVE	D3,GDCCDEPTH(A6)			;SAVE DEPTH OF EXPANDED CURSOR
+			ADD		D3,D3						;GET 2*DEPTH
+			MOVE	D3,GDCCBYTES(A6)			;SAVE ROWBYTES FOR EXPANDED CURSOR
+
+CHKNEXT		MOVE.L	GDNEXTGD(A6),D4				;IS THERE A NEXT DEVICE?
+			MOVE.L	D4,A6						;GET HANDLE TO NEXT DEVICE
+			BNE		NXTDEVICE					;=>THERE IS ONE, PREPARE ITS CURSOR
+
+			BSR		GETMAINCRSR					;SET UP FIELDS FOR MAIN CURSOR
+			MOVE.L	CRSRDEVICE,A1				;GET HANDLE TO CURSOR DEVICE
+			MOVE.L	(A1),A1						;GET POINTER TO CURSOR DEVICE
+			JSR		SetCrsrData					;AND SET UP LOW-MEM FOR THIS DEVICE
+
+			MOVE.L	(SP)+,THEZONE				;RESTORE THE ZONE
+			CLR.B	CRSRBUSY					;CHANGE COMPLETE
+			BSR		DRAWCURSOR
+			MOVEM.L	(SP)+,D0-D6/A0-A4/A6		;RESTORE ALL REGS
+			RTS
+
+
+GETLOWHANDLE
+;--------------------------------------------------
+; UTILITY GETLOWHANDLE
+;
+; THIS ROUTINE RESERVES MEMORY FOR A HANDLE, ALLOCATES THE HANDLE
+; AND THEN LOCKS IT DOWN.  THE DESIRED SIZE IS IN D1.  THE RETURNED HANDLE IS IN A0
+; ONLY D0 IS TRASHED
+
+			MOVE.L	D1,D0						;GET THE DESIRED SIZE
+			_RESRVMEM							;RESERVE SPACE FOR THE HANDLE DOWN LOW
+			BNE.S	MEMFULL						;=>ON ERROR, JUST BOMB
+			MOVE.L	D1,D0						;GET THE DESIRED SIZE
+			_NEWHANDLE	,CLEAR					;ALLOCATE THE HANDLE
+			_HLOCK								;LOCK IT
+			RTS									;AND RETURN
+
+MEMFULL		MOVEQ	#25,D0						;MEM FULL ERROR
+			_SYSERROR							;FLAG IT
+			DC.W	$A9FF						;JUST IN CASE WE RETURN
+
+;_______________________________________________________________________
+;
+;	BLITCURSOR																<dvb 19sep88>
+;
+; The only thing that will stop this routine from blitting the cursor
+; to the screen is ShieldRect. Since the new CrsrRect isn't known
+; until pretty far through the process, it's checked here, not
+; DrawCursor. CrsrState and CrsrObscure are _not_ checked here.
+; It seems likely that patching this routine will have use on accelerator
+; cards etc.
+
+BLITCURSOR		PROC	EXPORT
+		IMPORT	CursorSect, SHFTTBL
+
+		TST.L	CRSRPTR							;CURSOR ALLOCATED?
+		BMI		NoBlit							;=>NO, JUST RETURN
+		MOVEM.L D0-D7/A0-A6,-(SP)				;SAVE REGISTERS
+		LEA		THECRSR+DATA,A2					;POINT TO THE CURSOR
+
+
+;-----------------------------------------------
+;
+;  CONVERT CHUNKY DEPTH TO SHIFT AMOUNT IN D7
+;
+		LEA		SHFTTBL,A0					;TO CONVERT DEPTH TO SHIFT
+		MOVE	CHUNKYDEPTH,D1				;GET DEPTH
+		MOVEQ	#0,D7						;DEFAULT SHIFT = 0
+		MOVE.B	0(A0,D1),D7					;GET SHIFT AMOUNT IN D7
+
+
+;-----------------------------------------------
+;
+;  CHECK THE CURSOR TO SEE IF IT HAS CHANGED
+;	 OLD CURSORS: CHECK CURSOR DATA AND DEPTH
+;    NEW CURSORS: CHECK DEPTH
+;
+GOTSHFT	MOVE.L	([CRSRPTR]),A4				;GET POINTER TO CURSOR DATA (LOCKED)
+		CMP		#CCRSRPAT,CCTYPE(A4)		;IS IT A COLOR CURSOR?
+		BNE.S	OLDCUR						;=>NO, JUST AN OLD ONE
+		CMP		CCDEPTH(A4),D1				;HAS DEPTH CHANGED?
+		BEQ		NOEXPAND					;=>NO, DON'T EXPAND
+		CMP		#2,D1						;IS DEPTH 2 or 1?
+		BGT		EXPMASK						;=>NO, JUST EXPAND MASK
+		BRA.S	CPYDATA						;=>ELSE JUST COPY DATA
+
+OLDCUR	LEA		CCLASTCRSR(A4),A0			;POINT TO SAVED DATA
+		MOVE.L	A2,A1						;GET POINTER TO CURSOR
+		MOVEQ	#7,D0						;CHECK 8 LONGS
+@0		CMP.L	(A0)+,(A1)+					;ARE THEY THE SAME?
+		BNE.S	GOEXPAND					;=>NO, EXPAND IT
+		DBRA	D0,@0						;=>LOOP UNTIL DONE
+
+		CMP		CCDEPTH(A4),D1				;HAS DEPTH CHANGED?
+		BEQ		NOEXPAND					;=>NO, DON'T EXPAND
+
+GOEXPAND
+;-----------------------------------------------
+;
+;  INVALIDATE EXPANDED DATA FOR EACH DEVICE BY CLEARING DEPTH
+;  THIS MUST BE DONE SO THAT ALL EXPANDED CURSOR IMAGES ARE RENDERED INVALID AFTER
+;  AN OLD CURSOR HAS BEEN SET.  IF THE CURSOR IS NEW, SETCCURSOR ALREADY DID THIS.
+
+		MOVE.L	DEVICELIST,A0				;GET FIRST HANDLE IN DEVICE LIST
+NXTGD	MOVE.L	(A0),A0						;POINT TO FIRST DEVICE
+		TST		GDFLAGS(A0)					;IS IT ACTIVE?
+		BPL.S	NOTACT						;=>NO, SKIP TO NEXT
+		CLR		GDCCDEPTH(A0)				;ELSE INVALIDATE EXPANDED DATA
+NOTACT	MOVE.L	GDNEXTGD(A0),D0				;GET NEXT GRAFDEVICE
+		MOVE.L	D0,A0						;GET INTO A0
+		BNE.S	NXTGD						;=>REPEAT FOR ALL DEVICES
+
+;  COPY THE CURSOR DATA TO IDENTIFY THIS CURSOR
+
+CPYDATA	LEA		CCLASTCRSR(A4),A0			;POINT TO SAVED DATA
+		MOVE.L	A2,A1						;GET CURSOR
+		MOVEQ	#7,D0						;MOVE 8 LONGS
+@0		MOVE.L	(A1)+,(A0)+					;MOVE A LONG
+		DBRA	D0,@0						;=>LOOP UNTIL DONE
+
+;  UPDATE THE ROWBYTES AND DEPTH FOR THE EXPANDED DATA
+
+	;	MOVE	D1,(A0)+	;COPY THE DEPTH TOO	<this is the top half of ccID! <BAL 01Apr89>
+		MOVE	D1,CCDEPTH(A4)				;SET DEPTH TO SAY IT'S EXPANDED
+		ADD		D1,D1						;DOUBLE FOR CURSOR'S ROWBYTES
+		MOVE	D1,CCBYTES(A4)				;AND UPDATE ROWBYTES
+
+
+;-----------------------------------------------
+;
+;  EXPAND THE CURSOR TO THE CURRENT DEPTH
+;
+		MOVE.L	A2,A0						;SRC = CURSOR
+		MOVE.L	([CCXDATA,A4]),A1			;POINT TO EXPANDED DATA (LOCKED)
+		MOVE.L	A1,A2						;GET START OF DST BUFFER
+		MOVE	#32,D5						;GET #BYTES OF SOURCE
+		LSL		D7,D5						;MULTIPLY BY DEPTH
+		ADD		D5,A2						;POINT TO END OF BUFFER
+
+		move	d7,d0
+		cmp		#4,d0						;16/32 bits per pixel?				<BAL 28Jun88>
+		blt.s	@1							;no, don't hack depth conversion
+		addq	#2,d0						;get address of spiffy 1 to 15/24 bit expand
+
+@1		move.l	ExTblPtr,A3					;POINT TO ROUTINE TABLE
+		add.l	0(A3,D0*4),A3				;USE DEPTH TO SELECT ROUTINE
+		MOVEQ	#0,D0						;CLEAR HIGH PART OF D0
+		JSR		(A3)						;EXPAND 32*DEPTH BYTES
+
+
+;-----------------------------------------------
+;
+;  EXPAND THE MASK TO THE CURRENT DEPTH
+;
+EXPMASK	LEA		THECRSR+MASK,A0				;SRC = CURSOR MASK
+		MOVE.L	([CCXMASK,A4]),A1			;POINT TO EXPANDED MASK (LOCKED)
+		MOVE.L	A1,A2						;GET START OF DST BUFFER
+		MOVE	#32,D5						;GET #BYTES OF SOURCE			<BAL 14Jun88>
+		LSL		D7,D5						;MULTIPLY BY DEPTH				<BAL 14Jun88>
+		ADD		D5,A2						;POINT TO END OF BUFFER
+
+		move.l	ExTblPtr,A3					;POINT TO ROUTINE TABLE
+		add.l	0(A3,D7*4),A3				;USE DEPTH TO SELECT ROUTINE
+		MOVEQ	#0,D0						;CLEAR HIGH PART OF D0
+		JSR		(A3)						;EXPAND 32*DEPTH BYTES
+
+;-----------------------------------------------
+;
+;  PREPARE TO BLT THE CURSOR ON THE SCREEN IN ANY DEPTH
+;	(SUBTITLE:  WALTZ OF THE REGISTERS)
+;
+NOEXPAND
+		MOVE.L	([CCXDATA,A4]),d0			;A2 = EXPANDED DATA FOR BLT (LOCKED)
+		_rTranslate24To32					;strip off high byte
+		move.l	d0,a2
+		MOVE.L	([CCXMASK,A4]),d0			;A3 = EXPANDED MASK FOR BLT (LOCKED)
+		_rTranslate24To32					;strip off high byte
+		move.l	d0,a3
+		MOVEQ	#16,D5						;D5 = 16
+
+;-----------------------------------------------
+;
+;  CLIP THE CURSOR VERTICALLY AND GET THE TOP AND BOTTOM INTO D2 AND D3.
+;  IF THE TOP IS CLIPPED, UPDATE THE DATA BASE ADDRESSES IN A2 AND A3.
+;
+		MOVE	MOUSE+V,D2					;MOUSE POSITION Y
+		SUB		CRSRPIN+TOP,D2				;CONVERT TO SCREEN LOCAL COORDS
+		SUB		THECRSR+HOTSPOT+V,D2		; - HOTSPOT = TOP EDGE
+		MOVE	D2,D3						;GET CURSOR BOTTOM
+		ADD		D5,D3						; = TOP + 16
+		CMP		D5,D3						;AT TOP?
+		BGE.S	CHKBOT						;=>NOT AT TOP
+		NEG		D2							;GET NUMBER OF CLIPPED ROWS
+		CMP		D5,D2						;ARE ALL 16 CLIPPED?
+		BEQ		SkipBlit					;=>IF SO, NOTHING TO SHOW
+		MULU	CCBYTES(A4),D2				; * ROWBYTES FOR OFFSET
+		ADD.L	D2,A2						;ADD VERTICAL OFFSET INTO CURSOR
+		ADD.L	D2,A3						;ADD VERTICAL OFFSET INTO MASK
+		MOVEQ	#0,D2						;AND PIN CURSOR TO TOP
+
+CHKBOT	MOVE	COLLINES,D4					;GET BOTTOM OF SCREEN
+		CMP		D4,D3						;PAST BOTTOM?
+		BLE.S	CHKLFT						;=>NO, VERTICAL OK
+		MOVE	D4,D3						;ELSE PIN TO BOTTOM EDGE
+
+
+;-----------------------------------------------
+;
+;  CLIP THE CURSOR HORIZONTALLY AND GET THE LEFT AND RIGHT INTO D0 AND D1
+;  IF THE LEFT OF THE CURSOR IS CLIPPED, ADJUST THE OFFET IN D6.
+
+CHKLFT	MOVEQ	#0,D6						;INIT SRC/DST OFFSET TO 0
+		MOVE	MOUSE+H,D0					;MOUSE POSITION X
+		SUB		CRSRPIN+LEFT,D0				;CONVERT TO SCREEN LOCAL COORDS
+		SUB		THECRSR+HOTSPOT+H,D0		; - HOTSPOT = CURSOR LEFT
+		MOVE	D0,D1						;GET CURSOR RIGHT
+		ADD		D5,D1						; = LEFT + 16
+		CMP		D5,D1						;AT LEFT EDGE?
+		BGE.S	CHKRT						;=>NOT AT LEFT EDGE
+		SUB		D0,D6						;OFFSET = AMOUNT CLIPPED
+		MOVEQ	#0,D0						;AND PIN TO LEFT EDGE
+
+CHKRT	MOVE	ROWBITS,D4					;GET RIGHT EDGE OF SCREEN
+		CMP		D4,D1						;PAST RIGHT EDGE?
+		BLE.S	RTOK						;=>NO, HORIZONTAL OK
+		MOVE	D4,D1						;ELSE PIN TO RIGHT EDGE
+RTOK
+
+;-----------------------------------------------
+;
+;  USE TOP AND LEFT TO CALCULATE THE LONG ALIGNED SCREEN BASE ADDRESS
+
+		MOVE.L	CRSRBASE,A5 				;A5 = POINTER TO BASE OF SCREEN
+		MOVE	CRSRROW,A0					;A0 = SCREEN ROWBYTES
+		MOVE	A0,D4						;COPY FOR MULU
+		MULU	D2,D4						;TOP * ROWBYTES
+		ADD.L	D4,A5						;ADD VERT OFFSET INTO SCREEN
+		ext.l	d0							;make it a long					<BAL 17Jan89>
+		LSL.l	D7,D0						;CONVERT LEFT PIXELS TO BITS
+		MOVE.l	D0,D4						;GET LEFT EDGE
+		AND.l	#~$1F,D4					;LONGWORD ALIGNED
+		MOVE.l	D4,D5						;MAKE A COPY
+		ASR.l	#3,D5						;CONVERT BITS TO BYTES
+		ADD.l	D5,A5						;GET BASE OFFSET IN SCREEN
+
+;-----------------------------------------------
+;
+;  SAVE THE CRSRRECT FOR CURSHIELD
+
+		LEA 	CrsrRect,A1 				;SET UP CRSRRECT
+		MOVE	D2,(A1)+					;TOP
+		MOVE.l	D4,D5						;GET LONG ALIGNED LEFT IN BITS
+		LSR.l	D7,D5						;CONVERT TO PIXELS
+		MOVE	D5,(A1)+					;LONG ALIGNED LEFT
+		MOVE	D3,(A1)+					;BOTTOM
+		MOVE	D5,(A1) 					;RIGHT = LEFT + longcount/pixs in long
+
+	if cursorShadow then
+		add.w	#16,-2(a1)					;grow height for shadow
+		add.w	#16,(a1)					;grow width for shadow
+	endif
+
+SAMELONG
+;-----------------------------------------------
+;
+;  ADJUST DST/SRC OFFSET IN D6
+;  GET NUMBER OF ROWS TO DO IN D3
+;  GET LONGCNT IN D5 AND USE TO ADJUST DSTBUMP IN A0
+
+		AND		#$1F,D0						;GET LEFT EDGE MOD 32
+		LSL		D7,D6						;CONVERT OFFSET TO BITS
+		SUB		D0,D6						; = NEG OFFSET FROM SOURCE
+
+		ext.l	d1							;make it a long					<BAL 17Jan89>
+		LSL.l	D7,D1						;CONVERT RIGHT EDGE TO BITS
+		MOVE.l	D1,D5						;MAKE COPY
+		SUB.l	D4,D5						;GET WIDTH OF CURSOR
+		ble		SkipBlit					;crsr fits in 0 or fewer longs so don't draw
+		subq	#1,d5						;force multiples of 32 to round down
+
+		LSR.l	#5,D5						;GET LONGS-1
+
+		SUB		D2,D3						;D3 = # ROWS TO DO
+		SUBQ	#1,D3						;MAKE IT 0 BASED
+
+		MOVE.l	D5,D2						;GET LONGS
+		ADDQ.l	#1,D2						;MAKE ONE BASED
+		LSL.l	#2,D2						;CONVERT TO BYTES
+		SUB.l	D2,A0						;ADJUST DST BUMP
+
+		lsl.l	#3,d2						;get long aligned bit width
+		lsr.l	d7,d2						;get effective cursr pixel width
+		add		d2,(a1)						;adjust crsrRect.right = left+width
+
+		BSR		CursorSect					;Now then, do we intersect shield?
+		BNE		SkipBlit					;If so, ththat's all.
+
+;-----------------------------------------------
+;
+;  CONVERT LEFT EDGE AND RIGHT EDGE TO LEFTMASK AND RIGHTMASK IN D4 AND D2
+
+		MOVEQ	#-1,D4						;FILL LONG WITH ONES
+		LSR.L	D0,D4						;AND SHIFT IN 0'S FOR LEFTMASK
+
+		MOVEQ	#-1,D2						;FILL LONG WITH ONES
+		AND		#$1F,D1						;GET RIGHT MOD 32
+		beq.s	@1							;does right have a real mask? no, flush it
+		LSR.L	D1,D2						;AND SHIFT 0'S IN FROM RIGHT
+		NOT.L	D2							;GET RIGHTMASK
+
+;-----------------------------------------------
+;
+;  SAVE DSTLEFT/DSTBUMP/LONGCNT/ROWCNT INTO CRSRPTR SO THAT
+;  HIDECURSOR KNOWS HOW MUCH SCREEN TO REPLACE.
+
+@1		LEA		CCBYTES(A4),A6				;POINT TO END OF SAVE STATE AREA
+		MOVE	(A6),A1						;A1 = ROWBYTES FOR EXPANDED CURSOR
+		MOVE.L	([CCSAVE,A4]),d0			;A4 = POINTER TO SAVE AREA (LOCKED)
+		_rTranslate24To32					;strip off high byte
+		move.l	d0,a4
+		MOVEM.L	A5/A0/D5/D3,-(A6)			;SAVE DSTLEFT/DSTBUMP/LONGCNT/ROWCNT
+
+		moveq	#true32b,d0					;switch to 32 bit addressing
+		movem.l	a0-a2,-(sp)					;save off registers
+		_rSwapMMUMode						;get previous mode in d0.b (can trash a0/a2, d0/d2)
+		movem.l	(sp)+,a0-a2					;restore registers
+		move.b	d0,-(sp)					;save previous state for later
+
+		MOVE.L	D5,A6						;SAVE LONGCNT
+		EXT.L	D6							;BFEXTU LIKES LONG OFFSETS
+		MOVE.L	D6,-(SP)					;SAVE OFFSET ON STACK
+		MOVE.L	D4,-(SP)					;SAVE LEFTMASK ON STACK
+
+		;use alternate loop if on Direct Device			<BAL 12 Mar89>
+
+		cmp		#4,d7						;are we 16 or 32 bits/pixel (direct device) ?
+		bge		Direct						;no, don't hack
+
+	if	cursorShadow then
+		cmp		#3,d7
+		beq		Shadow8
+	endif
+
+		TST		D5							;CHECK FOR JUST ONE LONG
+		BRA.S	START						;AND JUMP INTO MIDDLE
+
+;-----------------------------------------------
+;
+;  DISPLAY THE CURSOR AND SAVE THE BITS BEHIND IT (DO THE CURSOR LIMBO!!)
+;
+;  THE FUNNY TRANSFER MODE USED HERE WORKS THE SAME AS BEFORE FOR ONE BIT
+;  MODE, AND SIMILARLY FOR COLOR.  IN COLOR, THE DATA PIXELS WITHIN THE MASK
+;  REPLACE THE DESTINATION;  THE DATA PIXELS OUTSIDE THE MASK ARE XORED WITH
+;  THE DST.  IF THE DATA PIXELS OUTSIDE OF THE MASK ARE BLACK (ALL F'S),
+;  THEN THE DST IS SIMPLY INVERTED.  IF THEY ARE OTHER COLORS, INTERESTING
+;  EFFECTS WILL MANIFEST THEMSELVES.
+;
+;  REGISTER USE:	D0:	SCRATCH			A0:	DSTBUMP
+;					D1:	SCRATCH			A1:	SRCBUMP
+;					D2:	RIGHTMASK		A2:	SRCPTR
+;					D3:	ROWCNT			A3:	MASKPTR
+;					D4:	LEFTMASK		A4:	SAVEPTR
+;					D5:	LONGCNT			A5: DSTPTR
+;					D6:	OFFSET			A6:	COPY LONGCNT
+;					D7:	SCRATCH		   (A7): LEFTMASK
+;									   4(A7): COPY OFFSET
+
+END		AND.L	D2,D4						;AND RIGHTMASK INTO LEFTMASK
+MAIN	BFEXTU	(A2){D6:0},D0				;EXTRACT A LONG OF SRC
+		BFEXTU	(A3){D6:0},D1				;EXTRACT A LONG OF MASK
+		ADD.L	#32,D6						;BUMP TO NEXT LONG
+		AND.L	D4,D0						;AND SRC WITH LEFTMASK
+		AND.L	D4,D1						;AND MASK WITH LEFTMASK
+		MOVE.L	D0,D7						;COPY SRC
+
+		AND.L	D1,D7						;GET MASK AND SRC (PIXELS TO REPLACE)
+		NOT.L	D1							;GET NOTMASK
+		MOVE.L	(A5),d4						;get a long of screen
+		move.l	d4,(A4)+					;SAVE A LONG OF SCREEN
+
+		AND.L	D1,D0						;GET NOTMASK AND SRC (PIXELS TO INVERT)
+		AND.L	d4,D1						;PUNCH HOLE FOR PIXELS TO REPLACE (used to be A5)
+		OR.L	D7,D1						;REPLACE PIXELS WITHIN MASK
+		EOR.L	D0,D1						;INVERT PIXELS OUTSIDE OF MASK
+		MOVE.L	D1,(A5)+					;AND PUT TO DST
+		MOVEQ	#-1,D4						;FLUSH LEFTMASK
+		SUB		#1,D5						;DECREMENT LONGCNT
+START	BGT.S	MAIN						;=>MORE THAN ONE TO DO
+		BEQ.S	END							;=>DO LAST LONG
+		MOVE.L	4(SP),D6					;RESTORE OFFSET
+		MOVE.L	(SP),D4						;RESTORE LEFTMASK
+		ADD.L	A1,A3						;BUMP CURSOR DATA
+		ADD.L	A1,A2						;BUMP CURSOR MASK
+		ADD.L	A0,A5						;BUMP SCREEN POINTER
+		MOVE.L	A6,D5						;RESTORE LONGCNT (TEST D5)
+		DBRA	D3,START					;=>DO NEXT ROW
+
+		bra		DoneBlit
+
+
+Direct
+		bgt.s	Direct32
+
+;-----------------------------------------------
+;
+;  DISPLAY THE CURSOR AND SAVE THE BITS BEHIND IT (DO THE CURSOR LIMBO!!)
+;
+;  THE FUNNY TRANSFER MODE USED HERE WORKS THE SAME AS BEFORE FOR ONE BIT
+;  MODE, AND SIMILARLY FOR COLOR.  IN COLOR, THE DATA PIXELS WITHIN THE MASK
+;  REPLACE THE DESTINATION;  THE DATA PIXELS OUTSIDE THE MASK ARE XORED WITH
+;  THE DST.  IF THE DATA PIXELS OUTSIDE OF THE MASK ARE BLACK (ALL F'S),
+;  THEN THE DST IS SIMPLY INVERTED.  IF THEY ARE OTHER COLORS, INTERESTING
+;  EFFECTS WILL MANIFEST THEMSELVES.
+;
+;  REGISTER USE:	D0:	SCRATCH			A0:	DSTBUMP
+;					D1:	SCRATCH			A1:	SRCBUMP
+;					D2:	RIGHTMASK		A2:	SRCPTR
+;					D3:	ROWCNT			A3:	MASKPTR
+;					D4:	LEFTMASK		A4:	SAVEPTR
+;					D5:	LONGCNT			A5: DSTPTR
+;					D6:	OFFSET			A6:	COPY LONGCNT
+;					D7:	SCRATCH		   (A7): LEFTMASK
+;									   4(A7): COPY OFFSET
+Direct16
+		swap	d4
+
+		addq	#1,d5						;make one based
+		add		d5,d5						;convert longcnt to word cnt
+		move	d5,d0						;save pixel cnt
+		subq	#2,d5						;make zero based - 1
+		move	d5,a6						;save a copy for later scans
+
+		moveq	#-1,d7
+		lsr.w	#1,d7						;make into low15bits mask
+
+		add		d0,d0						;make into byte cnt
+		sub		d0,a1						;make srcRow into srcBump
+
+		asr		#3,d6						;make offset into bytes
+		add		d6,a2						;adjust src ptr
+		add		d6,a3						;adjust mask ptr
+
+@first	tst		d4							;is left pixel masked?
+		bne.s	@MAIN						;no, go to it
+		move.w	(a5)+,(a4)+					;save first pixel
+		addq	#2,a2						;bump past first src pixel
+		addq	#2,a3						;bump past first mask pixel
+		bra.s	@next
+
+@MAIN	move.w	(A2)+,D0					;EXTRACT A LONG OF SRC
+		MOVE.w	(A5),d1						;get a long of screen
+		move.w	d1,(A4)+					;SAVE A LONG OF SCREEN
+		tst.w	(A3)+						;EXTRACT A LONG OF MASK
+		bne.s	@inside
+		not.w	d0							;flip src so that black is all 1's
+		and.w	d7,d0						;mask off high bit
+		beq.s	@skipit						;no use in xoring with zero
+		eor.w	d1,d0						;xor dst with src
+@inside
+		move.w	d0,(a5)
+@skipit	addq	#2,a5
+@next	dbra	D5,@MAIN					;DECREMENT LONGCNT
+
+		tst		d2							;is right pixel masked?
+		bne.s	@last						;no, go to it
+		move.w	(a5)+,(a4)+					;save first pixel
+		addq	#2,a2						;bump past first src pixel
+		addq	#2,a3						;bump past first mask pixel
+		bra.s	@nxtScn
+
+@last	move.w	(A2)+,D0					;EXTRACT A LONG OF SRC
+		MOVE.w	(A5),d1						;get a long of screen
+		move.w	d1,(A4)+					;SAVE A LONG OF SCREEN
+		tst.w	(A3)+						;EXTRACT A LONG OF MASK
+		bne.s	@in
+		not.w	d0							;flip src so that black is all 1's
+		and.w	d7,d0						;mask off high bit
+		beq.s	@skip						;no use in xoring with zero
+		eor.w	d1,d0						;xor dst with src
+@in
+		move.w	d0,(a5)
+@skip	addq	#2,a5
+@nxtScn	ADD.L	A1,A3						;BUMP CURSOR DATA
+		ADD.L	A1,A2						;BUMP CURSOR MASK
+		ADD.L	A0,A5						;BUMP SCREEN POINTER
+		MOVE.L	A6,D5						;RESTORE LONGCNT
+		DBRA	D3,@First					;=>DO NEXT ROW
+		bra		DoneBlit
+
+
+
+
+;-----------------------------------------------
+;
+;  DISPLAY THE CURSOR AND SAVE THE BITS BEHIND IT (DO THE CURSOR LIMBO!!)
+;
+;  THE FUNNY TRANSFER MODE USED HERE WORKS THE SAME AS BEFORE FOR ONE BIT
+;  MODE, AND SIMILARLY FOR COLOR.  IN COLOR, THE DATA PIXELS WITHIN THE MASK
+;  REPLACE THE DESTINATION;  THE DATA PIXELS OUTSIDE THE MASK ARE XORED WITH
+;  THE DST.  IF THE DATA PIXELS OUTSIDE OF THE MASK ARE BLACK (ALL F'S),
+;  THEN THE DST IS SIMPLY INVERTED.  IF THEY ARE OTHER COLORS, INTERESTING
+;  EFFECTS WILL MANIFEST THEMSELVES.
+;
+;  REGISTER USE:	D0:	SCRATCH			A0:	DSTBUMP
+;					D1:	SCRATCH			A1:	SRCBUMP
+;					D2:	RIGHTMASK		A2:	SRCPTR
+;					D3:	ROWCNT			A3:	MASKPTR
+;					D4:	LEFTMASK		A4:	SAVEPTR
+;					D5:	LONGCNT			A5: DSTPTR
+;					D6:	OFFSET			A6:	COPY LONGCNT
+;					D7:	SCRATCH		   (A7): LEFTMASK
+;									   4(A7): COPY OFFSET
+
+	if cursorShadow then
+
+Direct32
+		move	d5,d0						;get a copy of long cnt
+		addq	#1,d0						;make one based
+		lsl		#2,d0						;make into byte cnt
+		sub		d0,a1						;make srcRow into srcBump
+
+		asr		#3,d6						;make offset into bytes
+		add		d6,a2						;adjust src ptr
+		add		d6,a3						;adjust mask ptr
+
+
+voff	equ	4
+hoff	equ	4
+
+;-----------------------------------------------
+;
+;  SAVE DSTLEFT/DSTBUMP/LONGCNT/ROWCNT INTO CRSRPTR SO THAT
+;  HIDECURSOR KNOWS HOW MUCH SCREEN TO REPLACE.
+
+		movem.l	d3/d5/a6/a5/a0,-(sp)
+		MOVE.L	([CRSRPTR]),D0				;GET POINTER TO CURSOR DATA (LOCKED)
+		_rTranslate24To32
+		MOVE.L	D0,A6
+		LEA		CCBYTES(A6),A6				;POINT TO END OF SAVE STATE AREA
+		move.w	mouse,d0					;get vert pos
+		lsr.w	#6,d0
+	;	add.w	#voff,d3
+		add.w	d0,d3
+		move.w	mouse+2,d0					;get horiz pos
+		lsr.w	#6,d0
+	;	add.w	#hoff,d5
+		add.w	d0,d5
+		lsl.w	#2,d0
+	;	sub.w	#hoff*4,a0
+		sub.w	d0,a0
+		MOVEM.L	A5/A0/D5/D3,-(A6)			;SAVE DSTLEFT/DSTBUMP/LONGCNT/ROWCNT
+		MOVE.L	D5,A6						;SAVE LONGCNT
+
+@MAIN2	MOVE.L	(A5)+,d1					;get a long of screen
+		move.l	d1,(a4)+					;save a long of screen
+		dbra	D5,@MAIN2					;DECREMENT LONGCNT
+
+		ADD.L	A0,A5						;BUMP SCREEN POINTER
+		MOVE.L	A6,D5						;RESTORE LONGCNT
+		DBRA	D3,@MAIN2					;=>DO NEXT ROW
+		movem.l	(sp)+,a5/d3/d5/a6/a0
+
+
+		movem.l	d3/a2-a5,-(sp)
+
+	;	moveq	#voff,d0
+		move.w	mouse,d0					;get vert pos
+		lsr.w	#6,d0
+		bra.s	@1
+
+@0		ADD.w	CRSRROW,A5					;offset SCREEN POINTER vertically
+@1		dbra	d0,@0
+
+		move.w	mouse+2,d0					;get horiz pos
+		lsr.w	#6,d0
+		lsl.w	#2,d0
+	;	add.w	#hoff*4,a5
+		add.w	d0,a5
+
+@MAIN1	MOVE.L	(A5),d1						;get a long of screen
+		move.l	(A2)+,d0					;combine A LONG OF src
+		not.l	d0							;interested in nothing , dammit!!@!
+		and.l	$31a,d0						; shit line
+		or.l	(A3)+,d0					;EXTRACT A LONG OF MASK
+		beq.s	@skipit1
+											;d0 = 0
+		moveq	#0,d0						;assume result is black
+		moveq	#$3f,d4						;amount to remove from screen
+		swap	d4							;d4 = $3f0000
+		sub.l	d4,d1						;darken the red channel
+		bcs.s	@pinred
+		move.l	d1,d0						;take the red channel
+@pinred
+		lsr.l	#8,d4
+		sub.w	d4,d1						;darken the grn channel
+		bcs.s	@pingrn
+		move.w	d1,d0						;take the grn channel
+@pingrn
+		lsr.w	#8,d4
+		sub.b	d4,d1						;darken the blu channel
+		bcs.s	@pinblu
+		move.b	d1,d0						;take the blu channel
+@pinblu
+
+		move.l	d0,(a5)
+@skipit1
+		addq	#4,a5
+		dbra	D5,@MAIN1					;DECREMENT LONGCNT
+
+		ADD.L	A1,A3						;BUMP CURSOR DATA
+		ADD.L	A1,A2						;BUMP CURSOR MASK
+		ADD.L	A0,A5						;BUMP SCREEN POINTER
+		MOVE.L	A6,D5						;RESTORE LONGCNT
+		DBRA	D3,@MAIN1					;=>DO NEXT ROW
+
+		movem.l	(sp)+,d3/a2-a5
+
+
+
+@MAIN	move.l	(A2)+,D0					;EXTRACT A LONG OF SRC
+		MOVE.L	(A5),d1						;get a long of screen
+		tst.l	(A3)+						;EXTRACT A LONG OF MASK
+		bne.s	@inside
+		not.l	d0							;flip src so that black is all 1's
+		beq.s	@skipit						;no use in xoring with zero
+		eor.l	d1,d0						;xor dst with src
+@inside
+		move.l	d0,(a5)
+@skipit	addq	#4,a5
+		dbra	D5,@MAIN					;DECREMENT LONGCNT
+
+		ADD.L	A1,A3						;BUMP CURSOR DATA
+		ADD.L	A1,A2						;BUMP CURSOR MASK
+		ADD.L	A0,A5						;BUMP SCREEN POINTER
+		MOVE.L	A6,D5						;RESTORE LONGCNT
+		DBRA	D3,@MAIN					;=>DO NEXT ROW
+		bra		DoneBlit
+
+
+;  REGISTER USE:	D0:	SCRATCH			A0:	DSTBUMP
+;					D1:	SCRATCH			A1:	SRCBUMP
+;					D2:	RIGHTMASK		A2:	SRCPTR
+;					D3:	ROWCNT			A3:	MASKPTR
+;					D4:	LEFTMASK		A4:	SAVEPTR
+;					D5:	LONGCNT			A5: DSTPTR
+;					D6:	OFFSET			A6:	COPY LONGCNT
+;					D7:	SCRATCH		   (A7): LEFTMASK
+;									   4(A7): COPY OFFSET
+Shadow8
+		move	d5,d0						;get a copy of long cnt
+		addq	#1,d0						;make one based
+		lsl		#2,d0						;make into byte cnt
+		sub		d0,a1						;make srcRow into srcBump
+
+		asr		#3,d6						;make offset into bytes
+		add		d6,a2						;adjust src ptr
+		add		d6,a3						;adjust mask ptr
+
+
+;-----------------------------------------------
+;
+;  SAVE DSTLEFT/DSTBUMP/LONGCNT/ROWCNT INTO CRSRPTR SO THAT
+;  HIDECURSOR KNOWS HOW MUCH SCREEN TO REPLACE.
+
+		movem.l	d3/d5/a6/a5/a0,-(sp)
+		MOVE.L	([CRSRPTR]),D0				;GET POINTER TO CURSOR DATA (LOCKED)
+		_rTranslate24To32
+		MOVE.L	D0,A6
+		LEA		CCBYTES(A6),A6				;POINT TO END OF SAVE STATE AREA
+		move.w	mouse,d0					;get vert pos
+		lsr.w	#6,d0						;d0=voff
+	;	add.w	#voff,d3
+		add.w	d0,d3
+		move.w	mouse+2,d0					;get horiz pos
+		lsr.w	#6,d0						;d0=hoff
+	;	add.w	#hoff,d5
+		addq	#3,d0
+		lsr.w	#2,d0						;d0=shadow width longs
+		add.w	d0,d5
+
+		lsl.w	#2,d0
+	;	sub.w	#hoff*4,a0
+		sub.w	d0,a0
+		MOVEM.L	A5/A0/D5/D3,-(A6)			;SAVE DSTLEFT/DSTBUMP/LONGCNT/ROWCNT
+		MOVE.L	D5,A6						;SAVE LONGCNT
+
+;-------------------------------------------
+;	Save bits under cursor/shadow
+;-------------------------------------------
+@MAIN2	MOVE.L	(A5)+,d1					;get a long of screen
+		move.l	d1,(a4)+					;save a long of screen
+		dbra	D5,@MAIN2					;DECREMENT LONGCNT
+
+		ADD.L	A0,A5						;BUMP SCREEN POINTER
+		MOVE.L	A6,D5						;RESTORE LONGCNT
+		DBRA	D3,@MAIN2					;=>DO NEXT ROW
+		movem.l	(sp)+,a5/d3/d5/a6/a0
+
+
+;-------------------------------------------
+;	Draw Shadow
+;-------------------------------------------
+		movem.l	d3/a2-a5,-(sp)
+
+	;	moveq	#voff-1,d0
+		move.w	mouse,d0					;get vert pos
+		lsr.w	#6,d0
+		bra.s	@1
+
+@0		ADD.w	CRSRROW,A5					;offset SCREEN POINTER vertically
+@1		dbra	d0,@0
+
+		move.w	mouse+2,d0					;get horiz pos
+		lsr.w	#6,d0
+		add.w	d0,a5
+	;	add.w	#hoff,a5
+
+@MAIN1	MOVE.l	(A5),d1						;get a long of screen
+		move.l	(A2)+,d0					;combine A LONG OF src
+		or.l	(A3)+,d0					;EXTRACT A LONG OF MASK
+		beq.s	@skipit1
+											;d0 = 0
+		moveq	#0,d0						;assume result is black
+		moveq	#$3f,d4						;amount to remove from screen
+		swap	d4							;d4 = $3f0000
+		sub.l	d4,d1						;darken the red channel
+		bcs.s	@pinred
+		move.l	d1,d0						;take the red channel
+@pinred
+		lsr.l	#8,d4
+		sub.w	d4,d1						;darken the grn channel
+		bcs.s	@pingrn
+		move.w	d1,d0						;take the grn channel
+@pingrn
+		lsr.w	#8,d4
+		sub.b	d4,d1						;darken the blu channel
+		bcs.s	@pinblu
+		move.b	d1,d0						;take the blu channel
+@pinblu
+
+	;	move.l	d0,(a5)
+@skipit1
+		addq	#4,a5
+		dbra	D5,@MAIN1					;DECREMENT LONGCNT
+
+		ADD.L	A1,A3						;BUMP CURSOR DATA
+		ADD.L	A1,A2						;BUMP CURSOR MASK
+		ADD.L	A0,A5						;BUMP SCREEN POINTER
+		MOVE.L	A6,D5						;RESTORE LONGCNT
+		DBRA	D3,@MAIN1					;=>DO NEXT ROW
+
+		movem.l	(sp)+,d3/a2-a5
+
+;-------------------------------------------
+;	Draw cursor atop shadow
+;-------------------------------------------
+
+@MAIN	move.l	(A2)+,D0					;EXTRACT A LONG OF SRC
+		tst.l	(A3)+						;EXTRACT A LONG OF MASK
+		bne.s	@inside
+		tst.l	d0							;flip src so that black is all 1's
+		beq.s	@skipit						;no use in xoring with zero
+		MOVE.L	(A5),d1						;get a long of screen
+		eor.l	d1,d0						;xor dst with src
+@inside
+		move.l	d0,(a5)
+@skipit	addq	#4,a5
+		dbra	D5,@MAIN					;DECREMENT LONGCNT
+
+		ADD.L	A1,A3						;BUMP CURSOR DATA
+		ADD.L	A1,A2						;BUMP CURSOR MASK
+		ADD.L	A0,A5						;BUMP SCREEN POINTER
+		MOVE.L	A6,D5						;RESTORE LONGCNT
+		DBRA	D3,@MAIN					;=>DO NEXT ROW
+
+	else
+
+Direct32
+		moveq	#-1,d4
+		lsr.l	#8,d4						;get low3bytes in d4
+		move	d5,d0						;get a copy of long cnt
+		addq	#1,d0						;make one based
+		lsl		#2,d0						;make into byte cnt
+		sub		d0,a1						;make srcRow into srcBump
+
+		asr		#3,d6						;make offset into bytes
+		add		d6,a2						;adjust src ptr
+		add		d6,a3						;adjust mask ptr
+
+@MAIN	move.l	(A2)+,D0					;EXTRACT A LONG OF SRC
+		MOVE.L	(A5),d1						;get a long of screen
+		move.l	d1,(A4)+					;SAVE A LONG OF SCREEN
+		tst.l	(A3)+						;EXTRACT A LONG OF MASK
+		bne.s	@inside
+		not.l	d0							;flip src so that black is all 1's
+		and.l	d4,d0						;mask off high byte
+		beq.s	@skipit						;no use in xoring with zero
+		eor.l	d1,d0						;xor dst with src
+@inside
+		move.l	d0,(a5)
+@skipit	addq	#4,a5
+		dbra	D5,@MAIN					;DECREMENT LONGCNT
+
+		ADD.L	A1,A3						;BUMP CURSOR DATA
+		ADD.L	A1,A2						;BUMP CURSOR MASK
+		ADD.L	A0,A5						;BUMP SCREEN POINTER
+		MOVE.L	A6,D5						;RESTORE LONGCNT
+		DBRA	D3,@MAIN					;=>DO NEXT ROW
+
+	endif
+
+
+DoneBlit
+		ADDQ	#8,SP						;STRIP LEFTMASK AND OFFSET
+		MOVE.B	#1,CrsrVis					;CURSOR VISIBLE
+
+		moveq	#0,d0
+		move.b	(sp)+,d0					;get previous MMU state in d0
+		_rSwapMMUMode						;restore MMU mode from d0.b
+SkipBlit
+		MOVEM.L (SP)+,D0-D7/A0-A6			;THE WALTZ IS OVER...(TANGO VERY MUCH)
+NoBlit
+		RTS
+
+
+
+;_______________________________________________________________________
+;
+;	UNBLITCURSOR															<dvb 19sep88>
+;
+; This routine unconditionally removes cursor according to the data in
+; CCSTATEREGS.
+; Such things as crsrstate, crsrvis, and other nonsense have already been
+; checked. Vectoring this routine may prove useful for later cursor
+; enhancements.
+
+UNBLITCURSOR	PROC	EXPORT
+		TST.L	CRSRPTR							;CURSOR ALLOCATED?
+		BMI.S	DONEHIDE						;=>NO, JUST RETURN
+		MOVEM.L D1-D4/A0-A2,-(SP)				;SAVE REGS USED
+
+		MOVE.L	([CRSRPTR]),A0					;GET POINTER TO CURSOR SAVE DATA (LOCKED)
+		MOVE.L	CCSAVE(A0),A1					;GET HANDLE TO SAVED BITS
+		MOVE.L	(A1),d0							;POINT TO SAVED BITS
+		_rTranslate24To32						;mask off high byte
+		move.l	d0,a1
+		LEA		CCSTATEREGS(A0),A0				;POINT TO SAVE STATE AREA
+		MOVEM.L	(A0)+,D2/D3/D4/A2				;GET /ROWCNT/LONGCNT/DSTBUMP/DSTLEFT
+
+		moveq	#true32b,d0						;switch to 32 bit mode
+		movem.l	d2/a1/a2,-(sp)					;save off registers
+		_rSwapMMUMode							;get previous mode in d0.b (can trash a0/a2, d0/d2)
+		movem.l	(sp)+,d2/a1/a2					;restore registers
+
+		MOVE.L	D3,A0							;SAVE LONGCNT
+@1		MOVE.L	(A1)+,(A2)+						;RESTORE A LONG OF SOURCE
+		DBRA	D3,@1							;=>DO ENTIRE ROW
+		MOVE.L	A0,D3							;RESTORE LONGCNT
+		ADD		D4,A2							;BUMP DST
+		DBRA	D2,@1							;=>DO FOR ALL LINES
+
+		_rSwapMMUMode							;restore original mode from d0.b
+
+		CLR.B	CRSRVIS 						;MARK IT AS INVISIBLE
+		MOVEM.L (SP)+,D1-D4/A0-A2				;RESTORE REGS USED
+DONEHIDE RTS
+
+
+;
+;_______________________________________________________________________
+;
+;  FUNCTION ScrnAddress:Ptr;
+;
+;	return a pointer to the start of the bit-map display
+;
+ScrnAddress		PROC	EXPORT
+		MOVE.L	ScrnBase,4(SP)			;get screenBase set up by OS
+		RTS 							;that was easy!
+
+;
+;_______________________________________________________________________
+;
+;  PROCEDURE ScrnSize(VAR hDots,vDots: INTEGER);
+;
+;  return the size of the screen in pixels
+;
+ScrnSize	PROC	EXPORT
+		MOVE.L	(SP)+,D0				;get the return address
+		MOVE.L	MainDevice,A0			;get handle to main screen device
+		MOVE.L	(A0),A0					;point to main screen device
+		MOVE.L	(SP)+,A1				;get pointer to vDots
+		MOVE	GDRect+bottom(A0),D1	;get bottom
+		SUB		GDRect+top(A0),D1		;calc height
+		MOVE	D1,(A1)					;return the number of vertical pixels
+		MOVE.L	(SP)+,A1				;get pointer to hdots
+		MOVE	GDRect+right(A0),D1		;get right
+		SUB		GDRect+left(A0),D1		;calc width
+		MOVE	D1,(A1)					;return the number of horizontal pixels
+		MOVE.L	D0,A0					;get return address
+		JMP		(A0)					;and return
+
+;_______________________________________________________________________
+;
+;  PROCEDURE ScrnBitMap(VAR x: BitMap);
+;
+;  return the screen bitmap
+;
+ScrnBitMap		PROC	EXPORT
+		MOVE.L	(SP)+,D0				;get the return address
+		MOVE.L	MainDevice,A0			;get handle to main screen device
+		MOVE.L	(A0),A0					;point to main screen device
+		MOVE.L	GDPMap(A0),A0			;get handle to screen's pixMap
+		MOVE.L	(A0),A0					;point to screen's pixMap
+		MOVE.L	(SP)+,A1				;get pointer to BitMap
+		MOVE.L	(A0)+,(A1)+				;copy base addr
+		MOVE	(A0)+,D1				;get rowbytes
+		AND		#nuRBMask,D1			;mask flag bits
+		MOVE	D1,(A1)+				;copy rowbytes
+		MOVE.L	(A0)+,(A1)+				;copy bounds.topleft
+		MOVE.L	(A0)+,(A1)+				;copy bounds.botright
+		MOVE.L	D0,A0					;get return address
+		JMP		(A0)					;and return
+
+

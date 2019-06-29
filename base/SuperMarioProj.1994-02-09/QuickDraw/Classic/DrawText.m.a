@@ -1,0 +1,986 @@
+;
+;	File:		DrawText.m.a
+;
+;	Contains:	QuickDraw Character Generator
+;
+;	Copyright:	© 1988-1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <3>	  8/3/90	GGD		Restored deleted code from last change that caused cursors to
+;									disappear forever.
+;		 <2>	 3/29/90	CL		Getting rid of old Spline Font code. It all exists in the color
+;									DrawText.a code.
+;	   <1.6>	 6/10/89	CEL		Moved Private.a QuickDraw Equates into proper QuickDraw private
+;									file (colorequ.a), got rid of QuickDraw nFiles dependencies and
+;									fixed up necessary files…
+;	  <•1.5>	  5/4/89	CEL		Cleaned up conditionals for ROM, HcMac works now! Blasting in
+;									fix…
+;	  <•1.4>	  5/3/89	CEL		Bass rolled into ROM. NOTE:Spline Fonts are conditionalized out.
+;									Blasting in correct file
+;	  <•1.2>	  5/1/89	cel		Rolled in Bass…
+;	   <1.1>	11/11/88	CCH		Fixed Header.
+;	   <1.0>	 11/9/88	CCH		Adding to EASE.
+;	   <1.2>	10/12/88	CCH		Changed “m.GrafType.a” to “GrafType.m.a”.
+;	   <1.1>	 5/18/88	MSH		Changed inclides to use m.GRAPHTYPES to work under EASE.
+;	   <1.0>	 2/11/88	BBM		Adding file for the first time into EASE…
+;		<.3>	7/01/87		CRC		Allow for fonts with strikes greater than 128K
+;		<.2>	11/12/87	DAF		Added toolequ.a to build for somebody's incorrectly
+;									rolled-in patches.
+; 		<.1>	4/29/85		BA		Completely reworked to get 50% speed up.  Takes advantage of 
+;									optional height table at end of font.
+;		
+;
+;	To Do:
+;
+
+				BLANKS			ON
+				STRING			ASIS
+
+
+		INCLUDE		'toolequ.a'					;<C964/12Nov87> DAF
+		INCLUDE		'GRAFTYPES.m.a'
+
+DrText	PROC  EXPORT
+	IMPORT 		TrimRect, RSect, MaskTab, RightMask, StretchBits
+	IMPORT	ShieldCursor, ShowCursor, MapRect
+;------------------------------------------------------------
+;
+;  PROCEDURE DrText(count: INTEGER; textAddr: Ptr; numer,denom: Point);
+;
+;  DRAWS CHARACTERS INTO THE CURRENT PORT'S BITMAP.
+;  THE FONT AND ATTRIBUTES ARE GIVEN IN THE CURRENT PORT'S CHARSTYLE.
+;
+
+
+;-------------------------------------------
+;
+;  KERNED STRIKE FONT FORMAT OFFSETS:
+;
+FORMAT			EQU 	0			;WORD
+MINCHAR 		EQU 	2			;WORD
+MAXCHAR 		EQU 	4			;WORD
+MAXWD			EQU 	6			;WORD
+FBBOX			EQU 	8			;WORD
+FBBOY			EQU 	10			;WORD
+FBBDX			EQU 	12			;WORD
+FBBDY			EQU 	14			;WORD
+LENGTH			EQU 	16			;WORD
+ASCENT			EQU 	18			;WORD
+DESCENT 		EQU 	20			;WORD
+XOFFSET 		EQU 	22			;WORD
+RASTER			EQU 	24			;WORD
+
+
+;------------------------------------------------------
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	14				;SIZE OF PARAMETERS
+COUNT			EQU 	PARAMSIZE+8-2			;WORD
+TEXTADDR		EQU 	COUNT-4 			;LONG
+NUMER			EQU 	TEXTADDR-4			;LONG, POINT
+DENOM			EQU 	NUMER-4 			;LONG, POINT
+
+
+;-----------------------------------------------------------
+;
+;  A6 OFFSETS OF LOCAL VARIABLES AFTER LINK:
+;
+SAVESTK 		EQU 	-4				;LONG
+TEXTRECT		EQU 	SAVESTK-8			;RECT
+TEXTR2			EQU 	TEXTRECT-8			;RECT
+MINRECT 		EQU 	TEXTR2-8			;RECT
+BUFEND			EQU 	MINRECT-4			;LONG
+BUFSIZE 		EQU 	BUFEND-2			;WORD
+BUFROW			EQU 	BUFSIZE-2			;WORD
+BUFLEFT 		EQU 	BUFROW-2			;WORD
+BUF2START		EQU 	BUFLEFT-4			;LONG
+BUF2END 		EQU 	BUF2START-4 		;LONG
+HEIGHT			EQU 	BUF2END-2			;WORD
+SRCBITS 		EQU 	HEIGHT-14			;BITMAP
+DSTBITS 		EQU 	SRCBITS-14			;BITMAP
+FAKERGN 		EQU 	DSTBITS-10			;RECTANGULAR REGION
+FAKEPTR 		EQU 	FAKERGN-4			;LONG, FAKE MASTER POINTER
+FASTFLAG		EQU 	FAKEPTR-2			;BYTE
+PENLOC			EQU 	FASTFLAG-4			;POINT
+SRCPTR			EQU 	PENLOC-4			;LONG
+DSTPTR			EQU 	SRCPTR-4			;LONG
+STRETCH 		EQU 	DSTPTR-2			;BOOLEAN
+FROMRECT		EQU 	STRETCH-8			;RECT
+TORECT			EQU 	FROMRECT-8			;RECT
+SRCRECT 		EQU 	TORECT-8			;RECT
+DSTRECT 		EQU 	SRCRECT-8			;RECT
+SPWIDTH 		EQU 	DSTRECT-4			;FIXED POINT
+CHARLOC 		EQU 	SPWIDTH-4			;FIXED POINT
+INFO			EQU 	CHARLOC-8			;4 WORDS
+HEIGHTAB		EQU 	INFO-4				;LONG
+WIDTAB			EQU 	HEIGHTAB-4			;LONG
+LOCTAB			EQU 	WIDTAB-4			;LONG
+TOPHT			EQU 	LOCTAB-2			;word
+HEIGHTFLAG		EQU 	TOPHT-2 			;byte
+MAXMIN			EQU 	HEIGHTFLAG-2			;word
+MINCH			EQU 	MAXMIN-2			;word
+SAVEA5			EQU 	MINCH-4 			;LONG
+NUMER2			EQU 	SAVEA5-4			;Point
+DENOM2			EQU 	NUMER2-4			;Point
+BUFSTART		EQU 	DENOM2-4			;LONG \						start of bits buffer
+SRCADDR 		EQU 	BUFSTART-4			;LONG  >- these 3 grouped:  address of font bits
+SRCROW			EQU 	SRCADDR-4			;LONG /						rowbytes of font bits
+VARSIZE 		EQU 	SRCROW				;SIZE OF VARIABLES
+
+		LINK	A6,#VARSIZE 			;ALLOCATE TEMP VARS
+		MOVEM.L D0-D7/A1-A4,-(SP)			;SAVE REGS
+		MOVE.L	SP,SAVESTK(A6)				;REMEMBER WHERE STACK WAS
+		MOVE.L	A5,SAVEA5(A6)				;REMEMBER GLOBAL PTR
+		MOVE.L	GRAFGLOBALS(A5),A4			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A4),A3				;GET CURRENT GRAFPORT
+		MOVE.L	NUMER(A6),NUMER2(A6)			;SAVE ORIGINAL NUMER
+		MOVE.L	DENOM(A6),DENOM2(A6)			;SAVE ORIGINAL DENOM
+;
+;  Call StdTxMeas to swap font and measure width.
+;
+		CLR 	-(SP)					;ROOM FOR FCN RESULT
+		MOVE	COUNT(A6),-(SP) 			;PUSH COUNT
+		BLE 	GOHOME					;QUIT IF COUNT <= 0
+												;STACK CLEANED UP BY SAVESTK
+		MOVE.L	TEXTADDR(A6),-(SP)			;PUSH TEXTADDR
+		PEA 	NUMER(A6)				;PUSH VAR NUMER
+		PEA 	DENOM(A6)				;PUSH VAR DENOM
+		PEA 	INFO(A6)				;PUSH VAR INFO
+		MOVE.L	JStdTxMeas,A0				;get piece of trap table
+		JSR 	(A0)					;MEASURE TEXT
+		MOVE	(SP)+,D1				;POP UNSCALED WIDTH RESULT
+;
+;  StdTxMeas also stashes FMOutPtr in QD global FONTPTR,
+;  and unscaled fixed point text width in FixTxWid.
+;
+		MOVE.L	FONTPTR(A4),A4				;POINT TO FMOUTPUT
+		MOVE.L	2(A4),A2				;GET FONT HANDLE
+		MOVE.L	(A2),A2 				;DE-REFERENCE IT
+		MOVE	FBBDY(A2),TOPHT(A6) 		;INIT TOPHT IN CASE OLD FONT
+		BTST	#0,1(A2)				;DOES FONT HAVE HEIGHT TABLE ?
+		SNE 	HEIGHTFLAG(A6)				;REMEMBER FOR LATER
+;
+;  Setup textRect, the rectangle bounding the entire string.
+;
+		MOVE.L	PNLOC(A3),D2				;GET PEN LOCATION
+		MOVE.L	D2,PENLOC(A6)				;SAVE FOR LATER
+		MOVE.W	D2,TEXTRECT+LEFT(A6)			;TEXTRECT.LEFT := PNLOC.H
+		ADD.W	D1,D2					;right := left + width
+		MOVEQ	#7,D0					;get mode mask
+		AND 	TXMODE(A3),D0				;is txMode = srcCopy ?
+		BEQ.S	NOSLOP					;yes, don't add slop
+		CMP 	#3,D0					;is textMode > srcBic ?
+		BGT.S	NOSLOP					;yes, don't add slop
+		ADD.W	#32,D2					;SLOP FOR ITALIC,BOLD,OVERSTRIKE
+NOSLOP	MOVE.W	D2,TEXTRECT+RIGHT(A6)			;STORE IN TEXTRECT.RIGHT
+		SWAP	D2					;GET PNLOC.V
+		SUB 	ASCENT(A2),D2				;SUBTRACT ASCENT
+		MOVE	D2,TEXTRECT+TOP(A6) 		;TEXTRECT.TOP := PNLOC.V - ASCENT
+		ADD 	FBBDY(A2),D2				;ADD HEIGHT
+		MOVE	D2,TEXTRECT+BOTTOM(A6)			;TEXTRECT.BOTTOM := TOP + HEIGHT
+		MOVE.L	TEXTRECT(A6),TEXTR2(A6) 		;MAKE AN EXTRA COPY
+		MOVE.L	TEXTRECT+4(A6),TEXTR2+4(A6) 	;OF TEXTRECT IN TEXTR2
+
+;
+;  Check for stretching
+;
+		MOVE.L	NUMER(A6),D0				;GET NUMERATOR
+		CMP.L	DENOM(A6),D0				;ARE WE STRETCHING ?
+		SNE 	STRETCH(A6) 			;REMEMBER THE ANSWER
+		BEQ.S	NOSTRCH 				;CONTINUE IF NOT STRETCHING
+
+;
+;  We will be stretching.  Setup fromRect and toRect and map textR2.
+;
+		MULU	D0,D1					;MULT WIDTH BY NUMER.H
+		DIVU	DENOM+H(A6),D1				;DIV BY DENOM.H
+
+		MOVE.L	PENLOC(A6),D0				;GET PENLOC
+		MOVE.L	D0,TORECT+TOPLEFT(A6)			;SET UP TORECT TOPLEFT
+		ADD.W	NUMER+H(A6),D0				;CALC PENLOC.H + NUMER.H
+		MOVE	D0,TORECT+RIGHT(A6) 		;SET UP TORECT RIGHT
+		SWAP	D0					;GET PENLOC.V
+		ADD 	NUMER+V(A6),D0				;CALC PENLOC.V + NUMER.V
+		MOVE	D0,TORECT+BOTTOM(A6)			;SET UP TORECT BOTTOM
+
+		MOVE.L	PENLOC(A6),D0				;GET PENLOC
+		MOVE.L	D0,FROMRECT+TOPLEFT(A6) 		;SET UP FROMRECT TOPLEFT
+		ADD.W	DENOM+H(A6),D0				;CALC PENLOC.H + DENOM.H
+		MOVE	D0,FROMRECT+RIGHT(A6)			;SET UP FROMRECT RIGHT
+		SWAP	D0					;GET PENLOC.V
+		ADD 	DENOM+V(A6),D0				;CALC PENLOC.V + DENOM.V
+		MOVE	D0,FROMRECT+BOTTOM(A6)			;SET UP FROMRECT BOTTOM
+
+		PEA 	TEXTR2(A6)				;PUSH TEXTR2
+		PEA 	FROMRECT(A6)				;PUSH FROMRECT
+		PEA 	TORECT(A6)				;PUSH TORECT
+		JSR 	MAPRECT 				;MAP TEXTR2 (PRESERVES ALL REGS)
+
+NOSTRCH ADD 	D1,PNLOC+H(A3)				;BUMP PEN BY (SCALED) TEXT WIDTH
+;
+;  Quit if the pen is hidden
+;
+		TST 	PNVIS(A3)				;IS PNVIS < 0 ?
+		BLT 	GOHOME					;YES, QUIT
+;
+;  Calc minRect: the intersection of textRect, bitMap bounds,
+;  clipRgn and visRgn bounding boxes.  Quit if no intersection.
+;
+		PEA 	TEXTR2(A6)				;PUSH (MAPPED) TEXTRECT
+		PEA 	PORTBOUNDS(A3)				;PUSH BITMAP BOUNDS
+		MOVE.L	CLIPRGN(A3),A0				;GET CLIPRGN HANDLE
+		MOVE.L	(A0),A0 				;DE-REFERENCE IT
+		PEA 	RGNBBOX(A0) 			;PUSH CLIPRGN BBOX
+		MOVE.L	VISRGN(A3),A0				;GET VISRGN HANDLE
+		MOVE.L	(A0),A0 				;DE-REFERENCE IT
+		PEA 	RGNBBOX(A0) 			;PUSH VISRGN BBOX
+		MOVE	#4,-(SP)				;PUSH NRECTS=4
+		PEA 	MINRECT(A6) 			;PUSH DST ADDR
+		JSR 	RSECT					;CALC INTERSECTION
+		BEQ 	GOHOME					;QUIT IF NO INTERSECTION
+;
+;  Set up srcAddr, srcRow, and height
+;
+		LEA 	26(A2),A0				;GET START OF FONT BITMAP
+		MOVE.L	A0,SRCADDR(A6)				;SAVE FOR LATER
+		MOVE	RASTER(A2),D1				;GET WORDS PER ROW IN FONT
+		ADD 	D1,D1					;DOUBLE FOR BYTES PER ROW
+		EXT.L	D1							;Make it a long			<1.4-4april89-CEL>
+		MOVE.L	D1,SRCROW(A6)				;REMEMBER FOR LATER		<1.4-4april89-CEL>
+		MOVE	FBBDY(A2),HEIGHT(A6)			;SETUP HEIGHT FOR LATER
+;
+;  Test for fast case:
+;  not stretched, no color mapping, txMode = srcOr,
+;  not bold, italic, underlined, outlined or shadowed,
+;  visRgn and clipRgn both rectangular.
+;
+		TST.B	fmOutItalic(A4)				;TEST BOLD $$$
+		BNE 	NOTFAST 					;NOT FAST UNLESS BOTH ZERO
+@skipItalic
+		TST.B	fmOutBold(A4)				;TEST BOLD
+		BNE 	NOTFAST 					;NOT FAST
+		CMP 	#1,TXMODE(A3)				;IS TEXT MODE SRCOR ?
+		BNE 	NOTFAST 				;NO, NOT FAST
+		TST.W	10(A4)					;TEST ULTHICK AND SHADOW
+		BNE 	NOTFAST 				;NOT FAST UNLESS BOTH ZERO
+		TST.B	STRETCH(A6) 			;IS TEXT STRETCHED ?
+		BNE 	NOTFAST 				;YES, NOT FAST
+		MOVE	COLRBIT(A3),D1				;ARE WE COLOR MAPPING ?
+		BMI.S	NOCOLOR 				;NO, CONTINUE
+		MOVE.L	BKCOLOR(A3),D0				;YES GET BACKGROUND COLOR
+		NOT.L	D0					;INVERT IT
+		AND.L	FGCOLOR(A3),D0				;AND WITH FOREGROUND COLOR
+		BTST	D1,D0					;IS THAT PLANE NORMAL ?
+		BEQ 	NOTFAST 				;NO, NOT FAST
+NOCOLOR MOVE.L	CLIPRGN(A3),A0				;GET CLIPRGN HANDLE
+		MOVE.L	(A0),A0 				;DE-REFERENCE IT
+		MOVEQ	#10,D0
+		CMP 	RGNSIZE(A0),D0				;IS CLIPRGN RECTANGULAR ?
+		BNE.S	NOTFAST 				;NO, NOT FAST
+		MOVE.L	VISRGN(A3),A1				;GET VISRGN HANDLE
+		MOVE.L	(A1),A0 				;DE-REFERENCE IT
+		CMP 	RGNSIZE(A0),D0				;IS VISRGN RECTANGULAR ?
+		BEQ.S	FAST					;YES, TAKE FAST OPTIMIZATION
+;
+;  All systems go except for VisRgn not rectangular.
+;  Check if visRgn sect minRect is rectangular.
+;  IF TrimRect(visRgn,minRect) THEN take the fast way.
+;
+		MOVE.L	A1,-(SP)				;PUSH VISRGN
+		PEA 	MINRECT(A6) 			;PUSH MINRECT
+		JSR 	TRIMRECT				;CALL TRIMRECT
+		BLT 	GOHOME					;quit if intersection empty
+		BGT.S	NOTFAST 				;continue if non-rectangular
+;
+;  Fast case, go directly to screen.
+;  If text is clipped vertically, then clear heightflag and update TOPHT
+;
+FAST	
+		ST		FASTFLAG(A6)			  ;REMEMBER WE'RE GOING FAST
+		MOVE	MINRECT+TOP(A6),D0		  ;GET MINRECT.TOP
+		MOVE	MINRECT+BOTTOM(A6),D1		  ;GET MINRECT.BOTTOM
+		SUB 	TEXTRECT+TOP(A6),D0 	  ;was top clipped ?
+		BNE.S	VCLIP				  ;yes, handle clip
+		CMP 	TEXTRECT+BOTTOM(A6),D1		  ;was bottom clipped ?
+		BEQ.S	VCLIPOK 			  ;no, continue
+
+VCLIP	CLR.B	HEIGHTFLAG(A6)			  ;can't use height table
+		MOVE.B	D0,TOPHT(A6)			  ;use adjusted top
+		SUB 	MINRECT+TOP(A6),D1		  ;calc clipped height
+		MOVE.B	D1,TOPHT+1(A6)			  ;replace TOPHT
+
+VCLIPOK MOVE	TEXTRECT+TOP(A6),D0 	  ;GET DST TOP
+		SUB 	PORTBOUNDS+TOP(A3),D0		  ;CONVERT TO GLOBAL COORDINATES
+		MULS	PORTBITS+ROWBYTES(A3),D0	  ;MULT BY ROWBYTES
+		ADD.L	PORTBITS+BASEADDR(A3),D0	  ;ADD START OF DST BITMAP
+		MOVE.L	D0,BUFSTART(A6) 		  ;SET UP BUFSTART FOR LATER
+		MOVE	PORTBITS+ROWBYTES(A3),BUFROW(A6)  ;SET UP BUFROW FOR LATER
+		MOVE	PORTBOUNDS+LEFT(A3),BUFLEFT(A6)   ;REMEMBER BUFLEFT
+		PEA 	MINRECT(A6) 		  ;PUSH SHIELD RECT
+		MOVE.L	PORTBOUNDS+TOPLEFT(A3),-(SP)	  ;PUSH DELTA TO CONVERT TO GLOBAL
+		JSR 	SHIELDCURSOR			  ;HIDE CURSOR IF IT INTERSECTS
+		BRA 	GETPTRS							; <3>
+
+;
+;  Slow case: Setup for an off-screen buffer.
+;
+;  Calc bufLeft:  (word-align to avoid shift)
+;
+NOTFAST CLR.B	FASTFLAG(A6)				;NOT GOING DIRECTLY TO SCREEN
+		MOVE	TEXTRECT+LEFT(A6),D0			;GET TEXTRECT LEFT
+		SUB 	PORTBOUNDS+LEFT(A3),D0			;CONVERT TO GLOBAL
+		AND 	#$FFF0,D0				;TRUNC TO WORD BOUND
+		SUB 	#32,D0					;32 DOT SLOP FOR SLANT & SHADOW
+		ADD 	PORTBOUNDS+LEFT(A3),D0			;RETURN TO LOCAL COORDS
+		MOVE	D0,BUFLEFT(A6)				;REMEMBER FOR LATER
+;
+;  Calculate buffer size
+;
+		MOVE	TEXTRECT+RIGHT(A6),D1			;BUFRIGHT := TEXTRECT RIGHT
+		SUB 	D0,D1					;WIDTH:=BUFRIGHT-BUFLEFT
+		LSR 	#5,D1					;CONVERT DOTS TO LONGS
+		ADD 	#2,D1					;ROUND UP PLUS EXTRA LONG
+		MOVE	HEIGHT(A6),D3				;GET HEIGHT
+		MULU	D1,D3					;BUFSIZE:=HEIGHT*BUFROW LONGS
+		MOVE	D3,BUFSIZE(A6)				;SAVE FOR LATER
+		LSL 	#2,D1					;QUAD BUFROW FOR BYTES
+		MOVE	D1,BUFROW(A6)				;SAVE FOR LATER
+;
+;  Calculate total stack requirements for off-screen buffers.
+;
+		MOVE.L	D3,D2					;GET BUFSIZE LONGS
+		TST.B	11(A4)					;ARE WE SHADOWING ?
+		BEQ.S	@1						;NO, CONTINUE
+		ADD.L	D2,D2					;YES, CALC 2*BUFSIZE
+		EXT.L	D1						;SIGN EXTEND BUFROW
+		ADD.L	D1,D2					;CALC TOTAL LONGS
+@1		LSL.L	#2,D2					;CALC TOTAL STACK BYTES NEEDED
+		ADD.L	#1024,D2				;ADD 1 KBYTE SLOP
+;
+;  If stack is too small to allocate buffer(s), then recursively call
+;  DrText with the left half and the right half of the text string.
+;
+		_StackAvail 				;Get StackAvail IN D0
+		CMP.L	D0,D2					;IS stackNeeded > stackAvail ?
+		BLE.S	STACKOK 				;NO, CONTINUE
+
+		MOVE.L	PENLOC(A6),PNLOC(A3)			;RESTORE PNLOC TO ORIGINAL
+
+		MOVE	COUNT(A6),D7				;GET CHARACTER COUNT
+		LSR 	#1,D7					;DIVIDE IN HALF
+		BEQ 	GOHOME					;GIVE UP IF COUNT WAS ONLY ONE
+		MOVE	D7,-(SP)				;PUSH NEW COUNT
+		MOVE.L	TEXTADDR(A6),-(SP)			;PUSH TEXTADDR
+		MOVE.L	NUMER2(A6),-(SP)			;PUSH ORIGINAL NUMER
+		MOVE.L	DENOM2(A6),-(SP)			;PUSH ORIGINAL DENOM
+		JSR 	DrText					;DRAW THE FIRST HALF
+
+		MOVE	COUNT(A6),D0				;GET ORIGINAL CHARACTER COUNT
+		SUB 	D7,D0					;SUBTRACT CHARS ALREADY DONE
+		MOVE	D0,-(SP)				;PUSH NEW COUNT
+		MOVE.L	TEXTADDR(A6),A0 			;GET ORIGINAL TEXTADDR
+		ADD 	D7,A0					;BUMP PAST CHARS ALREADY DONE
+		MOVE.L	A0,-(SP)				;PUSH NEW TEXTADDR
+		MOVE.L	NUMER2(A6),-(SP)			;PUSH ORIGINAL NUMER
+		MOVE.L	DENOM2(A6),-(SP)			;PUSH ORIGINAL DENOM
+		JSR 	DrText					;DRAW THE SECOND HALF
+		BRA 	GOHOME					;AND QUIT !
+
+;
+;  Allocate and clear an off-screen buffer
+;
+STACKOK SUB 	#1,D3					;INIT DBRA LOOP COUNT
+		CLR.L	-(SP)					;PAD BUFFER WITH AN EXTRA ZERO
+		MOVE.L	SP,BUFEND(A6)				;REMEMBER WHERE BUFFER ENDS
+CLRLOOP CLR.L	-(SP)
+		DBRA	D3,CLRLOOP				;ALLOCATE AND CLEAR BUFFER
+		MOVE.L	SP,BUFSTART(A6) 			;REMEMBER START OF BUFFER
+		CLR.L	-(SP)					;PAD BUFFER WITH AN EXTRA ZERO
+
+;
+;  Get pointers to location table, width table, and height table in font
+;
+GETPTRS 
+		LEA 	26(A2),A0				;GET START OF FONT BITMAP
+		MOVE	FBBDY(A2),D0				;GET HEIGHT OF FONT BITMAP
+		EXT.L	D0							;Make it a long to clear top half	<1.4-4april89-CEL>
+		MOVE.L	SRCROW(A6),D1				;CALC TOTAL SIZE OF STRIKE			<1.4-4april89-CEL>
+		MULU	D1,D0						;CALC TOTAL SIZE OF STRIKE			<1.4-4april89-CEL>
+		ADD.L	D0,A0					;A1 := START OF LOC TABLE
+		MOVE.L	A0,LOCTAB(A6)				;SAVE FOR LATER
+
+		MOVE.W	fNDescent(A2),D0			;possibly the high word of owTLoc
+		SWAP	D0							;put it in the high word
+		BPL.S	@notNegative
+		MOVEQ	#0,D0						;old fonts have negative of ascent here
+@notNegative
+		MOVE	LENGTH(A2),D0				;HOW MANY WORDS IN STRIKE BODY
+		ADD.L	D0,D0					;DOUBLE FOR BYTECOUNT
+		LEA 	16(A2,D0.L),A1				;GET START OF WIDTH TABLE
+		MOVE.L	A1,WIDTAB(A6)				;SAVE FOR LATER
+
+		MOVE	MAXCHAR(A2),D0				;GET MAXCHAR
+		MOVE	MINCHAR(A2),D1				;GET MINCHAR
+		MOVE	D1,MINCH(A6)				;STASH MINCHAR FOR LATER
+		SUB 	D1,D0					;CALC MAXCHAR-MINCHAR
+		MOVE	D0,MAXMIN(A6)				;SAVE FOR LATER
+
+		ADD 	#3,D0					;CALC MAXMIN+3
+		ADD 	D0,D0					;CALC 2*(MAX-MIN+3)
+		BTST	#1,1(A2)				;DOES FONT HAVE WIDTH TABLE ?
+		BEQ.S	NOWID					;NO, CONTINUE
+		ADD 	D0,D0					;YES, SKIP OVER WIDTH TABLE
+NOWID	LEA 	0(A1,D0),A0 			;POINT TO HEIGHT TABLE
+		MOVE.L	A0,HEIGHTAB(A6) 			;SAVE FOR LATER
+
+;
+;  Set up space width
+;
+		MOVE.L	WidthTabHandle, A0			;Get the Width Table		<1.4-4april89-CEL>
+		MOVE.L	(A0), A0					;Dereference the table		<1.4-4april89-CEL>
+		MOVE.L	128(A0),SPWIDTH(A6) 		;get width of the space char
+;
+;  Setup misc stuff in registers for speed
+;
+		MOVE	BUFLEFT(A6),D1				;GET BUFLEFT
+		MOVE	PENLOC+H(A6),D0 			;GET PEN LOCATION
+		ADD 	FBBOX(A2),D0				;ADJUST FOR KERNING
+		SUB 	D1,D0					;MAKE CHARLOC RELATIVE TO BUFLEFT
+		MOVE.W	D0,CHARLOC(A6)				;INIT INT PART OF CHARLOC
+		MOVE	#$8000,CHARLOC+2(A6)			;SET FRACT PART TO ONE HALF
+		SUB 	D1,MINRECT+LEFT(A6) 		;MAKE MINRECT.LEFT AND
+		SUB 	D1,MINRECT+RIGHT(A6)			;MINRECT.RIGHT BUFFER RELATIVE
+		MOVE.L	TEXTADDR(A6),A1 			;GET TEXTPTR
+		BRA.S	NEXTCH					;GO TO LOOP START
+
+
+;---------------------------------------------------
+;
+;  Here's the main character drawing loop:
+;
+MISSING 
+		MOVE	MAXMIN(A6),D0				;NO, USE MISSING SYMBOL
+		ADD 	#1,D0					;WHICH IS ONE PAST MAXCHAR
+		ADD 	D0,D0					;INDEX := 2*(MISSING-MINCHAR)
+		MOVE.L	WIDTAB(A6),A0				;POINT TO WIDTH TABLE
+		MOVE	0(A0,D0),D3 			;GET OFFSET AND WIDTH BYTES
+		BPL		NOTMISS 				;IS MISSING CHAR MISSING ?
+		BRA.S	NEXTCH					;YES, SKIP THIS CHAR
+
+SPACECH MOVE.L	SPWIDTH(A6),D1				;GET SPACE WIDTH
+		ADD.L	D1,CHARLOC(A6)				;BUMP CHARLOC
+SKIPCH	SUB 	#1,COUNT(A6)				;DECREMENT CHAR COUNT
+		BLE 	STRDONE 				;QUIT IF CHARCOUNT <= 0
+NEXTCH	CLR 	D0					;get ready for byte
+		MOVE.B	(A1)+,D0				;GET NEXT CHAR
+		CMP.B	#32,D0					;IS IT A SPACE ?
+		BEQ.S	SPACECH 				;YES, HANDLE IT
+
+		MOVE.L	WidthTabHandle, A0		;Get the Width Table
+		MOVE.L	(A0), A0				;Dereference the table
+		MOVE	D0,D4					;COPY CHARACTER	
+		LSL 	#2,D4					;QUAD FOR TABLE OFFSET
+		MOVE.L	0(A0,D4),D4 			;GET FIXED POINT WIDTH
+		SUB 	MINCH(A6),D0				;SUBTRACT SAVED MINCHAR
+		CMP 	MAXMIN(A6),D0				;IS CH BETWEEN MINCHAR AND MAXCHAR ?
+		BHI		MISSING						;Missing so miss it				<1.4-4april89-CEL>
+
+OKCHAR	ADD 	D0,D0					;INDEX := 2*(ASCII-MINCHAR)
+		MOVE.L	WIDTAB(A6),A0				;POINT TO WIDTH TABLE
+		MOVE	0(A0,D0),D3 			;GET OFFSET AND WIDTH BYTES
+		BMI 	MISSING 				;OFFSET NEG = MISSING CHAR
+
+NOTMISS LSR 	#8,D3					;GET OFFSET BYTE
+		ADD.W	CHARLOC(A6),D3				;DSTLEFT := CHARLOC.INT + OFFSET
+		ADD.L	D4,CHARLOC(A6)				;ADD FIXED POINT WIDTH TO CHARLOC
+
+		MOVE.L	LOCTAB(A6),A0				;POINT TO LOCATION TABLE
+		MOVE	0(A0,D0),D1 			;GET SRCLEFT
+		MOVE	2(A0,D0),D2 			;GET SRCRIGHT
+		SUB 	D1,D2					;CALC WIDTH OF BITS
+		BLE 	SKIPCH					;SKIP CHARBLT IF WIDTH <= 0
+		ADD 	D3,D2					;DSTRIGHT := DSTLEFT + WIDTH
+
+		TST.B	HEIGHTFLAG(A6)				;does font have height table ?
+		BEQ.S	NOHEIGHT				;no, continue
+		MOVE.L	HEIGHTAB(A6),A0 			;get height table
+		MOVE	0(A0,D0),TOPHT(A6)			;get this char's top and height
+NOHEIGHT
+
+;-----------------------------------------------------------------------
+;
+;  Horizontal clip only if FastFlag:   (else stretch,outline,shadow,italic die)
+;
+;  skip if hidden on left, string done if hidden on right.
+;
+;  at this point:	D1: srcLeft
+;			D2: dstRight
+;			D3: dstLeft
+;
+		TST.B	FastFlag(A6)				;ARE WE GOING FAST ?
+		BEQ.S	HORIZOK 				;NO, DON'T CLIP
+		CMP 	MINRECT+LEFT(A6),D3 		;IS DSTLEFT < MINRECT.LEFT ?
+		BGE.S	LEFTOK					;NO, CONTINUE
+		CMP 	MINRECT+LEFT(A6),D2 		;IS DSTRIGHT <= MINRECT.LEFT ?
+		BLE 	SKIPCH					;YES, SKIP THIS CHAR
+TRIMLFT MOVE	MINRECT+LEFT(A6),D0 		;NO, GET MINRECT.LEFT
+		SUB 	D3,D0					;DISCARD:=MINRECT.LEFT-DSTLEFT
+		ADD 	D0,D1					;SRCLEFT:=SRCLEFT+DISCARD
+		ADD 	D0,D3					;DSTLEFT:=DSTLEFT+DISCARD
+		CMP 	MINRECT+RIGHT(A6),D2			;IS DSTRIGHT > MINRECT.RIGHT ?
+		BLE.S	HORIZOK 				;NO, CONTINUE
+		BRA.S	TRIMRT					;YES, TRIM RIGHT
+LEFTOK	CMP 	MINRECT+RIGHT(A6),D2			;IS DSTRIGHT <= MINRECT.RIGHT ?
+		BLE.S	HORIZOK 				;YES, CONTINUE
+		CMP 	MINRECT+RIGHT(A6),D3			;IS DSTLEFT >= MINRECT.RIGHT ?
+		BGE 	STRDONE 				;YES, IGNORE REST OF STRING
+TRIMRT	MOVE	MINRECT+RIGHT(A6),D2			;NO, TRIM DSTRIGHT
+HORIZOK
+
+
+;--------------------------------------------------------------
+;
+;  Inputs to local block CharBlt:
+;
+;	  srcAddr(A6)
+;	  srcRow(A6)
+;	  bufStart(A6) = dstAddr
+;	  bufRow(A6) = dstRow
+;	  D1 = srcLeft
+;	  D2 = dstRight 		relative to buffer, > dstLeft
+;	  D3 = dstLeft			relative to buffer
+;	  TOPHT(A6) 			top and height
+;
+;	  CLOBBERS:  D0,D1,D2,D3,D4,D5,D6,D7,A0,A2,A3,A4,A5
+;	  PRESERVES: A1,A6,A7
+;
+;
+;  Setup shift count in D5 (relative shift between src and dst)
+;
+		MOVE	D3,D5					;COPY DSTLEFT
+		SUB 	D1,D5					;SUB SRC LEFT
+		MOVEQ	#$F,D0					;get a 4 bit mask
+		AND 	D0,D5					;SHIFTCNT:=DELTA HORIZ MOD 16
+		MOVE	BUFROW(A6),A3			;Get Bufrow in A3					<1.4-4april89-CEL>
+		MOVEM.L	SRCROW(A6),A2/A4-A5		;srcRow, srcAddr (src bitmap), bufStart (dst bitmap) <1.4-4april89-CEL>
+
+;
+;  Setup srcAddr in A4, address of leftmost word
+;
+;		MOVE.L	SRCADDR(A6),A4				;GET START OF SRC BITMAP		<1.4-4april89-CEL>
+		ADD 	D5,D1					;CALC SRCLEFT+SHIFTCNT
+		ASR 	#4,D1					;CONVERT FROM DOTS TO WORDS
+		ADD 	D1,D1					;DOUBLE FOR BYTES
+		SUB 	#2,D1					;BACK UP 1 WORD SINCE PICKING UP LONG
+		ADD 	D1,A4					;LEAVE SRCPTR IN A4
+
+;
+;  Setup dstPtr in A5, address of leftmost dst word
+;
+;		MOVE.L	BUFSTART(A6),A5 			;GET START OF DST BITMAP		<1.4-4april89-CEL>
+		MOVE	D3,D1					;GET A COPY OF DSTLEFT
+		ASR 	#4,D1					;CONVERT FROM DOTS TO WORDS
+		ADD 	D1,A5					;ADD TO DSTPTR
+		ADD 	D1,A5					;TWICE FOR BYTES
+
+;
+;  Setup leftMask in D3 and rightMask in D4
+;
+		LEA 	MaskTab,A0				;point to mask table
+		AND 	D0,D3					;get bottom 4 bits of dstLeft
+		ADD 	D3,D3					;double for table index
+		MOVE	0(A0,D3),D3 			;get mask word from table
+		NOT 	D3					;invert it for leftMask
+		MOVE	D2,D6					;copy dstRight
+		AND 	D0,D2					;get bottom 4 bits of dstRight
+		ADD 	D2,D2					;double for table index
+		MOVE	0(A0,D2),D4 			;get rightMask from table
+
+;
+;  Get srcRow, dstRow, and char height into regs
+;
+		MOVE.L	SRCROW(A6),A2		;It is a long now			<1.4-4april89-CEL>
+;		MOVE	SRCROW(A6),A2									<1.4-4april89-CEL>
+		MOVE	BUFROW(A6),A3
+		MOVE.W	#255,D7 			 ;GET -1 BYTE, CLEAR HI BYTE
+		ADD.B	TOPHT+1(A6),D7			 ;CALC HEIGHT-1 FOR DBRA LOOP
+		BMI 	SKIPCH				 ;OOPS HEIGHT WAS ZERO !
+;
+;  Adjust srcPtr and dstPtr for charTop
+;
+		CLR.W	D0				 ;get ready for byte
+		MOVE.B	TOPHT(A6),D0			 ;get char top
+		MOVE.L	A2,D2				 ;get srcRow in D-reg		<1.4-4april89-CEL>
+;		MOVE	A2,D2				 ;get srcRow in D-reg		<1.4-4april89-CEL>
+		MULU	D0,D2				 ;calc charTop * srcRow
+		ADD.L	D2,A4				 ;add to srcPtr
+		MOVE	A3,D2				 ;get dstRow in D-reg
+		MULU	D0,D2				 ;calc charTop * dstRow
+		ADD.L	D2,A5				 ;add to dstPtr
+
+;
+;  Branch based on total number of dst words
+;
+		ASR 	#4,D6					;CALC (DSTRIGHT) DIV 16
+		SUB 	D1,D6					;CALC TOTAL NUMBER OF WORDS-1
+		BEQ.S	WORD1					;BR IF DST ALL IN ONE WORD
+		SUB 	#1,D6
+		BEQ.S	LONG1					;BR IF DST ALL IN ONE LONG
+		ADD 	#1,D7					;COMPENSATE FOR EXTRA DBRA
+		BRA.S	WIDE1					;DST WIDER THAN ONE LONG
+
+;
+;  Slow loop only taken in wierd cases where dst wider than a long.
+;
+MAIN1	MOVE.L	(A4),D0 				;GET SRC FROM BITMAP
+		ADD 	#2,A4					;BUMP SRCPTR RIGHT
+		LSR.L	D5,D0					;ALIGN TO DST
+		AND 	D1,D0					;MASK EXTRA TO ZEROS
+		OR		D0,(A5)+				;OR SRC INTO DST
+		MOVEQ	#-1,D1					;FLUSH MASK
+		DBRA	D2,MAIN1				;LOOP TILL LAST WORD
+		MOVE.L	(A4),D0 				;GET SRC FROM BITMAP
+		LSR.L	D5,D0					;ALIGN TO DST
+		AND 	D4,D0					;MASK WITH RIGHTMASK
+		OR		D0,(A5) 				;OR SRC INTO DST
+		MOVE.L	SRCPTR(A6),A4				;RESTORE SRCPTR TO LEFT
+		ADD.L 	A2,A4					;BUMP TO NEXT ROW				<1.4-4april89-CEL>
+;		ADD 	A2,A4					;BUMP TO NEXT ROW				<1.4-4april89-CEL>
+		MOVE.L	DSTPTR(A6),A5				;RESTORE DSTPTR TO LEFT
+		ADD 	A3,A5					;BUMP DST TO NEXT ROW
+WIDE1	MOVE.L	A4,SRCPTR(A6)				;REMEMBER SRCPTR AT LEFT
+		MOVE.L	A5,DSTPTR(A6)				;REMEMBER DSTPTR AT LEFT
+		MOVE	D3,D1					;MASK:=LEFTMASK
+		MOVE	D6,D2					;GET WORDCOUNT
+		DBRA	D7,MAIN1				;LOOP ALL ROWS
+		SUB 	#1,COUNT(A6)				;DECREMENT CHAR COUNT
+		BGT 	NEXTCH					;LOOP IF MORE CHARS LEFT
+		BRA.S	STRDONE 				;QUIT IF CHARCOUNT <= 0
+
+;
+;  Optimize if dst fits in one long.   (30% of normal characters do)
+;
+LONG1	SUB 	#2,A3					;ADJUST DSTEND FOR WORD BUMP
+LONG1A	MOVE.L	(A4),D0 				;GET SRC DATA
+		LSR.L	D5,D0					;ALIGN TO DST
+		AND 	D3,D0					;MASK EXTRA WITH LEFTMASK
+		OR		D0,(A5)+				;OR RESULT INTO DST
+		MOVE.L	2(A4),D0				;GET SECOND WORD OF SRC
+		LSR.L	D5,D0					;ALIGN IT
+		AND 	D4,D0					;MASK EXTRA WITH RIGHTMASK
+		OR		D0,(A5) 				;OR RESULT INTO DST
+		ADD.L 	A2,A4					;BUMP SRCPTR TO NEXT ROW		<1.4-4april89-CEL>
+;		ADD 	A2,A4					;BUMP SRCPTR TO NEXT ROW		<1.4-4april89-CEL>
+		ADD 	A3,A5					;BUMP DSTPTR TO NEXT ROW
+		DBRA	D7,LONG1A				;LOOP ALL ROWS
+		SUB 	#1,COUNT(A6)				;DECREMENT CHAR COUNT
+		BGT 	NEXTCH					;LOOP IF MORE CHARS LEFT
+		BRA.S 	STRDONE					;QUIT IF CHARCOUNT <= 0
+
+;
+;  Optimize if dst fits in one word.  (70% of normal characters do)
+;
+WORD1	AND 	D4,D3					;COMBINE LEFT AND RIGHT MASKS
+WORD1B	MOVE.L	(A4),D0 				;GET SRC DATA
+		LSR.L	D5,D0					;ALIGN TO DST
+		AND 	D3,D0					;MASK EXTRA TO ZEROS
+		OR		D0,(A5) 				;OR RESULT INTO DST
+		ADD.L 	A2,A4					;BUMP SRCPTR TO NEXT ROW			<1.4-4april89-CEL>
+;		ADD 	A2,A4					;BUMP SRCPTR TO NEXT ROW			<1.4-4april89-CEL>
+		ADD 	A3,A5					;BUMP DSTPTR TO NEXT ROW
+		DBRA	D7,WORD1B				;LOOP ALL ROWS
+		SUB 	#1,COUNT(A6)				;DECREMENT CHAR COUNT
+		BGT 	NEXTCH					;LOOP IF MORE CHARS LEFT
+
+
+STRDONE MOVE.L	SAVEA5(A6),A5				;RESTORE GLOBAL PTR
+		TST.B	FASTFLAG(A6)				;WERE WE GOING DIRECT TO SCREEN ?
+		BEQ.S	@1					;NO, CONTINUE
+		JSR 	SHOWCURSOR				;YES, RESTORE CURSOR
+		BRA 	GOHOME					;AND QUIT
+
+@1		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO QUICKDRAW GLOBALS
+		MOVE.L	THEPORT(A0),A3				;GET CURRENT GRAFPORT
+		MOVE.L	FONTPTR(A0),A4				;POINT TO FMOUTPUT
+		MOVE.L	2(A4),A2				;GET FONT HANDLE
+		MOVE.L	(A2),A2 				;DE-REFERENCE IT
+		MOVE	CHARLOC(A6),D7				;GET FINAL CHARLOC INT PART
+		SUB 	FBBOX(A2),D7				;UN-ADJUST FROM KERNING
+;
+;  Make buffer bold if necessary:
+;
+CKBOLD	CLR 	D2					;GET READY FOR BYTE
+		MOVE.B	6(A4),D2				;GET NUMBER OF OVERSTRIKES
+		BRA.S	NXTBOLD 				;BOLD BUFFER IF ANY
+BOLDIT	MOVE.L	BUFSTART(A6),A0 			;POINT TO START OF BUFFER
+		MOVE	BUFSIZE(A6),D1				;HOW MANY LONGS IN BUF
+		SUB 	D0,D0					;CLEAR X-BIT
+BOLDLP	MOVE.L	(A0),D0 				;GET ONE LONG
+		ROXR.L	#1,D0					;ROTATE RIGHT WITH EXTEND
+		OR.L	D0,(A0)+				;OR BACK INTO BUFFER
+		DBRA	D1,BOLDLP				;LOOP ENTIRE BUFFER
+NXTBOLD DBRA	D2,BOLDIT				;LOOP FOR EACH OVERSTRIKE
+
+
+;
+;  Slant the buffer if necessary:
+;  Work from bottom of buffer up, shifting each row right.
+;  Work right to left to avoid clobbering src.
+;
+		CLR 	D2					;GET READY FOR BYTE
+		MOVE.B	7(A4),D2				;DO WE NEED ITALIC ?
+		BEQ.S	CHECKUL 				;NO, CONTINUE
+
+		MOVE.L	BUFEND(A6),A1				;DSTPTR:=END OF BUFFER
+		MOVE	BUFROW(A6),D3				;GET BUFFER ROWBYTES
+		SUB 	D3,A1					;BACK UP DSTPTR TO END OF 2ND ROW
+		LSR 	#1,D3					;WORDCNT:=ROWBYTES DIV 2
+		SUB 	#1,D3					;WORDCOUNT-1 FOR DBRA LOOP
+
+		MOVE	HEIGHT(A6),D6				;INIT ROW COUNTER
+		CLR 	D4					;INIT OFFSET
+		BRA.S	DOSLANT 				;GO TO LOOP START
+NXTROW	ADD 	D2,D4					;OFFSET:=OFFSET+ITALIC
+		MOVE	D4,D0					;COPY OFFSET
+		LSR 	#4,D0					;DELTA := OFFSET SCALED BY 16
+		MOVEQ	#$F,D5
+		AND 	D0,D5					;SHIFTCNT:=DELTA MOD 16
+		LSR 	#4,D0					;DELWORD:=DELTA DIV 16
+		MOVE.L	A1,A0					;SRCPTR:=DSTPTR
+		SUB 	#4,A0					;BACK UP ONE LONG
+		SUB 	D0,A0					;SUBTRACT DELWORD
+		SUB 	D0,A0					;TWICE BECAUSE WORDS
+
+		MOVE	D3,D1					;INIT LOOP TO WORDCNT
+NXTWORD MOVE.L	(A0),D0 				;GET A LONG OF SRC
+		SUB 	#2,A0					;BUMP SRCPTR LEFT ONE WORD
+		LSR.L	D5,D0					;SHIFT SRC TO ALIGN WITH DST
+		MOVE	D0,-(A1)				;STORE IN DST AND BUMP DSTPTR
+		DBRA	D1,NXTWORD				;LOOP ALL WORDS THIS ROW
+DOSLANT DBRA	D6,NXTROW				;LOOP FOR ALL ROWS IN BUFFER
+
+
+;
+;  Underline characters in buffer if necessary.
+;
+;  Use characters in buffer to hide parts of the underline.
+;
+CHECKUL TST.B	10(A4)					;IS ULTHICK ZERO ?
+		BEQ 	NOTUL					;YES, CONTINUE
+		MOVE.L	BUFSTART(A6),A0 			;POINT TO BUFFER START
+		MOVE	BUFROW(A6),D1				;GET BYTES PER ROW OF BUFFER
+		MOVE	ASCENT(A2),D0			;GET ASCENT
+		MOVE	DESCENT(A2),D2			;GET DESCENT
+		MULU	D1,D0
+		ADD.L	D0,A0					;POINT TO BASELINE ROW
+		MOVE.L	A0,A1
+		MOVE.L	A0,A2
+		ADD 	D1,A1					;POINT TO BASELINE+1
+		CMP 	#2,D2					;IS DESCENT AT LEAST 2 ?
+		BLT.S	NOTUL					;NO, SKIP UNDERLINE
+		BEQ.S	ONLY2					;ONLY USE 2 IF DESCENT=2
+		ADD 	D1,A2
+		ADD 	D1,A2					;POINT TO BASELINE+2
+ONLY2	SUB 	D1,SP					;ALLOCATE TEMP SCANBUF
+		MOVE.L	A3,-(SP)				;SAVE GRAFPORT
+		LEA 	4(SP),A3				;POINT TO START OF TEMP
+		LSR 	#2,D1					;CONVERT BYTES TO LONGS
+		SUB 	#1,D1					;INIT DBRA LOOP COUNT
+		MOVE	D1,D2					;COPY LOOP COUNT
+		SUB 	D0,D0					;CLEAR X-BIT
+UL1 	MOVE.L	(A0)+,D0				;GET FROM BASELINE
+		OR.L	(A1)+,D0				;OR WITH BASELINE+1
+		OR.L	(A2)+,D0				;OR WITH BASELINE+2
+		MOVE.L	D0,(A3) 				;PUT RESULT TO TEMP
+		ROXR.L	#1,D0					;SHIFT WITH CARRY
+		OR.L	D0,(A3)+				;OR INTO TEMP
+		DBRA	D1,UL1					;LOOP ALL LONGS IN ROW
+
+		MOVE.L	A1,A0					;COPY END PTR
+		SUB 	D0,D0					;CLEAR X-BIT
+UL2 	MOVE.L	-(A3),D0				;GET FROM TEMP
+		ROXL.L	#1,D0					;SHIFT LEFT WITH CARRY
+		OR.L	(A3),D0 				;OR WITH TEMP
+		NOT.L	D0					;INVERT
+		OR.L	D0,-(A1)				;DRAW SOME UNDERLINE
+		DBRA	D2,UL2					;LOOP ALL LONGS IN ROW
+		MOVE.L	(SP)+,A3				;RESTORE GRAFPORT
+;
+;  Trim right edge of underline.  (left edge trimmed by StretchBits)
+;
+		MOVE	BUFROW(A6),D0				;GET BYTES PER ROW OF BUFFER
+		LSL 	#3,D0					;TIMES 8 FOR DOTS WIDE
+		SUB 	D7,D0					;OVERSHOOT:=BUFRIGHT-LASTRIGHT
+		SUB 	#1,D0					;BACK UP 1 SO MASK COMES OUT RIGHT
+		LSR 	#4,D0					;CONVERT DOTS TO WORDCOUNT
+		BRA.S	UL3 				;GO TO LOOP START
+ULTRIM	CLR 	-(A0)					;ERASE SOME UNDERLINE
+UL3 	DBRA	D0,ULTRIM				;LOOP ALL FULL WORDS
+		ADD 	BUFLEFT(A6),D7				;UNDO BUFFER RELATIVE
+		MOVE	D7,D0					;GET LAST RIGHT COORD
+		SUB 	PORTBOUNDS+LEFT(A3),D0			;CONVERT TO GLOBAL COORDS
+		JSR 	RIGHTMASK				;COMPUTE A MASK
+		AND 	D0,-(A0)				;ERASE LAST PARTIAL WORD
+
+
+;
+;  Setup fakeRgn, a dummy rectangular region
+;
+NOTUL	MOVE	#10,FAKERGN+RGNSIZE(A6) 		;SIZE=10 BYTES FOR RECT RGN
+		MOVE.L	PORTBOUNDS(A3),FAKERGN+RGNBBOX(A6)
+		MOVE.L	PORTBOUNDS+4(A3),FAKERGN+RGNBBOX+4(A6)
+		LEA 	FAKERGN(A6),A0				;GET ADDR OF FAKERGN
+		MOVE.L	A0,FAKEPTR(A6)				;POINT FAKE MASTERPTR TO IT
+
+
+;
+;  Setup bitMaps to transfer from buffer to screen.
+;
+;  srcBits := buffer
+;
+		LEA 	SRCBITS(A6),A0				;POINT TO SRCBITS
+		MOVE.L	BUFSTART(A6),(A0)+			;SET UP BASEADDR
+		MOVE	BUFROW(A6),(A0)+			;SET UP ROWBYTES
+		MOVE	TEXTRECT+TOP(A6),(A0)+			;SET UP BOUNDS TOP
+		MOVE	BUFLEFT(A6),(A0)+			;SET UP BOUNDS LEFT
+		MOVE.L	TEXTRECT+BOTRIGHT(A6),(A0)+ 	;SET UP BOTTOM RIGHT
+
+;
+;  dstBits := portBits
+;
+		LEA 	PORTBITS(A3),A2 			;POINT TO PORTBITS
+		LEA 	DSTBITS(A6),A0				;POINT TO DSTBITS
+		MOVE.L	(A2)+,(A0)+ 			;COPY BASEADDR
+		MOVE	(A2)+,(A0)+ 			;COPY ROWBYTES
+		MOVE.L	(A2)+,(A0)+ 			;COPY BOUNDS.TOPLEFT
+		MOVE.L	(A2)+,(A0)+ 			;COPY BOUNDS.BOTRIGHT
+
+;
+;  check if any shadowing:
+;
+		CLR 	D3					;GET READY FOR BYTE
+		MOVE.B	11(A4),D3				;GET SHADOW COUNT
+		BEQ 	NOSHAD					;SKIP IF NO SHADOWING
+;
+;  Shadowing will be used. Allocate buf2, 4 scans taller than BUF1.
+;  Clear out new 4 scanlines, and copy BUF1 into the rest.
+;
+		MOVE	BUFROW(A6),D0				;GET 4 * NUMBER OF LONGS PER ROW
+		SUB 	#1,D0					;INIT LOOP COUNTER
+		CLR.L	-(SP)					;ALLOW ONE LONG OF SLOP
+		MOVE.L	SP,BUF2END(A6)				;REMEMBER END OF BUF2
+CLR2	CLR.L	-(SP)					;ALLOCATE AND CLEAR A LONG
+		DBRA	D0,CLR2 				;CLEAR 4 SCANLINES WORTH
+		MOVE	BUFSIZE(A6),D0				;GET NUMBER OF LONGS IN BUF1
+		SUB 	#1,D0					;INIT DBRA COUNTER
+		MOVE.L	BUFEND(A6),A0				;POINT TO END OF BUF1
+COPYLP	MOVE.L	-(A0),-(SP) 			;COPY FROM BUF1 TO NEW BUF2
+		DBRA	D0,COPYLP				;COPY ALL OF BUF1
+		MOVE.L	SP,BUF2START(A6)			;REMEMBER START OF BUF2
+		CLR.L	-(SP)					;ALLOW ONE LONG OF SLOP
+
+;
+;  Bold buf2 across to the right enough for shadow.
+;
+		AND 	#3,D3					;RESTRICT SHADOW COUNT TO 1..3
+		MOVE	D3,D2					;INIT BOLD COUNTER
+ACROSS1 MOVE.L	BUF2START(A6),A0			;POINT TO START OF BUFFER2
+		MOVE	BUFSIZE(A6),D1				;INIT COUNT OF LONGS
+		SUB 	D0,D0					;CLEAR X-BIT
+ACROSS2 MOVE.L	(A0),D0 				;GET A LONG FROM BUF2
+		ROXR.L	#1,D0					;SHIFT IT RIGHT EXTENDED
+		OR.L	D0,(A0)+				;OR IT BACK INTO BUFFER
+		DBRA	D1,ACROSS2				;LOOP FOR ALL LONGS
+		DBRA	D2,ACROSS1				;BOLD RIGHT 2,3, OR 4 TIMES
+
+;
+;  Bold BUF2 down enough for shadow.
+;
+		MOVE.L	BUF2START(A6),A2			;GET LIMIT POINTER
+DOWN1	MOVE.L	BUF2END(A6),A1				;DSTPTR:=END OF BUF2
+		MOVE.L	A1,A0
+		SUB 	SRCBITS+ROWBYTES(A6),A0 		;SRCPTR:=END - 1 SCANLINE
+DOWN2	MOVE.L	-(A0),D0				;GET A LONG FROM LINE ABOVE
+		OR.L	D0,-(A1)				;OR INTO THIS LINE
+		CMP.L	A2,A0					;IS SRCPTR <= BUF2START ?
+		BGT.S	DOWN2					;NO, LOOP ALL LONGS
+		DBRA	D3,DOWN1				;BOLD DOWN 2,3, OR 4 TIMES
+
+
+;
+;  Alter srcBits to use BUF2
+;
+		MOVE.L	A2,SRCBITS+BASEADDR(A6) 		;SRC BASEADDR:=BUF2START
+		ADD 	#4,SRCBITS+BOUNDS+BOTTOM(A6)	;4 SCANS TALLER
+
+;
+;  Push params and call StretchBits to transfer shadow to screen
+;
+		MOVE.L	TEXTRECT(A6),SRCRECT(A6)		;SRCRECT := TEXTRECT
+		MOVE.L	TEXTRECT+4(A6),SRCRECT+4(A6)
+		ADD 	#4,SRCRECT+BOTTOM(A6)			;PLUS 4 SCANS TALLER
+
+		MOVE.L	SRCRECT(A6),DSTRECT(A6) 		;DSTRECT := SRCRECT
+		MOVE.L	SRCRECT+4(A6),DSTRECT+4(A6)
+		LEA 	DSTRECT+TOP(A6),A0			;OFFSET BY (-1,-1)
+		SUB 	#1,(A0)+				;TOP
+		SUB 	#1,(A0)+				;LEFT
+		SUB 	#1,(A0)+				;BOTTOM
+		SUB 	#1,(A0)+				;RIGHT
+
+		TST.B	STRETCH(A6)
+		BEQ.S	@1
+		PEA 	DSTRECT(A6)
+		PEA 	FROMRECT(A6)
+		PEA 	TORECT(A6)
+		JSR 	MAPRECT 				;THEN MAPPED FOR SCALING
+@1
+
+		PEA 	SRCBITS(A6) 			;PUSH SRCBITS
+		PEA 	DSTBITS(A6) 			;PUSH DSTBITS
+		PEA 	SRCRECT(A6) 			;PUSH SRCRECT
+		PEA 	DSTRECT(A6) 			;PUSH DSTRECT
+		MOVEQ	#7,D0					;GET A 3-BIT MASK
+		AND 	TXMODE(A3),D0				;GET TEXTMODE MOD 7
+		MOVE	D0,-(SP)				;PUSH SHADOW MODE
+		MOVE.L	CLIPRGN(A3),-(SP)			;PUSH CLIPRGN HANDLE
+		MOVE.L	VISRGN(A3),-(SP)			;PUSH VISRGN HANDLE
+		PEA 	FAKEPTR(A6) 			;PUSH FAKE HANDLE
+		JSR 	StretchBits 			;TRANSFER BUFFER TO SCREEN
+
+;
+;  restore altered srcBits
+;
+		MOVE.L	BUFSTART(A6),SRCBITS+BASEADDR(A6)
+		SUB 	#4,SRCBITS+BOUNDS+BOTTOM(A6)
+
+;
+;  Push params and call StretchBits to transfer buffer to screen
+;
+NOSHAD	PEA 	SRCBITS(A6) 			;PUSH SRCBITS
+		PEA 	DSTBITS(A6) 			;PUSH DSTBITS
+		PEA 	TEXTRECT(A6)				;PUSH SRCRECT = TEXTRECT
+		PEA 	TEXTR2(A6)				;PUSH DSTRECT = TEXTR2
+		MOVE	TXMODE(A3),-(SP)			;PUSH TEXTMODE
+		TST.B	11(A4)					;ARE WE USING SHADOW ?
+		BEQ.S	MODEOK					;NO, CONTINUE
+		MOVE	#2,(SP) 				;YES, USE XOR MODE
+MODEOK	AND 	#7,(SP) 				;TREAT MODE MOD 8
+		MOVE.L	CLIPRGN(A3),-(SP)			;PUSH CLIPRGN HANDLE
+		MOVE.L	VISRGN(A3),-(SP)			;PUSH VISRGN HANDLE
+		PEA 	FAKEPTR(A6) 			;PUSH FAKE HANDLE
+		JSR 	StretchBits 			;TRANSFER BUFFER TO SCREEN
+
+
+GOHOME	
+		MOVE.L	SAVESTK(A6),SP				;STRIP BUFFER
+		MOVEM.L (SP)+,D0-D7/A1-A4			;RESTORE REGS
+		UNLINK	PARAMSIZE,'DRTEXT  '
+
+
+
+		END 
+
+

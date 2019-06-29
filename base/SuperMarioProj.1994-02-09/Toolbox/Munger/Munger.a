@@ -1,0 +1,1581 @@
+;
+;	File:		Munger.a
+;
+;	Contains:	Byte String munger
+;
+;	Copyright:	© 1986-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM3>	 10/22/92	CSS		Fixed short branch to regular branches.
+;	   <SM2>	 5/21/92	kc		Append "Trap" to the names of HandToHand, PtrToXHand, PtrToHand,
+;									HandAndHand and PtrAndHand to avoid name conflict with the glue.
+;		 <6>	 2/10/92	JSM		Moved this file to Munger folder, keeping all the old revisions.
+;		 <5>	10/17/91	JSM		Cleanup header, roll-in FixTypoInFixAtan2 patch from
+;									MungerPatches.a, remove non-68020 code since we'll never build
+;									another 68000 ROM, remove 68881 code which was never used.
+;		 <4>	 9/28/90	SAM		Removed EclipseNOPs that were breaking the 68000 builds.
+;		 <3>	 9/13/90	BG		Removed <2>. 040s are behaving more reliably now.
+;		 <2>	 6/22/90	CCH		Added some NOPs for flaky 68040's.
+;	  <C914>	10/29/87	rwh		Port to Modern Victorian
+;				 12/9/86	JTC		Back out until state issues resolved.
+;	  <C412>	11/17/86	JTC		Add conditional code to implement fixed-pt elems using ‘881.
+;	  <A343>	 11/3/86	JTC		fixed fixDiv/FracDiv problem. Fixed or frac results with a one
+;									bit in bit #31 is falsely forced to the overflow value.
+;	  <A279>	10/27/86	JTC		Changed two addq instructions to addq.l instructions in Munger.a
+;									to fix a small rounding problem in the fixed point routines.
+;				10/20/86	CRC		Added 68020 specific flavors of LongMul, FixMul, FracMul,
+;									FixRatio
+;	  <C206>	 10/9/86	bbm		Modified to mpw aincludes.
+;	  <C169>	 9/23/86	JTC		Replace master ptr bit twiddling with mem mgr calls.
+;				 2/19/86	BBM		Made some modifications to work under MPW
+;				 8/28/85	BBM		Temporarily restored ForRAM Equate
+;				 7/26/85	RDC		Removed ForRAM equate (included in Newequ file)
+;				 5/13/85	SC		Exit bug w/d0 in munger
+;				  5/8/85	SC		Added new trap XMunger
+;				  5/8/85	SC		Fixed bug in 4 May work and cleaned up
+;				  5/4/85	SC		Sped up munger per Ernie suggestions and TextEdit needs. New
+;									local blockmove proc avoids dispatch for 0-1 bytes moved. Only
+;									one _SetHandleSize and one less _BlockMove on replace calls
+;				 4/23/85	JTC		Added fixed-point stuff.
+;				 4/16/85	SC		Made HandAndHand more robust, doesn't allow source or dest to
+;									purge.
+;				 1/29/85	EHB		Added fix to make returned offset correct (=offset + length 2)
+;				 1/28/85	EHB		Added fix to make compare respect string boundaries In
+;									HandToHand, make original Handle unpurgeable, and if original
+;									already purged, then don't try to clone it.
+;				 1/23/85	LAK		Adapted for new equate files.
+;
+
+		MACHINE	MC68020
+
+; WARNING:	CHANGE HISTORIES APPEAR AT THREE DIFFERENT PLACES IN
+;			THIS FILE.  MAKE SURE YOU CHECK ALL THREE.
+;			(I know this should be cleaned up, some day it will.)
+;---------------------------------------------------------------
+; Fixed-point code added 21 Apr 85 by JTC.
+; MacApp method code added 08 May 85 by JTC.
+; More fixed-point code added 13 May 85 JTC.
+;---------------------------------------------------------------
+
+;---------------------------------------------------------------
+;
+;			Byte String munger
+;
+;			FUNCTION Munger( h0: Handle; o0: LONGINT;
+;							 p1: Pointer; l1: LONGINT;
+;							 p2: Pointer; l2: LONGINT ): LONGINT
+;
+;			This routine performs various byte-string manipulations.  The general
+;			theme is that handle "h0" (indirectly pointing to an uninterpereted
+;			string of bytes) is operated on starting at or beyond byte-offset
+;			"o0" The pointer/length tuple (p1,l1) defines a substring to
+;			be replaced with the second substring (p2,l2).	There are many
+;			variations depending on which parameters are nullified by passing
+;			a zero.
+;
+;			The fully expanded arguments will search h starting at o and replace
+;			the first occurence of (p1,l1) with (p2,l2).
+;
+;			The variations are:
+;
+;			If p1 = 0 the substring defined by offset "o0" of length "l1" will be
+;			replaced by the substring (p2,l2).	The length parameter l1 can be
+;			set negative to define substring from o0 to the end of string at H
+;
+;			If l1 = 0 the substring (p2,l2) will simply be inserted at offset "o0"
+;
+;			If p2 = 0 no replacement or deletion will occur; this, with the function
+;			return value, is useful for locating substrings in h
+;
+;			If l2 = 0 the substring used for replacing is null so a delete will
+;			occur in all the above cases
+;
+;			The function returned value is the final offset at which the replacement
+;			occurs.  A negative value implies the substring couldn't be found in
+;			the case of a search.  Or was out of range in the case of an offset-type
+;			specification.
+;
+;-----------------------------------------------------------------------
+
+		  BLANKS	ON
+		  STRING	ASIS
+
+			LOAD		'StandardEqu.d'
+
+Bytes		PROC	EXPORT
+
+			EXPORT Munger						; Munger 100% U.S. RDA
+			EXPORT XMunger						; X-tra Munger				  <11May85>
+
+; local defs
+
+sloppy		EQU 		-4						; local copy of slop factor 	<11May85>
+physical	EQU 		sloppy-4				; physical handle size			<11May85>
+mungeLink	EQU 		physical				; munger stack frame			<11May85>
+
+; parameter defs for both Munger and XMunger									<11May85>
+
+h0			EQU 		28						; 4 bytes - Handle
+o0			EQU 		24						; 4 bytes - offset
+p1			EQU 		20						; 4 bytes - pointer 1
+l1			EQU 		16						; 4 bytes - length 1
+p2			EQU 		12						; 4 bytes - pointer 2
+l2			EQU 		 8						; 4 bytes - length 2
+
+return		EQU 		32						; 4 bytes - return value
+mungeParams EQU 		24						; nBytes of parameters
+
+Munger
+			LINK		A6,#mungeLink			;								<11May85>
+			MOVEM.L 	D2-D7/A2-A4,-(SP)		; save regs 					<11May85>
+
+			MOVE.L		h0(A6),A2				; get handle					<11May85>
+			MOVE.L		A2,A0					; Get handle size				<11May85>
+			_GetHandleSize
+			MOVE.L		D0,D5					; save it as logical size		<11May85>
+			MOVE.L		D0,physical(A6) 		; save it physical too			<11May85>
+			CLR.L		sloppy(A6)				; we must be neat				<11May85>
+
+			BSR.S		MungeGuts				; it's the real thing           <11May85>
+
+			MOVE.L		D2,return(A6)			; return offset 				<11May85>
+
+			MOVEQ		#mungeParams,D1 		; fix up stack					<13May85>
+mungeBye
+			MOVEM.L 	(SP)+,D2-D7/A2-A4		; restore regs					<11May85>
+			UNLK		A6						;								<11May85>
+			MOVE.L		(SP)+,A0				; return address				<11May85>
+			ADD 		D1,SP					; fix up stack					<13May85>
+			JMP 		(A0)					;								<11May85>
+
+;			FUNCTION XMunger( slop: LONGINT; h0: Handle; o0: LONGINT;			<11May85>
+;							  p1: Pointer; l1: LONGINT; 						<11May85>
+;							  p2: Pointer; l2: LONGINT ): LONGINT				<11May85>
+
+logical 	EQU 		36						; logical size - LONGINT		<11May85>
+slop		EQU 		32						; slop value - LONGINT			<11May85>
+xReturn 	EQU 		40						; 4 bytes - return value		<11May85>
+xMungeParam EQU 		32						; nBytes of parameters			<11May85>
+
+XMunger
+			LINK		A6,#mungeLink			;								<11May85>
+			MOVEM.L 	D2-D7/A2-A4,-(SP)		; save regs 					<11May85>
+
+			MOVE.L		h0(A6),A2				; get handle					<11May85>
+			MOVE.L		A2,A0					; Get handle size				<11May85>
+			_GetHandleSize
+			MOVE.L		D0,physical(A6) 		; save it physical too			<11May85>
+			MOVE.L		logical(A6),D5			; get the logical size			<11May85>
+
+			MOVE.L		slop(A6),sloppy(A6) 	; relocate slop value			<11May85>
+			BSR.S		MungeGuts				; it's the real thing           <11May85>
+
+			MOVE.L		D2,xReturn(A6)			; return offset 				<11May85>
+
+			MOVEQ		#xMungeParam,D1 		; fix up stack					<13May85>
+			BRA 		mungeBye				;								<11May85>
+
+; This is the real munger code, all parameters are off A6 except slop
+
+;			Register usage:
+;
+;			A2 contains handle to be munged
+;			D5 contains handle's size
+;			D2 contains offset o0 (and modified to contain return value)
+;			A3 contains pointer one p1
+;			D3 contains length one l1
+;			A4 contains pointer two p2
+;			D4 contains length two l2
+
+MungeGuts
+;			 MOVE.L 	 h0(A6),A2				 ; get handle
+;			 MOVE.L 	 A2,A0					 ; Get handle size
+;			 _GetHandleSize
+;			 MOVE.L 	 D0,D5					 ; save it away
+;			 MOVE.L 	 D0,incisor(A6) 		 ; save it here too
+
+			MOVE.L		o0(A6),D2				; get offset
+			MOVE.L		p1(A6),A3				; get pointer 1
+			MOVE.L		p2(A6),A4				; get pointer 2
+			MOVE.L		l1(A6),D3				; get length 1
+			BEQ 		doInsert				; if l1 = 0 do insertion only
+
+			BPL.S		notInfinite 			; see if l1 is funny
+fixL1
+			MOVE.L		D5,D3					; l1 = length - o0
+			SUB.L		D2,D3
+notInfinite
+			MOVE.L		D5,D0					; Get length
+			SUB.L		D3,D0					; length - (delLength+offset)
+			BLT.S		notFound				; escape if search > length
+
+			SUB.L		D2,D0					;
+			BLT.S		fixL1					; it's not ok if negative
+
+			MOVE.L		A3,D0					; test for find op (p1 = 0)?
+			BEQ			doDelete				; <SM3> CSS
+
+; Look for substring (p1,l1) starting at "o0"
+
+			MOVE.L		(A2),D6 				; dereference the handle and save
+
+			MOVE.L		D5,D7					; get size of string
+			SUB.L		D3,D7					; subtract l1						<EHB 28-Jan-84>
+			ADD.L		D6,D7					; point to last valid search loc
+
+			ADD.L		D2,D6					; point to first valid loc(add o0)
+
+outer
+			MOVE.L		D3,D1					; inner loop ctr for compare
+			SUBQ.L		#1,D1					; fix up for DBRA				<4May85>
+
+			MOVE.L		D6,A0					; working copy of handle^
+			MOVE.L		A3,A1					; working copy of search string
+inner
+			CMP.L		D6,D7					; see if anchor if past limit
+			BCS.S		notFound
+
+			CMPM.B		(A0)+,(A1)+ 			; compare bytes
+			BNE.S		tryNext
+
+;			 SUBQ.L 	 #1,D1					; -1 next						<4May85>
+;			 BNE.S		 inner					;								<4May85>
+			DBRA		D1,inner				;								<4May85>
+
+; If it gets to here, it matched so take the offset and run
+			MOVE.L		D6,D2					; set offset to anchor loc and..
+			SUB.L		(A2),D2 				; subtract orig. to make into offset
+			BRA.S		tryDelete
+
+; The match failed on this byte, move anchor to next and try again
+tryNext
+			ADDQ.L		#1,D6					; anchor ++
+			BRA.S		outer
+
+; The match failed entirely, go home with negative code
+notFound
+			MOVEQ		#-1,D2					; offset = -1
+			BRA.S		go2Home
+
+; This is a special local version of block move to handle simple cases quickly	<4May85>
+; that arise from the brain-damaged textedit calls. 							<4May85>
+												;								<4May85>
+bm												; local, faster block move		<4May85>
+			CMP.L		A0,A1					; identity move?				<4May85>
+			BEQ.S		zeroErr 				; skip if so					<4May85>
+			SUBQ.L		#1,D0					; only move <=1 byte?			<4May85>
+			BLE.S		@0						; small move?					<4May85>
+			ADDQ.L		#1,D0					; fix up subtract above 		<4May85>
+			_BlockMove							; move 'em on out               <4May85
+			RTS 								; adios 						<4May85>
+@0												;								<4May85>
+			BLT.S		zeroErr 				; nothing to move				<4May85>
+			MOVE.B		(A0),(A1)				; special case 1 byte			<4May85>
+zeroErr 										;								<11May85>
+			MOVEQ		#0,D0					; must return zero				<4May85>
+			RTS 								; adios 						<4May85>
+
+; Special local cover of sethandlesize.  Doesn't shrink the handle if newsize   <11May85>
+; is within sloppy(A6) of physical(A6).  And, if it grows it, it adds sloppy(A6)<11May85>
+; on for the next time.  Since this is called only once per Munger call, it 	<11May85>
+; doesn;t have to update the physical size. 									<11May85>
+;																				<11May85>
+shs 											;								<11May85>
+			MOVE.L		D0,-(SP)				; save D0						<11May85>
+			SUB.L		physical(A6),D0 		; subtract physical size		<11May85>
+			BEQ.S		@0						; escape if same size			<11May85>
+			BGT.S		@1						; it must be shrinking to check <11May85>
+			NEG.L		D0						; ABS it						<11May85>
+			CMP.L		sloppy(A6),D0			; within range? 				<11May85>
+			BGT.S		@1						; nope, must set away			<11May85>
+@0												;								<11May85>
+			ADDQ		#4,SP					; drop D0 because we can ignore <11May85>
+			BRA 		zeroErr 				; the call - return no error	<11May85>
+@1												;								<11May85>
+			MOVE.L		(SP)+,D0				; restore D0					<11May85>
+			ADD.L		sloppy(A6),D0			; add slop value				<11May85>
+			_SetHandleSize						;								<11May85>
+			RTS 								; it's been real...             <11May85>
+
+
+; Now delete l1 characters at offset in D2 which contains a possibily modified
+; offset "o0"
+
+
+tryDelete
+			MOVE.L		A4,D0					; if = 0 no deletion/insertion
+			BEQ.S		go2Home 				; just do a find
+
+; Delete the substring at o0 (D2) of length l1(D3)
+
+doDelete
+			MOVE.L		l2(A6),D4				; get length 2					<4May85>
+			BNE.S		doReplace				; do replace					<4May85>
+
+			MOVE.L		D5,D0					; calc new size
+			SUB.L		D3,D0					; = oldsize - l1
+			MOVE.L		D0,D5					; save new size
+			SUB.L		D2,D0					; amount to move (length - (o0+l1)
+
+			MOVE.L		(A2),A1 				; dereference handle for dest.
+			ADD.L		D2,A1					; and add offset o0
+			MOVE.L		A1,A0					; source = dest +
+			ADD.L		D3,A0					; l1
+
+			BSR 		bm						; use our blockmove 			<4May85>
+;			 _BlockMove 						 ;								<4May85>
+
+			MOVE.L		A2,A0					; reset size
+			MOVE.L		D5,D0					; new size
+
+			BSR 		shs 					;								<11May85>
+;			 _SetHandleSize 					 ;								<11May85>
+go2Home
+			BRA.S		goHome					; done, go home 				<4May85>
+
+
+doInsert
+			MOVE.L		l2(A6),D4				; get length 2
+			BEQ.S		goHome					; if = 0 no insertion go home
+
+			MOVE.L		D5,D0					; new size = old + l2
+			ADD.L		D4,D0					; D5 contains old size
+			MOVE.L		A2,A0					; get handle
+			BSR 		shs 					;								<11May85>
+;			 _SetHandleSize 					 ;								<11May85>
+			BNE.S		goHome					; escape if error
+
+; Make room for new part by sliding over remainder
+			MOVE.L		(A2),A1 				; dereference handle for dest
+			ADD.L		D2,A1					; offset dest by o0
+			MOVE.L		A1,A0					; source = dest so far
+			ADD.L		D4,A1					; offset dest by l2
+			MOVE.L		D5,D0					; nBytes = oldLength -
+			SUB.L		D2,D0					; offset -
+			BSR 		bm						; use our blockmove 			<4May85>
+;			 _BlockMove 						 ;								<4May85>
+
+finishUp										;								<4May85>
+			MOVE.L		(A2),A1 				; dereference handle for dest
+			ADD.L		D2,A1					; offset dest by o0
+			MOVE.L		A4,A0					; source = p2
+			MOVE.L		D4,D0					; nBytes = l2
+			BSR 		bm						; use our blockmove 			<4May85>
+;			 _BlockMove 						 ;								<4May85>
+			ADD.L		D4,D2					; return offset + length 2		<EHB 29-Jan-85>
+
+goHome
+			RTS 								;								<11May85>
+
+; Replace the substring at o0(D2) of length l1(D3) with substring at			<8May85>
+; p2(A4) of length l2(D4).	Thanks Ernie... 									<8May85>
+; Decide whether the thing is growing or shrinking.  If growing, the handle 	<8May85>
+; handlesize is set 1st, then the trailing piece moved.  If shrinking, the		<8May85>
+; piece is moved first, the handleSize set.  After that, the new piece is		<8May85>
+; inserted																		<8May85>
+;																				<8May85>
+doReplace										;								<8May85>
+			MOVE.L		D4,D1					; start with l2 				<8May85>
+			SUB.L		D3,D1					; subtract l1					<8May85>
+			BEQ.S		finishUp				; skip if no change 			<8May85>
+			BGT.S		@0						; handle's growing, bm after    <8May85>
+												;								<8May85>
+			BSR.S		MoveTail				; move the tail 				<8May85>
+@0												;								<8May85>
+			MOVE.L		A2,A0					; get handle					<8May85>
+			MOVE.L		D5,D0					; get old size					<8May85>
+			ADD.L		D1,D0					; add delta l2-l1				<8May85>
+												;								<8May85>
+			BSR 		shs 					;								<11May85>
+;			 _SetHandleSize 					 ;								<11May85>
+			BNE 		goHome					; oops							<8May85>
+												;								<8May85>
+; Now slide the trailing piece up to make room for insertion					<8May85>
+												;								<8May85>
+			TST.L		D1						; did handle grow?				<8May85>
+			BMI 		finishUp				; if so, block move done before <8May85>
+												;								<8May85>
+			BSR.S		MoveTail				; move the tail 				<8May85>
+												;								<8May85>
+			BRA 		finishUp				; go finish up					<8May85>
+MoveTail										;								<8May85>
+			MOVE.L		(A2),A1 				; dereference handle for dest.	<8May85>
+			ADD.L		D2,A1					; and add offset o0 			<8May85>
+												;								<8May85>
+			MOVE.L		A1,A0					; source = dest +				<8May85>
+			ADD.L		D3,A0					; l1							<8May85>
+			ADD.L		D4,A1					; add offset o0 and length l2	<8May85>
+												;								<8May85>
+			MOVE.L		D5,D0					; get old size					<8May85>
+			SUB.L		D3,D0					; = oldsize - l1				<8May85>
+			SUB.L		D2,D0					; amt to move (length - (o0+l1) <8May85>
+												;								<8May85>
+			BRA 		bm						; use our blockmove 			<8May85>
+
+
+;----------------------------------------------------------------------
+;
+;			Handle /Pointer clone routines
+;
+;
+;	 HandToHand takes a handle in A0 and returns a clone in A0
+;	 PtrToXHand takes a pointer in A0, a handle in A1, and a size in D0. It
+;			clones the pointer from A0 into the existing handle in A1
+;	 PtrToHand takes a pointer in A0, a size in D0 and returns a clone in A0
+;	 HandAndHand takes handle in A0 and concatenates to handle in A1
+;	 PtrAndHand takes ptr,length in A0,D0 and concatenates to handle in A1
+;
+;	 Returns Memory Mgr code in D0
+;
+
+			EXPORT		HandToHandTrap
+			EXPORT		PtrToXHandTrap
+			EXPORT		PtrToHandTrap
+			EXPORT		HandAndHandTrap
+			EXPORT		PtrAndHandTrap
+
+HandToHandTrap
+			_HGetState							; D0 <- master ptr state<C169>
+			MOVE.B		D0,-(SP)				; save for exit			<C169>
+			MOVE.L		A0,-(SP)				; save the handle					<EHB 28-Jan-85>
+			_HNoPurge							; nonpurgeable for now	<C169>
+			MOVE.L		A0,A1					; save the handle					<EHB 28-Jan-85>
+			_GetHandleSize						; and get the size					<EHB 28-Jan-85>
+			TST.L		D0						; purged handle?					<EHB 28-Jan-85>
+			BMI.S		handRest				; =>yes, exit pronto				<EHB 28-Jan-85>
+
+			MOVE.L		D0,D1					; save length						<EHB 28-Jan-85>
+			_NewHandle							;									<EHB 28-Jan-85>
+			MOVE.L		(A1),A1 				; dereference source into A1		<EHB 28-Jan-85>
+			BSR.S		cloneCommon 			;									<EHB 28-Jan-85>
+handRest
+			; Get here with D0=error code, A0=result ptr.  Must perserve<C169>
+			; them while restoring mp state from stack.  D1/A1 are free.
+			MOVE.L		D0,D1					;						<C169>
+			MOVE.L		A0,A1					;						<C169>
+			MOVE.L		(SP)+,A0				; restore handle <EHB 28-Jan-85> <C169>
+			MOVE.B		(SP)+,D0				;		<EHB 28-Jan-85>	<C169>
+			_HSetState							;						<C169>
+			MOVE.L		D1,D0					; restore saved results	<C169>
+			MOVE.L		A1,A0					;						<C169>
+			RTS 								;									<EHB 28-Jan-85>
+
+PtrToXHandTrap
+			EXG 		A0,A1					; save source pointer
+			MOVE.L		D0,D1					; save length
+			_SetHandleSize						; Set the handle length
+			BRA.S		cloneCommon
+PtrToHandTrap
+			MOVE.L		A0,A1					; save source pointer
+			MOVE.L		D0,D1					; save length
+			_NewHandle
+
+; A0 contains dest. handle, A1 contains source pointer, D2 offset into dest, D1
+; amount to move
+
+cloneCommon
+			BNE.S		noRoom					; didn't get space, so skip
+			MOVEQ		#0,D2					; no offset for these
+clone2Common
+			MOVE.L		A0,-(SP)				; save handle for return
+			MOVE.L		(A0),A0 				; dereference
+			ADD.L		D2,A0					; add in offset (=0 most times)
+			EXG 		A0,A1					; switch source/dest
+			MOVE.L		D1,D0					; restore length
+			_BlockMove							; counts on D0 being returned 0
+
+			MOVE.L		(SP)+,A0				; get handle for return
+noRoom
+			RTS
+
+; Concatenates handle in A0 onto handle in A1
+
+HandAndHandTrap
+			_HGetState							; D0 <- mp state	<C169>
+			MOVE.B		D0,-(SP)				; save across call	<C169>
+			MOVE.L		A0,-(SP)				; save the handle
+			_HNoPurge							;					<C169>
+
+			_GetHandleSize						; and get the size
+			TST.L		D0						; purged handle?
+			BMI.S		handRest				; =>yes, exit pronto
+
+			MOVE.L		D0,D1					; save add-on length
+
+			EXG 		A1,A0					; get dest handle
+			_GetHandleSize
+
+			MOVE.L		D0,D2					; save existing length
+			BMI.S		handRest				; error in dest exit pronto
+
+			ADD.L		D1,D0					; add in new length
+			_SetHandleSize
+			BNE.S		handRest				; escape if error
+
+			MOVE.L		(A1),A1 				; dereference source
+			BSR 		clone2Common			; go do it
+			BRA 		handRest
+
+PtrAndHandTrap
+			MOVE.L		D0,D1					; save add-on length
+
+			EXG 		A1,A0					; get dest handle
+			_GetHandleSize
+			MOVE.L		D0,D2					; save existing length
+			ADD.L		D1,D0					; add in new length
+			_SetHandleSize
+			BNE.S		noRoom					; escape if error
+			BRA.S		clone2Common			; go do it
+
+;-------------------------------------------------------------------
+; Pulled from file: Method.TEXT
+;
+; PROCEDURE MethodDispatch ( 'uses nonstandard stack params ' );
+;			(SP)		= selector table address
+;			4(SP)		= actual return address
+;			8(SP)		= receiver
+; 07 May 85  JTC  Written by MacApp group -- typed by their new AA!
+; 17 Jun 86  DBG  Tweaks for performance
+;-------------------------------------------------------------------
+			EXPORT		MethodDispatch
+MethodDispatch
+			MoveA.L 	(SP)+,A0				; A0 := Method table address
+			MoveA.L 	4(SP),A1				; A1 := receiver handle
+			MoveA.L 	(A1),A1 				; A1 := receiver ptr
+			Move.W		(A1),D0 				; D0 := receiver's class #
+			Move.W		(A0)+,D1				; D1 := number of implementations of method (-1)
+			Cmp.W		(A0),D0 				; cached class # versus receiver class #
+			BNE.S		search					; Not Equal => must search table
+jmpMeth
+			Move.W		2(A0),D0				; D0 := A5/A0 relative offset to method
+			BClr		#0,D0					; 0=>A5; 1=>A0
+			BNE.S		A0Rel					; 1 => do A0
+			Jmp 		0(A5,D0.W)				; via Jump Table
+A0Rel
+			Jmp 		2(A0,D0.W)				; jump to method, A0 pointing to word before offset
+search
+			Move.W		D0,(A0) 				; cache the class #
+			Move.L		A0,D2					; D2 := cache address
+loopa
+			AddQ.L		#4,A0					; A0 := ptr to next class # in table
+			Cmp.W		(A0),D0 				; next class # versus given class #
+			DBCC		D1,loopa 				; fall through if (A0) unsigned <= D0
+			BEq.S 		found					; Eq => found it
+			MoveA.L 	MASuperTab,A1			; A1 := handle to Superclass table
+			MoveA.L 	(A1),A1 				; A1 := ptr to Superclass table
+			BrA.S		doSuper					; Get Superclass
+loopb
+			AddQ.L		#4,A0					; A0 := ptr to next class # in table
+loop2
+			Cmp.W		(A0),D0 				; next class # versus given class #
+			DBCC		D1,loopb 				; fall through if (A0) unsigned <= D0
+			BEq.S 		found					; Eq => found it
+doSuper
+			Move.W		0(A1,D0.W),D0			; D0 := Superclass # of D0 (D0 is always even!)
+			BNE.S		loop2					; Not Equal => still worth searching
+
+			; Error condition: method not found
+			MoveA.L 	D2,A1					; A1 := cache address
+			Clr.L		(A1)
+			Move.L		MAErrProc,A1			; address of error routine
+			Jmp 		(A1)
+found
+			MoveA.L 	D2,A1					; A1 := cache address
+			Move.W		2(A0),2(A1) 			; store method offset in cache
+			BrA.S		jmpMeth
+
+;-------------------------------------------------------------------
+; End of MacApp Method code...
+;-------------------------------------------------------------------
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; File: Used to be . . . AdMath.ASM . . . now part of Toolbox Utilities.
+;
+; Assembly language FixMul, FixDiv, Sqrt, FixRatio, FracMul, FracDiv,
+;		and FracSqrt.
+; Written by J. Coonen	8 Sep 84.
+;		13 Sep 84  JTC	added FixRatio, FracMul, FracDiv, and FracSqrt.
+;		22 Jan 85  CRC	added FixSin, removed ones in ROM, Sqrt; tweaked for Pascal
+;		 4 Feb 85  CRC	tweaked FixSin into FracSin, added fixed point ROM sources
+;		21 Apr 85  JTC	Fixed up for ROM use:												<18Apr85>
+;							1) Remove Macro definitions.
+;							2) Remove FFixMul(Fixed, Fracd) entry point -- it's the same as FracMul!
+;							3) Add QD fixed-point routines to comment.
+;							4) Fix bug in FixRound.
+;							5) Renamed FixFixRatio (was FFixRatio)
+;		22 Apr 85  JTC	Modified calling convention for LongMul to be custom for Bill.			<22Apr85>
+;		24 Apr 85  JTC	Modified all calls to preserve all but A0.								<24Apr85>
+;		13 May 85  JTC	One last bash at new routines.											<13May85>
+; <C156>15 Sep 86  CRC  FixRound: Add almost 1/2 instead of -1/2 in negative case
+; <C576>30 Dec 86  EHB  CRC LongMul,FixMul,FracMul,FixRatio were trashing too many registers
+;						Added a few RTD's for speed
+; <C693>25 Jan 87  EHB  Undid some mysterious changes in FixRatio that broke it
+;
+; FUNCTION FixMul	(x, y: Fixed): Fixed;	  { returns x*y, signed }
+;
+; FUNCTION FracMul	(x, y: Fracd): Fracd;	  { returns x*y }
+;
+; PROCEDURE LongMul (x, y: LONGINT; VAR z: Int64bit);	  { returns 64-bit x*y, signed }
+;
+; FUNCTION FixDiv	(x, y: Fixed): Fixed;	  { returns x/y, signed }
+;
+; FUNCTION FracDiv(x, y: Fracd): Fixed; 	{ returns x/y }
+;
+; FUNCTION FixRatio(x, y: Integer): Fixed;	  { returns x/y }
+;
+; FUNCTION FixRound (x: Fixed)	 : INTEGER;   { returns x, rounded to integer }
+;
+; FUNCTION FracSqrt (x: Fracd)	 : Fracd;	  { returns square root of x }
+;
+; FUNCTION FracSin	(x: Fixed)	 : Fracd;	  { returns Sin(x) }
+;
+; FUNCTION FracCos	(x: Fixed)	 : Fracd;	  { returns Cos(x) }
+;
+; FUNCTION FixATan2 (x, y : LongInt): Fixed;  { returns ATan(y/x) }
+;
+; FUNCTION HiWord (x: LONGINT)	 : INTEGER;   { returns hi word of x }
+;
+; FUNCTION LoWord (x: LONGINT)	 : INTEGER;   { returns lo word of x }
+;
+; FUNCTION Long2Fix, Fix2Long, Fix2Frac, Frac2Fix (x: inputType): outputType;
+;
+; FUNCTION Fix2X, X2Fix, Frac2X, X2Frac (x: inputType): outputType;
+;
+; Type Fixed is 32-bit binary fixed-point with binary point between
+; high and low words.  Sign is kept a la 2's-complement.
+; Type double is 64-bit IEEE binary floating point.
+; Type Fracd is 32-bit binary fixed point-point with binary point
+; after leading bits.  Sign is kept a la 2's-complement.
+;
+; Exceptional cases:
+;		Fixed overflow is set to $7FFFFFFF when positive, $80000000 when
+;				negative.
+;		Division by zero yields $7FFFFFFF when x is positive or zero,
+;				and $80000000 when x is negative.
+;
+; Calling conventions:
+;		Lisa/Mac Pascal stack arguments and return values.
+;		Exception: LongMul preserves all but A0 -- special for quickdraw.		<22Apr85>
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; When this package is adapted for RAM, set this value to 1.  It prevents
+; collisions with sacred names defined in first-round system.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+FixedPRAM	EQU 	0															  ; <28aug85> BBM
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; There are two flavors of multiply, FracMul and FixMul.  FracMul uses the
+; top 35 bits of the 64-bit product: the top two are shifted off the left,
+; the the last bit is used for rounding.  FixMul uses the middle 32 bits
+; of the product, with the attendant overflow checks, and rounds with a
+; 32nd bit.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;		   .PROC   FixMath,0		Don't need this in toolbox utilities.       <21Apr85>
+		EXPORT	FracMul
+		EXPORT	FracDiv
+		EXPORT	FixDiv
+		EXPORT	FracSqrt
+		EXPORT	FracSin
+		EXPORT	FracCos
+		EXPORT	FixATan2
+		EXPORT	Long2Fix
+		EXPORT	Fix2Long
+		EXPORT	Fix2Frac
+		EXPORT	Frac2Fix
+		EXPORT	Fix2X
+		EXPORT	X2Fix
+		EXPORT	Frac2X
+		EXPORT	X2Frac
+   IF  FixedPRAM THEN
+		EXPORT	RLongMul
+		EXPORT	RFixMul
+		EXPORT	RHiWord
+		EXPORT	RLoWord
+		EXPORT	RFixRatio
+		EXPORT	RFixRound
+   ELSE 
+		EXPORT	LongMul
+		EXPORT	FixMul
+		EXPORT	HiWord
+		EXPORT	LoWord
+		EXPORT	FixRatio
+		EXPORT	FixRound
+   ENDIF
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; PROCEDURE LongMul (x, y: LONGINT; VAR z: Int64bit);	  { returns 64-bit x*y, signed }
+;
+; CLOBBERS ONLY A0
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		IF		FixedPRAM THEN
+RLongMul
+		ELSE
+LongMul
+		ENDIF
+
+; RTS	EQU		8
+; Z		EQU		12
+; Y 	EQU		16
+; X		EQU		20
+
+		MOVEM.L	D0-D1,-(SP)		;save work registers
+		MOVE.L	16(SP),D1		;get y
+		MULS.L	20(SP),D0:D1	;multiply x by y to form 64 bit result
+		MOVE.L	12(SP),A0		;get var Z
+		MOVE.L	D0,(A0)+		;store high word
+		MOVE.L	D1,(A0)+		;store low word
+		MOVEM.L	(SP)+,D0-D1		;restore work registers
+		RTD		#12				;strip params and return
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; FracMul, FixMul
+;
+; CLOBBERS ONLY A0
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+FracMul
+		LEA		3,A0			; mark as FracMul (# of extra bits above result)
+		BRA.S	commonMul
+	
+		IF		FixedPRAM THEN
+RFixMul
+		ELSE
+FixMul
+		ENDIF
+
+		CMP.L	#$00010000,4(SP); is y 1?
+		BEQ.S	returnX
+		CMP.L	#$00010000,8(SP); is x 1?
+		BEQ.S	returnY
+		LEA		17,A0			; mark as FixMul (# of extra bits above result)
+
+commonMul
+
+RET		EQU 	16				; return address (after 4 regs)
+Y		EQU		RET+4			; Y parameter
+X		EQU		Y+4				; X parameter
+RESULT	EQU		X+4
+
+		MOVEM.L	D0-D2/A1,-(SP)	; save everything but A0
+		MOVE.L	Y(SP),D1		; get argument y
+		SMI		D2				; remember sign
+		TST.L	X(SP)			; check sign of x
+		SMI		D0				; remember its sign as well
+		EOR.B	D0,D2			; combine to signs together
+		EXTB.L	D2				; make it a mask for overflow check
+		MULS.L	X(SP),D0:D1		; get argument x; multiply by y
+		MOVE.L	D1,-(SP)		; save 64 bit result away for bit extract
+		MOVE.L	D0,-(SP)
+		
+	; overflow occured if top bits are not equal to xored signs
+	
+		MOVE.L	A0,D0			; 16 for FixMul; 2 for FracMul
+		BFEXTS	(SP){0:D0},D1	;get either first 3 or first 17 bits
+		CMP		D1,D2
+		BEQ.S	@noOverFlow
+		
+	; if one of the operands are 0, and the other one is negative, we’ll get here even though
+	; there is no overflow.  Check for 0 in result going on.
+	
+		MOVE.L	(SP)+,D1		;get high word of result
+		OR.L	(SP)+,D1		;zero if and only if the low and high words are zero.
+		BEQ.S	@returnResult
+		
+		MOVEQ	#-1,D1			;-1
+		LSR.L	#1,D1			;$7FFFFFFF
+		EOR.L	D2,D1			;$7FFFFFFF (largest positive) or $80000000 (largest negative)
+		BRA.S	@returnResult
+		
+@noOverFlow
+		
+	;no overflow; extract result
+		SUBQ	#1,D0			;get sign bit as well
+		BFEXTS	(SP){D0:0},D1	;get 32 bits of results (0 = 32:  assembler bug/oversight)
+	
+	;if 1/2 bit is set, add 1.  Note that to be painstakingly correct, if the result is negative
+	;add 1 only if a bit smaller than the 1/2 bit is also set.  The exact one-half case should
+	;not round up.
+	
+		ADD		#32,D0			; bump D0 to 1/2 bit
+		BFEXTU	(SP){D0:1},D2	; get the 1/2 bit
+		BEQ.S	@commonEnd
+		TST.L	D1				; result is minus?
+		BPL.S	@add1
+		ADDQ	#1,D0			; advance to next bit (the 1/4 bit)
+		MOVEQ	#64,D2			;
+		SUB		D0,D2			; determine number of bits remaining
+		BFEXTU	(SP){D0:D2},D0
+		BEQ.S	@commonEnd
+@add1
+		ADDQ.L	#1,D1			; bump the result
+		
+@commonEnd
+		ADDQ	#8,SP			; throw away 64 bit result
+@returnResult
+		MOVE.L	D1,RESULT(SP)	; save result
+		MOVEM.L	(SP)+,D0-D2/A1	; restore registers
+		RTD		#8				; strip params and return
+		
+returnX
+		MOVE.L	8(SP),12(SP)
+		RTD		#8
+
+returnY
+		MOVE.L	4(SP),12(SP)
+		RTD		#8
+		
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Restore sign to D0, with check for overflow.	On overflow store max
+; value with appropriate sign.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+reSign
+		TST.L	D0
+		BMI.S	fixOver 		; result must be 80000000
+		TST.B	D6
+		BEQ.S	TwoParmExit
+		NEG.L	D0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Common exit routine for all two parm routines.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+TwoParmExit
+		MOVE.W	#8,8(A6)		; A6: savedA6 << RET << x ...
+		MOVE.L	D0,16(A6)		; A6: savedA6 << RET << x << y << result slot
+		BRA.S	CustomExit
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Common exit routine for all one parm routines.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+OneParmExit
+		MOVE.W	#4,8(A6)		; A6: savedA6 << RET << x ...
+		MOVE.L	D0,12(A6)		; A6: savedA6 << RET << x << result slot
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Custom exit -- expect 8(A6) to be amount to kill from stack
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+CustomExit
+		MOVEM.L (SP)+,D0-D6/A1	; restore registers
+		UNLK	A6
+		MOVE.L	(SP)+,A0
+		ADDA.W	(SP),SP 		; kill the params
+		JMP 	(A0)
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Common entry routine for all.
+; Preserves all but A0.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+StdEntry
+		MOVE.L	(SP)+,A0		; local return address
+		LINK	A6,#0
+		MOVEM.L D0-D6/A1,-(SP)	; save scratch registers
+		JMP 	(A0)			; return
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Common startup routine fetches x,y from 12(A6) and unpacks into D1,D2.
+; Sign of result is stored in bit #15 of D6.16.
+; NOTE:  D1 and D2 are reversed from the Adobe version of these routines
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+fixArgs
+		MOVEM.L 8(A6),D1-D2 	; D1=y D2=x
+fixArg1
+		TST.L	D1
+		SMI 	D6
+		BPL.S	@41
+		NEG.L	D1
+@41
+		TST.L	D2
+		BPL.S	@43
+		NEG.L	D2
+		NOT.B	D6				; bit  7 is XOR of x,y signs
+@43
+		RTS
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Forces max value with correct sign.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+fixOver
+		MOVEQ	#1,D0
+		ROR.L	#1,D0			; get max negative Fixed, $80000000
+		TST.B	D6
+		BNE.S	TwoParmExit
+		SUBQ.L	#1,D0			; 7FFFFFFF when positive
+		BRA.S	TwoParmExit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; FixDiv:
+; Dividing	xxxx.xxxx by yyyy.yyyy.  Must prenormalize y to run division
+; algorithm.  To minimize number of divide steps, prenormalize x as well.
+; Step count  =  1-int + 16-frac + 1-round + y-shifts - x-shifts - 1-DBRA.
+; Cases:		count <= 0		quo := 0
+;				0 < count < 32	quo := as computed
+;				count >= 32 	quo := fixOver
+; Note that we can accommodate the "extra" round bit because the signed
+; result is really only 31 bits wide in magnitude.
+;
+; FracDiv:
+; Step count  =  1-int + 30-frac + 1-round + y-shifts - x-shifts - 1-DBRA.
+;
+; FixDiv:
+; Step count  =  1-int + 16-frac + 1-round + y-shifts - x-shifts - 1-DBRA.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+FracDiv
+		BSR.S	StdEntry
+		MOVEQ	#31,D3			; 1 + 30 + 1 - 1 = signature of FixRatio
+		BRA.S	comDiv
+FixDiv
+		BSR.S	StdEntry
+		MOVEQ	#17,D3			; 1 + 16 + 1 - 1 = signature of ...
+comDiv
+		BSR.S	fixArgs
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Initialize quo, have step count in D3; and check for division by zero.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		MOVEQ	#0,D0			; initialize quo
+		TST.L	D1
+		BNE.S	@13 			; entry to next loop, D1 tested
+		BRA.S	FixOver
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Loop to prenormalize y.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@11
+		ADDQ.W	#1,D3
+		ADD.L	D1,D1
+@13
+		BPL.S	@11
+		TST.L	D2
+		BEQ.S	TwoParmExit 	; hasty retreat if 0/0
+@14 	BRA.S	@17 			; entry to next loop, D2 tested
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Loop to prenormalize x.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@15
+		SUBQ.W	#1,D3
+		ADD.L	D2,D2
+@17
+		BPL.S	@15
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Check for cases above, based on step count in D3.W
+; The 0-based quotient bit count is in D3, for a DBRA loop below.
+; D3 <= 0 means that there are no (nonzero) quotient bits to compute,
+; that is, the result is zero.  D3 < 32 means that we're computing 
+; at most 32 real bits, so there can be no overflow.
+; Now the subtle part: with normalized dividend and divisor, there is at
+; most one leading 0 bit before the nonzero quotient begins.  That means
+; that when the D3 = 32 (that is, 33 quotients bits coming), we overflow
+; precisely when the leading quotient bit is 1; otherwise, we just fall
+; into the divide loop where a zero quotient bit would have taken us.
+; Finally D3 > 32 gurantees overflow.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		TST.W	D3
+		BLE.S	TwoParmExit 	; StdExit, 0 is the result
+
+		CMPI.W	#32,D3			; changed for #31 to # 32 					<A279/28Oct86>
+		BLT.S	L23 			; fall into loop, guaranteed no overflow 	<A343/03Nov86>
+
+		BGT.S	fixover			; was bra.s until now, overflow guaranteed	<A343/03Nov86>
+		CMP.L	D1,D2			; D1 < D2 --> CarrySet -->first bit is zero <A343/03Nov86>
+		BCS.S	L27				; falls in when 0 quo bits go				<A343/03Nov86>
+
+		BRA.S	fixOver
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Divide loop, to divide D2 by D1, developing D3.W quotient bits into D0.
+; At each step quotient is left shifted one place; in event of carry-out
+; be sure to force subtract.  Because of tests above, there's no chance
+; of overflow except during round step.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+L21
+		ADD.L	D0,D0			; make way for next quo bit
+;;;		BCS.S	FixOver			; remove test from inner loop				<A279/27Oct86>
+		ADD.L	D2,D2			; shift dividend
+		BCS.S	L25 			; force subtract on carry
+L23
+		CMP.L	D1,D2			; divisor vs dividend
+		BCS.S	L27 			; skip subtract if too small
+L25
+		SUB.L	D1,D2
+		ADDQ.W	#1,D0			; no carry here
+L27
+		DBRA	D3,L21
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Use the low bit of D0 to round the result.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		LSR.L	#1,D0
+		BCC.S	reSign
+		ADDQ.L	#1,D0
+		BRA.S	reSign
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Square root of a Frac xx.xxxxxxxx .  In this case, the leading two
+; bits of the Fract are BOTH taken to be integer, that is, the value is
+; interpreted as unsigned.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Square roots based on classical schoolboy algorithm.
+; P = (SUM Aj*10^-j)^2
+;	= A1 * A1 * 10^-2  +
+;	  ( 2(10*A1) + A2 ) * A2 * 10^-4  +
+;	  ( 2(10^2*A1 + 10*A2) + A3 ) * A3 * 10^-6	+
+;	  ( 2(10^3*A1 + 10^2*A2 + 10*A3) + A4 ) * A4 * 10^-8  + ...
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FracSqrt
+		BSR.S	StdEntry
+		MOVE.L	8(A6),D3		; fetch input Frac
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Know that lead bit of root is 0, so only 31 bits plus a round bit are
+; required.  Alas, this just spills over a longword, so compute in a
+; 64-bit field.  Compute root into D0-D1.  Maintain radicand in D2-D3.
+; Loop counter in D4.  Before each step, the root has the form:
+; <current root>01	and after each step: <new root>1, where the number
+; shown spans D0 and the highest two bits of D1.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		MOVEQ	#0,D0
+		MOVEQ	#1,D1
+		ROR.L	#2,D1			; D1 := 4000 0000
+		MOVEQ	#0,D2			; clear high radicand
+		MOVEQ	#31,D4			; need 32 bits less 1-DBRA
+
+frSqrtLoop
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Try radicand minus trial root.  Use subtle fact that C is the complement
+; of the next root bit at each step.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		SUB.L	D1,D3
+		SUBX.L	D0,D2			; no carry means root=1
+		BCC.S	@72
+
+		ADD.L	D1,D3
+		ADDX.L	D0,D2
+@72
+		DC.W	$0A3C			;EORI	 #16,CCR - complement X bit
+		DC.W	$0010
+
+		ADDX.L	D0,D0			; set root bit while shifting
+
+		ADD.L	D3,D3			; shift radicand two places
+		ADDX.L	D2,D2
+		ADD.L	D3,D3
+		ADDX.L	D2,D2
+
+		DBRA	D4,frSqrtLoop
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Shift the 32-bit root in D0 right one bit and round.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		LSR.L	#1,D0
+		BCC.S	OneParmExit
+		ADDQ.L	#1,D0
+		BRA.S	OneParmExit 			;												<23Apr85>
+
+; Experiment in crunching:	FixRatio written using common code, at what cost?
+		IF		FixedPRAM THEN
+RFixRatio
+		ELSE
+
+FixRatio
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; FixRatio(numerator,denominator: INTEGER): Fixed;
+;
+; CLOBBERS ONLY D0-D1
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+		ENDIF
+
+		MOVE	4(SP),D0				; get denominator
+		BEQ.S	@overFlow				; check for division by zero
+		MOVEQ	#0,D1					; clear high part of D1
+		MOVE	6(SP),D1				; get numerator
+		CMP		D0,D1
+		BEQ.S	@returnOne
+		EXT.L	D0
+		SWAP	D1						; multiply denominator by $1000
+		DIVS.L	D0,D1					; all done
+		MOVE.L	D1,8(SP)				; return fixed result
+		RTD		#4						; strip params and return
+		
+@overFlow
+		MOVEQ	#-1,D1
+		LSR.L	#1,D1					; a very large positive number
+		TST		6(SP)					; is numerator negative?
+		BPL.S	@0
+		NEG.L	D1						; a very large negative number
+@0		MOVE.L	D1,8(SP)				; return fixed result
+		RTD		#4						; strip params and return
+
+@returnOne
+		MOVEQ	#1,D1
+		SWAP	D1
+		MOVE.L	D1,8(SP)				; return fixed result
+		RTD		#4						; strip params and return
+		
+chkSign TST.B	D6							   ; was original signed?
+		BEQ.S	@9							   ; common code for this & FracSin, FracCos
+		NEG.L	D0
+@9		BRA.S	OneParmExit
+FixRatEasy
+		MOVEQ	#1,D0					; 0000.0001 									<23Apr85>
+		SWAP	D0						; make it 1.0									<23Apr85>
+		BRA.S	OneParmExit
+
+
+		IF	FixedPRAM THEN
+RLoWord
+		ELSE
+LOWORD
+		ENDIF
+;----------------------------------------------------
+;
+;  FUNCTION LoWord(x: Fixed): INTEGER;
+;
+		MOVE.W	6(SP),8(SP) 					;GET LO WORD
+		BRA.S	StripRet
+
+;----------------------------------------------------
+;
+;  FUNCTION HiWord(x: Fixed): INTEGER;
+;
+		IF	FixedPRAM THEN
+RHiWord
+		ELSE
+HIWORD
+		ENDIF
+		 MOVE.W  4(SP),8(SP)					 ;RETURN HI WORD OF RESULT
+StripRet MOVE.L  (SP)+,(SP) 					 ;STRIP PARAM
+		 RTS									 ;RETURN
+
+;----------------------------------------------------
+;
+;  FUNCTION FixRound(x: Fixed): INTEGER;
+;
+; Tricky routine requires that one add 1/2 to the MAGNITUDE of x, then CHOP toward 0.
+; Chopping a 2's-complement value requires an increment if the value of the fraction is
+; nonzero.	To be polite, also check for overflow:
+;	$7FFF8000 and above carries out to $8000xxxx, which must be pinned at $7FFF.
+;	$80007FFF and above (in magnitude) carry out to $7FFF8xxx, which must be pinned at $8000.
+; Lovely trick: note that regardless of its negation, the low word of D1 is $8000! Use it!
+; Subtle case: it looks simple to add 1/2 (toward +INF) and take floor (toward -INF) to get FixRound
+; to come out.	Alas, this messes up in half-way cases, to wit,  3/2 --> 2	but  -3/2 --> -1  !!!
+; change made 15-Sep-86 CRC:  add almost 1/2 instead of -1/2 in negative case
+
+		IF	FixedPRAM THEN
+RFixRound
+		ELSE
+FIXROUND
+		ENDIF
+
+			MOVE.L	(SP)+,A0		;get return address
+			MOVEQ	#1,D1
+			ROR.W	#1,D1			;compute $00008000
+			MOVE.L	(SP)+,D0		;get passed argument
+			BPL.S	@positive
+			NOT		D1				;for negative, make it $00007FFF
+@positive	ADD.L	D1,D0			;round up, but not as far if negative
+			BVC.S	@notTooBig		;fell off the end of the positive world
+			MOVEQ	#-2,D0			;get $FFFFFFFE
+			ROR.L	#1,D0			;compute $7FFFFFFF
+@notTooBig
+			SWAP	D0				;get hi word result
+			MOVE	D0,(SP)			;and return integer
+			JMP		(A0)			;go home
+
+
+
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; FUNCTION FracSin	(x: Fixed)	 : Fract;	  { returns Sin(x) }
+;
+; FUNCTION FracCos	(x: Fixed)	 : Fract;	  { returns Cos(x) }
+;
+;  Written by KLH  8 May 85
+;
+;  Description: Fixed Point Sine & Cosine.	It would be wise to use values
+;	of PI/4, PI/2 or PI obtained from FixATan2 for angle conversions.
+;	Undone: 1) code would be improved if A2 were saved and restored in
+;			   standard entry and exits.
+;			2) Need to make standard bypass when reduced arguments are 0, maybe.
+;
+;
+; (|x| div Pi/4) mod 8	 Argument Range 	sin (x) 		cos (x)
+;  D6 := |x| div Pi/4	   D3 := x
+;
+;		 0				 0		to Pi/4 	sin (x) 		cos (x)
+;		 1				 Pi/4	to Pi/2 	cos (Pi/2 - x)	sin (Pi/2 - x)
+;		 2				 Pi/2	to 3*Pi/4	cos (x) 	   -sin (x)
+;		 3				 3*Pi/4 to Pi		sin (Pi/2 - x) -cos (Pi/2 - x)
+;		 4				 Pi 	to 5*Pi/4  -sin (x) 	   -cos (x)
+;		 5				 5*Pi/4 to 3*Pi/2  -cos (Pi/2 - x) -sin (Pi/2 - x)
+;		 6				 3*Pi/2 to 7*Pi/4  -cos (x) 		sin (x)
+;		 7				 7*Pi/4 to 2*Pi    -sin (Pi/2 - x)	cos (Pi/2 - x)
+;
+;	 Note; 1) when D6 is odd D3 := Pi/2 - D3
+;		   2) if (cosine entry) then D6 := D6 + 2, use sine column
+;		   3) if (x < 0) and (sine entry) then D6 := D6 + 4
+;		   4)	 'move.b  #$66,-(sp)'
+;				 'btst    D6,(sp)+'   tests (D6 mod 8) bit of $66
+;		   5) the above scheme reduces all cosine and sine calls to
+;			  the appropriate sine or cosine in the range 0 to Pi/4
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FracCos
+		BSR.S	StdEntry
+		MOVEQ	#2,D6			;This is a Cosine, PI/2 phase shift
+		BRA.S	FSin2
+		
+FracSin
+		BSR.S	StdEntry
+		MOVEQ	#0,D6			;flag that this is a Sine routine, No phase shift
+FSin2
+		MOVE.L	8(A6),D3		;get angle
+		bpl.s	@3				;input argument is postive
+		tst.l	D6
+		bne.s	@2				;not Sine routine
+		addq	#4,D6			;Add PI phase shift, argument negative for sine
+@2		neg.l	D3
+@3		move.l	#$0000c910,D5	;D5 := PI/4 (fixed)
+		divu	D5,D3
+		add.l	D3,D6
+		clr.w	D3
+		swap	D3
+		btst	#0,D6
+		beq.s	@4
+		sub.w	D5,D3			; D3 := D3 - PI/4
+		neg.w	D3				; D3 := -D3
+@4		swap	D3				; frac := fixed/2
+		lsr.l	#3,D3
+		MOVE.l	A2,-(SP)		;need an address register
+		SUB.L	#16,SP			;space for 4 FracMul's function result
+
+		move.l	D3,-(sp)
+		move.l	D3,-(sp)
+		bsr		FracMul 			   ;d5 := sqr (D3)
+		MOVE.L	(SP)+,D5
+		move.b	#$66,-(sp)
+		btst	D6,(sp)+
+		bne.S	PolyCos
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;  sin (x) := (x/2)*(sn0 + x2*(sn1 + x2*sn2)),	where x2 := sqr (x/2)
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		LEA 	sn0,A2			;polynomial constants Sine
+		MOVEQ	#4,D4			;2 iterations, counting from 0 by fours.
+		bra.s	PolyLoop
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;  cos (x) :=		 cs0 + x2*(cs1 + x2*(cs2 + x2*cs3)),   where x2 := sqr (x/2)
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+PolyCos LEA 	cs0,A2			;polynomial constants for Cosine
+		MOVEQ	#8,D4			;3 iterations, counting from 0 by fours.
+
+PolyLoop
+		move.L	4(A2,D4),-(sp)
+@3		MOVE.l	D5,-(SP)		;push sqr (x) onto stack
+			  bsr		FracMul
+		move.L	0(A2,D4),D0
+		add.L	D0,(sp) 		;add coefficient to stack
+		SUBQ	#4,D4
+		BPL.S	@3
+		move.b	#$66,-(sp)
+		btst	D6,(sp)+
+		bne.S	NotSine
+
+		move.l	d3,-(sp)		;push original argument onto stack
+			  jsr		FracMul 	 ;do final multiply for Sine
+
+
+NotSine
+		move.l	(sp)+,D0		;pop result into D0 register
+		MOVE.L	(SP)+,A2		;restore extra register
+
+		move.b	#$f0,-(sp)
+		btst	D6,(sp)+
+		beq.s	@9
+		neg.l	D0
+
+@9		Bra.S	OneParmExit
+
+sn0 	DC.L	$7FFFD609		;  1.9999899949540321990		 0.000000561
+sn1 	DC.L	$AAB3314D		; -1.3328129532011865770		 0.000000561
+sn2 	DC.L	$10A208E5		;  0.2598898155860768873		 0.000000561
+
+cs0 	DC.L	$40000000		;  1.0
+cs1 	DC.L	$800011A7		; -1.9999957911835540090		 0.000000032
+cs2 	DC.L	$2AA7F29A		;  0.6665007113846229170		 0.000000032
+cs3 	DC.L	$FA6E2A42		; -0.0870260574471380774		 0.000000032
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;  FUNCTION FixATan2 (x, y: LONGINT): Fixed; { returns ArcTan (x, y) }
+;
+;  Written by KLH  8 May 85
+;
+;  Description: FixATan2 returns the angle (fixed, radians) in the range
+;	[-PI to PI] to the point (x, y: Longint).  For consistency with fracCos
+;	and fracSin it would be wise to use value of PI/4, PI/2 or PI obtained
+;	from this function for angle conversions.
+;	Undone: 1) (0, 0) currently yields 0, is this OK?
+;			2) code would be improved if A2 were saved and restored in
+;			   standard entry and exits.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FixATan2
+		BSR.S	StdEntry
+
+		moveq	#0,D6
+		MOVE.L	12(A6),D3		; get X
+		bpl.s	@1				; if X < 0 then
+		addq	#2,D6			; set 2nd bit of D6
+		neg.l	D3				; X := abs |X|
+		bpl.s	@1
+		subq.l	#1,D3			; uh oh, it's still negative, make largest positive <fixed>		<5>
+
+@1		MOVE.L	8(A6),D0		; get Y
+		bpl.s	@2				; if Y < 0s then
+		addq	#1,D6			; set lowest bit of D6
+		neg.l	D0				; y := |y|
+		bpl.s	@2
+		subq.l	#1,D0			; make largest positive <fixed>									<5>
+
+@2		MOVE.l	A2,-(SP)		; need an address register
+		SUB.L	#32,SP			; space for 8 Longints function results 8LP
+
+		cmp.l	D3,D0			; D0 - D3
+		ble.s	bigger			; is |Y| > |X| if yes then
+		addq	#4,D6			; set 3rd bit of D6
+
+		move.l	D3,-(sp)		; argument for ArcTan is |X|/|Y|
+		beq.s	NoPoly			; reduced argument is zero
+		move.l	D0,-(sp)
+		bra.s	GetATanArg
+
+NoPoly	move.l	D3,D0
+NoPoly2 Add.l	#36,sp			; clean up stack						0LP
+		bra.s	bypass
+
+bigger	move.l	D0,-(sp)		; reduced argument for ArcTan is |Y|/|X|
+		beq.s	NoPoly2 		; reduced argument is zero or 0/0
+		move.l	D3,-(sp)
+
+GetATanArg						;									   10LP
+			 bsr	   FracDiv
+		MOVE.L	(SP),D3 		;save argument
+		move.l	(sp),-(sp)		;										9LP
+			  bsr		FracMul 			   ;D5 := sqr (D3)
+		MOVE.L	(SP)+,D5		;										6LP
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	  ArcTan (x) := x*(at0 + x2*(at1 + x2*(at2 + x2*(at3 + x2*(at3 + x2*at5))))),
+;
+;						   where x2 := sqr (x)
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+		LEA 	at0,A2			; polynomial constants for ArcTangent	6LP
+		MOVE.L	20(a2),-(sp)	; push last coefficient onto stack		7LP
+		MOVEQ	#16,D4			; 5 iterations, counting from 0 by fours.
+@3		  MOVE.l  D5,-(SP)		; push sqr (x) onto stack
+			  bsr		FracMul
+		  move.L  0(A2,D4),D0
+		  add.L   D0,(sp)		; add coefficient to stack
+		  SUBQ	  #4,D4
+		  BPL.S   @3
+								;										2LP
+		move.l	d3,-(sp)		; push original argument onto stack
+			  jsr		FracMul 	 ;do final multiply
+
+		move.l	(sp)+,D0		; pop result into D0 register
+
+		MOVEQ	#14,D2			; with ArcTangent
+		LSR.L	D2,D0			; shift right 14 bits, for frac to fixed
+		bcc.s	bypass
+		addq.l	#1,D0			; round up
+
+bypass	MOVE.L	(SP)+,A2		; restore extra register
+
+		move.l	#$00019220,D5	; D5 := PI/2 (fixed)
+		btst	#2,D6
+		beq.s	@2				; X < Y
+		sub.l	D5,D0			; D0 := D0 - PI/2
+		neg.l	D0				; D0 := -D0
+
+@2		btst	#1,D6
+		beq.s	@1				; X was positive
+		lsl.l	#1,D5			; D5 := PI
+		sub.l	D5,D0			; D0 := D0 - PI
+		neg.l	D0				; D0 := -D0
+
+@1		btst	#0,D6
+		beq.s	@0				; Y was positive
+		neg.l	D0				; D0 := -D0
+
+@0		Bra.S	TwoParmExit
+
+at0 	DC.L	$3FFFA073		;  0.9999772190799163233		 0.000001662
+at1 	DC.L	$EAB64EBE		; -0.3326228278407496104		 0.000001662
+at2 	DC.L	$0C62F72C		;  0.1935403757729599042		 0.000001662
+at3 	DC.L	$F88C77F2		; -0.1164264811847172587		 0.000001662
+at4 	DC.L	$035E92FE		;  0.0526473506160217409		 0.000001662
+at5 	DC.L	$FF3FFE62		; -0.0117191354060452945		 0.000001662
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; FUNCTION Fix2X  (x: Fixed   ): Extended;
+; FUNCTION Frac2X (x: Fract   ): Extended;
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+Fix2X
+		move.w	#$400E,D1		; set extended exponent for 2^15
+		bra.s	ComE
+Frac2X
+		move.w	#$4000,D1		; set extended exponent for 2^1
+ComE	MOVE.L	(SP)+,A0		; save return address
+		move.l	(sp)+,D0		; put Fixed or Frac into D0
+		bne.s	NotZero
+		moveq	#0,D1			; zero exponent
+		bra.s	fin
+
+NotZero bpl.s	shftgn
+		add.w	#$8000,D1		; set Extended sign bit
+		neg.l	D0
+		bmi.s	fin 			; largest negative number, thus it is normalized
+
+shftgn	subq.w	#1,D1			; decrement Extended exponent
+		lsl.l	#1,D0			; shift until normalized
+		bpl.s	shftgn
+
+fin 	move.l	(sp),A1 		; get effective address of return argument
+		move.w	D1,(A1) 		; stuff sign & exponent
+		move.l	D0,2(A1)		; stuff significand
+		clr.l	6(A1)			; clear low word of Extended
+
+		jmp 	(A0)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; FUNCTION X2Fix (x: Extended ): Fixed;
+; FUNCTION X2Frac(x: Extended ): Fract;
+;
+;	 Note:	Assumes Extended numbers are normalized
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+X2Fix
+		move.w	#$400e,D1		; exponent for Ext. for correct Fixed significand
+		bra.s	X2F
+X2Frac
+		move.w	#$4000,D1		; exponent for Ext. for correct Frac significand
+X2F 	MOVEm.L (SP)+,A0/A1 	; save return address/get Extended address
+		move.w	(A1),D0 		; get exponent
+		bclr	#15,D0			; D0 := abs (D0)
+		sub.w	D0,D1			; D1 := D1 - D0
+		blt.s	MaxIt			; either a NaN, Inf or too large for fixed or frac
+		move.l	2(A1),D0		; get most significant part of significand
+		tst.w	D1
+		bne.s	@1				; unnormalize number
+
+		tst 	6(A1)			; is the 33rd bit set necessitating a round up
+		bra.s	@2
+
+@1		cmp.w	#32,D1			; D1 - 32
+		blt.s	@3				; Ok to Shift
+		bne.s	ZeroIt			; even MSB shifted too far to cause a rounding
+		moveq	#0,D0			; 32 bit shift, zero leading 32 bits & check 33rd
+		tst 	2(A1)			; is the 33rd bit set necessitating a round up
+@2		bmi.s	RndUp
+		bra.s	rtnX2F
+
+@3		lsr.l	D1,D0			; shift
+		bcc.s	rtnX2F
+RndUp	addq.l	#1,D0			; round up
+		bcs.s	MaxIt			; MaxIt if overflow
+
+rtnX2F	tst 	(A1)
+		bmi.s	NegRslt
+		tst.l	D0
+		bmi.s	MaxIt			; positive value too large
+FinX2F	move.l	D0,(sp)
+		jmp 	(A0)
+
+ZeroIt	moveq	#0,D0			; put here to save a word
+NegRslt neg.l	D0
+		ble.s	FinX2F			; D0 was zero or a valid negative value
+
+MaxIt	tst.w	(A1)
+MaxE2	bpl.s	@1
+		moveq	#1,D0			; move.l $00000001,D0 -> $80000000,D0
+		bra.s	@2
+
+@1		clr.l	D0
+		subq.l	#2,D0			; move.l $fffffffe,D0 -> $7fffffff,D0
+
+@2		ror.l	#1,D0
+		bra.s	FinX2F
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; FUNCTION Long2Fix (x: Longint ): Fixed;
+; FUNCTION Fix2Long (x: Fixed	): Longint;
+; FUNCTION Fix2Frac (x: Fixed	): Fract;
+; FUNCTION Frac2Fix (x: Fract	): Fixed;
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+Fix2Long
+		moveq	#16,D1
+		bra.s	ComFF
+
+Frac2Fix
+		moveq	#14,D1
+ComFF	MOVE.L	(SP)+,A0		; save return address
+		move.l	(sp)+,D0		; put Fixed or Frac into D0
+		bpl.s	@2
+		neg.l	D0
+		lsr.l	D1,D0
+		bcc.s	@1
+		addq.l	#1,D0			; 						<A279/27Oct86>
+@1		neg.l	D0
+		bra.s	FinX2F
+
+@2		lsr.l	D1,D0
+		bcc.s	FinX2F
+		addq.l	#1,D0			; 						<A279/27Oct86>
+		bra.s	FinX2F
+
+Long2Fix
+		moveq	#16,D1
+		bra.s	ComLF
+
+Fix2Frac
+		moveq	#14,D1
+ComLF	MOVE.L	(SP)+,A0		; save return address
+		move.l	(sp)+,(sp)
+		move.l	(sp),D0 		; put Longint or Fixed into D0
+		asl.l	D1,D0
+; check for overflow & take appropriate action depending on the sign
+		bvc.s	FinX2F			; no overflow
+		move.l	(sp),D1 		; sets N condition code
+		bra.s	MaxE2
+
+		   END
+
+

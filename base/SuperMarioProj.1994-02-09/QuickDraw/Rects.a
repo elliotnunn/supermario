@@ -1,0 +1,1036 @@
+;
+;	File:		Rects.a
+;
+;	Contains:	Procedures for operating on rectangles.
+;
+;	Copyright:	© 1981-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM3>	 9/15/92	RB		Removed 1st call to GetStreamMode in PushVerb. #1041577 Shannon
+;									Holland: PushVerb calls GetStreamMode to extract the alpha bits,
+;									later on DrawRect calls GetStreamMode again and the alpha mode
+;									is not set anymore, so the alpha channel is ignored by
+;									QuickDraw. This "patch" roll-in was not nessesary.
+;	   <SM2>	 6/11/92	stb		<sm 6/9/92>stb Synch with QDciPatchROM.a; added comments to
+;									StdRect, PushVerb.  Added _GetStreamMode calls to PushVerb.
+;		 <5>	 8/22/91	JSM		Don’t use FALSE as a label.
+;		 <4>	11/26/90	SMC		Fixed validation of penmode on calls to stretchbits.  With BAL.
+;		 <3>	10/31/90	SMC		Fixed alpha channel bugs with BAL.
+;		 <2>	 7/24/90	gbm		fix a couple of bogoid definitions
+;	  <•1.4>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;				  1/8/89	BAL		Vectorized CheckPic
+;				  6/4/87	CRC		fixed more hilite bugs; set patMode even if user forgets to
+;				  1/3/87	CRC		fixed hilite bugs; state was restored even when not saved
+;				 10/9/86	EHB		Added mask parameters to stretchbits calls
+;				  9/5/86	EHB		Added FillCRect
+;				 8/16/86	EHB		Modified fillRect to work with color grafports
+;				 7/16/86	EHB		Modified pushVerb to work with color grafports
+;				  7/8/86	EHB		Reverted to PatXOR
+;				  7/7/86	EHB		In PushVerb, use notSrcCopy to invert instead of PatXOR, Black
+;									for inverting colors (called by INVERT RECT,RRECT,OVAL,POLY,RGN)
+;				 6/18/86	EHB		Call StretchBits instead of RgnBlt
+;
+
+		BLANKS	ON
+		STRING	ASIS
+
+;-----------------------------------------------------------
+;
+;
+;	  ****	 *****	 ***   *****   ***
+;	  *   *  *		*	*	 *	  *   *
+;	  *   *  *		*		 *	  *
+;	  ****	 ***	*		 *	   ***
+;	  * *	 *		*		 *		  *
+;	  *  *	 *		*	*	 *	  *   *
+;	  *   *  *****	 ***	 *	   ***
+;
+;
+;
+;  Procedures for operating on rectangles.
+;
+;---------------------------------------------------------------
+
+StdRect PROC  EXPORT
+		IMPORT PutPicVerb,PutPicRect
+		IMPORT PutRect,FrmRect,PushVerb,DrawRect,StdDevLoop
+;---------------------------------------------------------------
+;
+;  PROCEDURE StdRect(verb: GrafVerb; r: Rect);
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+; includes fix from QDciPatchROM.a											<sm 6/9/92>stb
+
+PARAMSIZE		EQU 	6
+VERB			EQU 	PARAMSIZE+8-2		;GRAFVERB
+RECT			EQU 	VERB-4				;LONG, ADDR OF RECT
+
+VARSIZE			EQU		0					;TOTAL SIZE OF LOCALS
+
+		LINK	A6,#VARSIZE					;NO LOCALS
+		MOVEM.L D7/A3-A4,-(SP)				;SAVE REGS
+		MOVE.B	VERB(A6),D7 				;GET VERB
+		_CheckPic							;SET UP A4,A3 AND CHECK PICSAVE
+		BLE.S	NOTPIC						;BRANCH IF NOT PICSAVE
+
+		MOVE.B	D7,-(SP)					;PUSH VERB
+		JSR		PutPicVerb					;PUT ADDIONAL PARAMS TO THEPIC
+		MOVEQ	#$30,D0 					;GET RECTNOUN IN HI NIBBLE
+		ADD 	D7,D0						;PUT VERB IN LO NIBBLE
+		MOVE.B	D0,-(SP)					;PUSH OPCODE
+		MOVE.L	RECT(A6),-(SP)				;PUSH ADDR OF RECT
+		JSR 	PutPicRect					;PUT OPCODE AND RECTANGLE
+		
+;  CALL STANDARD LOOP TO DRAW TO ALL DEVICES
+
+NOTPIC	PEA		StdDraw						;PUSH ADDRESS OF DRAW ROUTINE
+		PEA		GetRect						;PUSH ADDRESS OF RECT ROUTINE
+		_StdDevLoop							;DRAW TO ALL DEVICES
+
+GOHOME	MOVEM.L (SP)+,D7/A3-A4				;RESTORE REGS
+		UNLINK	PARAMSIZE,'STDRECT '
+		
+		
+;---------------------------------------------------------------
+;
+;	PROCEDURE GetRect(VAR theRect: rect); 
+;
+;	RETURN THE OBJECT'S RECTANGLE
+;
+GetRect	MOVE.L	(SP)+,D0					;GET RETURN ADDRESS
+		MOVE.L	(SP)+,A1					;GET DST RECT
+		MOVE.L	RECT(A6),A0					;GET SRC RECT
+		MOVE.L	(A0)+,(A1)+					;SET TOPLEFT
+		MOVE.L	(A0),(A1)					;SET BOTRIGHT
+		MOVE.L	D0,A0						;GET RETURN ADDRESS
+		JMP		(A0)						;AND RETURN
+
+
+;---------------------------------------------------------------
+;
+;	PROCEDURE StdDraw; 
+;
+;	DRAW THE OBJECT
+;
+StdDraw	MOVE.L	RECT(A6),-(SP)				;PUSH RECT FOR FrmRect or DrawRect
+		TST.B	D7							;IS VERB FRAME ?
+		BNE.S	NOTFR						;NO, CONTINUE
+		TST.L	RGNSAVE(A3) 				;YES, IS RGNSAVE TRUE ?
+		BEQ.S	NOTRGN						;NO, CONTINUE
+
+		MOVE.L	RECT(A6),-(SP)				;YES, PUSH ADDR OF RECT
+		MOVE.L	RGNBUF(A4),-(SP)			;PUSH RGNBUF
+		PEA 	RGNINDEX(A4)				;PUSH VAR RGNINDEX
+		PEA 	RGNMAX(A4)					;PUSH VAR RGNMAX
+		JSR 	PutRect 					;ADD A RECT TO THERGN
+
+NOTRGN	JSR 	FrmRect						;FrmRect(rect)
+		BRA.S	DONESD
+
+NOTFR	_PushVerb							;PUSH MODE AND PATTERN
+		JSR 	DRAWRECT					;DrawRect(rect,mode,pat);
+DONESD	RTS
+		
+
+StdDevLoop	PROC	EXPORT
+			IMPORT	PortToMap,PINIT
+;---------------------------------------------------------------
+;
+;  PROCEDURE StdDevLoop(DrawProc, RectProc);
+;
+;  On Entry:	A3:		GrafPort
+;				A6:		Caller's stack frame
+;
+;  Trashes:		D0-D2/A0-A1
+;
+;  A6 OFFSETS OF PARAMS AFTER LINK:
+;
+PARAMSIZE		EQU 	8
+DrawProc		EQU		PARAMSIZE+8-4		;routine to do drawing
+RectangleProc	EQU		DrawProc-4			;routine to calc rect
+
+UserStack		EQU		0					;user's stack frame
+
+RECT1			EQU		-8					;USER RECT
+CURDEV			EQU		RECT1-4				;CURRENT DEVICE IN CHAIN
+DRAWDONE		EQU		CURDEV-2			;FLAG SET WHEN DRAWING DONE
+SAVEPNLOC		EQU		DRAWDONE-4			;SAVE COPY OF PNLOC
+LASTSEED		EQU		SAVEPNLOC-4			;LAST COLOR TABLE SEED
+SAVEFG			EQU		LASTSEED-4			;ORIGINAL FG COLOR
+SAVEBK			EQU		SAVEFG-4			;ORIGINAL BK COLOR
+PORTPIX			EQU		SAVEBK-4			;SAVE THE PORTPIXMAP
+saveHilite		EQU		portPix-2			;saved hilite mode flag
+savePnHFrac		EQU		saveHilite-2		;saved pen fraction
+VARSIZE			EQU		savePnHFrac			;TOTAL SIZE OF LOCALS
+
+
+		LINK	A6,#VARSIZE					;ALLOCATE STACK FRAME
+
+		CLR.L	CURDEV(A6)					;ASSUME NOT DRAWING TO SCREEN
+		
+; IF THERE IS ONLY ONE SCREEN DEVICE, SKIP LOOP STUFF
+
+		MOVE.L	DEVICELIST,A0				;GET FIRST DEVICE
+		MOVE.L	(A0),A0						;POINT AT IT
+		TST.L	GDNEXTGD(A0)				;IS THERE A SECOND DEVICE?
+		BEQ		NOTSCRN						;=>NO, JUST DRAW ONCE		
+		
+;  IF DRAWING IS TO THE SCREEN, THEN ATTEMPT TO DRAW TO EACH SCREEN DEVICE
+
+		CLR		DRAWDONE(A6)				;SAY NO DRAWING DONE
+		MOVE.L	A3,A0						;GET PORT IN A0
+		_PORTTOMAP							;GET BIT/PIXMAP IN A0
+		MOVE.L	A0,PORTPIX(A6)				;SAVE POINTER TO PORT PIXMAP
+		MOVE.L	BASEADDR(A0),D0				;GET BASEADDR OF THEPORT
+		MOVE.L	MAINDEVICE,A0				;GET THE PRIMARY SCREEN DEVICE
+		MOVE.L	(A0),A1						;POINT TO DEVICE
+		MOVE.L	GDPMAP(A1),A1				;GET HANDLE TO PIXMAP
+		MOVE.L	(A1),A1						;POINT TO PIXMAP
+		CMP.L	BASEADDR(A1),D0				;SAME AS THESCREEN?
+		BNE		NOTSCRN						;=>NOT GOING TO THE SCREEN
+											
+; IF WE ARE GOING TO SCREEN, SAVE OFF STATE INFO
+		
+		MOVE.B	HiliteMode,saveHilite(A6)	;save the hilite state
+		MOVE.L	PNLOC(A3),SAVEPNLOC(A6)		;SAVE THE PEN LOCATION
+		MOVE	pnLocHFrac(A3),savePnHFrac(A6) ;save the fraction (if a new port)
+		MOVE.L	SRCDEVICE,-(SP)				;SAVE THE SOURCE DEVICE
+		MOVE.L	THEGDEVICE,-(SP)			;SAVE THE GRAFDEVICE
+		MOVE.L	POLYSAVE(A3),-(SP)			;SAVE POLYSAVE
+		MOVE.L	RGNSAVE(A3),-(SP)			;SAVE RGNSAVE
+		MOVE.L	PMTABLE(A1),A0				;GET COLOR TABLE HANDLE
+		MOVE.L	(A0),A0						;POINT TO COLOR TABLE
+		MOVE.L	CTSEED(A0),LASTSEED(A6)		;SAVE LAST COLOR TABLE SEED
+		MOVE.L	FGCOLOR(A3),SAVEFG(A6)		;SAVE FG COLOR
+		MOVE.L	BKCOLOR(A3),SAVEBK(A6)		;SAVE BK COLOR
+		
+;  CALL CALLER TO RETURN OBJECT'S RECTANGLE
+		
+		MOVE.L	A6,-(SP)					;SAVE OUR STACK FRAME
+		MOVE.L	RECTANGLEPROC(A6),A0		;GET THE RECT PROC
+		PEA		RECT1(A6)					;PUSH USER RECT
+		MOVE.L	USERSTACK(A6),A6			;GET USER'S STACK
+		JSR		(A0)						;GetRect(VAR theRect: Rect);
+		MOVE.L	(SP)+,A6					;RESTORE OUR STACK FRAME
+		
+;  CONVERT OBJECT'S RECT TO GLOBAL COORDINATES
+
+		LEA		RECT1(A6),A0				;POINT TO RECT
+		MOVE.L	PORTPIX(A6),A1				;POINT TO PORT PIXMAP
+		MOVE.L	BOUNDS(A1),D0				;GET TOPLEFT
+		MOVE.L	D0,D1						;LEAVE LEFT IN D0
+		SWAP	D1							;AND TOP IN D1
+		SUB		D1,(A0)+					;OFFSET TOP
+		BVC.S	@0							;=>NO OVERFLOW
+		_PINIT								;ELSE PIN VALUE
+@0		SUB		D0,(A0)+					;OFFSET LEFT
+		BVC.S	@1							;=>NO OVERFLOW
+		_PINIT								;ELSE PIN VALUE
+@1		SUB		D1,(A0)+					;OFFSET BOTTOM
+		BVC.S	@2							;=>NO OVERFLOW
+		_PINIT								;ELSE PIN VALUE
+@2		SUB		D0,(A0)+					;OFFSET RIGHT
+		BVC.S	@3							;=>NO OVERFLOW
+		_PINIT								;ELSE PIN VALUE
+@3
+
+;  FOR EACH DEVICE DRAW OBJECT IF IT INTERSECTS WITH DEVICE
+
+		MOVE.L	DEVICELIST,A0				;GET THE FIRST DEVICE IN THE LIST
+		
+DONEXT	MOVE.L	(A0),A1						;POINT TO DEVICE
+		TST		GDFLAGS(A1)					;IS IT AN ACTIVE DEVICE?
+		BPL		NXTDEV1						;=> NO, SKIP IT
+
+		MOVE.L	A0,THEGDEVICE				;SET CURRENT DST DEVICE
+		MOVE.L	A0,SRCDEVICE				;SET CURRENT SRC DEVICE (for stretchBits)
+		MOVE.L	A0,CURDEV(A6)				;SAVE CURRENT DEVICE
+		
+;  DOES THE OBJECT INTERSECT WITH THE DEVICE?
+		
+		LEA		GDRECT(A1),A0				;POINT TO DEVICE'S RECT
+		LEA		RECT1(A6),A1				;POINT TO USER'S RECT
+		MOVE.L	(A1)+,D0					;TOPLEFT IN DO
+		MOVE.L	(A1)+,D1					;BOTRIGHT IN D1
+		SWAP	D1							;GET BOTTOM
+		CMP 	(A0)+,D1					;IS RECT1.BOTTOM <= GDRECT.TOP ?
+		BLE		NXTDEV						;=>YES, CHECK NEXT DEVICE
+		SWAP	D1							;GET RIGHT
+		CMP 	(A0)+,D1					;IS RECT1.RIGHT <= GDRECT.LEFT ?
+		BLE		NXTDEV						;=>YES, CHECK NEXT DEVICE
+		SWAP	D0							;GET RECT1.TOP
+		CMP 	(A0)+,D0					;IS RECT1.TOP >= GDRECT.BOTTOM ?
+		BGE		NXTDEV						;=>YES, CHECK NEXT DEVICE
+		SWAP	D0							;GET RECT1.LEFT
+		CMP 	(A0)+,D0					;IS RECT1.LEFT >= GDRECT.RIGHT ?
+		BGE		NXTDEV						;=>YES, CHECK NEXT DEVICE
+		
+;  YES, DRAW THE OBJECT ON THAT DEVICE
+;  IF THE DEVICE'S COLOR TABLE IS DIFFERENT, FIX UP FG AND BK COLORS
+
+		MOVE.B	saveHilite(A6),HiliteMode	;RESTORE HILITE FLAGS
+		MOVE.L	SAVEPNLOC(A6),PNLOC(A3)		;RESTORE THE PNLOC BEFORE DRAWING
+		TST		PORTBITS+ROWBYTES(A3)		;NEW PORT?
+		BPL		NOTSCRN						;IF NOT, SKIP NEW PORT STUFF
+		MOVE	savePnHFrac(A6),pnLocHFrac(A3) ;ELSE RESTORE THE PEN FRACTION
+
+		MOVE.L	THEGDEVICE,A0				;GET THE DEVICE
+		MOVE.L	(A0),A0						;POINT AT IT
+		MOVE.L	GDPMAP(A0),A0				;GET PIXMAP
+		MOVE.L	(A0),A0						;POINT AT IT
+		MOVE.L	PMTABLE(A0),A0				;GET COLOR TABLE
+		MOVE.L	(A0),A0						;POINT AT IT
+		MOVE.L	CTSEED(A0),D0				;GET SEED
+		CMP.L	LASTSEED(A6),D0				;SAME AS CURRENT SEED?
+		BEQ.S	NOTSCRN						;=>YES, COLORS ARE OK
+		
+		MOVE.L	D0,LASTSEED(A6)				;UPDATE SEED
+		SUBQ	#6,SP						;MAKE ROOM FOR A COLOR RECORD
+		CLR.L	-(SP)						;CLEAR INDEX, FLAGS WORDS
+		
+; This is a patch rolled in <6Jun87 EHB>
+; The idea here is that to keep the index field in the grafPort valid, we must
+; check to see whether we should use palette manager or not.  
+
+		MOVE.L	GrafVars(A3),D0				;get the grafVars handle
+		BEQ.S	@NoPlt						;=>none there
+		MOVE.L	D0,A0						;get grafVars handle
+		MOVE.L	(A0),A0						;point at grafVars
+		TST.L	PmFgColor(A0)				;is there a palette?
+		BEQ.S	@NoPlt						;=>no, continue
+
+		MOVE	PmFlags(A0),D2				;else get flags
+		MOVE	PmBkIndex(A0),2(SP)			;save bk index
+		BTST	#PmBkBit,D2					;bk set by palette mgr?
+		SNE		(SP)						;if so set flag
+
+		BTST	#PmFgBit,D2					;fg set by palette mgr?
+		BEQ.S	@NoPlt						;=>no, continue
+
+		MOVE	PmFgIndex(A0),-(SP)			;else push last index
+		_PmForeColor						;and set that color
+		BRA.S	@NoPlt1						;=>no, do old way
+		
+@NoPlt	PEA		4(SP)						;POINT AT RECORD FOR RGBFC
+		MOVE.L	(SP),-(SP)					;AND AGAIN FOR GETFC
+		_GETFORECOLOR						;GET THE FOREGROUND COLOR
+		_RGBFORECOLOR						;SET THE FOREGROUND COLOR
+
+@NoPlt1	TST.B	(SP)						;bk set by palette mgr?
+		BEQ.S	@NoPlt2						;=>no, do old way
+		MOVE	2(SP),-(SP)					;else push bk index
+		_PmBackColor						;and set that color
+		BRA.S	@BkDone						;=>done setting colors
+
+@NoPlt2	PEA		4(SP)						;POINT AT RECORD
+		MOVE.L	(SP),-(SP)					;AND AGAIN FOR GETFC
+		_GETBACKCOLOR						;GET THE BACKGROUND COLOR
+		_RGBBACKCOLOR						;SET THE BACKGROUND COLOR
+
+@BkDone	ADD		#10,SP						;STRIP THE RECORD
+				
+NOTSCRN	MOVE.L	DRAWPROC(A6),A0				;GET CALLER'S DRAW PROC
+		MOVE.L	A6,-(SP)					;SAVE OUR STACK FRAME
+		MOVE.L	USERSTACK(A6),A6			;GET USER'S STACK
+		JSR		(A0)						;DRAW TO ONE DEVICE
+		MOVE.L	(SP)+,A6					;RESTORE OUR STACK FRAME
+		ST		DRAWDONE(A6)				;SAY DRAWING DONE
+		
+; IF THERE ARE MORE SCREEN DEVICES, DRAW TO THEM
+		
+		MOVE.L	CURDEV(A6),D0				;GET CURRENT DEVICE
+		BEQ.S	GOHOME						;=>NO MORE TO DO, RETURN
+
+		CLR.L	RGNSAVE(A3)					;ONLY RECORD REGIONS ONCE
+		CLR.L	POLYSAVE(A3)				;ONLY RECORD POLYS ONCE
+		
+NXTDEV	MOVE.L	CURDEV(A6),A0				;GET CURRENTDEVICE
+		MOVE.L	(A0),A1						;AND POINT TO IT
+NXTDEV1	MOVE.L	GDNEXTGD(A1),D0				;GET HANDLE TO NEXT DEVICE
+		MOVE.L	D0,A0						;AND GET HANDLE IN A0
+		BNE.S	DONEXT						;=>DO NEXT DEVICE
+		
+		CLR.L	CURDEV(A6)					;FLAG NO MORE DEVICES
+		
+DONE	MOVE.L	(SP)+,RGNSAVE(A3)			;RESTORE RGNSAVE
+		MOVE.L	(SP)+,POLYSAVE(A3)			;RESTORE POLYSAVE
+		MOVE.L	(SP)+,THEGDEVICE			;RESTORE THE GRAFDEVICE
+		MOVE.L	(SP)+,SRCDEVICE				;RESTORE THE SRC DEVICE
+		MOVE.L	SAVEFG(A6),FGCOLOR(A3)		;RESTORE FG COLOR
+		MOVE.L	SAVEBK(A6),BKCOLOR(A3)		;RESTORE BK COLOR
+		TST		DRAWDONE(A6)				;WAS DRAWING DONE?
+		BEQ.S	NOTSCRN						;=>NO, DRAW ONCE AND GOHOME
+		
+GOHOME	BSET	#HILITEBIT,HILITEMODE		;TURN OFF HILITING
+		UNLINK	PARAMSIZE,'STDDEVLO'
+
+
+PINIT 	PROC	EXPORT
+;----------------------------------------------------------
+;
+;  CALLED IF OVERFLOW.  PINS -2(A0) JUST BELOW OVERFLOW VALUE
+;
+		TST		-2(A0)						;DID VALUE GO NEGATIVE?
+		BPL.S	SETNEG						;=>NO, SET TO NEGATIVE
+		MOVE	#$7FFE,-2(A0)				;ELSE PIN TO LARGE POSITIVE NUMBER
+		RTS
+SETNEG	MOVE	#$8002,-2(A0)				;ELSE PIN TO LARGE NEGATIVE NUMBER
+		RTS
+
+
+PushVerb 	PROC	EXPORT
+			IMPORT	SETFILLPAT
+;----------------------------------------------------------
+;
+;  PUSH A MODE AND A PATTERN, BASED ON VERB
+;  ENTER WITH VERB IN D7, GRAFGLOBALS IN A4, THEPORT IN A3.
+;
+;  CLOBBERS A0-A1/D0/D2
+;
+;	 frame:  pnMode,  pnPat
+;	 paint:  pnMode,  pnPat
+;	 erase:  patCopy, bkPat
+;	 invert: notSrcCopy, noPat
+;	 fill:	 patCopy, fillPat
+;
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR				<sm 6/9/92>stb	<SM3> rb
+		MOVE	#8,-(SP)					;PUSH MODE = PATCOPY (IE. DEFAULT)
+		CMP.B	#1,D7						;CASE ON VERB
+		BLE.S	PAINT1						;								<SM3> rb, removed GetStreamMode code
+		CMP.B	#3,D7
+		BLT.S	ERASE1
+		BEQ.S	INVERT1
+
+FILL1	LEA		FILLPAT(A3),A1				;ASSUME IT'S AN OLD PORT
+		TST		PORTBITS+ROWBYTES(A3)		;IS IT A COLOR GRAFPORT
+		BPL.S	OLDPORT						;=>NO, JUST PUSH PAT
+USEPPAT	LEA		FILLPIXPAT(A3),A1			;ELSE GET POINTER TO FILLPAT
+OLDPORT	MOVE.L	A1,-(SP)	 				;PUSH PAT := FILLPAT
+		JMP 	(A0)						;RETURN TO CALLER
+
+ERASE1	PEA 	BKPAT(A3)					;PUSH PAT = BKPAT
+		JMP 	(A0)						;RETURN TO CALLER
+
+INVERT1	
+		ADD.W	#2,(SP) 					;ADJUST, PUSH MODE = PATXOR
+		LEA 	BLACK(A4),A1				;ASSUME PAT = BLACK
+		TST		PORTBITS+ROWBYTES(A3)		;IS IT A COLOR PORT?
+		BPL.S	OLDPORT						;=>NO, USE BLACK PATTERN
+		MOVE.L	A0,-(SP)					;SAVE RETURN ADDRESS
+		MOVE.L	A1,-(SP)					;PUSH PAT
+		MOVEQ	#0,D0						;FLAG = FILLRECT
+		_SETFILLPAT							;AND SET THE FILL PATTERN TO IT
+		MOVE.L	(SP)+,A0					;RESTORE RETURN ADDRESS
+		BRA.S	USEPPAT						;AND RETURN POINTER TO FILLPIXPAT
+
+PAINT1	MOVE	PNMODE(A3),D0				;get the pen mode				<SM3> rb <removed GetStreamMode>
+; as seen in QDciPatchROM.a													<sm 6/9/92>stb
+		OR		D0,(SP) 					;push mode, but leave the pattern bit set <SM3> rb
+		PEA 	PNPAT(A3)					;PUSH PAT = PNPAT
+		JMP 	(A0)						;RETURN TO CALLER				<SM3> rb
+
+
+FillRect	PROC	EXPORT
+			EXPORT	FILLCRECT
+			EXPORT	CallRect,FrameRect,PaintRect,EraseRect,InvertRect
+			IMPORT	SetFillPat
+;----------------------------------------------------------
+;
+;  PROCEDURE FillRect(r: Rect; pat: Pattern);
+;
+		MOVEQ	#0,D0						;FLAG = FILLRECT
+		BRA.S	SHARE						; => USE COMMON CODE
+		
+;----------------------------------------------------------
+;
+;  PROCEDURE FillCRect(r: Rect; PPH: PixPatHandle);
+;
+FILLCRECT MOVEQ	#1,D0						;FLAG = FILLCRECT
+
+SHARE	MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,A1					;POP ADDR OF PATTERN
+		MOVE.L	A0,-(SP)					;PUT RETURN ADDR BACK
+		MOVE.L	A1,-(SP)					;PUSH ADDR OF PATTERN
+		_SETFILLPAT							;FILLPAT := PAT
+		MOVEQ	#FILL,D0					;VERB = FILL
+		BRA.S	CallRect					;SHARE COMMON CODE
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE FrameRect(r: Rect);
+;
+FrameRect
+		MOVEQ	#FRAME,D0					;VERB = FRAME
+		BRA.S	CallRect					;SHARE COMMON CODE
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE PaintRect(r: Rect);
+;
+PaintRect
+		MOVEQ	#PAINT,D0					;VERB = PAINT
+		BRA.S	CallRect					;SHARE COMMON CODE
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE EraseRect(r: Rect);
+;
+EraseRect
+		MOVEQ	#ERASE,D0					;VERB = ERASE
+		BRA.S	CallRect					;SHARE COMMON CODE
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE InvertRect(r: Rect);
+;
+InvertRect
+		MOVEQ	#INVERT,D0					;VERB = INVERT
+;		BRA.S	CallRect					;SHARE COMMON CODE
+
+
+;---------------------------------------------------------------
+;
+;  PROCEDURE CallRect(r: Rect);
+;
+;  code shared by FrameRect, PaintRect, EraseRect, InvertRect, and FillRect.
+;  enter with verb in D0.
+;
+CallRect
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,A1					;POP ADDR OF RECT
+		MOVE.B	D0,-(SP)					;PUSH VERB
+		MOVE.L	A1,-(SP)					;PUSH ADDR OF RECT
+		MOVE.L	A0,-(SP)					;RESTORE RETURN ADDR
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		MOVE.L	GRAFPROCS(A0),D0			;IS GRAFPROCS NIL ?
+		MOVE.L	JStdRect,A0 				;get piece of trap table
+		BEQ.S	USESTD						;YES, USE STD PROC
+		MOVE.L	D0,A0
+		MOVE.L	RECTPROC(A0),A0 			;NO, GET PROC PTR
+USESTD	JMP 	(A0)						;GO TO IT
+
+
+DrawRect PROC  EXPORT	
+		IMPORT STRETCHBITS
+;----------------------------------------------------------
+;
+;  PROCEDURE DrawRect(r: Rect; mode: INTEGER; pat: Pattern);
+;
+;  Rectangle is given in local coordinates.
+;
+;  A6 OFFSETS OF PARAMS AND LOCALS AFTER LINK:
+;
+PARAMSIZE		EQU 	10					;TOTAL BYTES OF PARAMS
+DSTRECT 		EQU 	PARAMSIZE+8-4		;LONG, ADDR OF RECT
+MODE			EQU 	DSTRECT-2			;WORD
+PAT 			EQU 	MODE-4				;LONG, ADDR OF PAT
+
+		LINK	A6,#0						;NO LOCAL VARS
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A1				;GET CURRENT GRAFPORT
+		MOVE.L	WIDEOPEN(A0),D2				;PUSH WIDE OPEN
+		TST 	PNVIS(A1)					;IS PNVIS >= 0 ?
+		BLT.S	GOHOME						;NO, QUIT
+		PEA 	PORTBITS(A1)				;PUSH SRCBITS = DSTBITS
+		CLR.L	-(SP)						;NO MASKBITS
+		PEA 	PORTBITS(A1)				;PUSH DSTBITS
+		MOVE.L	DSTRECT(A6),-(SP)			;PUSH SRCRECT = DSTRECT
+		CLR.L	-(SP)						;NO MASKRECT
+		MOVE.L	DSTRECT(A6),-(SP)			;PUSH DSTRECT
+		MOVE	MODE(A6),D1					;PUSH MODE
+		OR		#$8,D1						;set the pattern bit in case the user forgot to
+		_GetStreamMode						;strip mode
+		MOVE.W	D1,-(SP)					;save stripped mode
+		MOVE.L	PAT(A6),-(SP)				;PUSH ADDR OF PATTERN
+		MOVE.L	CLIPRGN(A1),-(SP)			;PUSH CLIPRGN
+		MOVE.L	VISRGN(A1),-(SP)			;PUSH VISRGN
+		MOVE.L	D2,-(SP)					;PUSH WIDE OPEN
+		CLR		-(SP)						;pass multicolor flag false
+		_STRETCHBITS						;CALL STRETCHBITS
+GOHOME	UNLINK	PARAMSIZE,'DRAWRECT'
+
+
+
+FrmRect	PROC  EXPORT
+		IMPORT STRETCHBITS
+;----------------------------------------------------------
+;
+;  PROCEDURE FrmRect(r: Rect);
+;  Draws an outline inside a rect.
+;
+;  A6 OFFSETS OF PARAMETERS AND LOCALS AFTER LINK:
+;
+DSTRECT 		EQU 	8					;LONG, ADDR OF RECT
+H1				EQU 	-2					;WORD
+H2				EQU 	H1-2				;WORD
+H3				EQU 	H2-2				;WORD
+H4				EQU 	H3-4				;WORD
+V1				EQU 	H4-2				;WORD
+V2				EQU 	V1-2				;WORD
+V3				EQU 	V2-2				;WORD
+V4				EQU 	V3-4				;WORD
+TMPRECT			EQU 	V4-8				;RECT
+VARSIZE 		EQU 	TMPRECT				;TOTAL SIZE OF LOCALS
+
+
+		LINK	A6,#VARSIZE 				;SET UP STACK FRAME
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A0				;GET CURRENT GRAFPORT
+		TST 	PNVIS(A0)					;IS PNVIS NEGATIVE ?
+		BLT 	GOHOME						;YES, DON'T DRAW AT ALL
+		MOVE.L	DSTRECT(A6),A1				;POINT TO INPUT RECT
+		MOVE.L	(A1)+,TMPRECT+TOPLEFT(A6)	;COPY INPUT RECT
+		MOVE.L	(A1)+,TMPRECT+BOTRIGHT(A6)
+;
+;  Now set up h1,h2,h3,h4 and v1,v2,v3,v4
+;
+		LEA 	TMPRECT(A6),A1 				;POINT TO COPIED RECT
+		MOVE	PNSIZE+H(A0),D2 			;GET PEN WIDTH
+		MOVE	LEFT(A1),D0
+		MOVE	D0,H1(A6)					;H1:=LEFT
+		ADD 	D2,D0
+		MOVE	D0,H2(A6)					;H2:=LEFT+PENWIDTH
+		MOVE	RIGHT(A1),D1
+		MOVE	D1,H4(A6)					;H4:=RIGHT
+		SUB 	D2,D1
+		MOVE	D1,H3(A6)					;H3:=RIGHT-PENWIDTH
+		CMP 	D1,D0						;IS H2 >= H3 ?
+		BGE.S	@1							;YES, FILL IT IN SOLID
+
+		MOVE	PNSIZE+V(A0),D2 			;GET PEN HEIGHT
+		MOVE	TOP(A1),D0
+		MOVE	D0,V1(A6)					;V1:=TOP
+		ADD 	D2,D0
+		MOVE	D0,V2(A6)					;V2:=TOP+PENHEIGHT
+		MOVE	BOTTOM(A1),D1
+		MOVE	D1,V4(A6)					;V4:=BOTTOM
+		SUB 	D2,D1
+		MOVE	D1,V3(A6)					;V3:=BOTTOM-PENHEIGHT
+		CMP 	D1,D0						;IS V2 >= V3 ?
+		BGE.S	@1							;YES, FILL IT IN SOLID
+
+;
+;  PEN IS NOT SO BIG AS TO FILL IN SOLID.  BREAK RECT INTO 4 EDGES.
+;
+		MOVE	H1(A6),TMPRECT+LEFT(A6)
+		MOVE	H3(A6),TMPRECT+RIGHT(A6)
+		MOVE	V1(A6),TMPRECT+TOP(A6)
+		MOVE	V2(A6),TMPRECT+BOTTOM(A6)
+		BSR.S	DORECT						;PAINT TOP EDGE
+
+		MOVE	H3(A6),TMPRECT+LEFT(A6)
+		MOVE	H4(A6),TMPRECT+RIGHT(A6)
+		MOVE	V3(A6),TMPRECT+BOTTOM(A6)
+		BSR.S	DORECT						;PAINT RIGHT EDGE
+
+		MOVE	H2(A6),TMPRECT+LEFT(A6)
+		MOVE	V3(A6),TMPRECT+TOP(A6)
+		MOVE	V4(A6),TMPRECT+BOTTOM(A6)
+		BSR.S	DORECT						;PAINT BOTTOM EDGE
+
+		MOVE	H1(A6),TMPRECT+LEFT(A6)
+		MOVE	H2(A6),TMPRECT+RIGHT(A6)
+		MOVE	V2(A6),TMPRECT+TOP(A6)
+@1		BRA.S	FILLED						;PAINT LEFT EDGE
+
+
+;--------------------------------------------------------
+;
+;  LOCAL ROUTINE TO PAINT TMPRECT, GIVEN IN LOCAL COORDS
+;
+DORECT	MOVE.B	HiliteMode,-(SP)			;preserve hilite state for each side
+		MOVE.L	GRAFGLOBALS(A5),A0			;POINT TO LISAGRAF GLOBALS
+		MOVE.L	THEPORT(A0),A1				;POINT TO CURRENT GRAFPORT
+		MOVE.L	WIDEOPEN(A0),D2				;PUSH WIDE OPEN
+		PEA 	PORTBITS(A1)				;PUSH SRCBITS = DSTBITS
+		CLR.L	-(SP)						;NO MASKBITS
+		PEA 	PORTBITS(A1)				;PUSH DSTBITS
+		PEA 	TMPRECT(A6)					;PUSH SRCRECT = DSTRECT
+		CLR.L	-(SP)						;NO MASKRECT
+		PEA 	TMPRECT(A6)					;PUSH DSTRECT, LOCAL COORDS
+		MOVE	PNMODE(A1),D1				;PUSH PEN MODE
+		OR		#$8,D1						;set the pattern bit in case the user forgot to
+		_GetStreamMode						;strip mode
+		MOVE.W	D1,-(SP)					;save stripped mode
+		PEA 	PNPAT(A1)					;PUSH ADDR OF PEN PATTERN
+		MOVE.L	CLIPRGN(A1),-(SP)			;PUSH CLIPRGN
+		MOVE.L	VISRGN(A1),-(SP)			;PUSH VISRGN
+		MOVE.L	D2,-(SP)					;PUSH WIDE OPEN
+		CLR		-(SP)						;pass multicolor flag false
+		_STRETCHBITS						;CALL STRETCHBITS
+		MOVE.B	(SP)+,HiliteMode			;restore hilite state for each side
+		RTS
+
+FILLED	BSR 	DORECT						;FILL TMPRECT SOLID
+		BSET	#hiliteBit,HiliteMode		;reset hilite flag
+GOHOME	UNLINK	4,'FRMRECT '
+
+
+
+SetRect PROC  EXPORT
+;----------------------------------------------------------
+;
+;  PROCEDURE SetRect(VAR r: Rect; left,top,right,bottom: INTEGER);
+;  { assign 4 integers into a rectangle }
+;
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE.L	(SP)+,D1					;POP BOTRIGHT POINT
+		MOVE.L	(SP)+,D0					;POP TOPLEFT POINT
+		MOVE.L	(SP)+,A1					;POP ADDR OF RECT
+		MOVE.L	D0,(A1)+					;INSTALL TOPLEFT
+		MOVE.L	D1,(A1)+					;INSTALL BOTRIGHT
+		JMP 	(A0)						;RETURN
+
+
+
+EqualRect FUNC	EXPORT	
+;----------------------------------------------------------
+;
+;  FUNCTION  EqualRect(rect1,rect2: Rect): BOOLEAN;
+;
+;  CLOBBERS D0,A0,A1.
+;
+		MOVE.L	(SP)+,D0					;POP RETURN ADDR
+		MOVE.L	(SP)+,A1					;POP ADDR OF RECT2
+		MOVE.L	(SP)+,A0					;POP ADDR OF RECT1
+		CMPM.L	(A0)+,(A1)+ 				;IS TOPLEFT SAME ?
+		BNE.S	RETFALSE					;NO, RETURN FALSE
+		CMPM.L	(A0)+,(A1)+ 				;YES, IS BOTRIGHT SAME TOO ?
+		BNE.S	RETFALSE					;NO, RETURN FALSE
+		MOVE.B	#1,(SP) 					;YES, RETURN TRUE
+		BRA.S	DONE						;AND QUIT
+RETFALSE CLR.B	(SP)						;RETURN FALSE
+DONE	MOVE.L	D0,-(SP)					;PUSH RETURN ADDR
+		RTS 								;AND RETURN
+
+
+
+EmptyRect FUNC	EXPORT	
+;----------------------------------------------------------
+;
+;  FUNCTION  EmptyRect(r: Rect): BOOLEAN;
+;
+;  CLOBBERS D0,D1,A0,A1.
+;
+		MOVE.L	(SP)+,A1					;POP RETURN ADDR
+		MOVE.L	(SP)+,A0					;POP ADDR OF RECT
+		MOVE	(A0)+,D0					;GET TOP
+		MOVE	(A0)+,D1					;GET LEFT
+		CMP 	(A0)+,D0					;IS TOP >= BOTTOM ?
+		BGE.S	EMPTY						;YES, RETURN TRUE
+		CMP 	(A0)+,D1					;IS LEFT >= RIGHT ?
+		BGE.S	EMPTY						;YES, RETURN TRUE
+		CLR.B	(SP)						;NOT EMPTY, RETURN FALSE
+		BRA.S	DONE						;AND QUIT
+EMPTY	MOVE.B	#1,(SP) 					;RETURN TRUE
+DONE	JMP 	(A1)						;RETURN
+
+
+
+OffsetRect PROC  EXPORT 	
+;----------------------------------------------------------
+;
+;  PROCEDURE OffsetRect(VAR r: Rect; dh,dv: INTEGER);
+;
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE	(SP)+,D1					;POP DV
+		MOVE	(SP)+,D0					;POP DH
+		MOVE.L	(SP)+,A1					;POP ADDR OF RECT
+		ADD 	D1,(A1)+					;TOP:=TOP+DV
+		ADD 	D0,(A1)+					;LEFT:=LEFT+DH
+		ADD 	D1,(A1)+					;BOTTOM:=BOTTOM+DV
+		ADD 	D0,(A1)+					;RIGHT:=RIGHT+DH
+		JMP 	(A0)						;RETURN
+
+
+InsetRect PROC	EXPORT	
+;----------------------------------------------------------
+;
+;  PROCEDURE InsetRect(VAR r: Rect; dh,dv: INTEGER);
+;  { inset a rectangle on all 4 sides }
+;
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		MOVE	(SP)+,D1					;POP DV
+		MOVE	(SP)+,D0					;POP DH
+		MOVE.L	(SP)+,A1					;POP ADDR OF RECT
+		ADD 	D1,(A1)+					;ADD DV TO TOP
+		ADD 	D0,(A1)+					;ADD DH TO LEFT
+		SUB 	D1,(A1)+					;SUBTRACT DV FROM BOTTOM
+		SUB 	D0,(A1)+					;SUBTRACT DH FROM RIGHT
+DONE	JMP 	(A0)						;RETURN
+
+
+
+SectRect FUNC  EXPORT	
+		EXPORT RSect
+;---------------------------------------------------------
+;
+;  FUNCTION SectRect(srcA,srcB: Rect; VAR dstC: Rect): BOOLEAN;
+;
+;  Returns TRUE and intersection in dst,
+;  else FALSE and dst = 0,0,0,0.
+;  Dst may also be used as one of the inputs
+;
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	12					;SIZE OF PARAMETERS
+RESULT			EQU 	PARAMSIZE+8 		;BOOLEAN RESULT
+SRCA			EQU 	RESULT-4			;LONG, ADDR OF RECTANGLE
+SRCB			EQU 	SRCA-4				;LONG, ADDR OF RECTANGLE
+DST 			EQU 	SRCB-4				;LONG, ADDR OF RECTANGLE
+
+
+		LINK	A6,#0						;NO LOCAL VARS
+		MOVE.L	SRCA(A6),-(SP)				;PUSH SRCA POINTER
+		MOVE.L	SRCB(A6),-(SP)				;PUSH SRCB POINTER
+		MOVE	#2,-(SP)					;PUSH NRECTS=2
+		MOVE.L	DST(A6),-(SP)				;PUSH DST POINTER
+		BSR.S	RSECT						;CALC INTERSECTION
+		SNE 	RESULT(A6)					;STORE BOOLEAN RESULT
+		NEG.B	RESULT(A6)					;CONVERT $FF TO $01
+NOTEMPTY UNLINK  PARAMSIZE,'SECTRECT'
+
+
+;---------------------------------------------------
+;
+;  ASSEMBLY CALLABLE ROUTINE TO COMPUTE THE INTERSECTION OF
+;  ANY NUMBER OF RECTANGLES.
+;
+;  INPUTS: PUSH ADDRESSES OF EACH INPUT RECTANGLE (LONGS)
+;	   PUSH # OF RECTANGLES (WORD)
+;	   PUSH ADDRESS OF OUTPUT RECTANGLE (LONG)
+;
+;  RETURNS DST=(0,0,0,0) AND Z-FLAG SET IF NO INTERSECTION
+;
+;  CLOBBERS: D0,A0
+;
+RSECT	LINK A6,#0
+		MOVEM.L D1-D4/A1,-(SP)				;SAVE REGS
+		LEA 	12(A6),A1					;POINT TO NRECTS
+		MOVE	(A1)+,D0					;GET NRECTS COUNT
+		BLE.S	EMPTY						;EMPTY IF NRECTS <= 0
+		MOVE.L	(A1)+,A0					;POINT TO FIRST RECT
+		MOVEM.W (A0)+,D1/D2/D3/D4			;GET TOP, LEFT, BOT, RIGHT
+		SUB 	#1,D0						;DECREMENT RECT COUNT
+		BRA.S	RTOK						;CHECK THIS RECT AND LOOP
+
+NEXTRECT MOVE.L (A1)+,A0					;POINT TO NEXT RECT
+		CMP    (A0)+,D1 					;IS TOP < NEXT TOP ?
+		BGE.S	TOPOK						;NO, CONTINUE
+		MOVE	-2(A0),D1					;YES, TOP:=NEXT TOP
+TOPOK	CMP 	(A0)+,D2					;IS LEFT < NEXT LEFT ?
+		BGE.S	LEFTOK						;NO, CONTINUE
+		MOVE	-2(A0),D2					;YES, LEFT:=NEXT LEFT
+LEFTOK	CMP 	(A0)+,D3					;IS BOTTOM > NEXT BOT ?
+		BLE.S	BOTOK						;NO, CONTINUE
+		MOVE	-2(A0),D3					;YES, BOTTOM:=NEXT BOT
+BOTOK	CMP 	(A0)+,D4					;IS RIGHT > NEXT RIGHT ?
+		BLE.S	RTOK						;NO, CONTINUE
+		MOVE	-2(A0),D4					;YES, RIGHT:=NEXT RIGHT
+RTOK	CMP 	D1,D3						;IS BOTTOM <= TOP ?
+		BLE.S	EMPTY						;YES, EMPTY
+		CMP 	D2,D4						;IS RIGHT <= LEFT ?
+		BLE.S	EMPTY						;YES, EMPTY
+		DBRA	D0,NEXTRECT 				;LOOP FOR ALL RECTANGLES
+		BRA.S	DONE
+
+EMPTY	CLR 	D1							;ALL EMPTY RECTS ARE (0,0,0,0)
+		CLR 	D2
+		CLR 	D3
+		CLR 	D4
+DONE	MOVE.L	8(A6),A0					;GET DST ADDR
+		MOVE	D1,(A0)+					;STORE DST TOP
+		MOVE	D2,(A0)+					;DST LEFT
+		MOVE	D3,(A0)+					;DST BOT
+		MOVE	D4,(A0)+					;DST RIGHT
+		MOVE	12(A6),D0					;GET NRECTS COUNT AGAIN
+		LSL 	#2,D0						;TIMES 4 BYTES PER RECTANGLE
+		ADD 	#6,D0						;PLUS 6 BYTES FOR NRECTS AND DSTPTR
+		CMP 	D1,D3						;SET Z-FLAG IF EMPTY RECT
+		MOVEM.L (SP)+,D1-D4/A1				;RESTORE REGS
+		UNLK	A6							;RELEASE STATIC FRAME PTR
+		MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		ADD 	D0,SP						;STRIP VARIABLE NUMBER OF PARAMS
+		JMP 	(A0)						;RETURN WITH Z-FLAG IF EMPTY
+
+
+UnionRect PROC	EXPORT	
+		EXPORT Pt2Rect
+;----------------------------------------------------------
+;
+;  PROCEDURE UnionRect(* src1,src2: Rect; VAR dst: Rect *);
+;
+;  { compute smallest rectangle containing both input rectangles   }
+;  { works correctly even if one of the sources is the destination }
+;
+		MOVE.L	12(SP),A0					;GET ADDR OF SRC1
+		MOVE.L	8(SP),A1					;GET ADDR OF SRC2
+
+		MOVE	(A0)+,D0					;TOP:=TOP1
+		CMP 	(A1)+,D0					;IS TOP2 < TOP ?
+		BLE.S	TOPOK						;NO, CONTINUE
+		MOVE	-2(A1),D0					;YES, TOP:=TOP2
+TOPOK	SWAP	D0							;PUT TOP IN HI WORD
+		MOVE	(A0)+,D0					;LEFT:=LEFT1
+		CMP 	(A1)+,D0					;IS LEFT2 < LEFT ?
+		BLE.S	LEFTOK						;NO, CONTINUE
+		MOVE	-2(A1),D0					;YES, LEFT:=LEFT2
+LEFTOK	MOVE	(A0)+,D1					;BOTTOM:=BOTTOM1
+		CMP 	(A1)+,D1					;IS BOTTOM2 > BOTTOM ?
+		BGE.S	BOTOK						;NO, CONTINUE
+		MOVE	-2(A1),D1					;YES, BOTTOM:=BOTTOM2
+BOTOK	SWAP	D1							;PUT BOTTOM IN HI WORD
+		MOVE	(A0)+,D1					;RIGHT:=RIGHT1
+		CMP 	(A1)+,D1					;IS RIGHT2 > RIGHT1 ?
+		BGE.S	RIGHTOK 					;NO, CONTINUE
+		MOVE	-2(A1),D1					;YES, RIGHT:=RIGHT2
+RIGHTOK MOVE.L	4(SP),A0					;POINT TO DST RECT
+		MOVE.L	D0,(A0)+					;INSTALL TOPLEFT
+		MOVE.L	D1,(A0)+					;INSTALL BOTRIGHT
+		BRA.S	SHARE						;STRIP 3 PARAMETERS AND RETURN
+
+
+;----------------------------------------------------------
+;
+;  PROCEDURE Pt2Rect(* pt1,pt2: Point; VAR dst: Rect *);
+;
+;  { make a rectangle from two points }
+;
+Pt2Rect MOVE.L	4(SP),A0					;POINT TO DST RECT
+		MOVE	14(SP),D0					;GET H1
+		MOVE	10(SP),D1					;GET H2
+		CMP 	D0,D1						;IS H2 < H1 ?
+		BGE.S	HOK 						;NO, CONTINUE
+		EXG 	D0,D1						;YES, SWAP THEM
+HOK 	MOVE	D0,LEFT(A0) 				;INSTALL DST LEFT  = MIN(H1,H2)
+		MOVE	D1,RIGHT(A0)				;INSTALL DST RIGHT = MAX(H1,H2)
+		MOVE	12(SP),D0					;GET V1
+		MOVE	8(SP),D1					;GET V2
+		CMP 	D0,D1						;IS V2 < V1 ?
+		BGE.S	VOK 						;NO, CONTINUE
+		EXG 	D0,D1						;YES, SWAP THEM
+VOK 	MOVE	D0,TOP(A0)					;INSTALL DST TOP	= MIN(V1,V2)
+		MOVE	D1,BOTTOM(A0)				;INSTALL DST BOTTOM = MAX(V1,V2)
+SHARE	MOVE.L	(SP)+,A0					;POP RETURN ADDR
+		ADD 	#12,SP						;STRIP 3 PARAMETERS
+		JMP 	(A0)						;AND RETURN
+
+
+
+PtInRect FUNC  EXPORT	
+;------------------------------------------------------------
+;
+;  FUNCTION PtInRect(pt: Point; r: Rect): BOOLEAN;
+;
+;  Returns TRUE if point is within the rectangle.
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	8					;SIZE OF PARAMETERS
+RESULT			EQU 	PARAMSIZE+8 		;A6 OFFSETS AFTER LINK
+PT				EQU 	RESULT-4			;POINT, VALUE
+R				EQU 	PT-4				;LONG, ADDR OF RECTANGLE
+
+		LINK	A6,#0						;NO LOCAL VARS
+		MOVE.L	R(A6),A0					;GET RECT PTR
+		MOVE	PT+H(A6),D0 				;GET HORIZ COORD
+		MOVE	PT+V(A6),D1 				;GET VERT COORD
+		CLR.B	RESULT(A6)					;INIT BOOLEAN TO FALSE
+		CMP 	(A0)+,D1					;IS PT.V < TOP ?
+		BLT.S	RETFALSE					;YES, QUIT
+		CMP 	(A0)+,D0					;IS PT.H < LEFT ?
+		BLT.S	RETFALSE					;YES, QUIT
+		CMP 	(A0)+,D1					;IS PT.V >= BOTTOM ?
+		BGE.S	RETFALSE					;YES, QUIT
+		CMP 	(A0)+,D0					;IS PT.H >= RIGHT ?
+		BGE.S	RETFALSE					;YES, QUIT
+		ADDQ.B	#1,RESULT(A6)				;RETURN BOOLEAN TRUE
+RETFALSE UNLINK	PARAMSIZE,'PTINRECT'
+
+
+
+PutRect PROC  EXPORT
+		IMPORT SetHSize
+;----------------------------------------------------------------
+;
+;  PROCEDURE PutRect(r: Rect; bufHandle: Handle; VAR index,size: INTEGER);
+;
+;  Puts the four inversion points of a rectangle
+;
+;  Clobbers D0,A0,A1
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	16					;TOTAL SIZE OF PARAMETERS
+RECT			EQU 	PARAMSIZE+8-4		;LONG, ADDR OF RECT
+BUFHANDLE		EQU 	RECT-4				;LONG, HANDLE
+INDEX			EQU 	BUFHANDLE-4 		;LONG, ADDR OF INTEGER
+SIZE			EQU 	INDEX-4 			;LONG, ADDR OF INTEGER
+
+
+		LINK	A6,#0						;NO LOCAL VARIABLES
+
+;------------------------------------------------------------
+;
+; IS THERE ROOM FOR FOUR NEW POINTS IN THE POINT BUFFER ?
+;
+		MOVE.L	INDEX(A6),A0				;POINT TO INDEX
+		cmp.w	#65535-1024-16,(a0)			;check for overflow?		<BAL 28Apr89>
+		bls.s	@noProb						;no, don't worry; be happy	<BAL 28Apr89>
+		move	#-147,qdErr					;indicate rgnTooBigErr		<BAL 28Apr89>
+		bra.s 	GOHOME						;skip this rect				<BAL 28Apr89>
+		
+@noProb	MOVE.L	SIZE(A6),A1 				;POINT TO SIZE
+		MOVEQ	#16,D0
+		ADD 	(A0),D0 					;GET CURRENT INDEX + 16
+		CMP 	(A1),D0 					;IS NEW INDEX > SIZE ?
+		bls.s	SIZEOK						;NO, CONTINUE				<BAL 28Apr89>
+
+
+;-------------------------------------------------------------
+;
+;  NO, GROW THE POINT BUFFER ENOUGH FOR 256 MORE POINTS
+;
+		ADD 	#1024,(A1)					;ADD 1024 TO SIZE
+		MOVEM.L D3/A2,-(SP) 				;SAVE REGS
+		MOVE.L	BUFHANDLE(A6),-(SP) 		;PUSH HANDLE PARAM
+		MOVE	(A1),-(SP)					;PUSH NEW SIZE
+		JSR 	SetHSize 					;MAKE THE BUFFER BIGGER
+		MOVEM.L (SP)+,D3/A2 				;RESTORE REGS
+		MOVE.L	INDEX(A6),A0				;POINT TO INDEX AGAIN
+
+
+;------------------------------------------------------------
+;
+;  NOW INSTALL THE 4 NEW INVERSION POINTS
+;
+SIZEOK	MOVE.L	BUFHANDLE(A6),A1			;GET BUFHANDLE
+		MOVE.L	(A1),A1 					;DE-REFERENCE HANDLE
+		moveq	#0,d0						;clear out high end			<BAL 28Apr89>
+		move.w	(a0),d0						;get index as a long		<BAL 28Apr89>
+		add.l 	d0,A1 						;ADD INDEX TO POINTER		<BAL 28Apr89>
+		ADD 	#16,(A0)					;BUMP INDEX
+		MOVE.L	RECT(A6),A0 				;POINT TO RECTANGLE
+		MOVE.L	TOPLEFT(A0),(A1)+			;PUT TOPLEFT POINT
+		MOVE	TOP(A0),(A1)+				;PUT TOP-RIGHT POINT
+		MOVE	RIGHT(A0),(A1)+
+		MOVE	BOTTOM(A0),(A1)+			;PUT BOTTOM-LEFT POINT
+		MOVE	LEFT(A0),(A1)+
+		MOVE.L	BOTRIGHT(A0),(A1)+			;PUT BOTRIGHT POINT
+GOHOME	UNLINK	PARAMSIZE,'PUTRECT '
+
+
+
+		ENDPROC 
+
+
+
+

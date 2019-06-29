@@ -1,0 +1,224 @@
+;EASE$$$ READ ONLY COPY of file “sexydate.a”
+; 1.1	CCH 11/10/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.0	BBM 2/11/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+; File SexyDate.TEXT
+;
+; Routines to convert between number of seconds elapsed since 1904 Jan 1 00:00:00 am
+; and date: year / month / day / hour / min / sec / (day of week).
+; Written by Jerome T. Coonen  2 July 1983
+;
+; Seconds: unsigned 32-bit integer passed in D0.
+;
+; Date: array of 7 16-bit integers pointed to by A0.
+;		0:	year	-- 1904, 1905, ...
+;		1:	month	-- 1, 2, ..., 12
+;		2:	day 	-- 1, 2, ..., 31
+;		3:	hour	-- 0, 1, ..., 24
+;		4:	minute	-- 0, 1, ..., 59
+;		5:	second	-- 0, 1, ..., 59
+;		6:	weekday -- 1, 2, ..., 7 corresponding to Sun, Mon, ..., Sat
+;
+
+				BLANKS			ON
+				STRING			ASIS
+
+SEXYDATE		PROC			EXPORT	
+				EXPORT			SECS2DATE, DATE2SECS
+
+SECS2DATE
+				MOVEM.L 		D0-D4/A0,-(SP)			; SAVE WORKING REGISTERS
+
+;
+; Have number of seconds N 1904 in D0.	Compute
+; DN = number of days elapsed =  N div 86400   where 86400 = 24 * 60 * 60
+; HMS = number of seconds in last day = N mod 86400.
+; Since 86400 > 2^31-1 cannot use 68000 DIVU directly.	Instead, divide halved number
+; of seconds by 43200.	To get HMS, must double computed mod (with 43200) and add in the
+; low order bit of the input N.
+;
+				MOVEQ			#0,D1					; INIT HMS
+				LSR.L			#1,D0					; N DIV 2, WITH ODD BIT TO X
+				ROXR.L			#1,D1					; GET X BIT IN HI SLOT, FOR LATER ROTATE
+				DIVU			#43200,D0
+				SWAP			D0						; GET MOD 43200 IN D0.W
+				MOVE.W			D0,D1					; HALF THE MOD IN D1.W
+				ROL.L			#1,D1
+				CLR.W			D0						; WANT LONG DN
+				SWAP			D0						; DN
+
+;
+; YearsGone = (DN * 4) div 1461    where 1461 is 4*365+1
+; Formula depends on leap year being the first of the four.
+;
+				MOVE.L			D0,D2					; COPY DN
+				ASL.L			#2,D2					; DN * 4
+				DIVU			#1461,D2				; YEARSGONE = (DN * 4) DIV 1461
+				ADDI.W			#1904,D2				; YEAR
+				MOVE.W			D2,(A0)+
+
+;
+; Need number of days in Jan+Feb just below.  So take YEAR mod 3 before clearing year.
+;
+				MOVEQ			#59,D3					; ASSUME NOT LEAP YEAR
+				ANDI.W			#3,D2					; YEAR MOD 3
+				BNE.S			SDNOTLEAP
+				ADDQ.W			#1,D3
+SDNOTLEAP
+				CLR.W			D2						; LEAVE 4 * DOY = DAY OF YEAR IN HI WORD
+				SWAP			D2
+				LSR.W			#2,D2					; D0Y
+
+;
+; Computing Month/Day from DOY is an exercise in interpolation.  As a function of DOY,
+; MONTH is a step function.  Because of the leap year glitch, convenient to restart
+; function at March.
+;
+;		DOY 			MONTH
+;-------------------------------------------------------------------
+;		0-30			1 -- January
+;		31-58/59		2 -- February (depends on whether leap year)
+;
+;		0-30			3 -- March
+;		31-60			4 -- April
+;		61-91			5 -- May
+;		92-121			6 -- June
+;		122-152 		7 -- July
+;		153-183 		8 -- August
+;		184-213 		9 -- September
+;		214-244 		10 -- October
+;		244-274 		11 -- November
+;		275-305 		12 -- December
+;
+; The linear interpolator is  ((DOY * 128) + 71) div 3919.
+;
+				MOVEQ			#1,D4					; MONTH OFFSET, 1 OR 3
+				CMP.W			D3,D2					; 59/60 VERSUS DOY
+				BLT.S			SDJANORFEB				; LESS THAN MEANS JAN OR FEB
+				ADDQ.W			#2,D4					; ADJUST MONTH OFFSET
+				SUB.W			D3,D2					; START DOY AT MARCH
+SDJANORFEB
+				LSL.L			#7,D2					; DOY * 128
+				MOVEQ			#71,D3
+				ADD.L			D3,D2					; (DOY * 128) + 71
+				DIVU			#3919,D2				; ((DOY * 128) + 71) DIV 3919
+				ADD.W			D4,D2					; ADJUST MONTH 1..12
+				SWAP			D2						; HAVE MONTH | DAY-1
+				LSR.W			#7,D2					; DIVIDE BY 128 TO GET DAY OF MONTH
+				ADDQ.W			#1,D2					; DAY 1..31
+				MOVE.L			D2,(A0)+
+
+;
+; HOURS = HMS div 3600
+; MS = HMS mod 3600 = minutes/seconds
+; MINUTES = MS div 60
+; SECONDS = MS mod 60
+;
+				DIVU			#3600,D1				; HMS DIV 3600
+				MOVE.W			D1,(A0)+				; HOURS
+				CLR.W			D1
+				SWAP			D1						; MS
+				DIVU			#60,D1					; SECONDS | MINUTES
+				SWAP			D1
+				MOVE.L			D1,(A0)+				; MINUTES | SECONDS
+
+;
+; Finally get the day of week = ((DN + 5) mod 7) + 1
+; The 5 is added since 1 Jan 1904 was a Friday.
+;
+				ADDQ.W			#5,D0
+				DIVU			#7,D0
+				SWAP			D0
+				ADDQ.W			#1,D0
+				MOVE.W			D0,(A0)
+
+;
+; Clean up stack and return.
+;
+				MOVEM.L 		(SP)+,D0-D4/A0
+				RTS
+
+
+;
+; Have year / month / day / hours / min / sec in a sequence of words pointed to by A0.
+; Deduce number of seconds since 1904, and return in D0.
+;
+; Since a date is no more than a representation of time in a bizarre mixed radix,
+; the computation reduces to:
+;		DAYSGONE * 86400   +   HOURS * 3600   +   MINUTES * 60	 +	 SECONDS
+; The hard part is deducing the DAYSGONE from the YEAR / MONTH / DAY.
+;
+DATE2SECS
+				MOVEM.L 		D1-D4,-(SP) 			; WORKING REGISTERS
+
+;
+; Do the easy part with HOURS, MINUTES, and SECONDS.
+;
+				MOVEQ			#0,D0					; INIT SECOND COUNT
+				ADDQ.L			#8,A0					; POINT TO MINUTES/SECONDS
+				MOVE.L			(A0),D1 				; MINUTES | SECONDS
+				MOVE.W			D1,D0					; SECONDS
+				SWAP			D1						; MINUTES
+				MOVE.W			-(A0),D2				; HOURS
+				MOVEQ			#60,D3
+				MULU			D3,D2					; HOURS * 60
+				ADD.W			D1,D2					; (HOURS * 60) + MINUTES
+				MULU			D3,D2					; ((HOURS * 60) + MINUTES) * 60
+				ADD.L			D2,D0
+
+;
+; Compute DAYSGONE in D1.
+;
+				MOVE.W			-(A0),D1				; DAYS
+				SUBQ.W			#1,D1
+				MOVE.W			-(A0),D2				; MONTH
+				MOVE.W			-(A0),D3				; YEAR, AND A0 IS BACK TO INPUT VALUE
+
+				MOVE.W			D3,D4					; COPY YEAR FOR LEAP TEST
+
+;
+; To find number of days in elapsed years use  ((YEARSGONE * 1461) + 3) div 4.
+; Formula depends on leap year being the first of a quartet.
+;
+				SUBI.W			#1904,D3				; YEARSGONE
+				MULU			#1461,D3				; YEARSGONE * 1461
+				ADDQ.L			#3,D3					; (YEARSGONE * 1461) + 3
+				LSR.L			#2,D3					; ((YEARSGONE * 1461) + 3) DIV 4
+				ADD.W			D3,D1					; ACCUMULATE DAYSGONE
+
+;
+; As above, the tough part is finding the number of days in the elapsed months.
+; The function to be interpolated is in a sense the inverse of the step function above.
+; The interpolating function is  ((MONTHSGONE * 3917) + 52) div 128.
+;
+				SUBQ.W			#1,D2					; MONTH-1 RANGES 0..11
+				CMPI.W			#1,D2					; 2 OR MORE IS MARCH...
+				BLE.S			DSJANORFEB
+
+				SUBQ.W			#2,D2					; MONTH-3, RESTART INTERP AT MARCH
+				MOVEQ			#59,D3					; DAYS IN JAN AND FEB
+				ANDI.W			#3,D4					; CHECK FOR LEAP YEAR, MOD 3
+				BNE.S			DSNOTLEAP
+				ADDQ.W			#1,D3
+DSNOTLEAP
+				ADD.W			D3,D1					; SOME MORE ELAPSED DAYS
+DSJANORFEB
+				MULU			#3917,D2				; (MONTHSGONE * 3917)
+				ADDI.W			#52,D2					; (MONTHSGONE * 3917) + 52
+				LSR.W			#7,D2					; ((MONTHSGONE * 3917) + 52) DIV 128
+				ADD.W			D2,D1					; MORE ELAPSED DAYS
+
+;
+; Finally multiply the number of days elapsed by 24*60*60 = 86400 = 43200*2
+;
+				MULU			#43200,D1
+				ADD.L			D1,D1
+				ADD.L			D1,D0
+
+				MOVEM.L 		(SP)+,D1-D4
+				RTS
+
+				END 
+

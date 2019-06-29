@@ -1,0 +1,829 @@
+;
+;	File:		SaveRestoreBits.a
+;
+;	Contains:	calls to save and restore bits
+;				also, calls that attach to a port and do buffering
+;
+;				SaveBits is used to store bits from the screen of the Macintosh.
+;				After the bits have been saved, use RestoreBits to put them back on screen.
+;				The bits are stored in an off-screen handle.
+;
+;				If there is insufficient memory for the bits off-screen, we allocate a handle
+;				containing only the rectangle. If there is too little space even for a handle
+;				containing a rectangle, we return nil.
+;
+;				TYPE
+;					SavedBits = LONGINT;
+;
+;				FUNCTION SaveBits(saveRect: Rect; purgeable: BOOLEAN; VAR bits: SavedBits): OSErr;
+;				FUNCTION RestoreBits(bits: SavedBits): OSErr;
+;				FUNCTION DiscardBits(bits: SavedBits): OSErr;
+;
+;				TYPE
+;					OffscreenBuffer = LONGINT;
+;
+;				FUNCTION BeginDrawingOffscreen(bufferRect: Rect; VAR buffer: OffscreenBuffer): OSErr;
+;				FUNCTION EndDrawingOffscreen(buffer: OffscreenBuffer): OSErr;
+;
+;				FUNCTION NewOffscreenBuffer(bufferRect: Rect; purgeable: BOOLEAN; VAR buffer: OffscreenBuffer): OSErr;
+;				FUNCTION AttachOffscreenBuffer(buffer: OffscreenBuffer): OSErr;
+;				FUNCTION DetachOffscreenBuffer(buffer: OffscreenBuffer): OSErr;
+;				FUNCTION DisposeOffscreenBuffer(buffer: OffscreenBuffer): OSErr;
+;
+;	Written by:	Darin Adler
+;
+;	Copyright:	© 1990-1991 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds: BigBang
+;
+;	Change History (most recent first):
+;
+;		<14>	 5/21/91	gbm		dba: fix obscure rowBytes bit bug
+;		<13>	  2/5/91	stb		gs: include MenuMgrPriv.a
+;		<12>	11/27/90	KON		Make fgColor black, bgColor white before calling CopyBits to
+;									save bits to offscreen buffer. This eliminates undesirable
+;									colorizing. <KSM>
+;		<11>	10/23/90	KSM		<KON>Use WMgr port instead of relying on A5 world because some
+;									monitors change the base address.
+;		<10>	 9/22/90	dba		Ed Tecot meant well when he told us to do a PaintOne(RootLayer),
+;									but he really meant PaintBehind(RootLayer).
+;		 <9>	 8/21/90	VL		(with dba) fixed DetachOffscreenBuffer by using local
+;									coordinates for the offscreen pixmap.
+;		 <8>	 6/25/90	DTY		Included LayerEqu.a
+;		 <7>	 6/25/90	dba		replace PaintBehind(WindowList) with PaintOne(RootLayer)
+;		 <6>	  6/8/90	dba		added calls to attach an off-screen buffer to an unsuspecting
+;									port
+;		 <5>	  6/8/90	dba		always save the rectangle that goes with the bits; also support
+;									cases where the WMgrPort is not set to local=global; also get
+;									rid of the workaround to the “bug” in NewScreenBuffer since I
+;									now understand why the call works the way it does (and I fixed
+;									some bugs in the Classic and Macintosh II versions of it)
+;		 <4>	 5/31/90	KSM		Since this is really following Pascal calling conventions,
+;									return the errors on the stack and NOT in D0.
+;		 <3>	 5/21/90	KSM		As requested by Finder team, SaveBits tries to allocate from
+;									temp memory first, rather than using the app heap first.
+;		 <2>	 4/20/90	KSM		Use Darin's new (and totally awesome) 1-line dispatcher macro to
+;									dispatch these routines (i.e. all functions return OSErr).
+;		 <1>	  4/9/90	dba		new today
+;
+;	To Do:
+;		use a device loop for SavedBits
+;		move equates into system equate files
+;		share more code between SavedBits and OffscreenBuffer
+;
+
+		load	'StandardEqu.d'
+		include 'LayerEqu.a'
+		include	'InternalMacros.a'
+		include	'LinkedPatchMacros.a'
+		include 'MenuMgrPriv.a'
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+SavedBitsRecord		record		0
+rectangle			ds.w		4					; the rectangle
+pixMap				ds.l		1					; the pixMap handle
+					endrsize
+
+OffscreenBufferRecord record	0
+rectangle			ds.w		4					; the rectangle (local coordinates)
+bufferPixMap		ds.l		1					; the pixMap of the buffer
+bufferGDevice		ds.l		1					; the gDevice for drawing in the buffer
+savedPortBits		ds.b		bitMapRec			; the old bitmap of the port (for B&W)
+					org			savedPortBits
+savedPortPixMap		ds.l		1					; the old pixMap of the port
+savedGDevice		ds.l		1					; the old gDevice for the port
+					org
+					endrsize
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+selectBeginDrawingOffscreen			EQU		4
+paramWordsBeginDrawingOffscreen		EQU		4
+
+		MACRO
+		_BeginDrawingOffscreen
+		DoDispatch _SaveRestoreBits,selectBeginDrawingOffscreen,paramWordsBeginDrawingOffscreen
+		ENDM
+
+selectEndDrawingOffscreen			EQU		5
+paramWordsEndDrawingOffscreen		EQU		2
+
+		MACRO
+		_EndDrawingOffscreen
+		DoDispatch _SaveRestoreBits,selectEndDrawingOffscreen,paramWordsEndDrawingOffscreen
+		ENDM
+
+selectNewOffscreenBuffer			EQU		6
+paramWordsNewOffscreenBuffer		EQU		5
+
+		MACRO
+		_NewOffscreenBuffer
+		DoDispatch _SaveRestoreBits,selectNewOffscreenBuffer,paramWordsNewOffscreenBuffer
+		ENDM
+
+selectAttachOffscreenBuffer			EQU		7
+paramWordsAttachOffscreenBuffer		EQU		2
+
+		MACRO
+		_AttachOffscreenBuffer
+		DoDispatch _SaveRestoreBits,selectAttachOffscreenBuffer,paramWordsAttachOffscreenBuffer
+		ENDM
+
+selectDetachOffscreenBuffer			EQU		8
+paramWordsDetachOffscreenBuffer		EQU		2
+
+		MACRO
+		_DetachOffscreenBuffer
+		DoDispatch _SaveRestoreBits,selectDetachOffscreenBuffer,paramWordsDetachOffscreenBuffer
+		ENDM
+
+selectDisposeOffscreenBuffer		EQU		9
+paramWordsDisposeOffscreenBuffer	EQU		2
+
+		MACRO
+		_DisposeOffscreenBuffer
+		DoDispatch _SaveRestoreBits,selectDisposeOffscreenBuffer,paramWordsDisposeOffscreenBuffer
+		ENDM
+
+
+SaveRestoreBitsDispatch	Dispatcher _SaveRestoreBits,(Plus,SE,II,Portable,IIci),	\
+	(\
+		SaveBits,				\
+		RestoreBits,			\
+		DiscardBits,			\
+		BeginDrawingOffscreen,	\
+		EndDrawingOffscreen,	\
+		NewOffscreenBuffer,		\
+		AttachOffscreenBuffer,	\
+		DetachOffscreenBuffer,	\
+		DisposeOffscreenBuffer,	\
+	)
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+SaveBits			proc		export
+					entry		CalculateOffscreenRect
+					export		SetUpFgBgToBW
+
+					resultsStackFrame
+error				ds.w		1					; the resulting error code
+					parametersStackFrame
+saveRectPtr			ds.l		1					; the rectangle of bits to save
+purgeable			ds.w		1					; set this true if we want a purgeable buffer
+resultPtr			ds.l		1					; where to put the saved handle
+					localsStackFrame
+saveRect			ds.w		4					; rectangle to save (global coords)
+offscreenRect		ds.w		4					; calculate the off-screen rectangle here
+pixMap				ds.l		1					; the created pixMap handle
+gDevice				ds.l		1					; the appropriate device
+					endStackFrame
+
+		linkSave	a3
+
+		; save the rectangle, so we can take parameters from the middle of relocatable blocks
+
+		move.l		saveRectPtr(a6),a0				; get the rectangle into a local
+		move.l		topLeft(a0),saveRect+topLeft(a6)
+		move.l		botRight(a0),saveRect+botRight(a6)
+
+		; allocate our handle
+
+		move.l		#0,a3							; initialize result to 0
+
+		moveq		#SavedBitsRecord.size,d0		; make the handle we need
+		_NewHandle clear
+		bnz			Done							; oops, failed
+		move.l		a0,a3							; store away the result
+
+		move.l		(a0),a0							; dereference the handle
+		move.l		saveRect+topLeft(a6),(a0)+
+		move.l		saveRect+botRight(a6),(a0)+
+
+		moveq		#1,d0							; try temp. memory
+		bsr			DoNewScreenBuffer1
+		bz.s		GotBuffer						; go if we got the buffer successfully
+
+		moveq		#0,d0							; don’t use temp. memory
+		bsr			DoNewScreenBuffer1
+		bz.s		GotBuffer						; go if we got the buffer successfully
+
+GotRectangleOnly
+		moveq		#memFullErr,d0					; return an error
+		bra.s		Done
+
+GotBuffer
+		rsrv.b										; make room for the result
+		push.l		pixMap(a6)
+		_LockPixels
+		tst.b		(sp)+							; was the thing already purged?
+		bz.s		GotPixMap						; this is not an error; it was purged right away!
+
+		btst		#6,ROM85						; check for color QuickDraw
+		bnz.s		@noSetSaveDevice
+
+		rsrv.l										; make room for the saved device
+		_GetGDevice
+
+		push.l		gDevice(a6)						; set the device to the one we desire
+		_SetGDevice
+@noSetSaveDevice
+
+		move.l		WMgrPort,a0						; get non-color port
+		btst		#6,ROM85						; check for color QuickDraw
+		bnz.s		@gotport
+		move.l		WMgrCPort,a0					; get color port
+@gotport
+		bsr			SetUpFgBgToBW					; <12> Set fg=black bg=white
+
+		pea			portBits(a0)					; pass screenBits as the source
+		move.l		pixMap(a6),a0					; dereference the PixMapHandle
+		push.l		(a0)							; pass the offscreen pixmap as the destination
+		lea			offscreenRect(a6),a0			; calculate the offscreen rectangle
+		lea			saveRect(a6),a1					; from the passed rectangle
+		bsr.s		CalculateOffscreenRect
+		push.l		a1								; source is passed rectangle
+		push.l		a0								; destination is off-screen
+		push.w		#srcCopy						; srcCopy
+		push.l		#0								; no masking
+		_CopyBits									; put the bits off-screen
+
+		btst		#6,ROM85						; check for color QuickDraw
+		bnz.s		@noRestoreDevice
+
+		_SetGDevice									; set the device back to normal
+@noRestoreDevice
+
+		push.l		pixMap(a6)
+		_UnlockPixels								; unlock those pixels
+
+GotPixMap
+		move.l		(a3),a0							; put pixmap in result
+		move.l		pixMap(a6),SavedBitsRecord.pixMap(a0)
+
+GotResult
+		moveq		#noErr,d0						; success!
+
+Done
+		; at this point, the error is in d0 and the result is in a3
+
+		move.l		resultPtr(a6),a0				; get place to put result
+		move.l		a3,(a0)							; put result there
+		move.w		d0,error(a6)					; and remember to return any error <4>
+
+		restoreUnlinkReturn
+
+DoNewScreenBuffer1
+		rsrv.w										; make room for error result
+		pea			saveRect(a6)					; our global rectangle
+		push.b		purgeable(a6)					; try purgeable bits?
+		pea			gDevice(a6)						; get the device
+		pea			pixMap(a6)						; get the pixMap
+		tst.b		d0								; should we use temp. memory?
+		bnz.s		@temp
+		_NewScreenBuffer							; get buffer in current zone
+		bra.s		@done
+@temp
+		_NewTempScreenBuffer						; get buffer in shared memory
+@done
+		pop.w		d0								; get error result
+		rts
+
+CalculateOffscreenRect
+		clr.l		topLeft(a0)						; offscreeRect.topLeft is always at 0,0
+		move.w		bottom(a1),d0					; calculate bottom
+		sub.w		top(a1),d0						; minus top
+		move.w		d0,bottom(a0)					; offscreeRect.bottom is srcRect height
+		move.w		right(a1),d0					; calculate right
+		sub.w		left(a1),d0						; minus left
+		move.w		d0,right(a0)					; offscreeRect.right is srcRect width
+
+		rts
+
+SetUpFgBgToBW										; <12>
+SetUpFgBgToBWReg	REG		a0/d0
+		movem.l		SetUpFgBgToBWReg,-(sp)
+		moveq		#BlackColor,d0
+		move.l		d0,-(sp)
+		_ForeColor
+		moveq		#WhiteColor,d0
+		move.l		d0,-(sp)
+		_BackColor
+		movem.l		(sp)+,SetUpFgBgToBWReg
+		rts
+
+					endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+RestoreBits			proc		export
+					import		DiscardBits
+					import		CalculateOffscreenRect
+					import		SetUpFgBgToBW
+
+					resultsStackFrame
+error				ds.w		1					; the resulting error code
+					parametersStackFrame
+savedBits			ds.l		1					; bits to restore
+					localsStackFrame
+bitsRect			ds.w		4					; rectangle to copy bits into
+offscreenRect		ds.w		4					; calculate the off-screen rectangle here
+menuBarRect			ds.w		4					; rectangle for the menu bar
+					endStackFrame
+
+		linkSave	d3/a2
+
+		rsrv.l										; make room for saved port
+		push.l		sp								; point to result
+		_GetPort
+
+		rsrv.l										; set the port to the Window Mgr port
+		push.l		sp								; point to result
+		_GetWMgrPort
+		move.l		(sp),a2							; keep a pointer around
+		_SetPort
+		jsr			SetUpFgBgToBW					; <12> Set fg=black bg=white
+
+		move.l		savedBits(a6),d3				; look at the handle
+		bz.s		InvalAll						; no handle, invalidate a wide-open region
+
+		move.l		d3,a0							; dereference the handle
+		move.l		(a0),a0
+
+		move.l		SavedBitsRecord.rectangle+topLeft(a0),bitsRect+topLeft(a6)
+		move.l		SavedBitsRecord.rectangle+botRight(a0),bitsRect+botRight(a6)
+
+		move.l		SavedBitsRecord.pixMap(a0),d3	; get the pixMap handle
+		bz.s		Inval
+
+		rsrv.b										; make room for the result
+		push.l		d3
+		_LockPixels
+		tst.b		(sp)+							; was the thing purged?
+		bz.s		Inval							; purged, so do an invalidate
+
+		pea			bitsRect+topLeft(a6)
+		_GlobalToLocal
+		pea			bitsRect+botRight(a6)
+		_GlobalToLocal
+
+		pea			bitsRect(a6)					; set the clip to this rectangle
+		_ClipRect
+
+		move.l		d3,a0							; dereference the PixMapHandle
+		push.l		(a0)							; pass the offscreen pixmap as the source
+		pea			portBits(a2)					; pass portBits as the destination
+		lea			offscreenRect(a6),a0			; calculate a source rectangle
+		lea			bitsRect(a6),a1					; from the destination rectangle
+		jsr			CalculateOffscreenRect
+		push.l		a0								; source is off-screen
+		push.l		a1								; destination is local on-screen
+		push.w		#srcCopy						; srcCopy
+		push.l		#0								; no masking
+		_CopyBits									; put the bits back on-screen
+
+		bra.s		Done
+
+InvalAll
+		move.l		#$80028002,bitsRect+topLeft(a6)	; fairly wide open, but a bit smaller
+		move.l		#$7FFE7FFE,bitsRect+botRight(a6) ; (I think I remember some Mac Plus bug)
+
+Inval
+		move.l		portRect+topLeft(a2),menuBarRect+topLeft(a6)
+		move.w		portRect+right(a2),menuBarRect+right(a6)
+		move.w		portRect+top(a2),d0
+		add.w		MBarHeight,d0					; calculate the rectangle for the menu bar
+		move.w		d0,menuBarRect+bottom(a6)
+
+		rsrv.b										; make room for result
+		pea			bitsRect(a6)					; intersect with the menu bar
+		pea			menuBarRect(a6)					; intersect with the menu bar
+		push.l		(sp)							; put result in menu bar rectangle
+		_SectRect									; see if it intersects the menu
+		tst.b		(sp)+							; does it
+		bz.s		@noNeedToDrawMenubar
+		_InvalMenuBar								; it intersects; draw the menu bar
+@noNeedToDrawMenubar
+
+		rsrv.l										; make a nice fresh region
+		_NewRgn
+		move.l		(sp),d3							; get resulting region
+		pea			bitsRect(a6)					; and make it rectangular
+		_RectRgn
+
+		rsrv.l
+		_GetRootLayer
+		push.l		d3								; and clobber everything
+		_PaintBehind								; <10>
+
+		push.l		d3								; now we are done
+		_DisposRgn
+
+Done
+		_SetPort									; restore the current port
+
+		rsrv.w										; make room for results
+		push.l		savedBits(a6)					; now, get rid of those bits
+		_DiscardBits								; all of them!
+		pop.w		error(a6)						; return the error result
+
+		restoreUnlinkReturn
+
+					endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+DiscardBits			proc		export
+
+					resultsStackFrame
+error				ds.w		1					; the resulting error code
+					parametersStackFrame
+bits				ds.l		1					; bits to discard
+					endStackFrame
+
+		linkSave	d3
+
+		move.l		bits(a6),d3						; look at the handle
+		bz.s		Done							; no handle
+
+		move.l		d3,a0							; dereference the handle
+		move.l		(a0),a1
+		move.l		SavedBitsRecord.pixMap(a1),d3	; get the pixMap handle
+		_DisposHandle								; get rid of the handle
+
+		tst.l		d3								; check the screen buffer
+		bz.s		Done							; no buffer
+
+		push.l		d3								; get it
+		_DisposeScreenBuffer						; get rid of it
+
+Done
+		move.w		#noErr,error(a6)				; show no error
+
+		restoreUnlinkReturn
+
+					endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+BeginDrawingOffscreen proc		export
+
+					resultsStackFrame
+error				ds.w		1					; the resulting error code
+					parametersStackFrame
+bufferRectPtr		ds.l		1					; rectangle to buffer
+bufferHandlePtr		ds.l		1					; result
+					endStackFrame
+
+		linkSave
+
+		rsrv.w
+		push.l		bufferRectPtr(a6)
+		push.b		#false
+		push.l		bufferHandlePtr(a6)
+		_NewOffscreenBuffer
+		pop.w		d0								; check error code
+		bnz.s		@done
+
+		rsrv.w
+		move.l		bufferHandlePtr(a6),a0
+		push.l		(a0)							; push the bufferHandle
+		_AttachOffscreenBuffer
+		pop.w		d0
+@done
+		move.w		d0,error(a6)					; return the error code
+
+		restoreUnlinkReturn
+
+					endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+EndDrawingOffscreen	proc		export
+
+					resultsStackFrame
+error				ds.w		1					; the resulting error code
+					parametersStackFrame
+bufferHandle		ds.l		1					; buffer parameter
+					endStackFrame
+
+		linkSave
+
+		rsrv.w
+		push.l		bufferHandle(a6)
+		_DetachOffscreenBuffer						; ignore the error
+		push.l		bufferHandle(a6)
+		_DisposeOffscreenBuffer
+		pop.w		error(a6)						; get the error code
+
+		restoreUnlinkReturn
+
+					endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+NewOffscreenBuffer	proc		export
+
+					resultsStackFrame
+error				ds.w		1					; the resulting error code
+					parametersStackFrame
+bufferRectPtr		ds.l		1					; rectangle to buffer
+purgeable			ds.w		1					; purgeable flag
+resultPtr			ds.l		1					; place to put result
+					localsStackFrame
+localBufferRect		ds.w		4					; rectangle to buffer
+globalBufferRect	ds.w		4					; globalized
+pixMap				ds.l		1					; the created pixMap handle
+gDevice				ds.l		1					; the appropriate device
+					endStackFrame
+
+		linkSave	a2-a4
+
+		; save the rectangle, so we can take parameters from the middle of relocatable blocks
+
+		move.l		bufferRectPtr(a6),a0
+		move.l		topLeft(a0),localBufferRect+topLeft(a6)
+		move.l		botRight(a0),localBufferRect+botRight(a6)
+
+		; get the port (keep it around in a2)
+
+		rsrv.l
+		push.l		sp
+		_GetPort
+		pop.l		a2								; keep it
+
+		; allocate our handle
+
+		move.l		#0,a3							; initialize result to 0
+
+		moveq		#OffscreenBufferRecord.size,d0	; make the handle we need
+		_NewHandle clear
+		bnz.s		Done							; oops, failed
+		move.l		a0,a3							; store away the result
+
+		; fill in the handle with the port and the rectangle
+
+		move.l		(a3),a0
+		move.l		localBufferRect+topLeft(a6),(a0)+
+		move.l		localBufferRect+botRight(a6),(a0)+
+
+		; get rectangle into our stack frame (into global coordinates)
+
+		move.l		localBufferRect+topLeft(a6),globalBufferRect+topLeft(a6)
+		move.l		localBufferRect+botRight(a6),globalBufferRect+botRight(a6)
+
+		pea			globalBufferRect+topLeft(a6)
+		_LocalToGlobal								; convert topLeft to global coordinates
+		pea			globalBufferRect+botRight(a6)
+		_LocalToGlobal								; convert botRight to global coordinates
+
+		; allocate the buffer
+
+		moveq		#1,d0							; try temp. memory
+		bsr.s		DoNewScreenBuffer2
+		bz.s		GotBuffer						; go if we got the buffer successfully
+
+		moveq		#0,d0							; don’t use temp. memory
+		bsr.s		DoNewScreenBuffer2
+		bz.s		GotBuffer						; go if we got the buffer successfully
+
+GotHandleOnly
+		move.l		a3,a0							; get rid of handle
+		_DisposHandle
+
+		move.l		#0,a3
+		moveq		#memFullErr,d0					; return an error
+		bra.s		Done
+
+GotBuffer
+		move.l		pixMap(a6),a4
+
+		move.l		(a3),a0							; stuff the handle
+		move.l		a4,OffscreenBufferRecord.bufferPixMap(a0)
+		move.l		gDevice(a6),OffscreenBufferRecord.bufferGDevice(a0)
+
+		move.l		(a4),a0
+		pea			pmBounds(a0)					; offset this rectangle
+		push.l		localBufferRect+topLeft(a6)		; so that it corresponds to local coordinates
+		_OffsetRect									; move the pixmap
+
+		moveq		#noErr,d0
+
+Done
+		move.l		resultPtr(a6),a0				; store the result
+		move.l		a3,(a0)
+		move.w		d0,error(a6)					; return the error
+
+		restoreUnlinkReturn
+
+DoNewScreenBuffer2
+		rsrv.w										; make room for error result
+		pea			globalBufferRect(a6)			; our rectangle
+		push.b		purgeable(a6)					; try purgeable bits?
+		pea			gDevice(a6)						; get the device
+		pea			pixMap(a6)						; get the pixMap
+		tst.b		d0								; should we use temp. memory?
+		bnz.s		@temp
+		_NewScreenBuffer							; get buffer in current zone
+		bra.s		@done
+@temp
+		_NewTempScreenBuffer						; get buffer in shared memory
+@done
+		pop.w		d0								; get error result
+		rts
+
+					endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+AttachOffscreenBuffer proc		export
+
+					resultsStackFrame
+error				ds.w		1					; the resulting error code
+					parametersStackFrame
+buffer				ds.l		1					; buffer to dispose
+					endStackFrame
+
+		linkSave	d3/a3-a4
+
+		move.w		#memFullErr,error(a6)			; assume out of memory
+
+		move.l		buffer(a6),d0					; look at the handle
+		bz.s		GotError						; no handle
+		move.l		d0,a3
+
+		move.l		(a3),a0							; dereference the handle
+		move.l		OffscreenBufferRecord.bufferPixMap(a0),a4
+
+		rsrv.b										; make room for the result
+		push.l		a4
+		_LockPixels
+		tst.b		(sp)+							; could we lock it?
+		bz.s		GotError						; nope, we are done
+
+		; get the port (keep it around in a2)
+
+		rsrv.l
+		push.l		sp
+		_GetPort
+		pop.l		a2								; keep it
+
+		; attach buffer to the port
+
+		tst.w		portVersion(a2)					; color?
+		bmi.s		@color
+
+		; classic case
+
+		lea			portBits(a2),a0					; source
+		move.l		(a3),a1
+		lea			OffscreenBufferRecord.savedPortBits(a1),a1	; destination
+		moveq		#bitmapRec/2-1,d0				; loop count
+@loop	move.w		(a0)+,(a1)+
+		dbra		d0,@loop
+
+		push.l		(a4)							; get pointer to pixmap
+		_SetPBits									; set the port bits up
+		and.w		#$3FFF,portBits+rowBytes(a2)	; mask off rowBytes value (only works for 1-bit)	<14>
+
+		bra.s		@done
+
+		; color case
+
+@color
+		rsrv.l
+		_GetGDevice
+		move.l		(a3),a0
+		move.l		portPixMap(a2),OffscreenBufferRecord.savedPortPixMap(a0)	; save the port’s pixMap
+		pop.l		OffscreenBufferRecord.savedGDevice(a0)	; get device to save
+		push.l		OffscreenBufferRecord.bufferGDevice(a0)
+		_SetGDevice									; set to the right device
+		push.l		a4
+		_SetPortPix									; set the pixmap
+
+@done
+		move.w		#noErr,error(a6)				; show no error
+GotError
+
+		restoreUnlinkReturn
+
+					endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+DetachOffscreenBuffer proc		export
+					import		SetUpFgBgToBW
+
+
+					resultsStackFrame
+error				ds.w		1					; the resulting error code
+					parametersStackFrame
+buffer				ds.l		1					; buffer to dispose
+					endStackFrame
+
+		linkSave	a3
+
+		move.l		buffer(a6),d0					; look at the handle
+		bz.s		Done							; no handle
+		move.l		d0,a3
+
+		move.l		(a3),a0
+		tst.l		OffscreenBufferRecord.savedPortPixMap(a0)
+		bz.s		Done							; pixmap is not attached, we are done
+
+		move.l		OffscreenBufferRecord.bufferPixMap(a0),a4
+
+		; get the port (keep it around in a2)
+
+		rsrv.l
+		push.l		sp
+		_GetPort
+		pop.l		a2								; keep it
+
+		; detach buffer from the port
+
+		move.l		(a3),a0							; dereference the handle
+
+		tst.w		portVersion(a2)					; color?
+		bmi.s		@color
+
+		; classic case
+
+		pea			OffscreenBufferRecord.savedPortBits(a0)
+		_SetPBits									; set the port bits back
+
+		bra.s		PortDone
+
+		; color case
+
+@color
+		push.l		OffscreenBufferRecord.savedGDevice(a0)
+		push.l		OffscreenBufferRecord.savedPortPixMap(a0)
+		_SetPortPix									; set the pixmap
+		_SetGDevice									; set to the right device
+
+PortDone
+		jsr		SetUpFgBgToBW						; <12> Set fg=black bg=white
+
+		; mark that this buffer is done
+
+		move.l		(a3),a0
+		clr.l		OffscreenBufferRecord.savedPortPixMap(a0)
+
+		; copy bits from offscreen to onscreen
+
+		push.l		(a4)							; srcBits (offscreen bits)
+		pea			portBits(a2)					; dstBits (the port)
+		move.l		(a3),a0								
+		pea			OffscreenBufferRecord.rectangle(a0)	; srcRect (on-screen)		<9>
+		move.l		(SP),-(SP)							; destRect too				<9>
+		push.w		#srcCopy						; mode (srcCopy)
+		push.l		#0								; maskRgn (none)
+		_CopyBits
+
+		push.l		a4
+		_UnlockPixels
+
+Done
+		move.w		#noErr,error(a6)				; show no error
+
+		restoreUnlinkReturn
+
+					endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+DisposeOffscreenBuffer proc		export
+
+					resultsStackFrame
+error				ds.w		1					; the resulting error code
+					parametersStackFrame
+buffer				ds.l		1					; buffer to dispose
+					endStackFrame
+
+		linkSave	d3
+
+		move.l		buffer(a6),d3					; look at the handle
+		bz.s		Done							; no handle
+
+		rsrv.w
+		push.l		d3
+		_DetachOffscreenBuffer						; detach the buffer
+		free.w										; ignore result
+
+		move.l		d3,a0							; get handle in a0
+		move.l		(a0),a1
+		push.l		OffscreenBufferRecord.bufferPixMap(a1)	; push buffer
+		_DisposHandle								; get rid of the handle
+		_DisposeScreenBuffer						; get rid of the buffer
+
+Done
+		move.w		#noErr,error(a6)				; show no error
+
+		restoreUnlinkReturn
+
+					endproc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+		end

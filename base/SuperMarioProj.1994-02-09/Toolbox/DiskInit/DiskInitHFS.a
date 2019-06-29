@@ -1,0 +1,661 @@
+;
+;	File:		DiskInitHFS.a
+;
+;	Contains:	These routines are used to write a TFS directory onto a volume
+;
+;	Written by:	Patrick W. Dirks, December 21 1984.
+;
+;	Copyright:	© 1984-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <6>	 2/10/92	JSM		Moved this file to DiskInit folder, keeping all the old
+;									revisions.
+;		 <5>	 8/30/91	DTY		Define has3rdFloppy here since it’s no longer defined in
+;									BBSStartup.
+;		 <4>	 6/12/91	LN		Removed #includes for private interfaces from public interfaces.
+;									Changed #include 'HardwareEqu.a' to 'HardwarePrivateEqu.a'
+;		 <3>	  5/1/90	DDG		Removed the temporary conditionals that I added for Sys605.
+;		 <2>	  3/2/90	DDG		Added conditionals for Sys605.
+;	   <1.1>	11/17/89	dba		got rid of checks for 64K ROMs
+;	   <1.0>	11/16/88	CCH		Added to EASE.
+;				 7/23/87	BB		Fixed calculation of allocation block size for volumes sizes
+;									which are exact multiples of 32MB.
+;				 12/3/86	BB		Adjusted maximun clump size to fix rounding error.
+;				11/21/86	BB		Modified to force a maximum clump size of 1MB for the catalog
+;									and extents files.
+;				12/27/85	EHB		Only use low memory default record if new ROMs
+;				 8/27/85	EHB		Zero defaults for cache sizes (larry does it now)
+;				 8/26/85	EHB		Added setup of NDNHeight for catalog node
+;				 8/12/85	DLD		New version for MPW build.
+;				  8/9/85	PWD		Added setup of record count and first and last node pointers in
+;									B*-Tree header
+;				  8/8/85	EHB		Modified for variable B*-Tree node sizes
+;				 7/12/85	EHB		Removed setup of DrNxtDirID (field all gone)
+;				  7/8/85	EHB		Take constants from default record
+;				 6/27/85	EHB		Crunched extensively
+;				 6/25/85	EHB		Write spare copy of MDB at end of volume
+;				 6/17/85	EHB		Converted for use with DiskInit package
+;				 5/15/85	PWD		Added DrWrCnt field to MDB
+;				 5/10/85	PWD		Added DrNmRtDirs field to MDB
+;				  5/6/85	PWD		Changed for new FXM
+;				 4/22/85	PWD		Added code to special-case drives 1 and 2 in volume sizing
+;				 4/17/85	PWD		Changed to pick up volume size from Drive Queue Entry
+;				 3/17/85	PWD		Renamed and moved 'last backup' field.
+;				 2/19/85	PWD		Removed .Defs for MountVol and UnmountVol; TFSUtil now uses PB
+;									interface calls for Mount/Unmount/Eject.
+;				 2/11/85	PWD		Changed MountVol and UnMountVol to use volume cache for all I/O
+;				  2/5/85	PWD		Changed MountVol to split volume information over two VCB areas.
+;				 1/30/85	PWD		Added TFSUnmount
+;				 1/29/85	PWD		Updated to use word-long AlBlkSize fields
+;				12/21/84	PWD		New today.
+;
+
+; this code module is stored as a resource of type FMTR = CODE and is called by
+; jumping to it's entry point.  It only contains one main routine, and is only loaded
+; by the format package if TFS is present in the system.
+
+
+;
+; <5> has3rdFloppy is false for both System and ROM builds.
+;
+
+	if (&type('has3rdFloppy') = 'UNDEFINED') then	; <5>
+		has3rdFloppy:	equ	0						; <5>
+	endif											; <5>
+	
+	BLANKS ON
+	STRING ASIS
+
+			PRINT OFF
+            LOAD	   	'StandardEqu.d'
+            INCLUDE	 	'HardwarePrivateEqu.A'
+            INCLUDE	  	'SonyEqu.A'
+
+			PRINT ON
+
+;----------------------------------------------------------------------------------------------------
+
+TFSFMTR 	PROC	EXPORT	
+
+; A6 offsets.  Stack frame established externally
+
+UpDatFlg	EQU 	-2					; (word) used to avoid infinite update problem
+OldPort 	EQU 	UpDatFlg-4			; (long) save port
+DlogResult	EQU 	OldPort-2			; (word) ModalDialog result
+
+theRect 	EQU 	DlogResult-8		; (rect) item rectangle
+theItem 	EQU 	theRect-4			; (long) item handle
+theType 	EQU 	theItem-2			; (word) item type
+itemCount	EQU 	theType-2			; (word) number of items in list
+saveRect	EQU 	itemCount-8 		; (rect) place to save the old icon's rect      <01 Jul 85>
+saveIcon	EQU 	saveRect-4			; (long) place to save the old icon's handle    <26 Jun 85>
+
+SideCnt 	EQU 	saveIcon-2			; (word) $0001 or $0002 depending on sides to format <21 Jun 85>
+DQElPtr 	EQU 	SideCnt-4			; (long) drive queue element ptr
+DriveBlks	EQU 	DQElPtr-4			; (long) drive size in blocks					<21 Jun 85>
+StackBuf	EQU 	DriveBlks-512		; ( 512) large buffer for volname, disk blk
+VolNameBuf	EQU 	StackBuf-32 		; (  32) temp buffer for volume name			<21 Jun 85>
+IOPBlk		EQU 	VolNameBuf-IOVQElSize ; (  64) parameter blk for I/O calls
+
+; NOTE: name is read into VolNameBuf, assumes StackBuf is after to catch overflow chars
+
+InitTFSCode
+			BRA.S	TFSInit 		; branch to code						<3Dec85>
+;
+; Constant definitions
+;
+VCSize		EQU 	1				; Volume cache size
+VBMCSize	EQU 	1				; Bitmap cache size
+CtlCSize	EQU 	4				; Volume control cache size
+VBMSt		EQU 	3				; starting block of volume bit map
+KeyLen		EQU 	37				; maximum key length
+
+myFmtDefaults						; formatting constants used herein
+
+			DC.W	TSigWord		; Signature word
+			DC.L	0				; allocation block size (0 -> calculate it)
+			DC.L	0				; clump size (0 -> calculate it)
+			DC.L	NxFreeFN		; next free file number
+			DC.L	0				; B-tree clump size (0 -> calculate it)
+			DC.W	0				; reserved										<EHB 27-Aug-85>
+			DC.W	0				; reserved										<EHB 27-Aug-85>
+			DC.W	0				; reserved										<EHB 27-Aug-85>
+
+;_______________________________________________________________________
+;
+; Routine:		TFSInit
+;
+; Function: 	This routine writes an initial TFS volume structure on
+;				a selected volume.	It is assumed that the disk
+;				has already been formatted and verified.
+;
+;				Before this routine is called, the stack buffer has been
+;				cleared, and the name written into it, and the TagData has
+;				been cleared
+;
+; Modification History:
+;
+;	  01 AUG 84  BB   New today.
+;	  12 SEP 84  BB   Changed to use TFSEQU.text
+;	  18-Dec-84  PWD  Updated volume format, integrated into TFS skeleton app.
+;	   6-Mar-85  PWD  Changed to use extensible B*-Tree structure.
+;	  17-Apr-85  PWD  Changed to pick up volume size from DQE.
+;	   6-May-85  PWD  Changed for new FXM: updated MDB layout, changed initialization
+;					  of extent tree.
+;	  17-Jun-85  EHB  Modified for new diskInit package.
+;	   8-Aug-85  EHB  Modified for variable B-Tree node sizes
+;	  26-Sep-85  EHB  Made changes for >32 Mbyte volumes
+;_________________________________________________________________________________
+;
+;
+; On entry: 	A3	points to the stack buffer
+;
+; On exit:		D0	contains error # (CCR set)
+;				A0	trashed
+;
+; Register conventions:
+;
+;		A2		points to current position in MDB
+;		A3		points to stack buffer
+;		A4		points to default constants for formatting
+;
+;		D7		Allocation block size
+;		D6		Clump size (XT and CT)
+;		D5		extent tree size in allocation blocks (XT and CT)
+;_________________________________________________________________________________
+
+TFSInit:
+		  MOVE.L	A3,A2				; use A2 to waltz through MDB
+
+		  LEA		myFmtDefaults,A4	; point to our default constants
+
+		  MOVE.L	FmtDefaults,D0		; are the low-memory constants set up?
+		  BEQ.S 	@1					; => no, we're cool
+		  MOVE.L	D0,A4				; else get new constants
+@1
+		  MOVE.W	(A4)+,(A2)+ 		; set volume signature
+		  MOVE.L	Time,D0 			; get the time
+		  MOVE.L	D0,(A2)+			; set creation date
+		  MOVE.L	D0,(A2)+			; set last backup date
+
+		  CLR.L 	HFSTagData			; make sure HFS tag stuff is NIL			<EHB 13Aug85>
+		  MOVEQ 	#1,D0				; default value for system tag and file #	<EHB 13Aug85>
+		  MOVE.L	D0,TagData+10		; set up write sequence number				<EHB 13Aug85>
+		  MOVE.L	D0,TagData+2		; set up default FilNum 					<EHB 13Aug85>
+
+		  CLR.L 	(A2)+				; DrAtrb,DrNmFls = 0
+		  MOVE.W	#VBMSt,(A2)+		; DrVBMSt = 3
+		  CLR.W 	(A2)+				; DrAllocPtr = 0
+
+		  MOVE.L	DriveBlks(A6),D6	; D6 = volume size in 512-byte blocks	 <20Jun85>
+
+		  MOVE.L	(A4)+,D7			; D7 = allocation block size in bytes
+		  BNE.S 	@2					; => use default
+
+; if specified allocation block size = 0, then calculate based on volume size
+;		  ABS = 1 + (volSize/64K)
+
+		  MOVE.L	D6,D7				; get volume size in 512-byte blocks
+;		  SUBQ.L	#1,D7				; if exact block boundary, round down		<23Jul87>
+		  CLR.W 	D7					; how many 64K pieces in volume?
+		  SWAP		D7					; get into low word
+		  ADDQ.W	#1,D7				; now round back up 						<11Dec85>
+		  ASL.L 	#8,D7				; Multiply by 512 for size in bytes
+		  ADD.L 	D7,D7				; D7 = allocation block size in bytes
+
+@2		  MOVE.L	D6,D0				; get volume size in 512-byte blocks
+		  ASL.L 	#8,D0				; Multiply by 256 towards size in bytes
+		  ADD.L 	D0,D0				; D0 = volume size in bytes
+
+; After computing the number of allocation blocks to be mapped on the volume, the
+; bitmap size (in 512 byte sectors) is computed from:
+;
+;	Volume Size (Al. Blks) = 4096 * Bitmap Size (sectors) +
+;										Remainder to be mapped (Al. Blks)
+;
+; Since the Bitmap Size (the quotient) will not be mapped itself, if the remainder
+; is less than or equal to the quotient after conversion to allocation blocks
+; (i.e. if the number of allocation blocks occupied by the bitmap is greater than
+; or equal to the number of as yet unmapped allocation blocks), everything will
+; work fine.  Otherwise, an additional sector will have to be allocated to
+; the bitmap for the remaining allocation blocks.
+
+		  DIVU		D7,D0				; divide to get volsize in alloc. blocks
+		  AND.L 	#$FFFF,D0			; ignore remainder								<11Dec85>
+		  DIVU		#4096,D0			; divide by 512*8 to get bitmap size
+		  MOVEQ 	#0,D4				; Clear high word of D4 (will contain DrAlBlSt)
+		  MOVE.W	D0,D4				; Quotient after division (bitmap size)
+
+		  SWAP		D0					; get remainder 								<11Dec85>
+		  TST.W 	D0					; was there one?								<11Dec85>
+		  BEQ.S 	@25 				; => no 										<11Dec85>
+		  ADDQ.L	#1,D4				; else save one more for bitmap 				<11Dec85>
+
+@25:	  ADDQ.W	#3,D4				; Throw in boot blocks & MDB
+										; D4 = DrAlBlSt
+		  MOVE.L	D6,D2				; Pick up volume size in 512-byte blocks	<20Jun85>
+		  SUB.L 	D4,D2				; Adjust for 'lost' space
+		  LSL.L 	#8,D2				; Multiply by 256
+		  ADD.L 	D2,D2				; and again by 2 to get byte count
+		  DIVU		D7,D2				; Compute allocation block count
+		  SUBQ		#2,D2				; Save last block for MDB copy (Like MFS)
+		  MOVE.W	D2,(A2)+			; set DrNmAlBlks (true volume size in alloc. blocks)
+										; D2 = free alloc blocks in D2 (so far)
+		  MOVE.L	D7,(A2)+			; set DrAlBlkSiz
+
+		  MOVE.L	(A4)+,D0			; get clump size							<EHB 26Sep85>
+		  BNE.S 	@27 				; => pre-defined, use it					<EHB 26Sep85>
+		  MOVE.L	D7,D0				; else use 4*allocation block size			<EHB 26Sep85>
+		  LSL.L 	#2,D0				;											<EHB 26Sep85>
+@27:	  MOVE.L	D0,(A2)+			; set DrClpSiz (file clump size)			<EHB 26Sep85>
+
+		  MOVE.W	D4,(A2)+			; D4 = DrAlBlSt= first mapped block on disk
+		  MOVE.L	(A4)+,(A2)+ 		; set next free file number
+
+; skip over name (already set) and a bunch of zero fields
+
+; The XT and CT clump size is computed by dividing the original number of BLOCKS
+; on the volume by 128, rounding down, and multiplying the result out to bytes again.
+
+		  MOVE.L	(A4)+,D0			; examine default B-tree clump size
+		  BEQ.S 	@22 				; => calculate it ourselves
+		  MOVE.L	D0,D6				; else get B-tree clump size in bytes
+		  BRA.S 	@26 				; => and go set up extent and catalog
+
+@22 	  LSR.L 	#7,D6				; 'Divide' by 128 to get XT & CT clump size 	<20Jun85>
+		  BNE.S 	@23 				; If already > 0, we're all set
+		  MOVEQ 	#1,D6
+@23 	  ASL.L 	#8,D6				; Multiply by 256 towards size in bytes
+		  ADD.L 	D6,D6				; D6 = XT and CT clump size in bytes
+
+@26		  MOVE.L	#$100000,D0			; max clump size is 1MB							<21Nov86>
+		  SUB.L		D7,D0				;   - alloc block size (to allow for rounding)	<03Dec86>
+		  CMP.L		D0,D6				; clump size > max?								<21Nov86>
+		  BLE.S		@28					; ... no, use what we have						<21Nov86>
+		  MOVE.L	D0,D6				; ... yes, use max size							<21Nov86>
+		  
+@28 	  LEA		DrVCSize(A3),A2 	; point to volume cache size
+		  MOVE.L	(A4)+,(A2)+ 		; set volume cache size, volume bit map cache size
+		  MOVE.W	(A4)+,(A2)+ 		; set extent and catalog B*tree cache size
+
+		  LEA		DrXTFlSize(A3),A2	; Point to extent tree size
+		  MOVE.L	D6,D5				; get clump size (XT and CT)
+		  DIVU		D7,D5				; divide by allocation block size
+		  SWAP		D5					; get remainder in low word
+		  ADD.L 	#$FFFF,D5			; round up high word
+		  SWAP		D5					; D5.W = # of allocation blocks
+
+		  SUB.W 	D5,D2				; subtract size of extent tree
+		  MOVE.W	D5,D0				; get # of allocation blocks
+		  MULU		D7,D0				; get size in bytes
+		  MOVE.L	D0,(A2)+			; save in DrXTFlSize
+		  CLR.W 	(A2)+				; start block of extent tree = 0
+		  MOVE.W	D5,(A2)+			; length in allocation blocks
+		  ADDQ		#8,A2				; next 2 records are 0
+
+		  SUB.W 	D5,D2				; subtract size of catalog tree
+		  MOVE.W	D2,DrFreeBks(A3)	; and save as number of free blocks
+		  MOVE.L	D0,(A2)+			; DrCTFlSize in bytes
+		  MOVE.W	D5,(A2)+			; start = end of first extent
+		  MOVE.W	D5,(A2)+			; length = same as first extent record
+
+		  LEA		DrXTClpSiz(A3),A2	; point to extent tree clump size
+		  MOVE.L	D0,(A2)+			; Set extent tree clump size (rounded byte size)
+		  MOVE.L	D0,(A2)+			; Set catalog tree clump size
+		  MOVE.L	D0,D6				; and save for below
+
+		  MOVEQ 	#2,D0				; get initial write sequence number
+		  MOVE.L	D0,DrWrCnt(A3)		; and write it to MDB
+
+; write master block to disk
+
+		  MOVEQ 	#2,D1				; block # of MDB						<21Jun85>
+		  MOVEQ 	#1,D2				; 1 block long
+		  MOVE.L	D1,D3				; tag sequence number (0 - 1st block)	<21Jun85>
+		  BSR		BlkWrite			; write it to disk
+		  BNE		@95 				; Give up easily
+
+; place a spare copy at the end of the volume
+
+		  MOVE.L	DriveBlks(A6),D1	; get # of blocks on volume 			<25 Jun 85>
+		  SUBQ.L	#2,D1				; disk size in blocks -2				<25 Jun 85>
+		  MOVEQ 	#1,D2				; 1 block long							<25 Jun 85>
+		  MOVE.L	D1,D3				; tag sequence number (0 - 1st block)	<25 Jun 85>
+		  BSR		BlkWrite			; write it to disk						<25 Jun 85>
+		  BNE		@95 				; punt on error 						<25 Jun 85>
+
+; save some data from the MDB for later use
+;	 D6 = clump size (XT and CT)
+;	 D4 = DrAlBlSt
+;	 #VBMSt = DrVBMSt(A3)
+
+		  MOVEQ 	#0,D0				; Clear top half of D0.L
+		  MOVE.W	DrNmAlBlks(A3),D0	; Get total volume size (in alloc. blocks)
+		  SUB.W 	DrFreeBks(A3),D0	; Subtract out free blocks to get blocks taken
+
+; set up Volume Bitmap
+
+		  BSR		ClrStkBuf			; clear the buffer first
+		  MOVE.L	A3,A1				; and get pointer to the buffer
+
+		  DIVU		#8,D0				; get # of $FF bytes and # of bits left
+		  CLR.L 	D1					; put # of $FF bytes
+		  MOVE.W	D0,D1				; ... in D1
+		  CLR.W 	D0					; put # of bits left
+		  SWAP		D0					; ... in low half of D0
+
+		  TST.W 	D1					; Any whole bytes to set?
+		  BEQ		@35 				; Nope - don't bother
+		  SUBQ		#1,D1				;
+@30 	  ST		(A1)+				; True = FF
+		  DBRA		D1,@30				; ... in the buffer
+
+@35 	  MOVE.B	#$80,D2 			; assume 1 bit left
+		  SUBQ		#1,D0				; get shift count ( # bits left - 1)
+		  BMI		@50 				; no bits to set
+		  BEQ		@40 				; 1 bit, already set
+		  ASR.B 	D0,D2				; 2-7 bits, shift them into D2
+@40 	  MOVE.B	D2,(A1) 			; update the buffer
+
+@50:
+
+; write Bitmap to disk
+
+		  MOVEQ 	#VBMSt,D1			; get DrVBMSt as a long
+		  MOVEQ 	#1,D2				; 1 block long
+		  MOVE.L	D1,D3				; tag sequence number (0 - 1st block)	<21Jun85>
+		  BSR		BlkWrite			; write it
+		  BNE		@95 				; Give up without a write
+
+		  BSR		ClrStkBuf			; clear buffer for remaining blocks
+		  MOVEQ 	#0,D2				;										<21Jun85>
+		  MOVE.W	D4,D2				; get DrAlBlSt
+		  SUBQ.W	#VBMSt+1,D2 		; subtract drVBMSt+1 to get remaining blocks in bitmap
+		  BEQ.S 	@60 				; none left
+		  BSR		BlkWrite			; write them out
+		  BNE		@95 				; keep going only while the going's good
+@60:
+;
+; set up File extents B*-Tree
+;
+; set up tag data:
+;
+		  ADDQ.W	#2,TagData+4		; FilNum = 3									<EHB 13Aug85>
+;
+		  MOVEQ 	#0,D1				; make block num a long 						<EHB 26Sep85>
+		  MOVE.W	D4,D1				; start at first mapped block (DrAlBlSt)
+		  MOVE.L	D6,D2				; Get extent tree clump size in bytes
+		  MOVEQ 	#0,D0				; No records in extent tree
+		  LSR.L 	#8,D2				; 'Divide' by 256
+		  LSR.L 	#1,D2				; and again by 2 to get size in blocks
+		  MOVE.W	#7,D3				; Max. key length
+		  BSR		SetupBTree			; Set up a B*-Tree skeleton (leaves buffer clear)
+		  BNE		@95 				; Quit at the slightest hint of trouble
+
+; Set up the file catalog B*-Tree:
+
+; set up tag data:
+
+		  ADDQ.W	#1,TagData+4		; FilNum = 4
+
+		  MOVEQ 	#2,D0				; There'll be 2 records in the catalog
+		  MOVEQ 	#0,D1				; make block num a long 					<EHB 26Sep85>
+		  MOVE.W	D4,D1				; get first block (DrAlBlSt)
+		  MULU		D7,D5				; Get clump size in bytes					<PWD 26Sep85>
+		  LSR.L 	#8,D5				; 'divide' by 256							<PWD 26Sep85>
+		  LSR.L 	#1,D5				; and again by 2 to get size in phys. blocks<PWD 26Sep85>
+		  ADD.L 	D5,D1				; add in size in allocation blocks
+		  MOVE.L	D6,D2				; Get catalog tree clump size (bytes)
+		  LSR.L 	#8,D2				; 'Divide' by 256
+		  LSR.L 	#1,D2				; and again by 2 to get size in blocks
+		  MOVEQ 	#KeyLen,D3			; Max. key length
+		  BSR		SetupBTree			; Set up a B*-Tree skeleton (leaves buffer clear)
+		  BNE		@95 				; Give up readily
+;
+; Set up the first leaf node in the tree:
+
+; First set up the node descriptor (most of it zeros)...
+
+		ST		NdType(A3)				; Node type (True = $FF) - leaf node		<EHB 8Aug85>
+		MOVE.W	#2,NdNRecs(A3)			; 2 records in node.						<EHB 8Aug85>
+		MOVE.B	#1,NDNHeight(A3)		; set node height to one for node 2 		<EHB 26Sep85>
+
+; The first record is the root directory CNode, <1>'Root':
+
+; point to it and stuff an offset to it
+
+		LEA 	lenND(A3),A1			; Point to the first key record 			<21Jun85>
+		MOVEQ	#-2,D1					; offset from end of node for offset		<EHB 8Aug85>
+		BSR.S	SetOffset				; set offset to next record 				<EHB 8Aug85>
+
+; stuff the key record.   First figure out the length of the key record
+
+		LEA 	VolNameBuf(A6),A0		; Point to volume name						<21Jun85>
+		MOVEQ	#1,D0					; Clear top 3 bytes + 1 for length byte 	<21Jun85>
+		ADD.B	(A0),D0 				; D0 = length + 1 for blockMove 			<21Jun85>
+		MOVE.L	D0,D2					; keep rounded length in D2 				<EHB 8Aug85>
+		ADDQ	#1,D2					; make it even								<EHB 8Aug85>
+		BCLR	#0,D2					; by adding one and rounding				<EHB 8Aug85>
+		MOVE.B	D2,(A1) 				; store key length							<21Jun85>
+		ADDQ.B	#ckrCName-1,(A1)+		; as nameLen+bytes before name -1			<EHB 8Aug85>
+		CLR.B	(A1)+					; clear filler byte 						<EHB 8Aug85>
+		MOVEQ	#FSRtParID,D1			; Parent ID of root (1) 					<21Jun85>
+		MOVE.L	D1,(A1)+				; DirID in key								<21Jun85>
+
+		_BlockMove						; Put the volume name as the CName			<21Jun85>
+		ADD 	D2,A1					; Advance beyond volume name				<21Jun85>
+
+; Directory CNode:
+
+		MOVE.W	#$0100,(A1)+			; Data record type (directory CNode)		<21Jun85>
+		CLR.L	(A1)+					; Attributes/flag word & valence word		<21Jun85>
+
+		MOVEQ	#FSRtDirID,D1			; Root node's directory ID is 2             <21Jun85>
+		MOVE.L	D1,(A1)+				; DirID 									<21Jun85>
+		MOVE.L	Time,D1 				; Current date and time 					<21Jun85>
+		MOVE.L	D1,(A1)+				; Creation date time						<21Jun85>
+		MOVE.L	D1,(A1)+				; Date and time last modified				<21Jun85>
+		ADD.W  #(lendir-dirBkDat),A1	; bump pointer to end of record 			<EHB 8Aug85>
+
+; The second record in the catalog is the root thread record: key is <2>''
+
+; first stuff an offset to this record
+
+		MOVEQ	#-4,D1					; get offset to offset						<EHB 8Aug85>
+		BSR.S	SetOffset				; and set the offset						<EHB 8Aug85>
+
+; then stuff the record
+
+		MOVE.W	#$0700,(A1)+			; Key length = 7.							<21Jun85>
+		MOVEQ	#FSRtDirID,D1			; get DirID 								<EHB 9Aug85>
+		MOVE.L	D1,(A1)+				; DirID in key								<EHB 9Aug85>
+		CLR.W	(A1)+					; CName string (null)						<21Jun85>
+;
+; Thread record:
+;
+		MOVE.W	#$0300,(A1)+			; Record type is thread 					<21Jun85>
+		ADDQ	#8,A1					; skip over reserved bytes					<EHB 8Aug85>
+		MOVEQ	#FSRtParID,D1			; Root's parent ID                          <21Jun85>
+		MOVE.L	D1,(A1)+				;											<21Jun85>
+
+; A0 still points to the name, D2 still contains the padded length
+
+		MOVEQ	#1,D0					; Clear top 3 bytes + 1 for length byte 	<21Jun85>
+		ADD.B	(A0),D0 				; D0 = length + 1 for blockMove 			<21Jun85>
+		_BlockMove						; Copy in the volume name					<21Jun85>
+		ADD.W	#CMMaxCName+1,A1		; make name max size						<EHB 12Aug85>
+
+; and stuff offset to empty record
+
+		MOVEQ	#-6,D1					; get the offset to the offset				<EHB 8Aug85>
+		BSR.S	SetOffset				; set the offset to the empty record		<EHB 8Aug85>
+
+; Write the node out:
+
+		MOVEQ	#0,D1					; make block num a long 					<EHB 26Sep85>
+		MOVE.W	D4,D1					; DrStAlBl + size in allocation blocks
+		ADD.L	D5,D1					; is starting block number
+		ADDQ.L	#1,D1					; Advance beyond header block
+		MOVEQ	#1,D2					; Write just one block						<21Jun85>
+		MOVEQ	#1,D3					; Tag sequence number						<21Jun85>
+		BSR.S	BlkWrite				; Write the block
+		BNE.S	@95 					; Punt on errors
+;
+; clean up and return:
+;
+		MOVEQ	  #0,D0 				; the sweet smell of success...
+@95:	RTS 							; and return
+
+
+;------------------------
+; SetOffset places an offset to a record into the node offset table
+;
+;	  Input: A1 - pointer to beginning of next record
+;			 A3 - pointer to beginning of node
+;			 D1 - offset to offset
+;
+;	 Output: D0,D1 - trashed
+
+SetOffset
+			MOVE.L	A1,D0					; calculate offset to next record		<EHB 8Aug85>
+			SUB.L	A3,D0					; from beginning of block				<EHB 8Aug85>
+			ADD.W	#BTNodeSize,D1			; offset from beginning of node 		<EHB 8Aug85>
+			MOVE.W	D0,0(A3,D1) 			; stuff the offset						<EHB 8Aug85>
+			RTS
+
+;_______________________________________________________________________
+;
+; BlkWrite (Block Write) subroutine
+;
+;	  Input:  D1 - starting block number (long)
+;			  D2 - block count	(long)
+;			  D3 - starting tag sequence number
+;			  A3 - Pointer to buffer to be written (StackBuf)
+;
+;	  Output: D0 - error code
+;			  D1 - ending block number + 1
+;			  D3 - ending tag sequence number +1
+;_______________________________________________________________________
+
+BlkWrite	MOVEM.L D2/D4/A0-A2,-(SP)	; save regs
+
+			LEA 	IOPBlk(A6),A0		; point to general I/O param block
+			LEA 	IODrvNum(A0),A2 	; point to first param to set up
+			MOVE.L	DQElPtr(A6),A1		; point to drive queue element			<20Jun85>
+			MOVE.L	DQDrive(A1),(A2)+	; set drive number, refNum
+			ADDQ	#6,A2				; point to IOBuffer
+			MOVE.L	A3,(A2)+			; IOBuffer = stackBuf
+			MOVE.L	#512,(A2)+			; byte count (1 block)
+			CLR.L	(A2)+				; skip over IONumDone
+			MOVE.W	#1,(A2)+			; position mode 1 (from disk start)
+			BRA.S	@2					; make count (D2) 0 based
+
+@1			MOVE.L	D1,D4				; block number							<PWD 9Aug85>
+			LSL.L	#8,D4				; ...x 512
+			ADD.L	D4,D4				;
+			MOVE.L	D4,(A2) 			; ... gives disk address in bytes
+			MOVE.W	D3,TagData+8		; set file sequence number				<EHB 13Aug85>
+			_Write						; write one block
+			BNE 	@3					; exit if error
+
+			ADDQ.L	#1,D1				; increment block number
+			ADDQ.L	#1,D3				; ... and tag sequence number
+@2			SUBQ.L	#1,D2				; do next block
+			BGE.S	@1					; loop until -1
+
+@3			MOVEM.L (SP)+,D2/D4/A0-A2	; restore regs
+			TST.W	D0					; Set condition codes for return
+			RTS
+
+			EJECT
+;_______________________________________________________________________
+;
+; SetupBTree subroutine
+;
+;	  Input:  D0 - Number of records in first node (long)
+;			  D1 - starting block number
+;			  D2 - block count (file size)
+;			  D3 - Max. key length
+;			  D4 - drive number (1=internal, 2=exernal)
+;			  A3 - pointer to stack buffer
+;
+;	  Output: D0 - error code
+;
+; NOTE: This subroutine leaves the buffer completely cleared
+;_______________________________________________________________________
+
+SetupBTree:
+
+		MOVEM.L D2/D5/A2,-(SP)	; Stash regs for later use
+		BSR 	ClrStkBuf		; Empty the block buffer
+		MOVE.W	#$8000,D5		; mark header node as used
+
+; Write the B*-Tree header node:
+
+; Start with the node descriptor, which is mostly zeros...
+
+		MOVE.B	#NDHdrNode,NDType(A3)  ; This node contains the B*-Tree header			<EHB 8Aug85>
+		MOVE.W	#3,NDNRecs(A3)		   ; There are three records (header & map & user)	<EHB 8Aug85>
+		MOVE.L	D2,lenND+BTHNNodes(A3) ; set total number of nodes (before trashing D2) <EHB 8Aug85>
+
+		MOVE.L	D0,lenND+BTHNRecs(A3)  ; Set total number of data records				<PWD 9Aug85>
+		BEQ 	@10 			; No records in B*-Tree yet, so header and bitmap are OK<PWD 9Aug85>
+
+		MOVE.W	#$C000,D5		; otherwise, mark the second node as used too
+		SUBQ.L	#1,D2			; Take out first block (to be written) (for below)
+		LEA 	lenND(A3),A2	; get pointer to BTree Header
+		ADDQ.W	#1,(A2)+		; BTHDepth = 1 = Tree depth for empty tree (default = 0)
+		ADDQ.L	#1,(A2)+		; BTRoot = 1 = Root node of empty tree (default = 0)
+		ADDQ.L	#4,A2			; Skip BTHNRecs field									<PWD 9Aug85>
+		ADDQ.L	#1,(A2)+		; BTHFNode = 1											<PWD 9Aug85>
+		ADDQ.L	#1,(A2)+		; BTHLNode = 1											<PWD 9Aug85>
+
+@10 	LEA 	lenND+BTHNodeSize(A3),A2  ; get pointer to buffer					<EHB 9Aug85>
+		MOVE.W	#512,(A2)+		; BTHNodeSize = Node size
+		MOVE.W	D3,(A2)+		; BTHKeyLen = Max. key length
+		ADDQ	#4,A2			; BTHNNodes (long) already set						<EHB 9Aug85>
+		SUBQ.L	#1,D2			; Take out 1 header node
+		MOVE.L	D2,(A2)+		; BTHFree = Number of free nodes
+
+; Now for the bitmap record:
+
+@30 	LEA 	lenND+lenBTH+128(A3),A2 		; point to the allocation map		<EHB 8Aug85>
+		MOVE.W	D5,(A2) 		; D5 contains the used bits for the allocation map	<EHB 8Aug85>
+
+; Now place offsets to the records at the end of the node
+
+		LEA 	BTNodeSize-8(A3),A2 			; put 4 offsets at end of node		<EHB 8Aug85>
+		MOVE.W	#lenND+lenBTH+128+256,(A2)+ 	; pointer to free space 			<EHB 8Aug85>
+		MOVE.W	#lenND+lenBTH+128,(A2)+ 		; pointer to alloc map (256 bytes)	<EHB 8Aug85>
+		MOVE.W	#lenND+lenBTH,(A2)+ 			; pointer to user space (128 bytes) <EHB 8Aug85>
+		MOVE.W	#lenND,(A2) 			; and pointer to BTH (104 bytes)			<EHB 8Aug85>
+
+		MOVEQ	#1,D2			; Write just one block at a time
+		MOVEQ	#0,D3			; Clear tag sequence number for first block
+		BSR 	BlkWrite		; Write the header block
+		BNE 	@95 			; Surrender to the slightest opposition
+
+; Write the remaining blocks just to set their tags:
+
+		MOVE.L	(SP),D2 		; Retrieve full size (old D2)
+		SUBQ.W	#1,D2			; Subtract header block just written
+		BSR.S	ClrStkBuf		; Zero it out completely
+		BSR 	BlkWrite		; Write rest of B*-Tree file
+@95:	MOVEM.L (SP)+,D2/D5/A2	; Restore regs
+		TST.W	D0				; Set condition codes for return
+		RTS 					; And call it a day.
+
+
+ClrStkBuf	MOVEM.L D0/A0,-(SP) 		; save regs
+			LEA 	StackBuf(A6),A0 	; get address
+			MOVEQ	#(512/4)-1,D0		; get number of longs
+
+ClrBuf		CLR.L	(A0)+				;
+			DBRA	D0,ClrBuf
+			MOVEM.L (SP)+,D0/A0 		; restore regs
+			RTS
+
+
+		END 
+

@@ -1,0 +1,1209 @@
+;
+;	File:		FPCTRL.a
+;
+;	Contains:	xxx put contents here xxx
+;
+;	Written by:	xxx put writers here xxx
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds:   Mac32
+;
+;	Change History (most recent first):
+;
+;	Terror Change History:
+;
+;		 <1>	11/14/90	BG		Added to BBS for the first time.
+;
+;	To Do:
+;
+
+
+;-----------------------------------------------------------
+; FPCONTROL for MC68020
+; Copyright Apple Computer, Inc., 1983,1984,1985,1989,1990
+; All rights reserved
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+;  9 JAN 90: WRITTEN BY JON OKADA FOR MC68020, BASED UPON
+;		LISA CODE BY JEROME COONEN
+; 11 JUN 90: MODIFIED TO SUPPORT 96-BIT EXTENDED OPERANDS (JPO)
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; This is the main entry point of the package.  The stack has
+; the form:
+;	ret < opword < addr1 < addr2 < addr3,
+; where the number of addresses (1, 2, or 3) depends on the
+; operation.
+; 
+; Dispatching is done to entry points for individual operations
+; or for groups of similar operations.
+;-----------------------------------------------------------
+
+FP020	PROC	EXPORT
+;-----------------------------------------------------------
+; Prepare for quick dispatching for operations
+;-----------------------------------------------------------
+;	dc.w	$a9ff
+
+	SUBQ.L	#4,SP		; space for dispatching via RTS
+	MOVEM.L D0/A0,-(SP)	; save minimum # of registers
+
+;-----------------------------------------------------------
+; Get opword into D0.LO and dispatch quickly if format is
+; extended or opword is odd.
+;-----------------------------------------------------------
+
+DISPBASE:
+	MOVEQ	#0,D0		; zero D0
+	MOVE.W	16(SP),D0	; D0.W <- opcode
+	BFTST	D0{18:3}	; test operation format:
+	BEQ.S	DISP1		;   quick dispatch if extended
+	BTST	#0,D0		; test opcode for odd/even:
+	BEQ.S	DISP2		;   even case uses second dispatch table
+	
+;-----------------------------------------------------------
+; Dispatch via table for extended format or odd-numbered operations
+;-----------------------------------------------------------
+
+DISP1:
+	ANDI.W	#$001F,D0	; D0.W <- operation index
+	ADD	D0,D0		; double index to obtain table index
+	MOVE.W	D1CASE(D0),D0	; D0 <- operation addr offset
+	LEA	DISPBASE(D0),A0	; A0 <- operation addr
+
+;-----------------------------------------------------------
+; Accomplish entry to routine address in A0 via RTS.  At this
+; point, stack is:
+;     (SAVED D0/A0) < longword for addr < ret < opword < arg addresses
+;-----------------------------------------------------------
+
+VECTOROFF:
+	MOVE.L	A0,8(SP)	; stuff addr in A0 into stack
+	MOVEM.L	(SP)+,D0/A0	; restore two registers
+	RTS			; quick entry to implementation
+
+;-----------------------------------------------------------
+; Dispatch via table for remaining even-numbered operations
+;-----------------------------------------------------------
+
+DISP2:
+	ANDI.W	#$001E,D0	; D0.W <- table index
+	MOVE.W	D2CASE(D0),D0	; D0 <- operation addr offset
+	LEA	DISPBASE(D0),A0	; A0 <- operation addr
+	BRA.S	VECTOROFF	; dispatch after restoring registers
+
+;-----------------------------------------------------------
+; Tables for dispatching to operations
+;-----------------------------------------------------------
+
+D1CASE:
+	DC.W	QADDX - DISPBASE
+	DC.W	QSETENV	- DISPBASE
+	DC.W	QSUBX - DISPBASE
+	DC.W	QGETENV	- DISPBASE
+	DC.W	QMULX - DISPBASE
+	DC.W	QSETHV - DISPBASE
+	DC.W	QDIVX - DISPBASE
+	DC.W	QGETHV - DISPBASE
+	DC.W	QCMPX - DISPBASE
+	DC.W	QD2B - DISPBASE
+	DC.W	QCMPX - DISPBASE
+	DC.W	QB2D - DISPBASE
+	DC.W	QREMX - DISPBASE
+	DC.W	QNEG - DISPBASE
+	DC.W	QX2X - DISPBASE
+	DC.W	QABS - DISPBASE
+	DC.W	QX2X - DISPBASE
+	DC.W	QCPYSGN	- DISPBASE
+	DC.W	QSQRTX	- DISPBASE
+	DC.W	QNEXTB - DISPBASE
+	DC.W	QRINTX - DISPBASE
+	DC.W	QSETXCP	- DISPBASE
+	DC.W	QTINTX - DISPBASE
+	DC.W	QPROCENTRY- DISPBASE
+	DC.W	QSCALBX	- DISPBASE
+	DC.W	QPROCEXIT - DISPBASE
+	DC.W	QLOGBX - DISPBASE
+	DC.W	QTESTXCP - DISPBASE
+	DC.W	QCLASSX	- DISPBASE
+			
+D2CASE:
+	DC.W	QADDB - DISPBASE
+	DC.W	QSUBB - DISPBASE
+	DC.W	QMULB - DISPBASE
+	DC.W	QDIVB - DISPBASE
+	DC.W	QCMPB - DISPBASE
+	DC.W	QCMPB - DISPBASE
+	DC.W	QREMB - DISPBASE
+	DC.W	QB2X - DISPBASE
+	DC.W	QX2B - DISPBASE
+	DC.W	QSQRTX - DISPBASE
+	DC.W	QRINTX - DISPBASE
+	DC.W	QTINTX - DISPBASE
+	DC.W	QSCALBX	- DISPBASE
+	DC.W	QLOGBX - DISPBASE
+	DC.W	QCLASSB - DISPBASE
+			
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+; Code to store opword and unpack pairs of operands, assuming
+; A6 link entry.  Register usage:
+;    A0		continuation jmp address
+;    A3		DST exponent
+;    A4		SRC exponent
+;    D0		operand classification
+;    D3/A2	DST significand
+;    D4/D5	SRC significand
+;    D6		opword/exceptions/operand signs
+;    D7		round/stickies (initialized to zero)
+;    A1/D1	scratch
+;
+; D6 will contain the following information:
+;    opword in bits 16-31 (HI word)
+;    exceptions in bits 8-12 (initialized to zero)
+;    SRC sign in bit 7
+;    DST sign in bit 6
+;    XOR  of signs in bit 5
+;
+; D0 low word will contain NaN information for easy dispatching:
+;    0	neither operand is a NaN
+;    2	SRC is a NaN
+;    4  DST is a NaN
+;    6  both operands are NaNs
+;
+; If the low word in D0 is zero, the high word contains further
+; classification information:
+;    0  both operands are finite nonzero numbers
+;    2  DST is finite and nonzero; SRC is zero
+;    4  DST is finite and nonzero; SRC is infinite
+;    6	DST is zero; SRC is finite and nonzero
+;    8	both operands are zero
+;   10  DST is zero; SRC is infinite
+;   12	DST is infinite; SRC is finite and nonzero
+;   14  DST is infinite; SRC is zero
+;   16	both operands are infinite
+; In this case (no NaN input, the high and low words of D0 are
+; swapped before the operation continues.
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; Extended SRC and DST
+;-----------------------------------------------------------
+UNPACKXX:
+	MOVE.W	LKOP(A6),D6	; get opword into D6.HI
+	MOVEQ	#0,D0		;   and zero D0
+	SWAP	D6
+	CLR.W	D6		; zero D6.LO
+	
+	MOVEA.L	LKADR1(A6),A1	; unpack extended DST
+	BSR	UNPXOP
+	MOVEA.L	A4,A3		; move to A3/D3/A2
+	MOVE.L	D4,D3
+	MOVEA.L	D5,A2
+	LSR.B	#1,D6		; move sign to D6 bit 6
+	MOVE.L	D0,D1		; double NaN index (D0.LO) and
+	CLR.W	D1
+	ADD.L	D0,D0		;   and triple number index (D0.HI)
+	ADD.L	D1,D0
+	
+	MOVEA.L	LKADR2(A6),A1	; unpack extended SRC
+	BSR	UNPXOP
+	
+;-----------------------------------------------------------
+; Convenient to put XOR of signs in D6 bit 5
+;-----------------------------------------------------------
+UNPACKED2:
+	ASL.B	#1,D6		; V = XOR of signs
+	BVC.S	@1
+	BSET	#6,D6
+@1:
+	ROXR.B	#1,D6
+	MOVEQ	#0,D7		; zero D7
+	
+;-----------------------------------------------------------
+; Branch to special code if NaN(s) unpacked
+;-----------------------------------------------------------
+	TST.W	D0		; any NaN input?
+	BNE.S	NAN2OPS		;   yes; special processing
+	
+	SWAP	D0		;   no; swap D0 high/low
+	JMP	(A0)		; do operation
+
+
+;-----------------------------------------------------------
+; Non-extended SRC and extended DST
+;-----------------------------------------------------------
+UNPACKXB:
+	MOVE.W	LKOP(A6),D6	; Get opword into D6.HI
+	MOVEQ	#0,D0		;   and zero D0
+	SWAP	D6
+	CLR.W	D6		; zero D6.LO
+
+	MOVEA.L	LKADR1(A6),A1	; unpack extended DST
+	BSR	UNPXOP
+	MOVEA.L	A4,A3		; move to A3/D3/A2
+	MOVE.L	D4,D3
+	MOVEA.L	D5,A2
+	LSR.B	#1,D6		; move sign to D6 bit 6
+	MOVE.L	D0,D1		; double NaN index (D0.LO) and
+	CLR.W	D1
+	ADD.L	D0,D0		;   and triple number index (D0.HI)
+	ADD.L	D1,D0
+	
+	MOVE.L	D6,D1		; extract offset from format
+	CLR.W	D1		;   code in opword
+	ROL.L	#6,D1
+	ANDI.W	#$000E,D1
+	SUBQ.W	#2,D1
+	MOVEA.L	LKADR2(A6),A1	; unpack non-extended SRC
+	BSR	UNPBOP
+	BRA.S	UNPACKED2	; get XOR of signs & check for NaNs
+
+
+;-----------------------------------------------------------
+; This is the target of all invalid operations with extended
+; results.  Bits in D0 000000XX must go to 00XX0000.
+;-----------------------------------------------------------
+INVALIDOP:
+	BSET	#ERRI+8,D6
+	SWAP	D0		; align code byte
+	BSET	#QNANBIT,D0	; mark it quiet
+	MOVE.L	D0,D4
+	MOVEQ	#0,D5		; clear low half
+	MOVEA.W #$7FFF,A4	; set exponent
+	BRA	PACKX		; pack it
+
+
+;-----------------------------------------------------------
+; NaN input detected for binary operation.  Take as preliminary
+; result any single NaN input or, if both inputs are NaN, the
+; NaN with the larger code.  At this point, unpacked extended
+; operands are in A3/D3/A2 (DST) and A4/D4/D5 (SRC), and the
+; input NaN flags are in D0.W.
+;-----------------------------------------------------------
+NAN2OPS:
+	LEA	FINI2OPS,A0	; continuation addr
+
+NANCOMMON:
+	SUBQ.W	#2,D0
+	BEQ.S	NANSRC		; SRC NaN only
+	SUBQ.W	#2,D0
+	BEQ.S	NANDST		; DST NaN only
+	
+	MOVE.L	D3,D7		; two NaN inputs
+	MOVE.L	#$00FF0000,D1	; NaN code mask
+	AND.L	D1,D7		; DST code
+	AND.L	D4,D1		; SRC code
+	CMP.L	D7,D1
+	BGT.S	NANSRC		; SRC code >= DST code
+	
+NANDST:				; move DST NaN to SRC position
+	ADD.B	D6,D6		; sign
+	MOVEA.L	A3,A4		; exponent
+	MOVE.L	D3,D4		; significand
+	MOVE.L	A2,D5
+	
+NANSRC:
+	BFEXTU	D6{11:5},D1	; D1 <- opcode
+	SUBQ	#8,D1
+	BEQ.S	NANCMP		; FCMP opcode (no signal on unordered)
+	SUBQ	#2,D1
+	BNE.S	FPNANOUT	; output extended NaN
+	
+	BSET	#ERRI+8,D6	; FCPX signals invalid on unordered
+NANCMP:
+	MOVEQ	#CMPU,D7	; mark unordered
+	BRA	FINICMPS	; finish comparison
+	
+;-----------------------------------------------------------
+; Output extended NaN after checking for interesting NaN bits,
+; giving special code if there is none
+;-----------------------------------------------------------
+FPNANOUT:
+	BSR.S	FPNANIN		; check for interesting NaN bits
+	BRA	PACKX		; stuff NaN result
+
+	
+;-----------------------------------------------------------
+; Subroutine FPNANIN checks for interesting NaN bits and gives
+; a special NaN code if there is none.  Input NaN significand
+; is in D4/D5.  Uses D1 as scratch register
+;-----------------------------------------------------------
+FPNANIN:
+	MOVE.L	D4,D1		; check for all zeros
+	BCLR	#QNANBIT,D1	; disregard quiet bit
+	OR.L	D5,D1
+	BNE.S	@1
+	
+	MOVEQ	#NANZERO,D4	; special NaN if no code
+	SWAP	D4
+	BSET	#QNANBIT,D4
+@1:
+	RTS
+
+
+
+;-----------------------------------------------------------
+; Subroutine UNPXOP unpacks an extended operand.  Register usage
+; is as follows:
+;    ENTRY:
+;	A1	operand addr
+;	D6.HI	opword (includes 96-bit extended format bit (#21)
+;    EXIT:
+;	A4	exponent of operand sign-extended to 32 bits
+;	D4/D5	extended significand
+;	D0	classification code for operand (ADDed in)
+;	D6	sign of operand in bit 7 (ORed in)
+;	A1,D1	trashed
+;-----------------------------------------------------------
+UNPXOP:
+	MOVE.W	(A1)+,D1	; D1 <- sign/exp
+	BPL.S	@1		; + case
+	
+	BSET	#7,D6		; - case; set flag in D6
+	BCLR	#15,D1		;   and clr sign bit	
+@1:
+	BTST	#21,D6		; 96-bit extended?
+	BEQ.S	@2		;   no.  80-bit
+
+	ADDQ	#2,A1		;   yes.  bump pointer by 2
+@2:
+	MOVE.L	(A1)+,D4	; significand bits into D4/D5
+	MOVE.L	(A1),D5
+	
+	CMPI.W	#$7FFF,D1	; max exp?
+	BEQ.S	UNPNIN		;   yes; special handling
+	
+	TST.L	D4		; normalized?
+	BPL.S	UNPZUN		;   no; special handling
+	
+UNPNRM:				; normalized case
+	EXT.L	D1		; 32-bit exponent in A4
+	MOVEA.L	D1,A4
+	RTS			; return
+	
+;-----------------------------------------------------------
+; Distinguish special case and set appropriate bit in D0:
+;	bit 17 for zero;
+;	bit 18 for infinite
+;	bit 1  for NaN
+;-----------------------------------------------------------
+UNPZUN:
+	TST.L	D4		; unnormalized or zero
+	BNE.S	UNPUNR
+	TST.L	D5
+	BNE.S	UNPUNR		; do normalization
+UNP0:
+	SUBA.L	A4,A4		; ZERO unpacked; zero exponent
+	ADD.L	#$00020000,D0	; mark in D0
+	RTS			; done
+	
+UNPUNR:				; enter here to normalize quietly
+	SUBQ.W	#1,D1		; decrement exponent
+	ADD.L	D5,D5		; shift significand left
+	ADDX.L	D4,D4
+	BPL.S	UNPUNR		; loop until high bit of D4 set, then
+	BRA.S	UNPNRM		;   treat as normalized
+	
+UNPNIN:				; NaN or infinity
+	MOVEA.W	#$7FFF,A4	; max exponent
+	BCLR	#31,D4		; ignore explicit bit
+	TST.L	D4
+	BNE.S	UNPNAN		; NaN if any other significand
+	TST.L	D5		;   bit is set
+	BNE.S	UNPNAN
+	
+	ADD.L	#$00040000,D0	; INFINITE; mark INF operand in D0
+	RTS
+	
+;-----------------------------------------------------------
+; NaN unpacked.  Test and set the quiet NaN bit (#30 of upper
+; half of the significand); if it was clear, then signal invalid.
+;-----------------------------------------------------------
+UNPNAN:
+	BSET	#QNANBIT,D4	; quiet the NaN
+	BNE.S	@2		; it was already quiet
+	BSET	#ERRI+8,D6	; signaling NaN raises invalid flag
+@2:
+	ADDQ.W	#2,D0		; mark NaN in D0
+	RTS
+	
+	
+;-----------------------------------------------------------
+; Subroutine UNPBOP unpacks a non-extended binary operand.  Register
+; usage is as follows:
+;    ENTRY:
+;	A1	operand addr
+;	D1	offset into jump table for unpack routine
+;    EXIT:
+;	A4	exponent of operand sign-extended to 32 bits
+;	D4/D5	extended significand
+;	D0	classification code for operand (ADDed in)
+;	D6	sign of operand in bit 7 (ORed in)
+;	A1,D1	trashed
+;	D2	scratch register for some formats
+;-----------------------------------------------------------
+UNPBOP:
+	MOVE.W	UNPCASE(D1),D1	; get addr of specific routine
+	JMP	UNPBOP(D1)	;   and jump there
+	
+UNPCASE:
+	DC.W	UNPDBL - UNPBOP	; double precision
+	DC.W	UNPSGL - UNPBOP	; single precision
+	DC.W	UNPXOP - UNPBOP	; ---illegal format
+	DC.W	UNPI16 - UNPBOP	; int16
+	DC.W	UNPI32 - UNPBOP	; int32
+	DC.W	UNPC64 - UNPBOP	; comp
+	
+
+;-----------------------------------------------------------
+; 16-bit integer unpacking has special case of zero; else
+; normalize and return
+;-----------------------------------------------------------
+UNPI16:
+	MOVEQ	#0,D4		; zero D4
+	MOVE.W	#$400E,D1	; set exponent for short integer
+	MOVE.L	D4,D5		; zero D5
+	MOVE.W	(A1),D4		; get operand
+	SWAP	D4		; left align in register
+	BRA.S	UNPIGEN		; continue below	
+	
+;-----------------------------------------------------------
+; 32-bit integer unpacking has special case of zero; else
+; normalize and return
+;-----------------------------------------------------------
+UNPI32:
+	MOVE.W	#$401E,D1	; set exponent for long integer
+	MOVEQ	#0,D5		; zero D5
+	MOVE.L	(A1),D4		; get operand
+
+UNPIGEN:
+	BEQ.S	UNP0		; zero
+	BPL.S	UNPIUNR		; positive. normalize
+	
+	BSET	#7,D6		; negative. set sign in D6
+	NEG.L	D4		; negate D4
+	BMI.S	UNPNRM		; already normalized if = $80000000
+
+;-----------------------------------------------------------
+; Normalization for D4 > 0 and D5 = 0
+;-----------------------------------------------------------
+UNPIUNR:
+	BFFFO	D4{0:0},D2	; find first one bit
+	SUB.W	D2,D1		; adjust exponent
+	LSL.L	D2,D4		; shift significand
+	BRA	UNPNRM		; NORMALIZED
+	
+;-----------------------------------------------------------
+; 64-bit comp unpacking has special cases of zero and NaN; else
+; normalize and return
+;-----------------------------------------------------------
+UNPC64:
+	MOVE.W	#$403E,D1	; initialize exponent
+	MOVE.L	(A1)+,D4	; get operand into D4/D5
+	MOVE.L	(A1),D5
+	BNE.S	@1		; low half nonzero
+	
+	TST.L	D4		; test high half
+	BEQ	UNP0		; comp ZERO
+	BPL.S	UNPIUNR		; normalize positive
+	
+	BSET	#7,D6		; flag negative in D6
+	NEG.L	D4		; negate high significand
+	BPL.S	UNPIUNR		; normalize if not NaN
+	
+	MOVEA.W	#$7FFF,A4	; comp NaN; set exponent
+	BCLR	#7,D6		; clear sign bit
+	MOVEQ	#NANCOMP,D4	; NaN code in significand high word
+	SWAP	D4
+	BSET	#QNANBIT,D4	; make it quiet
+	ADDQ.W	#2,D0		; mark NaN in D0
+	RTS			; done
+	
+@1:				; comp low half nonzero
+	TST.L	D4		; test high half
+	BPL.S	@2		; nonnegative
+	
+	BSET	#7,D6		; mark as negative in D6
+	NEG.L	D5		; negate
+	NEGX.L	D4
+	TST.L	D4		; test high half
+@2:
+	BNE	UNPUNR		; nonzero; normalize D4/D5
+	
+	SUBI.W	#$0020,D1	; high half zero; reduce exponent
+	EXG	D4,D5		; exchange high/low halves
+	TST.L	D4
+	BPL.S	UNPIUNR		; normalize if necessary
+	BRA	UNPNRM
+	
+	
+;-----------------------------------------------------------
+; Single-precision unpacking has special cases of zero, NaN,
+;   and infinite
+;-----------------------------------------------------------
+UNPSGL:
+	MOVEQ	#0,D5		; zero significand low half
+	MOVE.L	(A1),D4		; read single-precision into D4
+	BPL.S	@3		; not negative
+	
+	BSET	#7,D6		; negative; mark in D6
+@3:
+	BFEXTU	D4{1:8},D1	; extract exponent into D1
+	BEQ.S	@4		; ZERO or subnormal single
+	
+	LSL.L	#8,D4		; shift significand just short of bit 31
+	CMPI.B	#$FF,D1		; max exp?
+	BEQ	UNPNIN		;   yes; NaN or INFINITE
+	
+	ADDI.W	#$3F80,D1	; normalized; bias exponent
+	BSET	#31,D4		; set explicit bit
+	BRA	UNPNRM
+	
+@4:
+	LSL.L	#8,D4		; shift significand
+	BEQ	UNP0		; ZERO
+	
+	MOVE.W	#$3F81,D1	; single subnormal; bias exponent
+	BRA	UNPIUNR		; normalize
+	
+	
+;-----------------------------------------------------------
+; Double-precision unpacking has special cases of zero, NaN,
+;   and infinite
+;-----------------------------------------------------------
+UNPDBL:
+	MOVE.L	(A1),D4		; high bits into D4
+	BPL.S	@5
+	
+	BSET	#7,D6		; set sign in D6
+@5:
+	MOVE.L	4(A1),D5	; low bits in D5
+	
+;-----------------------------------------------------------
+; Double operands appear as: (1)  (11) (1 implicit) (52), so
+; must align bits left by 11 places and insert explicit lead
+; bit.  Do this via shifts and bit field instructions.
+;-----------------------------------------------------------
+	BFEXTU	D4{1:11},D1	; extract exponent into D1
+	BFEXTU	D5{0:11},D2	; extract 11 high bits of D5
+	LSL.L	#8,D4		; shift D4 and D5 left 11 places
+	LSL.L	#8,D5
+	LSL.L	#3,D4
+	LSL.L	#3,D5
+	OR.W	D2,D4		; move 11 bits to D4 low end
+	BCLR	#31,D4		; clr explicit bit initially
+	TST.L	D1		; test exponent
+	BNE.S	@6		; normalized, infinite, or NaN
+	
+	MOVE.W	#$3C01,D1	; zero or unnormalized
+	BRA	UNPZUN
+@6:
+	CMPI.W	#$07FF,D1	; max exp?
+	BEQ	UNPNIN		; yes, NaN or INF
+	
+	BSET	#31,D4		; normalized number; set explicit bit
+	ADDI.W	#$3C00,D1	; bias exponent
+	BRA	UNPNRM
+
+
+;-----------------------------------------------------------
+; Subroutine RTSHIFT.
+;
+; This is the right shifter used in subnormal coercion, IPALIGN ...
+; Shift count in D0 > 0; Shift registers are D4/D5/D7 (stickies)
+; Uses D3 as scratch register.
+;-----------------------------------------------------------
+RTSHIFT:
+	CMPI.W	#66,D0		; high shift counts pin to 66
+	BLS.S	@1
+	MOVE.W	#66,D0
+@1:
+	CMPI.W	#32,D0		; count < 32?
+	BLT.S	@3		; yes. do shift
+	TST.L	D7		; no. set stickies if D7 nonzero
+	SNE	D3
+	MOVE.L	D5,D7		; shift D4/D5 into D5/D7
+	MOVE.L	D4,D5
+	OR.B	D3,D7		; OR in low stickies
+	MOVEQ	#0,D4		; zero D4
+	SUBI.W	#32,D0		; decr count by 32
+	BNE.S	@1		; loop if nonzero
+	RTS			; otherwise, done
+
+@3:				; right shift of 1-31 bits
+	BFINS	D7,D3{0:D0}	; test low bits
+	SNE	D3		; set sticky state in D3
+	LSR.L	D0,D7		; shift D7 right
+	BFINS	D5,D7{0:D0}	; shift bits from D5 low to D7 high
+	LSR.L	D0,D5		; shift D5 right
+	BFINS	D4,D5{0:D0}	; shift bits from D4 low to D5 high
+	LSR.L	D0,D4		; shift D4
+	OR.B	D3,D7		; OR in low stickies
+
+	RTS			; done
+
+
+
+
+
+;-----------------------------------------------------------
+; COERCION routines assume post-operation register mask with
+; result in:
+;	A4	exponent
+;	D4	significand high 32 bits
+;	D5	significand 
+;	D7	round/stickies.
+;-----------------------------------------------------------
+
+;-----------------------------------------------------------
+; Check value first, stuff if zero (with exp fix), otherwise,
+; normalize and coerce.  Called only by remainder routine,
+; which is exact and which has default (extended) rounding
+; precision. 
+;-----------------------------------------------------------
+ZNORMCOERCEX:
+	MOVE.L	#0,D7	; make it exact
+	TST.L	D4
+	BNE.S	NORMX	; nonzero
+	TST.L	D5
+	BNE.S	NORMX	; nonzero
+
+	SUBA.L	A4,A4	; zero
+	BRA	PACKX	; never coerce
+	
+NORMX:
+	TST.L	D4	; check for lead 1 bit
+	BMI	COERCEX	; normalized, so coerce
+
+@1:
+	SUBQ.L	#1,A4	; decr exponent
+	ADD.L	D5,D5	; shift significand
+	ADDX.L	D4,D4
+	BPL.S	@1	; loop until normalized
+	BRA	COERCEX	; coerce with default precision
+
+;-----------------------------------------------------------
+; ASSUME, AS AFTER SUBTRACT THAT VALUE IS NONZERO.  USE 1ST
+; BRANCH TO SHORTEN ACTUAL LOOP BY A BRANCH.
+;-----------------------------------------------------------
+NORMCOERCE:
+	TST.L	D4		; CHECK FOR LEAD 1
+	BMI.S	COERCE
+@1:
+	SUBQ.L	#1,A4		; DECREMENT EXP
+	ADD.L	D7,D7		; SHIFT RND
+	ADDX.L	D5,D5		; LO BITS
+	ADDX.L	D4,D4
+	BPL.S	@1		; WHEN NORM, FALL THROUGH
+
+;-----------------------------------------------------------
+; COERCE MILESTONE +++++++++++++++++++++++++++++++++++++++ .
+;
+; RUN SEPARATE SEQUENCES FOR EXT, SGL, DBL TO SAVE TESTS.
+; NOTE THAT FOR CONVENIENCE IN BRANCHING, THE SGL AND DBL
+; COERCE SEQUENCES FOLLOW THE COERCE ROUTINES.
+; SINCE OVERFLOW RESULTS IN A VALUE DEPENDING ON THE
+; PRECISION CONTROL BITS, RETURN CCR KEY FROM OFLOW:
+; EQ: OK  NE: HUGE
+;
+; Extended result is in D6 bit 7 (sign), A4 (exp), D4/D5 (sig),
+; and D7 (round/stickies).
+; Uses D1.W to store environment word for rounding control info.
+;-----------------------------------------------------------
+COERCE:
+	MOVE.W	(FPSTATE).W,D1	; environment in D1
+	BFTST	D1{25:2}	; check rounding precision
+	BEQ	COERCEX		;   default (extended)
+	BPL	COERCED		;   double
+
+;-----------------------------------------------------------
+; Coerce to single precision, obeying prescribed
+; rounding direction.
+;-----------------------------------------------------------
+COERCES:
+	BSR.S	SCOERCE		; coerce to single precision
+	BRA	COERCESDONE
+
+
+;-----------------------------------------------------------
+; Subroutine SCOERCE coerces extended value in A4/D4/D5/D7 to
+; single precision, honoring prescribed rounding direction
+; in environment word (D1.W).  Uses D0, clobbers D1
+;-----------------------------------------------------------	
+SCOERCE:
+	MOVE.L	#$3F81,D0	; single underflow threshold
+	SUB.L	A4,D0		; threshold - exponent
+	BLE.S	@1		; no underflow
+
+	BSET	#ERRU+8,D6	; signal underflow
+	MOVEA.W	#$3F81,A4	; minimum exponent
+	BSR	RTSHIFT		; shift
+@1:
+	TST.L	D5		; get single precision bits/stickies
+	SNE	D0		; nonzero D5 sets low stickies
+	OR.B	D0,D7
+	ADD.B	D4,D4		; round bit to X
+	ROXR.L	#1,D7		; X to D7 high bit
+	OR.B	D4,D7		; last stickies to D7 low byte
+
+	MOVEQ	#0,D5		; clear low bits
+	CLR.B	D4
+
+	TST.L	D7		; exact result?
+	BNE.S	@3		;   no
+	BCLR	#ERRU+8,D6	;   yes. suppress underflow
+	BRA.S	RNDOVERS
+
+@3:
+	BSET	#ERRX+8,D6	; signal inexact
+	BFTST	D1{17:2}	; round to nearest?
+	BEQ.S	@7		; yes
+	BMI.S	@5		; chop or round downward
+
+	TST.B	D6		; round toward +∞
+	BPL.S	RNDUPS		;   increment significand if positive
+	BRA.S	RNDOVERS
+
+@5:
+	BTST	#13,D1		; chop or round toward -∞
+	BNE.S	RNDOVERS	;   chop requires no incrementing
+
+	TST.B	D6		; round toward -∞
+	BPL.S	RNDOVERS
+	BRA.S	RNDUPS		; increment significand if negative
+
+@7:
+	ADD.L	D7,D7		; round bit set?
+	BCC.S	RNDOVERS	; no; significand OK
+
+	BNE.S	RNDUPS		; yes, with stickies, so round up
+
+	BTST	#8,D4		; halfway case gets bumped if low single
+	BEQ.S	RNDOVERS	;   bit is set
+
+RNDUPS:
+	ADD.L	#$0100,D4	; bump significand
+	BCC.S	RNDOVERS
+
+	ROXR.L	#1,D4		; if overflow, shift right and bump exponent
+	ADDQ.L	#1,A4
+
+RNDOVERS:
+	MOVEA.W	#$407E,A3	; single overflow exponent threshold
+	CMPA.L	A4,A3
+	BLT.S	@9
+
+	RTS			; no overflow
+
+@9:				; single precision overflow
+	BSET	#ERRO+8,D6	; signal overflow and inexact
+	BSET	#ERRX+8,D6
+	MOVEA.W	#$7FFF,A4	; store INF initially
+	SUB.L	D4,D4
+	SUB.L	D5,D5
+	LSR.W	#8,D1		; check rounding direction
+	AND.B	#RNDMSK,D1
+	BNE.S	@11
+
+	RTS			; default rounding returns INF
+
+@11:
+	CMPI.B	#RNDMSK,D1	; chopping returns single HUGE
+	BEQ.S	HUGES
+
+	TST.B	D6		; check sign
+	BMI.S	@15
+
+	CMPI.B	#RNDUP,D1	; positive
+	BNE.S	HUGES		;   round down returns single HUGE
+	RTS			;   round up returns INF
+
+@15:
+	CMPI.B	#RNDDN,D1	; negative
+	BNE.S	HUGES		;   round up returns single HUGE
+	RTS			;   round down returns -INF
+
+HUGES:
+	MOVEQ	#-1,D4		; set maximum single exponent and significand
+	MOVEA.L	A3,A4
+	CLR.B	D4
+
+	RTS
+
+
+
+
+
+;-----------------------------------------------------------
+; Coerce to double precision, obeying prescribed
+; rounding direction.
+;-----------------------------------------------------------
+COERCED:
+	BSR.S	DCOERCE		; coerce to double precision
+
+COERCESDONE:
+	BTST	#ERRU+8,D6	; underflow?
+	BEQ	PACKX		; no; pack extended format
+
+	MOVE.W	A4,D3		; zero exponent?
+	BEQ	PACKX		; yes; OK
+
+	TST.L	D4		; normalized or nonzero?
+	BNE.S	@3		; yes
+
+	TST.L	D5
+	BNE.S	@1		; unnormalized
+	
+	SUBA.L	A4,A4		; zero (inexact result); zero exponent
+	BRA	PACKX		; pack extended format
+
+@1:
+	SUBA.W	#1,A4		; normalize subnormal single/double
+	ADD.L	D5,D5
+	ADDX.L	D4,D4
+@3:
+	BPL.S	@1
+
+	BRA	PACKX		; pack extended format
+
+
+;-----------------------------------------------------------
+; Subroutine DCOERCE coerces extended value in A4/D4/D5/D7 to
+; double precision, honoring prescribed rounding direction
+; in environment word (D1.W).  Uses D0/D2/A3, clobbers D1
+;-----------------------------------------------------------	
+DCOERCE:
+	MOVE.L	#$3C01,D0	; double underflow threshold
+	SUB.L	A4,D0		; threshold - exponent
+	BLE.S	@1		; no underflow
+
+	BSET	#ERRU+8,D6	; signal underflow
+	MOVEA.W	#$3C01,A4	; minimum exponent
+	BSR	RTSHIFT		; shift
+@1:
+	MOVE.L	#$07FF,D0	; low bit mask
+	AND.W	D5,D0
+	ANDI.W	#$0F800,D5	; clr low bits
+	LSL.W	#5,D0		; left align round/stickies
+	SWAP	D0
+	TST.L	D7		; stickies from D7
+	SNE	D0
+	MOVE.L	D0,D7		; round/stickies into D7
+
+	TST.L	D7		; exact result?
+	BNE.S	@3		;   no
+	BCLR	#ERRU+8,D6	;   yes. suppress underflow
+	BRA.S	RNDOVERD
+
+@3:
+	BSET	#ERRX+8,D6	; signal inexact
+	BFTST	D1{17:2}	; round to nearest?
+	BEQ.S	@7		; yes
+	BMI.S	@5		; chop or round downward
+
+	TST.B	D6		; round toward +∞
+	BPL.S	RNDUPD		;   increment significand if positive
+	BRA.S	RNDOVERD
+
+@5:
+	BTST	#13,D1		; chop or round toward -∞
+	BNE.S	RNDOVERD	;   chop requires no incrementing
+
+	TST.B	D6		; round toward -∞
+	BPL.S	RNDOVERD
+	BRA.S	RNDUPD		; increment significand if negative
+
+@7:
+	ADD.L	D7,D7		; round bit set?
+	BCC.S	RNDOVERD	; no; significand OK
+
+	BNE.S	RNDUPD		; yes, with stickies, so round up
+
+	BTST	#11,D5		; halfway case gets bumped if low double
+	BEQ.S	RNDOVERD	;   bit is set
+
+RNDUPD:
+	MOVEQ	#0,D0
+	MOVE.L	#$00000800,D2
+	ADD.L	D2,D5		; bump significand
+	ADDX.L	D0,D4
+	BCC.S	RNDOVERD
+
+	ROXR.L	#1,D4		; if overflow, shift right and bump exponent
+	ADDQ.L	#1,A4
+
+RNDOVERD:
+	MOVEA.W	#$43FE,A3	; double overflow exponent threshold
+	CMPA.L	A4,A3
+	BLT.S	@9
+
+	RTS			; no overflow
+
+@9:				; double precision overflow
+	BSET	#ERRO+8,D6	; signal overflow and inexact
+	BSET	#ERRX+8,D6
+	MOVEA.W	#$7FFF,A4	; store INF initially
+	SUB.L	D4,D4
+	SUB.L	D5,D5
+	LSR.W	#8,D1		; check rounding direction
+	AND.B	#RNDMSK,D1
+	BNE.S	@11
+
+	RTS			; default rounding returns INF
+
+@11:
+	CMPI.B	#RNDMSK,D1	; chopping returns double HUGE
+	BEQ.S	HUGED
+
+	TST.B	D6		; check sign
+	BMI.S	@15
+
+	CMPI.B	#RNDUP,D1	; positive
+	BNE.S	HUGED		;   round down returns double HUGE
+	RTS			;   round up returns INF
+
+@15:
+	CMPI.B	#RNDDN,D1	; negative
+	BNE.S	HUGED		;   round up returns double HUGE
+	RTS			;   round down returns -INF
+
+HUGED:
+	MOVEQ	#-1,D4		; set maximum double exponent and significand
+	MOVEA.L	A3,A4
+	MOVE.L	#$FFFFF800,D5
+
+	RTS
+
+
+
+
+
+;-----------------------------------------------------------
+; Coerce to default (extended) precision, obeying prescribed
+; rounding direction.
+;-----------------------------------------------------------
+COERCEX:
+	MOVE.L	A4,D0		; exponent >= 0?
+	BPL.S	ROUNDX		;   yes, not subnormal
+	
+	NEG.L	D0		; underflow; get count
+	BSET	#ERRU+8,D6	; signal underflow
+	SUBA.L	A4,A4		; zero exponent
+	BSR	RTSHIFT		; shift significand right
+	
+ROUNDX:
+	TST.L	D7		; exact result?
+	BNE.S	@1		;   no  
+	BCLR	#ERRU+8,D6	;   yes; suppress underflow
+	BRA.S	RNDOVERX	;        no rounding needed
+	
+;-----------------------------------------------------------
+; Inexact result:  signal and round
+;-----------------------------------------------------------
+@1:
+	BSET	#ERRX+8,D6	; signal inexact
+	BFTST	D1{17:2}	; round to nearest?
+	BEQ.S	@3		; yes
+	BMI.S	@2		; chop or round downward
+	
+;-----------------------------------------------------------
+; Round toward +∞
+;-----------------------------------------------------------
+	TST.B	D6		; bump significand if positive
+	BPL.S	RNDUPX
+	BRA.S	RNDOVERX
+	
+@2:
+	BTST	#13,D1		; chop or round downward?
+	BNE.S	RNDOVERX	;   chop requires no rounding
+	
+;-----------------------------------------------------------
+; Round toward -∞
+;-----------------------------------------------------------
+	TST.B	D6		; bump significand if negative
+	BPL.S	RNDOVERX
+	BRA.S	RNDUPX
+
+;-----------------------------------------------------------
+; Default rounding (to nearest)
+;-----------------------------------------------------------
+@3:
+	ADD.L	D7,D7		; round bit set?
+	BCC.S	RNDOVERX	; no; significand OK
+	
+	BNE.S	RNDUPX		; stickies set so round up
+	BTST	#0,D5		; halfway case gets bumped
+	BEQ.S	RNDOVERX	;   if lowest SIG bit is 1
+	
+RNDUPX:
+	MOVEQ	#0,D0		; increment significand
+	ADDQ.L	#1,D5
+	ADDX.L	D0,D4
+	BCC.S	RNDOVERX
+	
+	ROXR.L	#1,D4		; if overflow, shift right and
+	ADDQ.L	#1,A4		;   bump exponent
+	
+;-----------------------------------------------------------
+; Check for overflow result
+;-----------------------------------------------------------
+RNDOVERX:
+	MOVEA.W	#$7FFF,A3	; overflow?
+	CMPA.L	A3,A4
+	BLT.S	PACKX		; no; stuff result
+	
+;-----------------------------------------------------------
+; Overflow detected.  Return HUGE or INF depending on 
+; rounding direction and sign.
+;-----------------------------------------------------------
+	BSET	#ERRO+8,D6	; signal overflow and inexact
+	BSET	#ERRX+8,D6
+	MOVEA.W	A3,A4		; set max exp
+	SUB.L	D4,D4		; zero significand
+	SUB.L	D5,D5
+	LSR.W	#8,D1		; check rounding direction
+	AND.B	#RNDMSK,D1
+	BEQ.S	PACKX		; default returns INF
+	
+	CMPI.B	#RNDMSK,D1	; chopping returns HUGE
+	BEQ.S	HUGEOUT
+	
+	TST.B	D6		; check sign
+	BMI.S	@5
+	
+	CMPI.B	#RNDUP,D1	; positive
+	BEQ.S	PACKX		;   round up returns INF
+	BRA.S	HUGEOUT		;   round down returns huge
+	
+@5:
+	CMPI.B	#RNDDN,D1	; negative
+	BEQ.S	PACKX		;   round down returns INF
+
+HUGEOUT:
+	SUBQ	#1,A4		; exponent = $7FFE
+	NOT.L	D4		; set all significand bits
+	NOT.L	D5
+	
+	
+;-----------------------------------------------------------
+; Pack an extended result into destination address
+;-----------------------------------------------------------
+PACKX:
+	MOVE.W	A4,D3		; exponent into D3
+	MOVEA.L	LKADR1(A6),A3	; get DST addr
+	TST.B	D6		; sign into D3
+	BPL.S	@1		;   positive
+	BSET	#15,D3		;   negative
+@1:
+	MOVE.W	D3,(A3)+	; stuff result
+	BTST	#21,D6		; bump pointer if 96-bit extended
+	BEQ.S	@2
+
+	ADDQ	#2,A3
+@2:
+	MOVE.L	D4,(A3)+
+	MOVE.L	D5,(A3)
+	
+	JMP	(A0)		; finish-up routine
+
+
+
+;-----------------------------------------------------------
+; Finish up and return after stack cleanup.  Check for halts here.
+;-----------------------------------------------------------
+FINI2OPS:
+	CLR	D7		; clear CCR bits
+FINICMPS:
+	MOVEA.W	#FPSTATE,A1	; A1 <- environment addr
+	MOVE.W	(A1),D0 	; get environment word
+	CLR.B	D6		; kill signs
+	OR.W	D6,D0		; OR in new exceptions
+	MOVE.W	D0,(A1)+	; store new exceptions and bump A1 pointer
+	LSR.W	#8,D6		; align exceptions with trap enables
+	AND.W	D6,D0
+	BNE.S	HALT2OP		; halt enabled
+
+FINISH2:
+	MOVE	D7,CCR		; prepare CCR
+	MOVEM.L (SP)+,D0-D7/A0-A4	; restore registers
+	UNLK	A6		; unlink
+	RTD	#STKREM2	; return, popping parameters
+
+
+;-----------------------------------------------------------
+; TO SET UP FOR TRAP:
+;	HAVE D0 ON TOP OF STACK.
+;	PUSH CCR TO HAVE 3-WORD STRUCTURE
+;	PUSH ADDRESS OF 3-WORD STRUCTURE
+;	BLOCK MOVE	OPCODE < ADR1 < ADR2 < ADR3 < REGADR
+;	  TO STACK
+;	CALL HALT PROCEDURE, EXPECTING PASCAL CONVENTIONS TO
+;		BE HONORED.
+; THE BLOCK MOVE CAN BE DONE WITH A PAIR OF MOVEM'S SO LONG
+; AS AN EXTRA WORD IS COPIED (TO HAVE A WHOLE NUMBER OF
+; LONGS).
+;-----------------------------------------------------------
+HALT2OP:
+	LEA	FINISH2,A4
+HALTCOMMON:
+	MOVE.W	D7,-(SP)	; push pending CCR
+	MOVE.W	D0,-(SP)	; push halt exceptions
+	PEA 	(SP)		; ADDRESS OF CCR/D0
+
+	MOVEM.L LKRET+2(A6),D0-D3	; PUSH ADDRESSES & OPCODE ON STACK
+	MOVEM.L D0-D3,-(SP)
+	ADDQ	#2,SP		; adjust SP to point to opcode
+
+	MOVEA.L (A1),A1		; CALL USER HALT HANDLER
+	JSR 	(A1)
+
+	MOVE.L	(SP)+,D7	; RESTORE CCR BITS AND STACK
+	JMP	(A4)
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+FINI1OP:
+	MOVEA.W	#FPSTATE,A1
+	CLR	D7
+	MOVE.W	(A1),D0 	; GET STATE WORD
+	CLR.B	D6		; KILL SIGNS
+	OR.W	D6,D0
+	MOVE.W	D0,(A1)+	; BUMP ADRS TO VECTOR
+	ROR.W	#8,D6		; ALIGN BYTES
+	AND.W	D6,D0
+	BNE.S	HALT1OP		; ZERO IF NO TRAP
+FINISH1:
+	MOVE	D7,CCR
+	MOVEM.L (SP)+,D0-D7/A0-A4
+	UNLK	A6
+	RTD	#STKREM1
+
+;-----------------------------------------------------------
+;-----------------------------------------------------------
+HALT1OP:
+	LEA	FINISH1,A4
+	BRA.S	HALTCOMMON
+
+
+
+
+;-----------------------------------------------------------
+; These routines handle the special cases in operations
+; when the DST operand is the exact extended result.
+; Subcase depends on whether the sign should also be stuffed.
+; (The SRC-is-result case is always trivial).
+;-----------------------------------------------------------
+RDSTSGN:
+	ADD.B	D6,D6		; shift DST sign to bit 7
+RDST:
+	MOVE.L	A2,D5
+	MOVE.L	D3,D4
+	MOVEA.L A3,A4		; exponent, too
+	BRA	PACKX		; coerce and pack result
+
+

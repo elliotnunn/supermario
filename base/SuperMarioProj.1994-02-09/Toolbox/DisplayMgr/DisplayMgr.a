@@ -1,0 +1,623 @@
+;
+;	File:		DisplayMgr.a
+;
+;	Contains:	Display Manager Assembly Sources
+;
+;	Written by:	Ian Hendry
+;
+;	Copyright:	© 1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<12>	 11/5/93	IH		Sync with Excelsior.
+;	  <SM11>	10/10/93	IH		Sync with Excelsior.
+;		<10>	 9/10/93	IH		Fix cursor bug in horror ROMs and SuperMario.
+;		 <9>	 8/16/93	IH		#1099391 <KON>: Sync w/Reality. Fix support for apple event
+;									notification to procs ptrs.
+;	   <SM8>	08-06-93	jmp		Added more entries to the ROMTimingTables.
+;		 <7>	  8/4/93	IH		#1101633,1098397,1101795,1101636,1102280 <KON>: Make
+;									DMGetROMMultiModeTable a trap (rather than a function call). Add
+;									private trap to begin configuring displays. Add Trap for
+;									animation. Temporarily set 2nd gestalt bit so Monitors CP can
+;									detect that calls take displayState (instead of "updateNow").
+;		 <6>	 6/22/93	IH		Remove Debugger call.
+;		 <5>	  6/1/93	IH		Add new calls for A1 feature complete
+;		 <4>	 5/28/93	IH		#1081805,1086363: Fix App quickdraw globals to update screenBits
+;									bitmap (Finder uses this information to determine if an icon is
+;									off screen).
+;		 <3>	  4/8/93	IH		Add support for mode switching.
+;		 <2>	 3/31/93	IH		Clean up for SuperMario
+;		 <1>	 3/25/93	IH		first checked in
+;		 <9>	 3/24/93	IH		Support changing menu bar.  Add RecalcMenuBar which calls
+;									_CalcMenuBar and if it gets a paramErr (selector not installed
+;									returns paramErr) then it tries to call the MBDF directly.  In
+;									future systems When I am sure the trap is installed I can
+;									conditionalize the direct call to the MBDF to INITVERSION only.
+;		 <8>	 3/17/93	IH		Adding patch to InitWindows to set up port. This is what
+;									LayerManager does to install DeskPort. What happens if
+;									InitWindows is called at init time? If portlist is cleared, this
+;									port will not get updated correctly when depths change etc.
+;		 <7>	 3/11/93	mgl		Display Manager is now successfully installing its Gestalt
+;									selectors again, so I will reenable the call to SysError that I
+;									commented out earlier.
+;		 <6>	 3/10/93	JDR		After checking in my fix <4> it occurred to me that the Gestalt
+;									proc should have been an LeaResident.
+;		 <5>	 3/10/93	mgl		Gestalt was failing because the Gestalt proc was not in the
+;									System heap.  Comment out the call to SysError until this is
+;									fixed.
+;		 <4>	  3/9/93	JDR		Fixed the system build. Moved DMGestaltProc being imported to be
+;									outside of the for INITVERSION conditional.
+;		 <3>	  3/5/93	IH		Add desk patches and gestalt procs
+;		 <2>	 2/25/93	IH		Added new desktop routine dispatchers and added routine to draw
+;									desktop the old way.
+;		 <1>	 2/23/93	IH		first checked in
+;
+;
+
+
+				LOAD	'StandardEqu.d'
+				INCLUDE	'InternalMacros.a'
+				INCLUDE	'GestaltEqu.a'
+				INCLUDE	'Video.a'
+				INCLUDE	'LinkedPatchMacros.a'
+				INCLUDE	'Displays.a'
+				INCLUDE	'DisplaysPriv.a'
+				INCLUDE	'MenuMgrPriv.a'
+
+				INCLUDE	'HardwarePrivateEqu.a'
+				INCLUDE	'DepVideoEqu.a'
+				INCLUDE	'TrapsPrivate.a'
+
+;---------------------------------------------------------------------------------------
+; Dispatcher for the Display Manager routines
+;---------------------------------------------------------------------------------------
+
+				CASE	OFF								; dispatch routines are Pascal
+				ROMs	Plus,SE,II,Portable,IIci,SuperMario
+
+DisplayDispatch	BeginDispatcher _DisplayDispatch
+				DispatchSelectors DM_SetDisplayID = selectSetDisplayID
+				DispatchSelectors DM_RegisterExtendedNotifyProc = selectRegisterExtendedNotification
+				DispatchSelectors DM_MoveCursor = selectDMMoveCursor
+				DispatchSelectors DM_RemoveCurrentProcessProcs = selectRemoveCurrentProcessProcs
+				DispatchSelectors DM_PrivateBeginConfigureDisplays = selectPrivateBeginConfigureDisplays
+				DispatchSelectors DM_GetBestDepthModeInfo = selectGetBestDepthModeInfo
+				DispatchSelectors DM_GiveDeskTime = selectGiveDeskTime
+				DispatchSelectors DM_GetROMMultiModeTable = selectGetROMMultiModeTable
+				DispatchSelectors DM_DeskClick = selectDeskClick
+				DispatchSelectors DM_ChangedDesktopIconRgn = selectChangedDesktopIconRgn
+				DispatchSelectors DM_SetAnimateProcess = selectSetAnimateProcess
+				DispatchSelectors DM_NotifyAllProcesses = selectNotifyAllProcesses
+				DispatchSelectors DM_KeepWindowOnscreen = selectKeepWindowOnscreen
+				DispatchSelectors DM_GetDesktopIconRgn = selectGetDesktopIconRgn
+				DispatchSelectors DM_SetDesktopIconRgn = selectSetDesktopIconRgn
+				DispatchSelectors DM_KillDisplayManager = selectKillDisplayManager
+				DispatchSelectors DM_InitDisplayManager = selectInitDisplayManager
+				DispatchSelectors DM_InstallDisplayManager = selectInstallDisplayManager
+
+				DispatchSelectors DM_GetFirstScreenDevice = selectGetFirstScreenDevice
+				DispatchSelectors DM_GetNextScreenDevice = selectGetNextScreenDevice
+				
+				DispatchSelectors DM_DrawDesktopRect = selectDrawDesktopRect
+				DispatchSelectors DM_DrawDesktopRegion = selectDrawDesktopRgn
+
+				DispatchSelectors DM_GetGDeviceTablecloth = selectGetGDeviceTablecloth
+				DispatchSelectors DM_SetGDeviceTablecloth = selectSetGDeviceTablecloth
+
+				DispatchSelectors DM_BeginConfigureDisplays = selectBeginConfigureDisplays
+				DispatchSelectors DM_EndConfigureDisplays = selectEndConfigureDisplays
+
+				DispatchSelectors DM_AddDisplay = selectAddDisplay
+				DispatchSelectors DM_MoveDisplay = selectMoveDisplay
+				DispatchSelectors DM_DisableDisplay = selectDisableDisplay
+				DispatchSelectors DM_EnableDisplay = selectEnableDisplay
+				DispatchSelectors DM_RemoveDisplay = selectRemoveDisplay
+
+				DispatchSelectors DM_GetComponentAnimateTicks = selectGetComponentAnimateTicks
+				DispatchSelectors DM_SetComponentAnimateTicks = selectSetComponentAnimateTicks
+				DispatchSelectors DM_GetNextAnimateTime = selectGetNextAnimateTime
+
+				DispatchSelectors DM_SetMainDisplay = selectSetMainDisplay
+				DispatchSelectors DM_SetDisplayMode = selectSetDisplayMode
+				DispatchSelectors DM_CheckDisplayMode = selectCheckDisplayMode
+
+				DispatchSelectors DM_GetDeskRegion = selectGetDeskRegion
+				DispatchSelectors DM_RegisterNotifyProc = selectRegisterNotifyProc
+				DispatchSelectors DM_RemoveNotifyProc = selectRemoveNotifyProc
+
+				DispatchSelectors DM_QDIsMirroringCapable = selectQDIsMirroringCapable
+				DispatchSelectors DM_CanMirrorNow = selectCanMirrorNow
+				DispatchSelectors DM_IsMirroringOn = selectIsMirroringOn
+				DispatchSelectors DM_MirrorDevices = selectMirrorDevices
+				DispatchSelectors DM_UnmirrorDevice = selectUnmirrorDevice
+				DispatchSelectors DM_GetNextMirroredDevice = selectGetNextMirroredDevice
+				DispatchSelectors DM_BlockMirroring = selectBlockMirroring
+				DispatchSelectors DM_UnblockMirroring = selectUnblockMirroring
+
+				DispatchSelectors DM_GetDisplayMgrA5World = selectGetDisplayMgrA5World
+
+				DispatchSelectors DM_GetDisplayIDByGDevice = selectGetDisplayIDByGDevice
+				DispatchSelectors DM_GetGDeviceByDisplayID = selectGetGDeviceByDisplayID
+
+				DispatchSelectors DM_SetDisplayComponent = selectSetDisplayComponent
+				DispatchSelectors DM_GetDisplayComponent = selectGetDisplayComponent
+
+				DispatchSelectors DM_NewDisplay = selectNewDisplay
+				DispatchSelectors DM_DisposeDisplay = selectDisposeDisplay
+
+				EndDispatcher
+
+				CASE	OBJECT							; back to C conventions
+
+;---------------------------------------------------------------------------------------
+;DisplayMgrInstall
+;	Install the Display Manager when the linked patch gets run - this is done for the 
+;	INIT version as well as for the system version of the Display Manager
+;
+DisplayMgrInstall		InstallProc
+				IMPORT		DM__GestaltProc : CODE
+				
+				Tst.b		$172						; mouse down?
+				Bge.s		@skipDebugger				; If so then do not install
+				Nop
+		;		_Debugger
+@skipDebugger
+
+				subq.l		#2,sp						; make room for result
+				_DMInstallDisplayManager				; install ourselves
+				move.w		(sp)+,d0					; get result
+				Beq.s		@DidInstall
+				
+				Moveq		#dsMemFullErr,D0
+				_SysError
+
+@DidInstall		Rts										; all done.
+				ENDPROC									; DisplayMgrInstall
+
+
+			
+
+;---------------------------------------------------------------------------------------
+; Patches needed until Display Manager is part of a ROM or part of gibbly
+;---------------------------------------------------------------------------------------
+;	IF ForROM THEN
+;	ENDIF
+
+
+	IF (&TYPE('INITVERSION') <> 'UNDEFINED') THEN
+; pascal void InitMenus(void)
+;	Initialized drawing port.  This is what Layer Manager does to install DeskPort.
+;	What happens if InitWindows is called at init time?  If portlist is cleared after
+;	INIT time, then this port will not get updated when the depth changes (base address changes)
+;
+;	In WindowMgr.a, InitMenus is called after the window manager port is allocated, but before the
+;	desktop is drawn.  At this time I can open my port and take over drawing the desktop.
+;	On Machines that I am installed in the ROMs, I should make this call inline and 
+;	call DMDrawDesktopRegion farther down.
+;
+PatchInitMenus	PatchProc	_InitMenus,(Plus,SE,II,Portable,IIci,SuperMario)
+				WITH		DMGlobalsRec				; for referencing globals
+								
+				subq.l	#2,sp							; make room for result
+				_DMInitDisplayManager
+				move.w	(sp)+,d0						; get result
+
+				jmpOld									; Continue
+								
+				ENDWITH
+				ENDPROC									; 
+	ENDIF		; INITVERSION
+
+
+	IF (&TYPE('INITVERSION') <> 'UNDEFINED') THEN
+;---------------------------------------------------------------------------------------
+; pascal void FillRgn(RgnHandle deskRgnToFill,Pattern deskPattern)
+;	Draw the desktop using the desk pattern.  This is when we are asked to 
+;	do the drawing before the Display Manager is initialized (during development)
+;	and if there is no installed component
+;
+PatchFillRgn	PatchProc	_FillRgn,(Plus,SE,II,Portable,IIci,SuperMario)
+				WITH		DMGlobalsRec				; for referencing globals
+	; InitWindows calls FillRgn or FillCRgn
+	;	until that ROM is overridden, we need to patch FillRgn
+	;
+	;	FillRgn(rgn, pat);
+	;		0(A7)		Rts
+	;		4(A7)		Pattern
+	;		8(A7)		Region
+				
+				Tst.b		pCDeskPat		; test flag to see which to use
+				Blt.s		@doOld			; if high bit set, then we have a color deskpat
+
+				Cmp.l		#DeskPattern,4(A7)			; If not the Deskpattern
+				Bne.s		@doOld						; The do the original fill
+				
+				__GetDMGlobalsPtrInA0					; Macro to get expandmem globals in A0
+				Move.l		A0,D0						; Have we been installed?
+				Beq.s		@doOld
+				
+				Move.b		fDeskDrawNest(A0),D0		; Is this a nested case?
+				Bne.s		@doOld
+				Add.b		#1,fDeskDrawNest(A0)		; Nest one more
+
+				Move.l		A0,-(A7)					; Save Global Ptr
+				
+				Subq.w		#4,SP
+				Move.l		SP,-(SP)
+				_GetPort
+				Move.l		(SP)+,A1					; The port
+				Move.l		(SP),A0						; Restore globals in A0
+								
+				Move.l		4+8(A7),-(SP)				; Parameter Rgn
+				Move.l		clipRgn(A1),-(SP)			; Clip is the desk to draw
+				Move.l		fWorkingDeskRectRgn(A0),-(SP)
+				_SectRgn
+				Move.l		(SP),A0						; Restore globals in A0
+				
+				; Is substituting the regions dangerous?
+				; Are there any wierd patches that look for the 
+				; actual region that they passed?  I have not
+				; see any problems.
+				
+				Move.l		fWorkingDeskRectRgn(A0),-(SP)
+				_DMDrawDesktopRegion
+				Move.l		(A7)+,A0					; Pop Global Pointer
+				Sub.b		#1,fDeskDrawNest(A0)		; Nest one less
+
+				Move.l		(A7)+,A0					; Get Rts
+				Addq.w		#8,A7						; Release other bits
+				Jmp			(A0)						; Go Home
+				
+@doOld			jmpOld									; call the old InitApplication
+
+				ENDWITH
+				ENDPROC									; PatchFillRgn
+	ENDIF		; INITVERSION
+
+
+	IF (&TYPE('INITVERSION') <> 'UNDEFINED') THEN
+;---------------------------------------------------------------------------------------
+; pascal void FillCRgn(RgnHandle deskRgnToFill,PixPatHandle deskPattern)
+;	Draw the desktop using the desk pattern.  This is when we are asked to 
+;	do the drawing before the Display Manager is initialized (during development)
+;	and if there is no installed component
+;
+PatchFillCRgn	PatchProc	_FillCRgn,(II,IIci,SuperMario)
+				WITH		DMGlobalsRec				; for referencing globals
+	; InitWindows calls FillRgn or FillCRgn
+	;	until that ROM is overridden, we need to patch FillRgn
+	;
+	;	FillCRgn(rgn, pp);
+	;		0(A7)		Rts
+	;		4(A7)		PixPatHandle
+	;		8(A7)		Region
+			
+				Tst.b		pCDeskPat		; test flag to see which to use
+				Bpl.s		@doOld			; if high bit clear, then we do not have a color deskpat
+
+				Move.l		DeskCPat,D0
+				Cmp.l		4(A7),D0		; If not the Deskpattern
+				Bne.s		@doOld			; The do the original fill
+				
+											; What should I do about the port?
+											; Should I set the port?
+											; Should I check the port?
+
+				__GetDMGlobalsPtrInA0					; Macro to get expandmem globals in A0
+				Move.l		A0,D0						; Have we been installed?
+				Beq.s		@doOld
+
+				Move.b		fDeskDrawNest(A0),D0		; Is this a nested case?
+				Bne.s		@doOld
+				Add.b		#1,fDeskDrawNest(A0)		; Nest one more
+				
+				Move.l		A0,-(A7)					; Save Global Ptr
+				
+				Subq.w		#4,SP
+				Move.l		SP,-(SP)
+				_GetPort
+				Move.l		(SP)+,A1					; thePort
+				Move.l		(SP),A0						; Restore globals in A0
+
+				Move.l		4+8(A7),-(SP)				; Parameter Rgn
+				Move.l		clipRgn(A1),-(SP)			; Clip is the desk to draw
+				Move.l		fWorkingDeskRectRgn(A0),-(SP)
+				_SectRgn
+				Move.l		(SP),A0						; Restore globals in A0
+				
+				Move.l		fWorkingDeskRectRgn(A0),-(SP)	; Clip is the desk to draw
+				_DMDrawDesktopRegion
+				
+				Move.l		(A7)+,A0					; Restore Global Pointer
+				Sub.b		#1,fDeskDrawNest(A0)		; Nest one less
+
+				Move.l		(A7)+,A0		; Get Rts
+				Addq.w		#8,A7			; Release other bits
+				Jmp			(A0)			; Go Home
+				
+@doOld			jmpOld						; call the old InitApplication
+
+				ENDWITH
+				ENDPROC						;
+	ENDIF		; INITVERSION
+
+;---------------------------------------------------------------------------------------
+PatchCleanUpApp	PatchProc	_CleanupApplication,(Plus,SE,II,Portable,IIci,SuperMario)
+
+				Subq		#2,A7
+				_DMRemoveCurrentProcessProcs	; Get rid of any procs tied to this process
+				Addq		#2,A7
+				
+@doOld			jmpOld						; call the old InitApplication
+
+				ENDPROC						;
+
+
+
+
+;---------------------------------------------------------------------------------------
+; Utility Routines
+;---------------------------------------------------------------------------------------
+
+
+
+;---------------------------------------------------------------------------------------
+; pascal void DrawDeskPattern(RgnHandle deskRgnToFill)
+;	Draw the desktop using the desk pattern.  This is when we are asked to 
+;	do the drawing before the Display Manager is initialized (during development)
+;	and if there is no installed component
+;
+				CASE	OFF								; Pascal Routine
+DrawDeskPattern	PROC	EXPORT
+				CASE	OBJECT							; back to C conventions
+			; Do the old fill
+				Link		A6,#0
+				
+				Tst.b		pCDeskPat				; test flag to see which to use			<C666/22Jan87> DAF
+				Bpl.s		@noCPat					; if ≥, then use binary pat				<C666/22Jan87> DAF
+	
+				Move.l		TheZone,-(A7)
+				Move.l		SysZone,A0				; use the system heap
+				_SetZone
+	
+		; Port is already set up by caller
+		;		Subq.w		#4,A7
+		;		Move.l		A7,-(A7)
+		;		_GetPort							; Get the port and leave it on the stack
+				
+		;		Subq.w		#4,A7
+		;		Move.l		A7,-(A7)
+		;		_GetCWMgrPort
+		;		_SetPort
+				
+				Move.l		8(A6),-(SP)				; PUSH THE update REGION	<11/9/86 EHB>
+				Move.l		DeskCPat,-(SP)			; push the desk ppat
+				_FillCRgn							; and fill
+				
+		;		_SetPort							; Restore the port
+			
+				Move.l		(A7)+,A0				; Restore the zone
+				_SetZone
+	
+				Bra.s		@doneDraw
+			
+@noCPat			Move.l		8(A6),-(SP)				; PUSH THE DESKTOP REGION	<11/9/86 EHB>
+				Pea 		DeskPattern 			; push the desk pattern
+				_FillRgn							; and paint the desktop
+	
+@doneDraw				
+				Unlk		A6
+				Move.l		(A7)+,(A7)				; Get rid of paramter
+				Rts
+
+				ENDPROC								; DrawDeskPattern
+
+;---------------------------------------------------------------------------------------
+; pascal OSErr DM__GestaltProc(OSType selector, long* response)
+;	This is the gestalt for both Display Manager version and Display Manager Attributes
+;	I assume that attributes are called more that version (and is slightly faster).
+;
+;	0(A7)		Rts
+;	4(A7)		response
+;	8(A7)		selector
+;
+
+				CASE	OFF								; Pascal Routine
+DM__GestaltProc	PROC		EXPORT
+				CASE	OBJECT							; back to C conventions
+				Move.l		(SP)+,A0							; RTS
+				Move.l		(SP)+,A1							; response
+				Move.l		(SP)+,D0							; selector
+				Move.l		#(1<<gestaltDisplayMgrPresent)+2,(A1)							; Attributes
+	; DANGER:  temp setting bit 1 to let monitors 
+	; 			know that parameters to Move and SetMode calls is correct.
+	;			I need to remove this bit when I am sure everyone has updated
+	;			say around b2.
+				Cmp.l		#gestaltDisplayMgrAttr,D0
+				Beq.s		@WasAttributes	
+				Move.l		#gestaltDMLatestVersion,(A1)		; Correct to version
+				
+@WasAttributes
+				Clr.w		(SP)								; Clear Result
+				Jmp			(A0)
+
+
+				ENDPROC											; DM__GestaltProc
+
+;-------------------------------------------------------------------------------------------
+;
+;	Utility -- Create QuickDraw world
+;
+;	Call InitGraf to create a quickdraw world.
+;
+;	pascal void DM_InitQDWorld(DisplayManagerGlobalsPtr dmGlobals);
+;
+;-------------------------------------------------------------------------------------------
+
+				CASE	OFF								; Pascal routine
+DM_InitQDWorld	PROC	EXPORT
+				CASE	OBJECT							; Back To C
+				Link		A6,#0								; Set up for paramters off A6
+				Move.b		QDExist,-(A7)						; Save QDExist
+				Move.l		CurrentA5,-(A7)						; Save CurrentA5
+				Move.l		A5,-(A7)							; Save A5
+				
+				Move.l		8(A6),A0							; Get dmGlobals				
+				Lea			DMGlobalsRec.fQDA5World(A0),A5		; Make A5 point at my A5 world
+				Move.l		A5,CurrentA5						; Stuff it in CurrentA5 just to be sure
+				
+				Move.l		DMGlobalsRec.fQDGlobals(A0),A0		; Globals pointer
+				Pea			grafSize-4(A0)						; Push Pointer to storage (at end of storage)
+				_InitGraf
+				
+				Move.l		8(A6),A0							; Get dmGlobals
+				Pea			DMGlobalsRec.fPortStorage(A0)		; Push display manager port
+				_SetPort										; Set thePort to fDrawingPort for the QD world.
+				
+
+				Move.l		(A7)+,A5							; Restore A5
+				Move.l		(A7)+,CurrentA5						; Restore CurrentA5
+				Move.b		(A7)+,QDExist						; Restore QDExist
+				Unlk		A6
+				Move.l		(A7)+,(A7)							; Copy Rts over dmGlobals parameter
+				Rts												; Go Home
+				ENDPROC											; DM__GestaltProc
+
+;-------------------------------------------------------------------------------------------
+;
+;	Utility -- RecalcMenuBar
+;
+;	Trys to use MenuMgr call to recalculate the menu bar, if this fails (ie not a valid trap)
+;	then it tries to call the MBDF directly.  The code for calling the MBDF only be include
+;	in system builds until we are sure that the _MenuCalc is installed.  The code will have
+;	to remain in this file for the initversion.
+;
+;-------------------------------------------------------------------------------------------
+RecalcMenuBar	PROC	EXPORT
+MBDFCalcMsg		EQU		2
+				
+				Clr.l	-(SP)							; Result and clear all
+				_CalcMenuBar
+				move.w	(sp)+,D0						; get result
+				
+				Cmp.w	#paramErr,D0					; If the trap is not implemented then try directly
+				Bne.s	@Done							; This should eventually go away (when I am sure that _MenuCalc is available)
+
+	;
+	; Conditionally compile CallMBarProc and this code only for INITVERSION when I am sure that
+	; _CalcMenuBar is in the SYSTEM
+	;
+;	IF (&TYPE('INITVERSION') <> 'UNDEFINED') THEN
+				
+		;	D0 Contains selector and param1	
+		;	D1 Contains the 6 byte offset or 0 indicating calc all	
+				Moveq	#MBDFCalcMsg,D0
+				Moveq	#0,D1							; Calc all
+				CASE	OFF								; dispatch routines are Pascal
+				IMPORT	CallMBarProc
+				Jsr		CallMBarProc
+				CASE	OBJECT							; back to C conventions
+
+@Done
+	;
+	; UNCOMMENT WHEN _MenuCalc is guaranteed to be in the system
+	;
+	;ENDIF			; INITVERSION
+
+				Rts
+				ENDPROC									;
+
+;-------------------------------------------------------------------------------------------
+;
+;	Utility -- UpdateScreenBits
+;
+;	pascal void UpdateScreenBits(GDHandle newMainDevice);
+;
+;		Call only where quickdraw has been initialized.  Update Screenbits  in quickdraw globals
+;		UpdateScreenBits assumes that low memory has be initialized for the current
+;			main device (see FixLowMem() in DisplayMgr.c).  This means if I did something
+;			wrong, I only have to fix it there, not here.
+;
+;		ISSUE:
+;			In resolution independent QD, do we want the pixmap bounds (ie at variable resolution) 
+;			or do we want the globals bounds (ie at 72 dpi)?  Currently I am using 72 dpi information
+;			because the only app I know about (Finder) uses this information to determine if an object
+;			is on screen.  Putting in resolution information would mess up this calculation.
+;
+				CASE	OFF								; Pascal routine
+UpdateScreenBits	PROC	EXPORT
+				CASE	OBJECT							; Back To C
+				
+				Move.l	(SP)+,D0				; Rts
+				Move.l	(SP)+,A0				; Get newMainDevice
+				Move.l	(A0),A0					; pointer to newMainDevice
+				
+				Move.l	(A5),A1					; Get pointer to QD globals 
+				Lea		screenBits(A1),A1
+				Move.l	ScrnBase,baseAddr(A1)	; Set up the quickdraw global screenBits
+				Move.w	ScreenRow,rowBytes(A1)
+				Move.l	gdRect(A0),bounds(A1)
+				Move.l	gdRect+4(A0),bounds+4(A1)
+				
+				Move.l	D0,A0					; Move return address to A0
+				Jmp		(A0)					; and return
+				ENDPROC							; UpdateScreenBits
+
+;-------------------------------------------------------------------------------------------
+
+				CASE	OFF								; Pascal routine
+DM_GetROMMultiModeTable		PROC	EXPORT
+				CASE	OBJECT							; Back To C
+				Lea		RomTimingTables,A1
+				Move.l	(SP)+,D0				; Rts
+				Move.l	(SP)+,A0				; Pointer to result
+				Move.l	A1,(A0)					; return table
+				Clr.w	(SP)					; return noErr
+				Move.l	D0,A0
+				Jmp		(A0)
+				
+RomTimingTables
+				Dc.w		kMultiModeCRT1Connect,	@MultiModeCRT1-RomTimingTables
+				Dc.w		kMultiModeCRT2Connect,	@MultiModeCRT2-RomTimingTables
+				Dc.w		kMultiModeCRT3Connect,	@MultiModeCRT3-RomTimingTables
+				Dc.w		kFullPageConnect,		@FullPage-ROMTimingTables
+				Dc.w		kVGAConnect,			@VGA-ROMTimingTables
+				Dc.w		kNTSCConnect,			@NTSC-ROMTimingTables
+				Dc.w		kPALConnect,			@PAL-ROMTimingTables
+				Dc.w		kHRConnect,				@HR-ROMTimingTables
+				Dc.w		0,0
+
+@MultiModeCRT1	Dc.w		timingApple13,3			; Default
+				Dc.w		timingApple16,1
+				Dc.w		0,0
+				
+@MultiModeCRT2	Dc.w		timingApple13,1
+				Dc.w		timingApple16,3			; Default
+				Dc.w		timingApple19,1
+				Dc.w		0,0
+				
+@MultiModeCRT3	Dc.w		timingApple13,1
+				Dc.w		timingApple16,1
+				Dc.w		timingApple19,1
+				Dc.w		timingApple21,3			; Default
+				Dc.w		0,0
+				
+@FullPage		Dc.w		timingApple15, 3		; Default
+				Dc.w		timingApple15x,1
+				Dc.w		0,0
+				
+@VGA			Dc.w		timingAppleVGA,3		; Default
+				Dc.w		0,0
+				
+@NTSC			Dc.w		timingAppleNTSC_ST,3	; Default
+				Dc.w		0,0
+
+@PAL			Dc.w		timingApplePAL_ST,3		; Default
+				Dc.w		0,0
+				
+@HR				Dc.w		timingApple13, 3		; Default
+				Dc.w		timingApple13x,1		;
+				Dc.w		0,0
+
+
+				END

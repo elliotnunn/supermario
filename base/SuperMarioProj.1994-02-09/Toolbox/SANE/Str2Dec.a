@@ -1,0 +1,752 @@
+;EASE$$$ READ ONLY COPY of file “str2dec.a”
+; 1.2	CSL 02/17/1989 fixed _pstr2dec for 32 bit clean.
+; 1.1	CCH 11/11/1988 Fixed Header.
+; 1.0	CCH 11/ 9/1988 Adding to EASE.
+; OLD REVISIONS BELOW
+; 1.0	BBM 2/12/88 Adding file for the first time into EASE…
+; END EASE MODIFICATION HISTORY 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; File: Str2Dec.TEXT
+;; Decimal string scanner for 68000
+;; Status: BETA
+;; Copyright Apple Computer, Inc. 1984, 1985
+;;
+;; Written by Jerome Coonen,14 May 83 (Original code named ScanDec)
+;;
+;; Modification History:
+;;		10 Aug 84  CRL	Correct pointer position after INF and NaN input
+;;						Correct INF decimal record to contain 'I'
+;;						Handle input of 0
+;;						Accept NaN without parentheses
+;;						Return -0 as decimal but not as integer
+;;						Accept ∞ and -∞ as infinities
+;;						Correct the exponent for input of ≥ 20 characters
+;;						Avoid overscan of expressions like 'IN' '3E-' 'NaN('
+;;
+;;		17 Sep 84  CRL	New parameter list
+;;						Will not scan past end of input string
+;;						Integer return is stripped out
+;;						Error code return is stripped out
+;;						NaN syntax changed to accept spaces
+;;						NaN syntax changed to reject NaN()	{no digits}
+;;						Index returns the smallest possible number, that is,
+;;						  without taking extra blanks, signs, or parentheses
+;;
+;;		8 Oct 84   CRL	Second entry point, _cstr2dec for C type strings
+;;						Fix pointer position on input of .e1
+;;
+;;		10 Oct 84  CRL	Better use of flags
+;;						Link - Unlnk style introduced
+;;
+;;		19 Nov 84  CRL	Signalling NaN delivered if no characters accepted
+;;
+;;		 2 Jan 85  CRL	Alter GetChar to compare with '0' in both C & Pascal
+;;
+;;		 7 Jan 85  CRL	Fix bug in StateInf.  A3 no longer used by Cstrings.
+;;
+;;		21 Jan 85  CRL	Bug fix in AppendDigit.  Exponent handled wrong on
+;;						overlong input strings with 'E' notation.
+;;
+;;		19 Mar 85  CRL	Switch sense of signalling NaN bit at InitDec & State99.
+;;						For 68881 compatibility.
+;;
+;;		28 Mar 85  CRL	New code from @3 to @5 in StateNum strips trailing zeros
+;;						from d.sig.
+;;
+;;		17 May 85  CRL	Bug fixed at State2. Zero followed by an ascii character
+;;						smaller than '0' used to branch to StateBackup and trash
+;;						Index.	The fix: check for 0.  If found, go to StateNum
+;;						else go to StateBackup.
+;;
+;;		 9 Jul 85  CRL	Typo in AppendDigit causing exponent errors on
+;;						1000000000000000000.0  fixed by changing byte to word.
+;;
+;;		11 Jul 85  CRL	State6 bug causing .. to return index=2.  Replaced
+;;						branch to STATENUM with branch to @1.
+;;
+;;		19 Jul 85  KLH	changed str2dec to _pstr2dec, & cstr2dec to _cstr2dec
+;;
+;;		16 Sep 85  JTC	changed name of MASK constant to LISMASK to avoid SysTlQk conflict.
+;;
+;;		_________________________________________________________________
+;;
+;; PROCEDURE _pstr2dec	(
+;;						  s 			  : DecStr ;
+;;						  VAR index 	  : integer;
+;;						  VAR d 		  : Decimal;  { as defined in SANE }
+;;						  VAR ValidPrefix : boolean
+;;					  );
+;;
+;; PROCEDURE _cstr2dec (
+;;						  s 			  : CStrPtr;  { CStrPtr = ^Char    }
+;;						  VAR index 	  : integer;
+;;						  VAR d 		  : Decimal;  { as defined in SANE }
+;;						  VAR ValidPrefix : boolean
+;;					  );
+;;
+;; Given a string containing a decimal value and an index into the
+;; string, this scanner updates the index to the first character
+;; beyond a legitimate value and fills the decimal record for
+;; later conversion via the routine Dec2Num or FD2B.  If the whole
+;; string is a valid number, or if the scanner could have accepted
+;; additional characters beyond the string given, then ValidPrefix
+;; is set to TRUE.	ValidPrefix is used to request more characters;
+;; for example in file input.
+;;
+;;		_________________________________________________________________
+;;
+;;	INPUT
+;; --------
+;;
+;; S
+;;		* the address of the string to be scanned.
+;;		* _pstr2dec expects Pascal type strings;
+;;				that is, with a leading 'length byte'.
+;;		* _cstr2dec expects C type strings; no leading byte, but terminated
+;;				with a null character.	_cstr2dec will also accept streams
+;;				of characters terminated only by the first character which
+;;				violates the syntax given below.
+;; INDEX
+;;		* index is the position in the string at which to begin scanning,
+;;				given as a non-negative offset from the address above.
+;;
+;;	OUTPUT
+;; --------
+;;
+;; INDEX, D, and VALIDPREFIX
+;;		* index is set one past the last character accepted in the scan.
+;;		* d returns (in decimal record format) the value scanned.  d
+;;			 always contains a valid representation.
+;;		* validprefix returns true if the whole string is a valid number
+;;			 or if additional characters could be accepted by the scanner.
+;;		* validprefix has no meaning unless the string has either
+;;			 a length byte (_pstr2dec) or a terminating NULL (_cstr2dec).
+;;
+;;
+;;		_________________________________________________________________
+;;
+;; On entry to ScanDec the stack should look like:
+;;
+;;					 _____________________________________
+;;					|									  |
+;;					|	 address of s (DecStr or CStrPtr) |
+;;					|_____________________________________|
+;;					|									  |
+;;					|	 address of index		(integer) |
+;;					|_____________________________________|
+;;					|									  |
+;;					|	 address of d			(decimal) |
+;;					|_____________________________________|
+;;					|									  |
+;;					|	 address of validprefix (boolean) |
+;;					|_____________________________________|
+;;					|									  |
+;;					|			 return address 		  |
+;;					|_____________________________________|
+;;
+;;		_________________________________________________________________
+;;
+;;
+;; SYNTAX ACCEPTED BY THE SCANNER
+;; ------------------------------
+;; Square brackets enclose optional items, braces enclose elements
+;; to be repeated at least once, and vertical bars separate
+;; alternative elements; letters that appear literally, like the 'E'
+;; marking the exponent field, may be either upper or lower case.
+;;
+;; <decimal number>   ::= [{space | tab}] <left decimal>
+;; <left decimal>	  ::= [+ | -] <unsigned decimal>
+;; <unsigned decimal> ::= <finite number> | <infinity> | <NaN>
+;; <finite number>	  ::= <significand> [<exponent>]
+;; <significand>	  ::= <integer> | <mixed>
+;; <integer>		  ::= {digits} [.]
+;; <digits> 		  ::= {0|1|2|3|4|5|6|7|8|9}
+;; <mixed>			  ::= [<digits>].<digits>
+;; <exponent>		  ::= E [+ | -] <digits>
+;; <infinity>		  ::= INF | ∞
+;; <NAN>			  ::= NAN[([<digits>])]
+;;
+;;		_________________________________________________________________
+;;
+;; The register conventions used throughout this code are:
+;; A0 = current input pointer
+;; A1 = Decimal record pointer
+;; A2 = pointer within digit string of the Decimal record (d.sig)
+;; A3 = pointer to last character of input string (forced end of scan)
+;;
+;; D0.B  = current input character
+;; D1.W  = #significant digits beyond 19 - #fraction digits (including 0's)
+;; D2.B  = number of characters in d.sig
+;; D3	 = work in State99 and StateInf
+;; D4.B  = ascii 0	 (for comparisons)
+;; D5.W  = exponent
+;; D6	 = pointer to char after last valid token  (D6 = -1 means unused)
+;; D7.B  = ascii 9	 (for comparisons)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	__________________________________________
+;; |										  |
+;; | WARNING:  SYSTEM DEPENDENCY FOLLOWS!!!!! |
+;; |__________________________________________|
+;;
+;; The constant $00FFFFFF is needed for masking the lower 24 bits of
+;; addresses used in comparisons.  This constant is available in MASKBC
+;; on the MAC, but must be hard coded on LISA.	The switch below sets
+;; the machine, and through it the way the mask is accessed.
+;; FPBYTRAP is defined in TlAsm/SANEMacs.TEXT.	If that file is already
+;; included in the assembly, then the next line must be commented out.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;FPBYTRAP		 .EQU			  0 	 ; 0 = LISA,  1 = MAC
+
+;.IF	 FPBYTRAP
+;				 .INCLUDE		 TlAsm/SYSEQU.TEXT
+;.ENDC
+
+
+				BLANKS			ON
+				STRING			ASIS
+
+_cstr2dec		PROC  EXPORT
+				EXPORT _pstr2dec
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Define flags and constants for indexing.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+FLEXPSGN		EQU 			31		; sign of exponent			  (in D2)
+FLZERO			EQU 			15		; leading 0 bypassed		  (in D4)
+FLVALPREF		EQU 			16		; validprefix flag			  (in D4)
+FLCSTRING		EQU 			31		; Pascal or C string on input (in D4)
+
+DSGN			EQU 			 0		; offsets from A1
+DEXP			EQU 			 2
+DSIG			EQU 			 4
+
+RETURN			EQU 			 4		; offsets from A6
+VPREF			EQU 			 8
+D				EQU 			12
+INDEX			EQU 			16
+S				EQU 			20
+REGISTERS		EQU 		   -32
+
+LISMASK 		EQU 			$00FFFFFF ; for address masking in Lisa 				<16Sep85>
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Beginning of code
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+				MOVEQ			#1,D1			; keep a flag - CString
+				ROR.L			#1,D1			; in bit 31 of D1 (for now)
+				BRA.S			Start
+
+_pstr2dec
+				MOVEQ			#0,D1			; no flag in bit 31 for Pascal
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Place pointers to current character and d in A1 and A0,
+;;		save value of index, then save D2-D7/A2-A3
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Start
+				LINK			A6,#0
+				MOVEM.L 		D2-D7/A2-A3,-(SP) ; save working registers
+				MOVEM.L 		D(A6),D4-D6 	; D4<--&D, D5<--&INDEX, D6<--&S
+
+				MOVE.L			D6,D0			; D0 <--&S								<v1.2>
+				_StripAddress					; sanitized address						<v1.2>
+				MOVEA.L			D0,A0			; &S for calc of first char				<v1.2>
+				MOVEA.L 		D5,A1			; copy &index for indirect ref
+				MOVEQ			#0,D6			; prepare to reuse D6
+				MOVE.B			(A0),D6 		; length byte of S
+				LEA 			0(A0,D6),A3 	; &S + length byte = &last char
+				ADDA.W			(A1),A0 		; &S + index = &first char
+
+				MOVE.L			A0,D6			; saved character pointer = start
+				MOVEA.L 		D4,A1			; A1<--address of decimal record
+				LEA 			DSIG(A1),A2 	; A2<--ptr to d.sig field of D
+				MOVE.L			D1,D4			; FLCstring flag now in D4
+				ADDI.B			#$30,D4 		; ascii zero
+				MOVEQ			#$39,D7 		; ascii nine
+
+				MOVEQ			#0,D0
+				MOVEQ			#0,D1
+				MOVEQ			#0,D2
+				MOVEQ			#0,D3
+				MOVEQ			#0,D5
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Initialize the decimal record to sign +, exponent 0 and significand N0011.
+;;		Use SNaN = 00 00 00 00 05 4E 30 30 31 31  = (0)(0)(0)(0)(5)'N0011'
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+InitDec
+				CLR.L			DSGN(A1)			; clear sign and exp
+				MOVE.L			#$054E3030,(A2) 	; 00 for signalling
+				MOVE.W			#$3131,4(A2)		; 11 for NaNAsciiBinary
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State0 -- scanning leading white space.
+;; For now presume just spaces and tabs.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State0
+				BSR 			GetChar 		; get next character
+				CMPI.B			#' ',D0 		; is it a space?
+				BEQ.S			State0
+				CMPI.B			#202,D0 		; is it a non-breaking space?
+				BEQ.S			State0
+				CMPI.B			#$09,D0 		; is it a tab?
+				BEQ.S			State0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Then fall through to State1 -- looking for a sign.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State1
+				CMPI.B			#'+',D0
+				BEQ.S			@1				; if so skip char
+				CMPI.B			#'-',D0
+				BNE.S			State2			; if not check for num
+
+				ADDQ.B			#1,DSGN(A1) 		; set sign to minus
+@1
+				BSR.S			GetChar 		; get char past sign
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Now expect D0 to be Start of INF, NAN, or number.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State2
+				CMPI.B			#'0',D0 		; leading 0's?
+				BCS.S			@1				;	less: .stuff?
+				BHI.S			@2				;	more: digits or letters?
+
+
+				BSET			#FLZERO,D4		; if equal, have a 0
+				MOVEQ			#-1,D6			; erase saved char ptr
+				BSR.S			GetChar 		; get next & check again
+				BRA.S			State2
+@1
+				;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+				;; Code added here 17 May 85:
+				;;	 An ascii character < '0'
+				;;	 has been found, possibly
+				;;	 preceded by 0's.  If 0's
+				;;	 in front, return 0, else
+				;;	 illegitimate input.
+				;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+				CMPI.B			#'.',D0
+				BEQ 			State6			; dot before significant digits
+				TST.W			D4				; has a zero been seen?
+				BPL 			StateBackup 	;	if not, then illegitimate
+				BRA 			StateNum		;	if zero, then exit normally
+
+@2
+				CMPI.B			#'9',D0
+				BLS.S			State4			; digits follow
+
+				TST.W			D4				; any leading zero's?
+				BPL 			State99 		;	if not, then try INF, NAN, ∞
+				BRA 			State8			;	else check E,e
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State4 -- scanning significant digits before the decimal point.
+;; Uses routine AppendDigit to place digit in string, get next char,
+;; and compare next char to '0'.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State4
+				MOVEQ			#-1,D6			; use current char ptr
+@1
+				BSR.S			AppendDigit
+				BCS.S			State5			; might be dot
+				CMPI.B			#'9',D0
+				BLS.S			@1
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State5 -- check for Start of fraction field after some significant
+;; digits scanned.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State5
+				CMPI.B			#'.',D0
+				BNE 			State8			; might be exponent
+
+				BSR.S			GetChar 		; char after dot
+				BCS 			StateNum		; must be end of number
+				BRA.S			State75
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; AppendDigit -- routine to place numeral in digit field of Decimal
+;; structure, update counters, get next character, and compare with '0'
+;; just before returning.  After 20 characters have been scanned, just
+;; logically OR subsequent digits into the 20th slot.
+;;
+;; Note:  When 20 digits appear in a decimal record, there is an implicit
+;; decimal point after the 19th.  This means that the 20th digit must
+;; be recorded as lost.  The Start of the code below checks for the 20th digit.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+AppendDigit
+				CMPI.B			#19,D2			; past all valid digits?
+				BLT.S			@1				;	no:  keep looking
+				BGT.S			@3				;	yes: 'OR' into 20th
+
+				;; next line changed from ADDQ.B to ADDQ.W	CRL 9 July 85
+
+				ADDQ.W			#1,D1			;record lost digit for 20th
+@1
+				ADDQ.L			#1,A2			; point to next char in d.sig
+				MOVE.B			D0,(A2) 		; copy this digit into d.sig
+				ADDQ.B			#1,D2
+				BRA.S			GetChar
+@3
+				OR.B			D0,(A2) 		; 'OR' into 20th digit
+				ADDQ.W			#1,D1			; record lost digit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; GetChar
+;;	  * test for end of string
+;;	  * collect the next character
+;;	  * set validprefix to TRUE if scan is forced to end prematurely
+;;	  * see if saved instead of current character pointer should be returned.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+GetChar
+				TST.L			D4				; Cstring?
+				BPL.S			@1				;	if not, then Pascal
+
+				MOVE.B			(A0)+,D0		; get next char
+				BEQ.S			@5				; if NULL, then end of C string
+				BRA.S			@2				;	else go back to caller
+@1
+		;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		;; begin Pascal code
+		;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+				CMPA.L			A0,A3			; end of Pascal string?
+				BLT.S			@3				;	if so, clean up and exit
+				MOVE.B			(A0)+,D0		;	else get next char
+@2
+		;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		;; return to caller
+		;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+				CMPI.B			#'0',D0 		; test for zero before returning
+				RTS
+@3
+		;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		;; end of Pascal string
+		;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+				ADDQ.L			#1,A0			; advance ptr if Pascal
+@5
+		;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+		;; end of C or Pascal string
+		;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+				BSET			#FLVALPREF,D4	; premature string end
+				TST.L			D6				; has pointer been saved?
+				BPL 			StateBackup 	;	if so use it
+				BRA 			StateNum		;	else exit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State6 -- encountered dot before any nonzero significant digits.
+;; Keep looking for digits, but throw away leading zeros, remembering
+;; placement of decimal.  If possible nonzero digit or alpha, skip
+;; right into fraction digit scanner.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State6
+				BSR.S			GetChar 		; skip past dot
+				BEQ.S			@3				; handle zero specially
+
+				;; next line changed from STATENUM branch to @1 branch
+				;; 11 July 85  CRL
+
+				BCS.S			@1				; below zero, .junk or 0.junk?
+
+				CMPI.B			#'9',D0 		; > zero, but is it a digit?
+				BLS.S			State7			;	 yes, scan fraction digits
+@1
+				TST.W			D4				; not digit, any zeros seen?
+				BPL 			StateBackup 	;	if not, then no number here
+				BRA.S			State8			;	if so, look for E,e
+@3
+				BSET			#FLZERO,D4		; zero has been seen
+				MOVEQ			#-1,D6			; use current char ptr
+				SUBQ.W			#1,D1			; count fraction zeros
+				BRA.S			State6			; look for more zeros
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State7 -- scanning fraction digits.	Just use AppendDigit and keep
+;; count of the digits scanned, whether in excess of 19 or not.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State7
+				MOVEQ			#-1,D6			; use current char ptr
+				SUBQ.W			#1,D1
+				BSR.S			AppendDigit
+				BCS.S			StateNum		; less than '0' ==> done
+State75 										; STATE ENTRY POINT
+				CMPI.B			#'9',D0
+				BLS.S			State7
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State8 -- looking for exponent, an E or e followed by an optional
+;; sign and a digit field.	Must be careful about exponent overflow.
+;; Since the extended range admits values in magnitude between
+;; 10^-5000 and 10^5000, it suffices to check for exponents outside
+;; say $2000 = 8192.  Overflowed exponents are mapped into $2000,
+;; guaranteed to produce a severe overflow on conversion.
+;;
+;; Must also guard against overscan of expressions like '123e-'.  We
+;; must return 123 with pointer at 'e'.  If E or e is found, hold
+;; input pointer in D6 in case subsequent scanning does not make
+;; sense of the characters past '123'.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State8
+				MOVE.L			A0,D6			; save current char ptr
+				SUBQ.L			#1,D6			; and point to E,e
+				CMPI.B			#'E',D0
+				BEQ.S			@1
+				CMPI.B			#'e',D0
+				BNE.S			StateNum		; no exponent found
+@1
+				BSR.S			GetChar
+				CMPI.B			#'+',D0
+				BEQ.S			@3
+				CMPI.B			#'-',D0
+				BNE.S			@7
+
+				BSET			#FLEXPSGN,D2	; mark as negative exponent
+@3
+				BSR.S			GetChar
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Keep saved input pointer D6 only if no digits.  If no digits are found
+;; after an E or e, then back up the input pointer and accept only those
+;; digits which preceded the 'E'.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@7
+				CMPI.B			#'0',D0
+				BCS.S			@15 			; must be 0-9
+				CMPI.B			#'9',D0
+				BHI.S			@15
+
+				MOVEQ			#-1,D6			; use current char ptr
+				ANDI.W			#$000F,D0		; mask higher ascii bits
+				MULU			#10,D5			; multiply by 10
+				ADD.W			D0,D5			; add in this digit
+				CMPI.W			#$2000,D5
+				BCS.S			@13 			; less than 8192 OK
+
+				MOVE.W			#$2000,D5		; force huge value
+@13
+				BRA.S			@3
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Finish exponent scanner by checking for presence of exponent digits.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@15
+				TST.L			D6				; digits after 'E'?
+				BPL 			StateBackup 	;	if not, reset input ptr
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; StateNum -- have sighted the first unrecognizable character after a
+;; possible number.  Check first for 0, a special case since all digits
+;; were discarded above, then put the number in canonical form.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+StateNum
+				SUBQ.L			#1,A0			; set char ptr back by 1
+StNum2
+				TST.B			D2				; any digits?
+				BNE.S			@1				;  if so, go to next section
+
+				TST.W			D4				;  if not, leading '0'S?
+				BPL.S			StateFin		;  nothing seen
+
+				MOVE.W			#$0130,(A2) 	; put '0' into d.sig
+				BRA.S			StateFin
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Have nonzero number with:
+;;		D2.B digits in string at DSIG(A1),
+;;		exponent in D5,
+;;		lost digit count - fraction count in D1.
+;; To align decimal point at right of the D2.B digits, compute
+;; true exp  :=  EXP + D1
+;;
+;; To produce canonical conversions, strip trailing zeros from d.sig.
+;; FP68K will adjust for minimum exponent, but not for trailing zeros.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+@1
+				TST.L			D2				; negative exponent bit?
+				BPL.S			@3				;	if not, go on
+
+				NEG.W			D5				;	if so, negate
+@3
+				CMP.B			#$30,4(A1,D2.W) ; examine last digit
+				BNE.S			@5				;	and strip trailing zeros
+				SUBQ.B			#1,D2			; decrement string length byte
+				CMP.B			#$13,D2 		; was 20th digit just removed?
+				BEQ.S			@4				;	if so, skip the increment
+				ADDQ.W			#1,D5			; increment exponent
+@4
+				BRA.S			@3				; go back to check more digits
+@5
+				MOVE.B			D2,DSIG(A1) 	; Pascal string length byte
+				ADD.W			D1,D5
+				MOVE.W			D5,DEXP(A1) 	; store in d.exp
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Replace the updated input pointer.  Restore registers D2-D7/A2-A3.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+StateFin
+				SUBA.L			S(A6),A0		; current ptr - initial ptr
+				MOVEA.L 		INDEX(A6),A1	; A1<--address of index
+				MOVE.W			A0,(A1) 		; return-value of index
+
+				MOVEA.L 		RETURN(A6),A0	; caller return address
+
+				MOVEA.L 		VPREF(A6),A1	; validprefix address
+				SWAP			D4				; move ValPref flag to lo word
+				MOVE.B			D4,(A1) 		; return-value of ValidPrefix
+
+				MOVEM.L 		REGISTERS(A6),D2-D7/A2-A3  ; restore registers
+				UNLK			A6				;
+				ADDA.W			#20,SP			; pop the stack
+				JMP 			(A0)			; return to caller
+ IF  FSymOK THEN
+				DC.B			'_pstr2dec '	  ; for Lisa debugging only
+ ENDIF
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; State99 -- all else has failed so check for ∞, INF or NaN.
+;; ∞ is easy, but INF & NaN may parse partially.  Use D6 to remember
+;; where the string pointer is at the start so it can be reset
+;; if the string does not contain a full token for INF or NaN.
+;;
+;; Use little utility GetMapped to fetch a character, map to upper
+;; case, and check against a seed in D3.
+;;
+;; If NAN is scanned, change the default nancode of NaNAsciiBinary to
+;; NaNZero (N4000).  If nan digits are found, change code again to reflect them.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+State99
+				CMPI.B			#'∞',D0 		; test for ∞ symbol
+				BEQ 			INF_2			;	if found, return INFINITY
+
+				SUBQ.L			#1,A0			; rewind char pointer
+
+				MOVEQ			#'I',D3 		; test for 'I'
+				BSR 			GetMapped
+				BEQ 			StateInf		; if 'I' then check for INF
+
+				CMPI.B			#'N',D0 		; is it NaN?
+				BNE.S			StateBackup 	; if not, then quit looking
+
+				MOVEQ			#'A',D3
+				BSR 			GetMapped
+				BNE.S			StateBackup
+				MOVEQ			#'N',D3
+				BSR 			GetMapped
+				BNE 			StateBackup
+
+				MOVE.L			#$054E3430,(A2)+; default to NaNZero and
+				MOVE.W			#$3030,(A2) 	;	point to NaN-code field
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Expect string (xxxx) to follow NAN.	If the input string contains a
+;; valid NaN code, change the decimal record's 2-byte Nan-code field.
+;;
+;; The last valid token might be the 'NaN' just parsed.  To protect
+;; subsequent parsing against overscan of stuff like 'NaN(12', keep a
+;; pointer to the 'NaN' part to fall back on if needed.  (in D6)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+				MOVE.L			A0,D6			; save input pointer
+
+				BSR.S			GetChar
+				CMPI.B			#'(',D0
+				BNE.S			StateBackup
+
+
+				MOVEQ			#0,D3			; compute NaN code in D3
+@51
+				BSR.S			GetChar
+				BCS.S			@57 			; < 0 so try ')'
+				CMPI.B			#'9',D0
+				BHI.S			StateBackup 	; > 9 so neither digit nor ')'
+
+				MULU			#10,D3			; multiply by 10
+				ANDI.W			#$000F,D0		; mask higher ascii bits
+				ADD.W			D0,D3
+
+				BRA.S			@51
+@57
+				CMPI.B			#')',D0 		; end with ')'?
+				BNE.S			StateBackup 	;	if not, use saved char ptr
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Now stuff a 3 character string 'Nxx' with 2 low nibbles from D3.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+				BSR.S			NibOut
+				ROR.W			#8,D0			; save byte
+				ROR.B			#4,D3			; align hi byte
+				BSR.S			NibOut
+				ROR.W			#8,D0
+				MOVE.W			D0,(A2)
+				BRA.S			INF_3			; same exit as StateInf
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; If the string has been overscanned, then D6 contains a pointer to
+;; the last valid substring.
+;; In that case, accept this pointer and branch to the output routine.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+StateBackup
+				MOVE.L			D6,A0
+				BRA.S			StNum2
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; LOOK FOR SIMPLE STRING INF.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+StateInf
+				MOVEQ			#'N',D3
+				BSR.S			GetMapped
+				BNE.S			StateBackup
+				MOVEQ			#'F',D3
+				BSR.S			GetMapped
+				BNE.S			StateBackup
+INF_2
+				MOVE.W			#$0149,(A2) 	; put 'I' into decimal record
+INF_3
+				MOVEQ			#-1,D6			; use current char ptr
+				TST.L			D4				; Cstring?
+				BPL.S			@1				;	 if not, then Pascal
+
+				MOVE.B			(A0),D0 		; examine char after INF
+				BNE.S			StateFin		;	 if not end of scan, exit
+				BRA.S			@3
+@1
+				CMPA.L			A0,A3			; end of Pascal scan?
+				BGE.S			StateFin		;	 if not, exit
+@3
+				BSET			#FLVALPREF,D4	;	 if so, set flag
+				BRA.S			StateFin		;	 and then exit
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; GetMapped -- fetches next input character, maps lower to upper case,
+;; and compares with seed in D3.B.	Note that	'a'  =	'A' + $20
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+GetMapped
+				BSR.S			GetChar
+				CMPI.B			#'a',D0
+				BCS.S			@1
+				CMPI.B			#'z',D0
+				BHI.S			@1
+				SUBI.B			#$20,D0
+@1
+				CMP.B			D3,D0
+				RTS
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Routine to pluck a nibble from D3 and construct an ascii character
+;; in D0.B.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+NibOut
+				MOVE.B			#$0F,D0 		; leave high bits alone
+				AND.B			D3,D0
+				CMPI.B			#9,D0
+				BLS.S			@61
+
+				ADDQ.B			#$07,D0 		; offset $37 for A-F
+@61
+				ADDI.B			#$30,D0 		; offset $30 for 0-9
+				RTS
+
+

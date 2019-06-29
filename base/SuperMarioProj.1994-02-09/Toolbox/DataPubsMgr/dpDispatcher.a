@@ -1,0 +1,219 @@
+;
+;	File:		dpDispatcher.a
+;
+;	Contains:	dispatcher for PACK 11 routines
+;
+;	Written by:	Nick Kledzik
+;
+;	Copyright:	© 1989-1990 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds: BigBang
+;
+;	Change History (most recent first):
+;
+;		<12>	12/14/90	ngk		<RC>Removed FindEditionDialog
+;		<11>	 7/11/90	gbm		add an END, so assembler quits bitchin'
+;		<10>	 5/31/90	ngk		add volume notification routine
+;		 <9>	 3/25/90	ngk		Change package version.
+;		 <8>	 3/17/90	ngk		Add dp_DrawPreview to jump table
+;		 <7>	 3/10/90	ngk		Change to use new package dispatcher. 'dlcd' no longer used.
+;									Just have a jump table and glue for dialogs.
+;		 <6>	 2/25/90	ngk		Make sure pack11 is locked before loading dialog code.
+;		 <5>	 1/26/90	ngk		Removed Get, Save, Clone, and Dispose Section
+;		 <4>	  1/8/90	ngk		Move get, save, and dispose section to end of table
+;		<2+>	  1/7/90	ngk		Remove get, save, and dispose section, added dp_GetCurrentAppRefNum
+;		 <2>	  1/6/90	ngk		Changed selector numbering. Cleaned up include files. Map short
+;									version of dialog routines to ext version.
+;	   <2.1>	11/13/89	ngk		Fixed bug when removing parameters from stack because of bad
+;									selector
+;	   <2.0>	10/24/89	ngk		Better error handling if 'dlcd' resource not found.
+;	   <1.9>	10/13/89	ngk		Added DialogDispatch and dpLoadDialogCode to put Dialog code in
+;									seperate code resource.
+;	   <1.8>	10/10/89	ngk		Bumped version to 10, 'cause of ePPC changes
+;	   <1.7>	 10/2/89	ngk		Changed some names, bumped version
+;	   <1.6>	 9/18/89	ngk		Added dpDeletePublicationFile
+;	   <1.5>	 8/29/89	ngk		Renamed XetEditionPos to XetEditionMark
+;	   <1.4>	  8/8/89	ngk		Bumped pack version because of API changes to use PubSpec
+;	   <1.3>	 6/11/89	ngk		Added dpHasEditionFormat
+;	   <1.2>	 5/31/89	ngk		Removed canonifyFile, bumped package version
+;	   <1.1>	 5/29/89	ngk		Added AssociateSection Changed Dispatcher to use D0 for
+;									selector, scarfing code from Tecot
+;	   <1.0>	 5/19/89	ngk		Submitted for first time
+;
+;	To Do:
+;
+			
+			SEG			'Main'
+			CASE		OFF
+			
+			LOAD		'StandardEqu.d'
+			INCLUDE		'dpCompileOptions.inc.a'
+			INCLUDE		'EditionsPrivate.a'
+	
+;---------------------------------------------------------------------------
+;
+; Editions Manager PACK header
+;
+;   Uses the package dispatcher.  See MiscPatches for details.
+;
+;	Following the header is a jump table used by the dispatcher.
+;	The order of entries in the table is there respective selector numbers.
+;
+;---------------------------------------------------------------------------
+			
+PackEntry	PROC	EXPORT
+								
+			CODEREFS 	FORCEPC
+			STRING		ASIS
+			
+				dc.w	$A9FF				; package entry point
+				dc.b	'PACK'				; resource type
+				dc.w	11					; resource ID
+				dc.w	17					; version
+DispatchTable	dc.w	1					; flags, 1 = selectors are already even
+				dc.b	minSelector			; first legal selector
+				dc.b	maxSelector			; last legal selector				
+
+				MACRO
+					JT			&entry
+					IMPORT		&entry
+					DC.W		&entry - DispatchTable
+				ENDM
+						
+EntyrFirst		
+				JT 		dp_EditionMgrVolumeNotifier
+				JT 		dp_DrawPreview
+				JT 		dp_GetCurrentAppRefNum
+				JT 		dp_PostSectionEvent
+				JT 		dp_EditionMgrBackGroundTask
+				JT 		dp_QuitEditionPack
+
+Entry0			JT 		dp_InitEditionPack		
+				
+				JT 		dp_NewSection		
+				JT 		dp_RegisterSection
+				JT 		dp_UnRegisterSection
+				JT 		dp_IsRegisteredSection
+				DC.W 	0								; used to be dp_FindEditionDialog
+				JT 		dp_AssociateSection
+
+				JT 		dp_CreateEditionContainerFile	
+				JT		dp_DeleteEditionContainerFile
+
+				JT 		dp_OpenEdition
+				JT 		dp_OpenNewEdition
+				JT 		dp_CloseEdition
+				JT 		dp_EditionHasFormat
+				JT 		dp_ReadEdition
+				JT 		dp_WriteEdition
+				JT 		dp_GetEditionFormatMark
+				JT 		dp_SetEditionFormatMark
+
+				JT 		dp_GetEditionInfo
+				JT 		dp_GotoPublisherSection
+				JT 		dp_GetLastEditionContainerUsed				
+				JT 		dp_GetStandardFormats
+				
+				JT 		dp_GetEditionOpenerProc				
+				JT 		dp_SetEditionOpenerProc				
+				JT 		dp_CallEditionOpenerProc				
+				JT 		dp_CallFormatIOProc				
+				
+				JT 		jmpTo_NewSubscriberDialog				
+				JT 		jmpTo_NewSubscriberExpDialog				
+				JT 		jmpTo_NewPublisherDialog				
+				JT 		jmpTo_NewPublisherExpDialog				
+				JT 		jmpTo_SectionOptionsDialog				
+				JT 		jmpTo_SectionOptionsExpDialog				
+
+
+EntyrPastLast		
+
+minSelector		EQU		EntyrFirst - Entry0
+maxSelector		EQU		EntyrPastLast - Entry0 - 2
+
+	
+			ENDPROC		; PackEntry
+
+
+
+;---------------------------------------------------------------------------
+;
+; DialogGlue
+;
+;	This glue is needed for two reasons.
+;		1) The dialogs come in two forms, simple and expanable
+;			the calls to the simple form have the default expandle
+;			parameter added, then the expanable form is called.
+;		2) The dialogs are at the end of the package.  They are too
+;			far to jump through the normal jump table ( > 32K ).
+;
+;
+; Trashes: D0, A0, A1
+;---------------------------------------------------------------------------
+
+
+DialogGlue	PROC
+				EXPORT 		jmpTo_NewSubscriberDialog				
+				EXPORT 		jmpTo_NewSubscriberExpDialog				
+				EXPORT 		jmpTo_NewPublisherDialog				
+				EXPORT 		jmpTo_NewPublisherExpDialog				
+				EXPORT 		jmpTo_SectionOptionsDialog				
+				EXPORT 		jmpTo_SectionOptionsExpDialog				
+				IMPORT 		dp_NewSubscriberExpDialog				
+				IMPORT 		dp_NewPublisherExpDialog				
+				IMPORT 		dp_SectionOptionsExpDialog				
+
+
+jmpTo_NewSubscriberDialog		
+				bsr.s		AddDefaultExp
+jmpTo_NewSubscriberExpDialog	
+				move.l		NewSubscriberOffset,D0
+				bra.s		JumpToIt
+				
+				
+jmpTo_NewPublisherDialog	
+				bsr.s		AddDefaultExp
+jmpTo_NewPublisherExpDialog		
+				move.l		NewPublisherOffset,D0
+				bra.s		JumpToIt
+			
+		
+jmpTo_SectionOptionsDialog
+				bsr.s		AddDefaultExp
+jmpTo_SectionOptionsExpDialog		
+				move.l		SectionOptionsOffset,D0
+;				bra.s		JumpToIt
+
+
+
+JumpToIt		lea			DialogGlue,A0
+				adda.l		D0,A0
+				jmp			(A0)
+			
+			
+AddDefaultExp	move.l	(SP)+,A1			; pop glue return address
+				move.l	(SP)+,A0			; pop real return address
+				; added default 'Exp' parameters
+				moveq	#-1,D0
+				move.l	D0,-(SP)			; where = -1, -1
+				moveq	#0,D0
+				move.w	D0,-(SP)			; extentionDITLresID = 0
+				move.l	D0,-(SP)			; dlgHook = NIL
+				move.l	D0,-(SP)			; filterProc = NIL
+				move.l	D0,-(SP)			; callBackPtr = NIL
+				move.l	A0,-(SP)			; restore real return address
+				jmp		(A1)				; return to glue 
+			
+			
+; The following are 32-bit offsets to the dialog routines.
+; We have to do it this way because 68000 does not support
+; 32-bit branches.
+
+NewSubscriberOffset		dc.l		dp_NewSubscriberExpDialog - DialogGlue
+NewPublisherOffset		dc.l		dp_NewPublisherExpDialog - DialogGlue
+SectionOptionsOffset	dc.l		dp_SectionOptionsExpDialog - DialogGlue
+
+			ENDPROC		; DialogGlue
+
+			END

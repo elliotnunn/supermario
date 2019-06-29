@@ -1,0 +1,1762 @@
+;
+;	File:			ProcessMgrMisc.a
+;
+;	Contains:		Routines which support the Process Manager that could not be
+;					coded in C.
+;
+;	Written by:		Phil Goldman
+;
+;	Copyright:		© 1986-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<19>	11/25/92	DRF		Add a conditional patch inside a_hfsdispatch to save and restore
+;									A2 across calls the the real _HFSDispatch. This is a temporary
+;									fix until the PowerPC trap glue follows the proper register
+;									saving conventions. Code is conditionalized under “PsychicTV”
+;									and will be removed at the earliest possibility.
+;		<18>	 9/25/92	DRF		Get rid of MyGestalt, since inline glue exists
+;		<17>	 3/30/92	DTY		#1025416,<DDG>: Add gestaltSkiaGlobalsSwitched to the list of
+;									attributes for gestaltOSAttr.
+;		<16>	11/25/91	DTY		Call GetParallelFCBFromRefNum in the _OpenRF patch to nail the
+;									PSN in the parallel FCB for printer drivers, if it they have the
+;									“MultiFinder compatible” bit set.  This prevents the driver from
+;									being closed out from under other applications which happen to
+;									be using it at the same time.
+;		<15>	 11/4/91	DTY		Of course, keeping your own copy of an interface macro tends to
+;									screw things up when the selectors change…
+;		<14>	 11/1/91	DTY		Don’t assume SysMapHndl really has a handle to the system
+;									resource map, as it will have a handle to an override map when
+;									ROMMapInsert is true. Call _IsThisASystemResourceMap to
+;									determine whether it is or not instead.
+;		<13>	10/23/91	DTY		Take GetTopSystemOverrideMap out of this file and hang it off of
+;									_ResourceDispatch.
+;		<12>	10/20/91	DTY		Add GetTopSystemOverrideMap.  This returns a handle to the first
+;									system override map in the resource chain to NewProcess so that
+;									new resource chains will have system override maps too.
+;		<11>	 4/12/91	DFH		TES, #86777 : Change _Close patch to just call through when trap
+;									was made async. Our “shared printer file” check can not be made
+;									safely at interrupt time. Fortunately, it is not necessary for
+;									it to be done on async Close's, since the printer files are
+;									closed by the Print Manager synchronously. First found in
+;									HyperCard testing.
+;		<10>	  3/5/91	DFH		dnf, #84115: Added support for new forced _Unmount (ignore
+;									result of notification proc).
+;		 <9>	 2/21/91	DFH		JWM,WS#DFH-910221a: Fix gross register eating in c_zeroscrap and
+;									c_putscrap across call to DisposeOrphanedScrap.
+;		 <7>	12/18/90	DFH		Added GetScrap patch to return memFullErr when most recent
+;									MoveScrap() failed for lack of memory.
+;		 <6>	12/17/90	DFH		ZeroScrap and PutScrap now call DisposeOrphanedScrap.
+;		 <5>	12/17/90	DFH		Fixed RecoverHandle patch to preserve d0, as per Inside Mac,
+;									Volume II, page 35.
+;		 <4>	 12/3/90	DFH		Changed CloseWD patch to return noErr in the error case. This
+;									is because error is not useful, and TOPS has an assert that it
+;									is zero.
+;		 <3>	 11/9/90	DFH		Wakes up front process before calling dsForcedQuit SysError, so
+;									that front process promptly makes the event call that will clean
+;									up the confirmation dialog.
+;		 <2>	 11/9/90	DFH		Added re-entrancy prevention in "forced quit" handling.  Note
+;									that this means user can not "force quit" out of a hung SysError
+;									of any kind.
+;		 <0>	 x/xx/86	PYG		New Today.
+;
+;--------------------------------------------------------------------
+
+				CASE	OBJECT
+				LOAD	'ProcessMgrIncludes.D'
+				INCLUDE	'Data.a'
+				include	'FileMgrPrivate.a'
+				include	'GestaltPrivateEqu.a'
+				STRING	PASCAL
+
+;-------------------------------------------------------------------------------
+;
+;	This mega-box comment was extracted 18 April 1989 from the ROM dispatch.a source,
+;	mainly as a compatibility guideline.
+;
+;	Of course, we strategically violate the register eating manners for particular
+;	traps that don't REALLY need the regs.
+;
+;
+;	  EMT1010 -- MacIntosh Operating System Dispatcher
+;
+;	The following code receives all Line 1010 emulator traps and transfers
+;	control to the appropriate system code to interpret the trap.  Two 32-bit/entry
+;	RAM-based dispatch tables are used to derive the addresses to which to dispatch.
+;	Since this table is patchable, a system or application program can patch in
+;	and intercept any system call to fix bugs, etc.
+;
+;	An A-line trap has the form:  1010 tabc nnnn nnnn
+;
+;	t=1 ==> Toolbox;  t=0 ==> OS.  They differ mainly in register saving conventions.
+;
+;	ToolBox:
+;		These calls follow Pascal parameter-passing conventions, receiving and
+;		returning values on the stack, and saving all but D0-D2/A0-A1.
+;		All registers are preserved up to the time the target routine is reached;
+;		the stack is as though a JSR had been executed.
+;
+;		a=1 ==> an extra return address was on the stack when the trap was executed
+;
+;		(e.g. a dumb compiler required a JSR to the A-line trap).  This superfluous
+;		address will be removed by the dispatcher.
+;		bcnnnnnnnn = trap number
+;
+;	OS:
+;		All parameters are passed in registers.  Routine must follow Pascal
+;		conventions about D3-D7/A2-A7.	D0/A0-A1 are passed through to the
+;		routine unchanged.	D1.W is the actual A-line instruction.
+;
+;		c=1 ==> D1-D2/A1 are preserved by the dispatcher (so values can
+;			be returned in D0/A0).
+;		c=0 ==> D1-D2/A0-A1 are preserved by the dispatcher (so D0 can be returned).
+;		a,b = don't care, but are used by the traps to indicate, say, SYS/APPL,
+;			SYNC/ASYNC, DIACRITICALS/NOT, . . .
+;		nnnnnnnn = trap number
+;
+;	Dispatch addresses are maintained in two tables of long words, ToolTable with
+;	512 entries, and OSTable with 256 entries.  (They used to be rolled into one
+;	table of 512 word entries.)
+;	For backward compatibility, the GetTrapAddress and SetTrapAddress routines use
+;	the original trap numbering scheme, that is traps $00-$4F, $54, and $57 are OS
+;	traps, and the rest are Tool traps.
+;
+;	The expanded routines GetTrapAddress and SetTrapAddress routines use bits #10
+;	to specify Tool=1/OS=0 and #9 to specify New=1/Old=0 numbering.	Bit #10 is
+;	ignored when bit #9 is 0.
+;
+;	A few things to remember.  Although toolbox routines use pascal register
+;	saving conventions, the trap dispatcher must preserve all registers when
+;	dispatching a toolbox trap, since there are some routines which are
+;	documented as saving all registers (_Debugger, _LoadSeg, _FP68K, …).
+;
+;	Even though the OS trap dispatcher saves A0-A2/D1-D2 for the user, it
+;	may not modify A0 or A1 before calling the OS routine, since routines
+;	like _BlockMove expect paramaters in A0/A1/D0.  Additionally, register
+;	D1 must contain a copy of the A-Trap word, since that is how routines
+;	read the additional trap bits (eg. _NewPtr ,SYS,CLEAR).
+;
+;	Although the register save order, and format of the stack frame for an
+;	OS trap is undocumented, Microsoft does a SetTrapAddress on _GetHandleSize
+;	and and their new routine calls the ROM GetHandleSize, and then restores
+;	the registers that the trap dispatcher saved, and does a TST.L on D0.
+;	Because of this, register save order must be maintained for compatibility,
+;	since we may never get back to restore them.
+;
+;	For machines with CPUs earlier than the 68020, we include 3 versions of the
+;	trap dispatcher in ROM, 68000, 68010, and 68020/030.  At startup time we
+;	determine which CPU we are running on, and install the correct dispatcher.
+;	We also modify the dispatch addresses for GetTrapAddress, SetTrapAddress,
+;	and BlockMove to use cache flushing versions when the CPU is a 68020 or later.
+;	On systems with 68020/030 cpus, we only provode the 020/030 versions.
+;_______________________________________________________________________
+
+; For resource maps, entries
+mapForceSysHeap	EQU		0
+RAttr			EQU		4
+RHndl			EQU		8
+
+mNext			equ		16
+MRefNum			EQU		20
+MAttr			EQU		22
+
+;---------------------------------------------------------------------------------------
+; generic_glue.  Routine to make up for the fact that the C compiler is too
+; brain-damaged to handle pointers to pascal functions.  This is a pascal-type
+; routine with the last parameter being the address of the routine to call.
+generic_glue	PROC	EXPORT
+				move.l	4(sp),a0						; get address of real routine
+				move.l	(sp)+,(sp)						; move return address on top of routine address
+				jmp		(a0)							; go do the routine
+
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; settrapaddress_glue.  This is glue to call the original SetTrapAddress.
+; The C prototype is:
+;
+;	pascal void
+;	settrapaddress_glue(Ptr trapAddr, short trapNum, short setTrapAddressNum, Ptr oldtrap)
+;
+; Eats a0, d0-d2 before calling trap
+SETTRAPADDRESS_GLUE		PROC	EXPORT
+				move.l	(sp)+,d2						; save return address
+				move.l	(sp)+,a1						; get old settrapaddress addr
+				move.w	(sp)+,d1						; get settrapaddress (full) trap number
+				move.w	(sp)+,d0						; d0 <- trap number
+				move.l	(sp)+,a0						; a0 <- trap address
+				move.l	d2,-(sp)						; restore return address
+				jmp		(a1)							; go do routine
+
+				ENDPROC
+					
+;---------------------------------------------------------------------------------------
+; OverlayRecoverHandle.  The following is to get Works to live up to its name.  Works
+; assumes that if the ,SYS bit is not set then the handle must be in the App Heap.
+; The only problem with this is if the handle belongs in SysZone.  Therefore the patch
+; forces ,SYS in this case.
+OverlayRecoverHandle	PROC	EXPORT
+				IMPORT	GetOverlayRecoverHandleOldTrap:CODE
+SYSBITON		EQU		$0400
+				
+				movem.l	d0-d1/a0,-(sp)					; save working registers
+				move.l	a0,d0							; get ptr in parameter reg
+				_StripAddress							; strip!
+				move.l	d0,a0							; for unsigned compare
+				move.l	SysZone,a1						; ptr to system zone descriptor
+				cmpa.l	bkLim(a1),a0					; Ptr < SysZone->bkLim?
+				bcc.s	ORH_done						; if not, branch
+ORH_force_comma_sys
+				or.l	#SYSBITON,4(sp)					; force ,SYS bit on for Works to see
+ORH_done
+				jsr		GetOverlayRecoverHandleOldTrap	; Get the actual value from the PCB
+				move.l	d0,a1							; and get it into an address register
+				movem.l	(sp)+,d0-d1/a0					; restore working registers
+				jmp		(a1)							; and do it
+				
+				ENDPROC
+					
+;---------------------------------------------------------------------------------------
+; pascal long ProcessMgr_GZProc_Glue(long cbNeeded)
+
+; The ROM memory manager keeps the "working zone" address in A6 wherever it
+; travels.  If our growzone changes the zone address (a unique experience!),
+; we must be sure to keep the memory manager up to date for the remainder of
+; his operation.  The A6 is (handily) on our caller's stack frame.  Yuck.
+; NOTE:  This is a massive hack!  Fix this if at all possible.
+; NOTE: This GZProc can be called from places other than the ROM CallGZProc (like our
+; own routine, HiNewHandle), so checking for SavedA6 == oldProcessMgrZone is required.
+;
+; Here are the regs saved by CallGZProc in Sources:OS:MemoryMgr:HeapGuts.a
+GZPROCREGS_SIZE		EQU		(14*4)						; d0-d1/d3-d7/a0-a6
+GZPROCREGS_A6OFFSET	EQU		(GZPROCREGS_SIZE-4)			; GZPROCREGS_SIZE up to a6
+
+; Here is how much we have on the stack when we need to access the saved a6
+OURTEMPSTACKUSAGE	EQU		16							; a couple regs, etc.
+
+; Here is how far we have to go from our stack pointer to the saved a6
+SavedA6				EQU		OURTEMPSTACKUSAGE + GZPROCREGS_A6OFFSET
+
+PROCESSMGR_GZPROC_GLUE	PROC	EXPORT
+				IMPORT	PROCESSMGRGZPROC:CODE
+				IMPORT	(oldProcessMgrZone, newProcessMgrZone):DATA
+				
+				move.l	a5,-(sp)						; save old a5
+				movea.l	ProcessMgrGlobals,a5			; set up our a5
+
+; clear the indicator of actual zone movement
+				clr.l	oldProcessMgrZone				; zero is impossible address
+
+; now call real grow zone procedure
+				clr.l	-(sp)							; clear out ret value
+				move.l	12(sp),-(sp)					; push arg again
+				jsr		PROCESSMGRGZPROC				; do it
+				move.l	(sp)+,12(sp)					; save ret val
+
+; did the zone header move?
+				tst.l	oldProcessMgrZone					; has oldProcessMgrZone been set?
+				beq.s	StackIsOK						; if not, branch
+
+; are we being called from the Memory Manager?	If so, fix up the a6 saved on the stack.			
+				move.l	SavedA6(sp),d0					; get a6 value on stack (welcome to system software)
+				cmp.l	oldProcessMgrZone,d0				; is the same as mem mgr zone ptr?
+				bne.s	StackIsOK						; if not, there is no fix to do
+				move.l	newProcessMgrZone,SavedA6(sp)		; give Memory Mgr a new a6
+StackIsOK
+				move.l	(sp)+,a5						; restore a5
+				move.l	(sp)+,a0						; get ret addr
+				addq.w	#4,sp							; skip argument
+				jmp		(a0)							; and return
+				
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_settrapaddress.  Our patch to SetTrapAddress.  Just calls our C function.
+a_settrapaddress	PROC	EXPORT
+
+				IMPORT	c_settrapaddress:CODE
+
+; WARNING:  This is dependent on new ROM trap dispatch routine (D1 has
+; no meaning on old ROMs)
+
+				move.l	d1,-(sp)						; pass the trap call
+				move.l	d0,-(sp)						; pass the trap number
+				move.l	a0,-(sp)						; pass the routine address
+				jsr		c_settrapaddress
+				lea		12(sp),sp						; get past my C parameters
+
+; Help out MS File by clearing d0 here.  They are about to call _BlockMove without
+; setting the top word of d0.
+				moveq.l	#noErr, d0						; clear this for MS File
+				rts
+				
+				ENDPROC
+				
+;---------------------------------------------------------------------------------------
+				IF (&TYPE('MM_DEBUG') <> 'UNDEFINED') THEN
+; CheckParam.  For memory manager debugging.  Checks that passed handle is valid.
+CheckParam		PROC
+				movem.l	d0-d7/a0-a6,-(sp)				; save work registers
+				move.l	a0,-(sp)						; push handle
+				jsr		CheckBadHandle					; check if bad
+				addq.w	#4,sp							; get rid of parameter
+				rts										; return
+				
+				ENDPROC
+				ENDIF
+
+;---------------------------------------------------------------------------------------
+; a_newhandle.  Our patch to NewHandle.  Specially prepares for allocations
+; from either the Process Mgr zone or the System zone.
+MIN_SYS_HEAP_FREE_SPACE	EQU		$2000
+
+a_newhandle		PROC	EXPORT
+
+				IMPORT	ProcessMgrHMakeMoreMasters:CODE
+				IMPORT	ProcessMgrZone:DATA, patchtraps:DATA
+SaveRegs		REG		d0-d1/d3
+
+; Check for needing more master pointers in the Process Mgr heap
+				movem.l	SaveRegs,-(sp)					; save work regs
+				movea.l	ProcessMgrGlobals,a0			; get address of our globals
+				exg		a0,a5							; a0 <- orig a5, a5 <- our a5
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.NEWHANDLE.oldtrap,d3		; d3 <- old _NewHandle routine
+				move.l	ProcessMgrZone,a5					; get Process Mgr zone
+				exg		a0,a5							; a5 <- orig a5, a0 <- ProcessMgrZone
+				move.l	TheZone,a1						; a1 <- TheZone
+				cmp.l	SysZone,a1						; is this the sys zone?
+				beq.s	DoSysCode						; if so, branch
+				btst	#10,d1							; is it sys heap override?
+				bne.s	DoSysCode						; if so, do sys heap handling
+				cmp.l	a1,a0							; is this the ProcessMgrZone?
+				bne.s	DoOldCode						; if not, branch
+			
+; Using Process Mgr zone.  Make sure our moreMasters routine is used.
+				move.l	hFstFree(a0),d0					; get next MP
+				bne.s	DoOldCode						; if not nil, branch
+				move.l	a5, -(sp)						; save a5
+				movea.l	ProcessMgrGlobals,a5			; get our a5 for intersegment call
+				jsr		ProcessMgrHMakeMoreMasters		; try for more masters
+				move.l	(sp)+, a5						; restore a5
+				tst.l	d0								; did we get them?
+				bpl.s	DoOldCode						; if so, branch
+NHErr
+				addq.w	#4,sp							; skip over old d0
+				move.l	(sp)+,d1						; restore d1
+				move.l	(sp)+,d3						; restore d3
+				rts
+			
+; getting memory from the system heap.  See if we should grow the zone right now.
+DoSysCode
+				move.l	SysZone,a0						; get the sys zone header
+				move.l	#MIN_SYS_HEAP_FREE_SPACE,d1		; get min free in d1
+				cmp.l	d0,d1							; is it smaller than min
+				bcc.s	GetMoreSpace					; if so, branch
+				move.l	d0,d1							; if not, substitute it
+GetMoreSpace
+				sub.l	zcbFree(a0),d1					; are there at least this many bytes free?
+				bls.s	MaybeEnoughRoom					; if so, branch
+			
+; requested size is greater than total free space, call the GZ proc, if any
+				move.l	gzProc(a0),d0					; get grow zone proc address
+				beq.s	DoOldCode						; can't call it if it doesn't exist!
+				movem.l	a0-a1/d3,-(sp)					; save still more work regs
+				subq.w	#4,sp							; save room for function result
+				move.l	d1,-(sp)						; push the desired handle size as bytes needed
+				movea.l	d0,a0							; put GZ proc address in address register
+				jsr		(a0)							; try to grow
+				addq.w	#4,sp							; trash function result
+				movem.l	(sp)+,a0-a1/d3					; restore still more work regs
+MaybeEnoughRoom
+DoOldCode
+				move.l	d3,a0							; a0 <- old _NewHandle routine
+				movem.l	(sp)+,SaveRegs					; restore work regs
+				jmp		(a0)							; tail recursion (if not from NHErr)
+				
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; Patch to HandleZone.  If handle is purged temp memory, return ProcessMgrZone directly.
+a_handlezone	PROC	EXPORT
+				IMPORT	ProcessMgrZone:DATA,patchtraps:DATA
+				IMPORT	InCurrTempMem:CODE
+
+; a0 == handle
+				move.l	a5,a1							; save current a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	a0,d0							; nil handle?
+				beq.s	CallOld							; if so, let memory manager give error
+				move.l	(a0),d0							; dereference it, check for purged
+				bne.s	CallOld							; if not purged, let memory manager find zone
+
+; handle is purged, must check for it in current temp memory
+				movem.l	d1/a0-a1,-(sp)					; save working registers
+				move.l	a0,-(sp)						; pass supposed handle (as HListElem)
+				jsr		InCurrTempMem					; try to locate it
+				addq.w	#4,sp							; dump stack param
+				tst.w	d0								; was handle really temp memory?
+				movem.l	(sp)+,d1/a0-a1					; restore working registers
+				bne.s	CallOld							; jump if block was not registered
+	
+; purged handle was ours, return ProcessMgrZone (d0 already equals noErr)
+				move.w	d0,MemErr						; agree in lomem
+				move.l	ProcessMgrZone,a0					; return our zone address
+				move.l	a1,a5							; restore old a5
+				rts
+
+; retrieve old trap address from table, and call it	
+CallOld
+				IF (&TYPE('MM_DEBUG') <> 'UNDEFINED') THEN
+				jsr		CheckParam						; ensure handle and MP lists OK
+				ENDIF
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.HANDLEZONE.oldtrap,-(sp)
+				move.l	a1,a5							; restore old a5
+				rts
+				
+				ENDPROC
+				
+;---------------------------------------------------------------------------------------
+; a_recoverhandle,  Our patch to RecoverHandle.  Make sure we find temp memory handles,
+; too.  Requires proper setting of TheZone, because real handle is determined by adding
+; it to the relative handle in the block header.  We try to find the pointer in temp
+; handle allocations for the current process and system.
+;  IN: a0 == Ptr
+; OUT: a0 = handle
+; NOTE: We must preserve caller's D0, since Inside Mac, volume II, page 35 says so.
+
+a_recoverhandle	PROC	EXPORT
+				IMPORT	patchtraps:DATA
+				IMPORT	RecoverCurrTempHdl:CODE
+SaveRegs		REG		d0-d1/a0-a1
+
+				move.l	a5,a1							; a1 <- orig a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.RECOVERHANDLE.oldtrap,-(sp)		; -(sp) <- old _NewHandle routine
+				movem.l	SaveRegs,-(sp)					; save working registers
+				move.l	a0,-(sp)						; pass supposed master pointer
+				jsr		RecoverCurrTempHdl				; try to locate it
+				addq.w	#4,sp							; dump stack param
+				move.l	d0,d2							; did we find it in temp memory?
+				movem.l	(sp)+,SaveRegs					; restore registers (CCs unchanged)
+				beq.s	Return							; return to old trap if block not known
+	
+; pointer was temp block, so no need to call old trap
+				movea.l	d2,a0							; put handle in output register
+				clr.w	MemErr							; set AOK lomem error code
+				addq.w	#4,sp							; dump old trap address
+Return
+				move.l	a1,a5							; a5 <- orig a5
+				rts
+				
+				ENDPROC
+				
+;---------------------------------------------------------------------------------------
+; a_reallochandle.  Our patch to ReallocHandle.  Make sure memory comes from correct
+; place.  If that's the system heap, call the growzone procedure if the free space
+; is getting low.  If the handle is Process Mgr temporary memory, use the ProcessMgrZone.
+; NOTE: Our save/restore of THEZONE assumes that the current zone is not ProcessMgrZone
+; if the handle is from temp memory, since call-through could change ProcessMgrZone.
+a_reallochandle	PROC	EXPORT
+
+				IMPORT	patchtraps:DATA, ProcessMgrZone:DATA
+				IMPORT	InCurrTempMem:CODE
+
+;  IN: a0 == handle, d0 == requested size, d1 == trap word
+; OUT: d0 == result code (long)
+				move.l	a5,a1							; a1 <- orig a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.REALLOCHANDLE.oldtrap,-(sp)		; -(sp) <- old _NewHandle routine
+				move.l	a1,a5							; a5 <- orig a5
+				move.l	SysZone,a1						; a1 <- TheZone
+				cmp.l	TheZone,a1						; is this the sys zone?
+				beq.s	DoSysCode						; if so, branch
+				btst	#10,d1							; is it sys heap override?
+				bne.s	DoSysCode						; if so, branch
+
+; Handle being reallocated from current heap.  Adjust THEZONE if the handle
+; was registered as Process Mgr temp memory for the current process.
+; NOTE: We could skip check if TheZone already equals ProcessMgrZone, but this
+; is unlikely since Process Mgr doesn't use purgeable blocks.
+				movem.l	d0-d1/a0/a5,-(sp)				; save working registers
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	a0,-(sp)						; pass supposed handle (as HListElem)
+				jsr		InCurrTempMem					; try to locate it
+				addq.w	#4,sp							; dump stack param
+				move.l	ProcessMgrZone,a1				; in case we need it
+				tst.w	d0								; was handle really temp memory?
+				movem.l	(sp)+,d0-d1/a0/a5				; restore working registers
+				bne.s	DoOldCode						; jump if block was not registered
+	
+; block was MF temp memory, switch zones around call
+				move.l	TheZone,-(sp)					; save current zone
+				move.l	a1,TheZone						; switch to ProcessMgrZone
+				move.l	4(sp),a1						; old trap address
+				jsr		(a1)							; call it
+				move.l	(sp)+,TheZone					; restore the zone
+				addq.w	#4,sp							; dump trap address
+				bra.s	ByeNow							; leave
+
+; getting memory from system heap
+DoSysCode
+				IF (&TYPE('MM_DEBUG') <> 'UNDEFINED') THEN
+				jsr		CheckParam						; ensure handle and MP lists OK
+				ENDIF
+				move.l	#MIN_SYS_HEAP_FREE_SPACE,d2		; get min free in d2
+				cmp.l	d0,d2							; is requested smaller than min
+				bcc.s	GetMoreSpace					; if so, branch
+				move.l	d0,d2							; if not, substitute it
+GetMoreSpace
+				sub.l	zcbFree(a1),d2					; are there at least this many bytes free?
+				bls.s	ProbablyEnoughRoom				; if so, branch
+				movem.l	d0-d1/a0,-(sp)					; save still more work regs
+				subq.w	#4,sp							; save room for function result
+				move.l	d2,-(sp)						; push the desired handle size as bytes needed
+				move.l	gzProc(a1),a1					; get grow zone proc address
+				jsr		(a1)							; try to grow
+				addq.w	#4,sp							; trash function result
+				movem.l	(sp)+,d0-d1/a0					; restore still more work regs
+ProbablyEnoughRoom
+
+DoOldCode
+				IF (&TYPE('MM_DEBUG') <> 'UNDEFINED') THEN
+				jsr		CheckParam						; ensure handle and MP lists OK
+				ENDIF
+ByeNow
+				rts
+				
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_disposhandle.  Our patch to DisposHandle.  If handle is temp memory, remove it
+; from the registry and switch to ProcessMgrZone around actual disposal.  Just make sure
+; the ProcessMgrZone doesn't end up with a master pointer from another heap in its free
+; list.  This would happen if someone disposed a purged handle, and we accidently
+; switched zones.  Tried to streamline the no-find case, because this trap is in even
+; when no temp memory is allocated.
+; NOTE: Getting an error while freeing a block we thought was temp mem is bad news.
+; It probably means the block was already freed, but by a process other than the
+; one that allocated it.  This should be relatively harmless, though.  What I am more
+; concerned about is that this sort of thing is happening, and that it may lead to
+; freeing a master pointer has since been reallocated.
+; FURTHER NOTE: We'll be lucky beyond belief if the Memory Manager is ever smart
+; enough to return error from DisposHandle.
+		
+				PROC
+				IMPORT	ProcessMgrZone:DATA,patchtraps:DATA
+				IMPORT	RemoveCurrTempMem:CODE
+				EXPORT	a_disposhandle:CODE
+
+a_disposhandle
+				move.l	a5,d0							; save current a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.DISPOSHANDLE.oldtrap,-(sp)
+				movem.l	d0-d1/a0,-(sp)				; save registers that might perish
+				move.l	a0,-(sp)						; pass supposed handle (as HListElem)
+				jsr		RemoveCurrTempMem				; try to deregister it
+				addq.w	#4,sp							; dump stack params
+				tst.w	d0								; was handle really temp memory?
+				movem.l	(sp)+,d0-d1/a0					; restore registers (no touch CC)
+				bne.s	NoSwitch						; jump if block wasn't registered
+			
+; awkward code only executed when freeing temporary memory
+; (sp) contains old trap address
+				move.l	TheZone,-(sp)					; push orig heap ptr
+				move.l	ProcessMgrZone,TheZone				; force into Process Mgr zone for good form
+				move.l	d0,a5							; restore a5
+				move.l	4(sp),a1						; get old trap address
+				jsr		(a1)							; call old trap
+				IF (&TYPE('DEBUG') <> 'UNDEFINED') THEN
+				cmp.w	#noErr,d0						; check result
+				beq.s	WentOK							; jump if no error
+				_Debugger								; block didn't dispose (registry bad??)
+				move.w	MemErr,d0						; restore condition codes
+WentOK
+				ENDIF
+				move.l	(sp)+,TheZone					; restore orig heap
+				addq.w	#4,sp							; dump old trap address
+				rts										; return to programmer
+
+NoSwitch
+				IF (&TYPE('MM_DEBUG') <> 'UNDEFINED') THEN
+				jsr		CheckParam						; ensure handle and MP lists OK
+				ENDIF
+				move.l	d0,a5							; restore a5
+				rts										; make old call w/o switching zones
+				
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_handtohand.  On numac ROM, put the synthesized fonts in the system heap.  We
+; detect them because the numac Font Mgr does a _HandToHand(FMOutHandle) into the app
+; heap to get the new font, and then does a _SetHandleSize to grow it to its final
+; immensity.
+; NOTE:  The zone save/restore below can only work if TheZone != ProcessMgrZone originally, since we
+; may cause the sys heap to grow.
+; NOTE:  Can't save/restore TheZone across call for all calls because _HandToHand is patched to
+; fix some CQD bug and of course it looks up the stack.
+;
+a_handtohand	PROC	EXPORT
+				IMPORT	patchtraps:DATA
+			
+				move.l	a5,d0							; d0 <- orig a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	patchtraps+RomAllPatchTable.Rom78Patches.HANDTOHAND.oldtrap,a1
+				move.l	d0,a5							; a5 <- orig a5
+			
+				cmp.l	FMgrOutRec+fmOutFontH,a0		; is it the orig strike?
+				bne.s	DoOldH2H						; if not, branch
+	
+HandleSynFont
+				move.l	TheZone,-(sp)					; save orig heap ptr on stack
+				move.l	SysZone,TheZone					; else force into sys zone
+				jsr		(a1)							; do it
+				move.l	(sp)+,TheZone					; restore orig heap
+				rts
+
+DoOldH2H
+				jmp		(a1)							; do it
+	
+	ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_open.  Our patch to the file system Open.  Several reasons for this:
+;		(1) If .Print, make sure the _Open goes thru IOCore
+;		(2) Check if the file name is the same as the clipboard name.  If so, then
+;			force vrefnum to be BootDrive.  This is done for MacPaint 1.5.  When
+;			1.5 goes away, so should this patch.
+;		(3) Call old routine
+;
+; NOTE:  Clean up register usage
+a_open			PROC	EXPORT
+				IMPORT	patchtraps:DATA
+				IMPORT	pCurrentProcess:DATA
+
+OpenPatchRegs	REG		d1/a0/a5						; trap word, param block, and a5
+SavedA0			EQU		4								; NOTE:  This depends on d1/a0/a5 on the stack!
+PrintSlotNo		EQU		2
+
+				movem.l	OpenPatchRegs,-(sp)				; save registers
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+	
+; check for print driver open
+				lea		printname,a1					; point at print name
+				move.l	ioFileName(a0),a0				; point at openee...
+				clr.l	d0
+				move.b	(a0)+,d0						; get length
+				swap	d0								; into high word
+				move.b	(a1)+,d0						; length into low word
+				_CmpString								; are they the same?
+				move.l	SavedA0(sp),a0					; restore a0 (doesn't change cond codes)
+				bne.s	NotDotPrint						; not .Print
+	
+; ah! the print driver IS being opened!
+				move.l	UTableBase,a1					; address of unit table
+				move.l	PrintSlotNo*4(a1),d0			; get the dce handle for .Print from fixed location
+				beq.s	CallOldOpen						; if none, no need to force permission
+				move.l	d0,a1							; get it back into an addr register
+				move.l	(a1),d0							; hdl -> ptr
+				beq.s	CallOldOpen						; if purged, no need to force permission
+				move.l	d0,a1							; get it back into an addr register
+				btst	#drvrActive,dCtlFlags+1(a1)		; is it active
+				bne.s	CallOldOpen						; if so, branch (don't force -- IOCore can't handle it)
+				move.b	#$40,ioPermssn(a0)				; set permissions to 40 to open again...
+				bra.s	CallOldOpen						; now call through
+
+; it's not the print driver, is it MacPaint opening the scrapbook file?
+NotDotPrint
+				move.l	pCurrentProcess,a1				; get current app ptr
+				move.l	8(a1),d0						; get current app's signature
+														; NOTE:  Assumes this offset correct in PEntry!
+				cmp.l	#'MPNT',d0						; is it MacPaint?
+				bne.s	CallOldOpen						; if not, restore regs and do normal trap
+				move.l	ioFileName(a0),a0				; get file name
+				lea		ScrapTag,a1						; get scrap file name
+				clr.l	d0
+				move.b	(a0),d0							; get length
+				swap	d0								; into high word
+				move.b	(a1),d0							; length into low word
+				_CmpString								; are they the same?
+				bne.s	CallOldOpen						; if not, don't change the refnum
+
+				move.l	SavedA0(sp),a0					; restore a0 pointing to iopb
+				IF (&TYPE('DEBUG') <> 'UNDEFINED') THEN
+; Check whether MacPaint 2.0 still needs the hack.  We officially no longer support 1.5
+; Added this check on 9 Oct 1990.
+				move.w	BootDrive, d0					; value of BootDrive
+				cmp.w	ioDrvNum(a0),d0					; already set to BootDrive??
+				beq.s	CallOldOpen						; if so, skip debugger message
+				pea		MacPaintMsg						; message to show
+				_DebugStr								; use power of suggestion on testers
+				ENDIF
+				move.w	BootDrive,ioDrvNum(a0)			; force boot drive to be vrefnum
+
+; All done fooling around, so get the darn thing open
+CallOldOpen
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.OPEN.oldtrap,a1
+				movem.l	(sp)+,OpenPatchRegs				; restore registers
+				jmp		(a1)							; jump down the patch chain
+
+				IF (&TYPE('DEBUG') <> 'UNDEFINED') THEN
+MacPaintMsg
+				dc.b	'This MacPaint still needs our fix (GO will be OK)'
+				ENDIF
+				
+printname
+				dc.b	'.Print'
+	
+				ENDPROC
+	
+;---------------------------------------------------------------------------------------
+; GetMapHdlFromRefNum. A utility routine (similar to GetMap() in ROM) that
+; searches the resource map chain whose topHandle is passed on the stack for the
+; refNum on stack. If it finds it, it returns with non-zero in D0.  It preserves
+; all registers except D0.  Its a C function in that it doesn't strip its parameters.
+;
+;	Handle GetMapHdlFromRefNum(short refNum, Handle topMapHdl)
+;
+
+GetMapHdlFromRefNum		PROC	EXPORT
+GetMapRegs		REG		a0/d1
+				moveq.l	#0,d0							; set default return value
+				movem.l	GetMapRegs,-(sp)				; save registers
+				move.w	14(sp),d1						; get ref num
+				bmi.s	DoneFindRef						; negative refnum means no maps open
+				bne.s	GotRefNum						; zero refnum means...
+				move.w	SysMap,d1						; ...change it to sys ref num
+GotRefNum
+				move.l	16(sp),d0						; get starting point
+				beq.s	DoneFindRef						; make sure we can start
+FindRefLoop
+				move.l	d0,a0							; put current suspect in a-reg
+				move.l	(a0),a0							; dereference handle to pointer
+				cmp.w	20(a0),d1						; does map refnum match target?
+				beq.s	DoneFindRef						; if so, we're done
+				move.l	16(a0),d0						; get link handle
+				bne.s	FindRefLoop						; if not nil, try again
+			
+DoneFindRef
+				movem.l	(sp)+,GetMapRegs				; restore registers
+				rts
+			
+				ENDPROC
+	
+;---------------------------------------------------------------------------------------
+; a_openrf.  OpenRF patch.  Override an opWrErr (file already open) if the file is
+; open in another process and the mapForceSysHeap bit is set in the resource map.
+
+a_openrf		PROC	EXPORT
+OpenRFPatchRegs	REG		a0-a1/a5/d1-d2
+				IMPORT	patchtraps:DATA
+				IMPORT	GetMapHdlFromRefNum:CODE
+				IMPORT	GetMapHdlInOtherChainFromRefNum:CODE
+				
+; call the original routine, leave immediately if it worked or error wasn't opWrErr
+				movea.l	ProcessMgrGlobals,a1			; get address of our globals
+				exg.l	a5,a1							; a5 <- our a5, a1 <- old a5
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.OPENRF.oldtrap,a5
+				exg.l	a5,a1							; a5 <- old a5, old trap addr
+				jsr		(a1)							; do old guy
+				beq.s	rf_done							; if no error, done
+				cmp.w	#opWrErr,d0						; is it being opened again?
+				bne.s	rf_done							; if some other error, done
+				
+; can't override if the file is open by the current fellow	
+				movem.l	OpenRFPatchRegs,-(sp)			; save working registers
+				move.l	TopMapHndl,-(sp)				; pass top most handle
+				moveq	#0,d0							; clear out top word
+				move.w	ioRefNum(a0),d0					; get ref num
+				move.l	d0,-(sp)						; and push on stack as C parameter
+				jsr		GetMapHdlFromRefNum
+				addq	#8,sp							; pop off topHandle, ref num
+				tst.l	d0								; find it?
+				bne.s	ORFLeaveErr						; if so, return error
+				
+; locate map in another process' chain, give error if not found
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.w	ioRefNum(a0),d0					; get ref num (we know d0 is 0 coming in here)
+				move.l	d0,-(sp)						; push ref num
+				jsr		GetMapHdlInOtherChainFromRefNum
+				addq	#4,sp							; ditch argument
+				tst.l	d0								; is it in other chain?
+				beq.s	ORFLeaveErr						; if not, branch
+				
+; finally, check whether others' map allows sharing (d0 = maphandle)
+				move.l	d0,a0							; get hdl into address register
+				moveq	#0,d0							; clear out return code
+				move.l	(a0),a0							; hdl -> ptr
+				btst.b	#mapForceSysHeap,MAttr(a0)		; is sharing bit set?
+				beq.s	ORFLeaveErr						; if not, leave with original error
+
+; now, fix up HFS's table so ExitToShell by app that originally opened the file will not
+; close the FCB out from under the other users of the file.  That is, untag the FCB in
+; the parallel array.
+
+				movea.l	8(sp),a0						; <16> get iopb
+				move.l	ioFDirIndex(a0),-(sp)			; <16> GetParallelFCB uses ioMisc
+				_GetParallelFCBFromRefNum				; <16> Get the parallel FCB
+				bnz.s	ORFRestore						; <16> Bad refnum, bail out
+				move.l	ioFDirIndex(a0),a1				; <16> Get pointer to it
+				clr.l	(a1)+							; <16> clear high long of PSN
+				clr.l	(a1)+							; <16> clear low long of PSN
+				move.l	(sp)+,ioFDirIndex(a0)			; <16> Restore ioMisc
+				bra.s	ORFRestore						; <16> if so, branch (zero out error)
+ORFLeaveErr
+				moveq	#opWrErr,d0						; return original error
+ORFRestore
+				movem.l	(sp)+,OpenRFPatchRegs			; restore working registers
+rf_done
+				rts
+
+				ENDPROC
+	
+;---------------------------------------------------------------------------------------
+; a_close.  Our patch to file system Close.  Keeps shared files from being closed out
+; from under the other apps resource chain.
+; Implemented by scanning the resource map chains in all active partitions for the
+; refNum.  If we find it and the file is a "Process Mgr compatible print driver", we
+; don't close the file.
+a_close			PROC	EXPORT
+ClosePatchRegs	REG		d1-d3/a0-a2
+
+				IMPORT	patchtraps:DATA
+				IMPORT	GetMapHdlInOtherChainFromRefNum:CODE
+				
+				movem.l	ClosePatchRegs,-(sp)			; save working registers
+				
+				move.l	a5,a2							; a2 <- old a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.CLOSE.oldtrap,d3
+
+; do even try if call is async.  Our structures are not safe, and it is not even necessary
+; to check, since the print drivers are always closed synchronously.
+				andi.w	#async,d1						; is this an asynchronous call?
+				bne.s	ReallyClose						; if so, just let it go
+
+; check for "Process Mgr compatible print driver"			
+				move.w	ioRefNum(a0),d0					; get ref num
+				bmi.s	ReallyClose						; if driver, branch
+				
+				ext.l	d0								; clear out high word
+				move.l	d0,-(sp)						; push ref num
+				jsr		GetMapHdlInOtherChainFromRefNum	; file open elsewhere, too?
+				addq	#4,sp							; ditch argument
+				tst.l	d0								; well, is it?
+				beq.s	ReallyClose						; if not, branch	
+				move.l	d0,a0							; get in address register
+				move.l	(a0),a0							; hdl -> ptr
+				btst.b	#mapForceSysHeap,MAttr(a0)		; is sharing bit set?
+				bne.s	DontReallyClose					; if so, branch
+				
+ReallyClose
+				move.l	d3,d0							; d0 <- old trap addr
+				movea.l	a2,a5							; a5 <- old a5
+				movem.l	(sp)+,ClosePatchRegs			; restore working registers
+				move.l	d0,-(sp)						; push old trap address
+				rts
+				
+DontReallyClose
+				move.l	a2,a5							; a5 <- old a5
+				movem.l	(sp)+,ClosePatchRegs			; restore working registers
+				moveq	#noErr,d0						; everything a-ok
+				rts
+				
+				ENDPROC
+				
+;---------------------------------------------------------------------------------------
+; a_hfsdispatch.  Patch CloseWD to not close the WD if it is the one the application was
+; launched into.  Patch GetVol, GetVolInfo, and HFSDispatch to compensate for bug in 
+; the Mac SE HFS that checks ioNamePtr for validity against MemTop.  This part of the 
+; patch should be in the system, and for SEs only.
+
+				PROC
+
+				IMPORT	(patchtraps, initMemTop):DATA
+				IMPORT	CHECKIFBACKINGWD:CODE
+				
+				EXPORT	a_hfsdispatch, a_getvol, a_getvolinfo:CODE
+				
+HFSPatchRegs	REG		d0-d2/a0/a5
+a_getvol
+				move	#RomAllPatchTable.Rom75Patches.GETVOL.oldtrap,d2
+				bra.s	DoOldCall						; call through
+				
+a_getvolinfo
+				move	#RomAllPatchTable.Rom75Patches.GETVOLINFO.oldtrap,d2
+				bra.s	DoOldCall						; call through
+
+a_hfsdispatch
+				move	#RomAllPatchTable.Rom75Patches.HFSDISPATCH.oldtrap,d2
+				cmpi.w	#2,d0							; is call _CloseWD?
+				beq.s	HandleCloseWD					; if so, branch
+
+; call through to the original trap address
+DoOldCall
+				move.l	a5,a1							; a1 <- old a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	MemTop, -(sp)					; save current memtop
+				move.l	initMemTop, MemTop				; this is high enough
+				lea		patchtraps, a5					; get patch array address
+				move.l	(a5,d2.w),a5					; get old routine
+				exg.l	a1,a5							; restore a5, a1 <- old trap
+
+	if	(PsychicTV) then
+				move.l	a2,-(sp)						; <19>
+	endif
+				jsr		(a1)							; call old trap
+
+	if	(PsychicTV) then
+				move.l	(sp)+,a2						; <19>
+	endif
+
+				move.l	(sp)+,MemTop					; restore memtop
+				rts										; and return to it
+
+; it IS _CloseWD, so make our check
+; NOTE: For awhile this code return fBsyErr in the error case.   Unfortunately, the
+; released version of the TOPS application actually has an assert that the ioResult
+; of CloseWD is noErr.  We roll over on this one, since seeing an error is of little
+; value here anyway (what can the caller do to recover?).
+HandleCloseWD
+				movem.l	HFSPatchRegs,-(sp)				; save registers
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				subq.w	#2,sp							; make room for ret val
+				move.w	ioVRefNum(a0),-(sp)				; pass the wd refnum
+				jsr		CHECKIFBACKINGWD				; can't close this one
+				tst.b	(sp)+							; check if uncloseable
+				movem.l	(sp)+,HFSPatchRegs				; restore regs
+				beq.s	DoOldCall						; if not, branch
+ 				moveq.l	#noErr,d0						; say it worked
+				move.w	d0,ioResult(a0)					; and here too
+				rts
+
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; Volume notification.  These patches take care of notifying our list of registered
+; volume aficionados.  We patch MountVol, Eject, Offline, and UnmountVol.  The patches
+; use identical stacks so they can share the exit and error paths.
+;---------------------------------------------------------------------------------------
+				PROC
+
+				EXPORT	a_mountvol, a_eject, a_offline, a_unmountvol:CODE
+				IMPORT	NotifyVolumeGoodbye, NotifyVolumeAction:CODE
+				IMPORT	patchtraps:DATA
+
+; Get the real refnum here by calling _GetVolInfo.  We have to use a new param block
+; because although _UnmountVol theoretically requires the same param block size as
+; _GetVolInfo, it is possible to get away with illegally sending a shorter block to
+; _Unmount, as it does not read or modify the fields at higher offsets.  It is not known
+; whether any apps do this, but if we can hypothesize about such a violation then some
+; app has done it.  If GetVolInfo returns an error we return -1.
+;
+; On entry:		a0 points to HFS volume parameter block
+; On exit:		d0 = error code, d1 = vrefnum or -1, CC = tst.w d0
+; Eats:			a0, a4, d0, d1
+GetRealRefNum
+				lea		-ioVQElSize(sp),sp				; save room for new iopb
+				move.w	#-1,ioVolIndex(sp)				; meaning: use name and vrefnum
+				moveq.l	#0,d1							; assume no file name
+				move.l	ioFileName(a0),ioFileName(sp)	; use same name
+				beq.s	@0								; if none, branch
+				move.l	ioFileName(a0),a4				; get (good) name ptr
+				move.b	(a4),d1							; save length
+@0
+				move.w	ioVRefnum(a0),ioVRefnum(sp)		; use same vrefnum
+				move.l	sp,a0							; point a0 to new block
+				_GetVolInfo								; get info
+				bmi.s	Error							; if err, branch
+				tst.b	d1								; was there a (non-zero) file name?
+				beq.s	@1								; if not, branch
+				move.b	d1,(a4)							; otherwise, restore correct length
+@1
+				moveq	#0,d1							; clear d1
+				move.w	ioVRefNum(sp),d1				; get "real" vrefnum in d1
+doneExit
+				tst.w	d0								; restore condition codes
+				lea		ioVQElSize(sp),sp				; restore room from new iopb
+				rts
+
+Error
+				moveq	#-1,d1							; give impossible refnum
+				bra.s	doneExit						; and return
+	
+; a_mountvol.  A patch to _MountVol so that we notify the interested parties.
+; NOTE: Special-cases the volOnLinErr error, since this is what happens for AppleShare
+; volumes (MountVol is called via diskinserted event AFTER VCB as been created).
+a_mountvol
+				move.l	a5,a1							; save a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.MOUNTVOL.oldtrap,a5		; get old _MountVol routine
+				exg.l	a1,a5							; a1 = trap address, a5 = olda5	
+				move.l	a0,-(sp)						; save param block
+				jsr		(a1)							; mount that volume!
+				move.l	(sp)+,a0						; retrieve param block
+				move.w	d0,d0							; test OSErr result
+				beq.s	mounted							; jump if mounted
+				cmp		#volOnLinErr,d0					; is it an acceptable error?
+				bne.s	leave							; jump if drive failed to mount
+
+; mount worked, try to inform everyone
+mounted
+				moveq	#VNMounted,d1					; get notification code
+				moveq	#0,d2							; clear the air
+				move.w	ioVRefNum(a0),d2				; get refnum
+				bra.s	haveRefNum						; continue
+
+; d0 == result of trap
+haveNotice
+				move.l	(sp)+,d2						; get vrefnum again
+				bmi.s	leave							; jump if vrefnum not known
+haveRefNum
+				move.l	d0,-(sp)						; save result
+				move.l	a5,-(sp)						; save a5 again
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				pea		$0								; push nil for stopper
+				move.l	d0,-(sp)						; push result
+				move.l	d1,-(sp)						; push notice
+				move.l	d2,-(sp)						; pass refnum as a param to the C routine
+				jsr		NotifyVolumeAction				; notify everyone of the result
+				lea		16(sp),sp						; get rid of C params
+			
+				move.l	(sp)+,a5						; restore a5 again
+				move.l	(sp)+,d0						; get result
+leave
+				rts
+
+SaveNotifyRegs	REG		d1-d3/a0/a4/a5
+
+; a_offline.  Our patch to _Offline sends out notification before and after the trap.
+a_offline
+				movem.l	SaveNotifyRegs,-(sp)			; save regs we'll use
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.OFFLINE.oldtrap,d3		; get old _Offline routine
+				bra.s	shareOfflineEject
+
+; a_eject.  Our patch to _Eject sends out notification before and after the trap (note
+; that we can send no notification if the volume has already been unmounted, but then
+; we shouldn't have to!).
+a_eject
+				movem.l	SaveNotifyRegs,-(sp)			; save regs we'll use
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.EJECT.oldtrap,d3		; get old _Offline routine
+
+shareOfflineEject
+				jsr		GetRealRefNum					; get the real vrefnum in d1
+				bmi.s	doOldCall1						; jump if error
+	
+; send out notification of intent
+				move.l	d1,-(sp)						; save refnum for later
+				clr.l	-(sp)							; pass false for forced parameter
+				moveq	#VNOffline,d0					; secondary notice if aborted
+				move.l	d0,-(sp)						; push it
+				moveq	#VNAboutToGoOffline,d0			; primary notice to send
+				move.l	d0,-(sp)						; push it
+				move.l	d1,-(sp)						; pass refnum as a param to the C routine
+				jsr		NotifyVolumeGoodbye				; let everyone know
+				lea		16(sp),sp						; get rid of C params
+				move.l	(sp)+,d1						; get refnum back
+				move.w	d0,d0							; test OSErr result
+				bne.s	allDone							; jump if someone complained
+			
+; got the high sign
+doOldCall1
+				move.l	d1,d0							; copy refnum to safe reg
+				move.l	d3,a1							; get trap address
+				movem.l	(sp)+,SaveNotifyRegs			; restore regs we used
+				move.l	d0,-(sp)						; save refnum
+				jsr		(a1)							; do old routine
+
+; send out the result notification
+				moveq	#VNOffline,d1					; notification code
+				bra.s	haveNotice						; share code
+
+; unusual exit
+allDone
+				movem.l	(sp)+,SaveNotifyRegs			; restore trap word, iopb ptr, scratch addr reg, old a5
+				bra.s	leave							; use common exit
+	
+; _UnmountVol.  Our patch to _UnmountVol sends out notification before and after the
+; actual unmount.
+a_unmountvol
+				movem.l	SaveNotifyRegs,-(sp)			; save regs we'll use
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				
+				btst	#HFSBit,d1						; is this _Unmount forced?
+				sne		d3								; save answer for later parameter
+				jsr		GetRealRefNum					; get the real vrefnum in d1
+				bmi.s	doOldCall2						; jump if error
+	
+; send out notification of intent
+				move.l	d1,-(sp)						; save refnum for later
+				move.l	d3,-(sp)						; say whether goodbye is forced
+				moveq	#VNUnmount,d0					; secondary notice if aborted
+				move.l	d0,-(sp)						; push it
+				moveq	#VNAboutToUnmount,d0			; primary notice to send
+				move.l	d0,-(sp)						; push it
+				move.l	d1,-(sp)						; pass refnum as a param to the C routine
+				jsr		NotifyVolumeGoodbye				; let everyone know
+				lea		16(sp),sp						; get rid of C params
+				move.l	(sp)+,d1						; get refnum back
+				move.w	d0,d0							; test OSErr result
+				bne.s	allDone							; jump if someone complained
+
+; got the high sign to unmount
+doOldCall2
+				move.l	d1,d0							; copy refnum to safe reg
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.UNMOUNTVOL.oldtrap,a1		; get old _UnmountVol routine
+				movem.l	(sp)+,SaveNotifyRegs			; restore regs we used
+				move.l	d0,-(sp)						; save refnum
+				jsr		(a1)							; do old routine
+
+; send out the result notifications
+				moveq	#VNUnmount,d1					; notification code
+				bra		haveNotice						; share code
+	
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_getscrap.  Prevent call-through and return memFullErr if the current SCRAPINFO is
+; not valid for the current process.  Use our handy C routine since it can look better
+; at the structures.
+a_getscrap		PROC	EXPORT
+				IMPORT	IsScrapOwnedByCurrentProcess:CODE
+				IMPORT	patchtraps:DATA
+GETSCRAPPARAMSIZE	EQU		(3*4)
+
+				move.l	a5,-(sp)						; save callers a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				jsr		IsScrapOwnedByCurrentProcess	; ask C routine what to do
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.GETSCRAP.oldtrap,a0
+				movea.l	(sp)+,a5						; restore caller's a5
+				tst.w	d0								; check Boolean result
+				bne.s	CallThrough						; jump if scrap OK to get
+
+DontCallThrough
+				movea.l	(sp)+,a0						; get return address
+				lea		GETSCRAPPARAMSIZE(sp),sp		; dump params
+				move.l	#memFullErr,(sp)				; set OSErr function result
+CallThrough
+				jmp		(a0)							; return to caller
+				
+				ENDPROC
+				
+;---------------------------------------------------------------------------------------
+; a_zeroscrap and a_putscrap.  Increment global counter so that next foreground switch
+; will cause scrap to migrate to new front app.  We call DisposeOrphanedScrap since the
+; orphaned scrap will no longer be needed (the caller is building a new scrap).
+				PROC
+
+				EXPORT	a_zeroscrap, a_putscrap:CODE
+				IMPORT	(patchtraps, cutCopyCount):DATA
+				IMPORT	DisposeOrphanedScrap:CODE
+
+a_zeroscrap
+				move.w	#RomAllPatchTable.Rom75Patches.ZEROSCRAP.oldtrap,d0
+				bra.s	shareInc						; share code
+
+a_putscrap
+				move.w	#RomAllPatchTable.Rom75Patches.PUTSCRAP.oldtrap,d0
+shareInc
+				move.l	a5,a1							; save a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				lea		patchtraps,a0					; get patch array address
+				move.l	(a0,d0.w),-(sp)					; push old routine for later RTS
+				move.l	a1,-(sp)						; save old a5 across call
+				addq.w	#1,cutCopyCount					; inc word-sized counter (overflow OK)
+				jsr		DisposeOrphanedScrap			; orphaned scrap is no longer needed
+				movea.l	(sp)+,a5						; restore a5
+				rts										; return to original trap
+
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_pack3.  Patch StandardFile to sneak in a puppet string file specification.			
+a_pack3			PROC	EXPORT
+				IMPORT	IsForcedOpen:CODE
+				IMPORT	patchtraps:DATA
+
+; Offsets from selector param to given param in _SFGetFile (_SFPGetFile must add 6)
+OFFSET_SFREPLY		EQU		0
+OFFSET_DLGHOOK		EQU		4
+OFFSET_TYPELIST		EQU		8
+OFFSET_NUMTYPES		EQU		12
+OFFSET_FILEFILTER	EQU		14
+
+SF_PARAMS_LEN		EQU		28							; size of parameters for SFGetFile
+SFP_PARAMS_LEN		EQU		34							; size of parameters for SFPGetFile
+
+				move.w	4(sp),d0						; get routine selector
+				cmp.w	#sfGetFile,d0					; is it _SFGetFile?
+				beq.s	CheckSFGetFile					; if so, branch
+				cmp.w	#sfPGetFile,d0					; is it _SFGetFile?
+				bne.s	NormalPack3						; if not, jump to old
+
+				lea		6+4(sp),a0						; point past ret addr, selector, and extra param
+				move.w	(a0)+,d0						; get the dialog res ID
+				ext.l	d0								; and make it a long for C call
+				move.w	#SFP_PARAMS_LEN,-(sp)			; put length of params on stack
+				bra.s	CheckBothGetFiles				; and branch to merge point
+
+CheckSFGetFile
+				lea		6(sp),a0						; point past ret addr and selector
+				move.w	#SF_PARAMS_LEN,-(sp)			; put length of params on stack
+				move.l	#getDlgID,d0					; just use standard dialog res ID
+CheckBothGetFiles
+				move.l	d0,-(sp)						; push the dialog ID
+				move.l	OFFSET_SFREPLY(a0),-(sp)		; push pSFReply
+				move.l	OFFSET_TYPELIST(a0),-(sp)		; push sfTypeList
+				move.l	OFFSET_DLGHOOK(a0),-(sp)		; push dlgHook
+				move.w	OFFSET_NUMTYPES(a0),d0			; get numTypes
+				ext.l	d0								; extend numTypes
+				move.l	d0,-(sp)						; push extended numTypes
+				move.l	OFFSET_FILEFILTER(a0),-(sp)		; push fileFilterFnc
+				jsr		IsForcedOpen					; check if we should force the result
+
+; NOTE:  register d2 is still valid here because the above is a C routine
+				lea		24(sp),sp						; ditch the params
+				move.w	(sp)+,d2						; get the size passed to this guy back into d2
+				tst.b	d0								; is it forced open?
+				beq.s	NormalPack3						; if not, jump to old
+				move.l	(sp)+,a0						; grab the ret addr
+				add.w	d2,sp							; ditch the args (d2 holds size of them)
+				jmp		(a0)							; and return
+
+; False alarm.  Call the old trap.
+NormalPack3
+				move.l	a5,a0							; save old a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.PACK3.oldtrap,a1	; get old trap routine
+				exg.l	a0,a5							; a5 <- old a5
+				jmp		(a1)							; and go do it
+				
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_drawmenubar.  Patch to make sure that the menu is only drawn by the foreground
+; application, or the application coming to the foreground.
+CS_GENERATE_DEACTIVATE1			EQU		3
+CS_GENERATE_DEACTIVATE2			EQU		4
+a_drawmenubar	PROC		EXPORT
+				IMPORT	(patchtraps, pCurrentProcess, pFrontProcess, coercionState):DATA
+
+				move.l	a5,a0							; save a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	pCurrentProcess, d0				; pointer to PEntry of current process
+				cmp.l	pFrontProcess, d0				; is current same as front?
+				bne.s	DontCallOld						; if not, we can't do it!
+				move.w	coercionState, d0				; get global coercion state
+				cmp.w	#CS_GENERATE_DEACTIVATE1, d0	; are we deactivating?
+				beq.s	DontCallOld
+				cmp.w	#CS_GENERATE_DEACTIVATE2, d0	; are we deactivating?
+				beq.s	DontCallOld
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.DRAWMENUBAR.oldtrap,-(sp)	; get old trap routine
+DontCallOld
+				movea.l	a0,a5							; restore a5
+				rts										; return
+			
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_postevent.  Our patch to PostEvent to catch users trying to break from the current
+; application.  The two possibilities are high-level debugger and the ExitToShell.
+ESC_KEYCODE			EQU		$35
+BACKTICK_KEYCODE	EQU		$32
+a_postevent		PROC	EXPORT
+				IMPORT	(patchtraps, pCurrentProcess, pDebugProcess, debugControlKeyCode, debugKeyTryCount, MachineHasMacPlusKbd):DATA
+
+				move.l	a5,d2							; save old a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.POSTEVENT.oldtrap,a1	; get old trap routine
+
+; look for keydown event with specific modifier combo
+				cmp.w	#keyDwnEvt,a0					; is it really a keydown?
+				bne.s	CallOldTrap						; if not, branch
+                btst.b	#7,KeyMap+6						; check for cmd key
+				beq.s	CallOldTrap						; if not down, branch
+                btst.b	#2,KeyMap+7						; check for option key
+				beq.s	CallOldTrap						; if not down, branch
+
+; we're close… is it the "break" key?
+				move.l	d0,-(sp)						; save old d0 on stack
+				lsr.w	#8,d0							; put key code in lowest byte
+				tst.w	MachineHasMacPlusKbd			; older keyboard?
+				bne.s	NotADB							; jump if so (it can't have escape key)
+				cmp.b	#ESC_KEYCODE,d0					; is this the right key?
+				bne.s	NotBreakKey						; if not, branch
+KillCurrentProcess
+				tst.l	pCurrentProcess					; is there an app running?
+				beq.s	FixStackAndGoOlds				; if not, branch
+
+; SysError handler is not re-entrant, so we must prevent it
+				move.b	MacJmpFlag,d1					; get possible debugger flag word
+				cmp.b	#UNIMP,d1						; is this an implemented flag byte?
+				bne.s	HaveFlags						; if so, use it
+				move.b	MacJmp,d1						; else, use traditional flag
+HaveFlags
+				btst	#7,d1							; already in?
+				bne.s	FixStackAndGoOlds				; if so, ignore this key
+
+; make sure foreground process is alert enough to remove the confirmation dialog
+				subq.l	#8,sp							; allocate storage
+				clr.w	-(sp)							; allocate OSErr result
+				pea		2(sp)							; push address of PSN
+				_GetFrontProcess						; find out who's singing
+				move.w	(sp),d0							; anyone?
+				bne.s	DoneWaking						; jump if error
+				pea		2(sp)							; push address of PSN
+				_WakeupProcess							; roust the front process
+DoneWaking
+				add.l	#10,sp							; clean up the parms
+
+; confirm our emergency cleanup with the user
+				move.l	d2,(sp)							; save old a5 on stack (where d0 was)
+				move.l	#dsForcedQuit,d0				; call SysError to confirm the kill
+				_SysError
+
+; shared exit when SysError was called
+AfterSysError
+				moveq	#evtNotEnb,d0					; tell caller no event was posted!
+				move.l	(sp)+,a5						; get old a5 back
+				rts										; and return w/out ever calling old routine
+
+; shared exit when false alarm, just call the old trap
+FixStackAndGoOlds				
+				move.l	(sp)+,d0						; restore d0
+CallOldTrap
+				move.l	d2,a5							; a5 <- old a5
+				jmp		(a1)							; go do it
+
+; using older keyboard without escape key, so check for alternate key
+NotADB
+				cmp.b	#BACKTICK_KEYCODE,d0			; is it the right key?
+				beq.s	KillCurrentProcess				; jump if so
+
+; is it the debugger key?
+NotBreakKey
+				tst.l	pDebugProcess					; does debugger exist?
+				beq.s	FixStackAndGoOlds				; if not, debugControlKeyCode is invalid 
+				cmp.b	debugControlKeyCode,d0			; is this the right key?
+				bne.s	FixStackAndGoOlds				; if not, branch
+				add.w	#1,debugKeyTryCount				; bump key counter
+				ble.s	FixStackAndGoOlds				; if hit 1 then we can't get in from _WNE
+
+				moveq	#-1,d0
+				move.w	d0,debugKeyTryCount				; reset it to -1
+				move.l	d2,(sp)							; save old a5 on stack (where d0 was)
+				moveq.l	#enterDebugger,d0				; call SysError to enter debugger
+				_SysError
+				bra.s	AfterSysError					; share code
+				
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_launch.  Our patch to Launch.  Just calls the C routine.
+; NOTE: The C routine ios 
+a_launch		PROC	EXPORT
+
+				IMPORT	C_LAUNCH:CODE
+				
+				clr.l	-(sp)							; allocate return storage
+				move.l	a0,-(sp)						; pass c_launch the pointer
+				jsr		C_LAUNCH						; call the C routine
+				move.l	(sp)+,d0						; put result in output register
+				rts
+	
+				ENDPROC
+
+				SEG		'kernel_segment'
+
+;---------------------------------------------------------------------------------------
+; a_exittoshell.  Glue to call C routine, but using our own stack.
+a_exittoshell	PROC	EXPORT
+				IMPORT	BeginKernelStack, C_EXITTOSHELL:CODE
+					
+				move.l	a5,d1							; save current a5
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+				jsr		BeginKernelStack				; switch to our stack
+				movea.l	d1,a5							; restore a5 for C routine to use
+				jsr		C_EXITTOSHELL					; make call that don't come back!
+				move.l	#dsLoadErr,d0					; oh no!
+				_SysError								; we returned from ExitToShell!!
+				rts
+				
+				ENDPROC
+
+				SEG		'Main'
+
+;---------------------------------------------------------------------------------------
+; a_osreserved.  Implement the do-nothing trap.  Here for future use/removal.
+a_osreserved	PROC	EXPORT
+				rts
+
+				ENDPROC
+		
+;---------------------------------------------------------------------------------------
+; a_wakeup.  Our patch to Wakeup.  Just calls the C routine.
+a_wakeup		PROC	EXPORT
+
+				IMPORT	c_Wakeup:CODE
+				
+				move.l	d0,-(sp)						; pass c_Wakeup the pid
+				jsr		c_Wakeup						; call the C routine
+				addq.w	#4,sp							; get past my C parameter
+				rts
+	
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; MyPrefixRelString.  Glue to call RelString and make it appear that the second
+; string is the same length as the first string.
+; The C prototype is:
+;
+;		short MyPrefixRelString(StringPtr pStr1, StringPtr pStr2);
+;
+MyPrefixRelString		PROC	EXPORT
+				move.l	4(sp),a0						; get first string in a0
+				move.l	8(sp),a1						; get second string in a1
+				moveq.l	#0,d0							; clear out d0
+				move.b	(a0),d0							; d0.w <- length of first string
+				swap	d0
+				move.b	(a0)+,d0						; d0.w <- length of first string
+				addq.w	#1,a1							; pass by length byte of str2 
+				_RelString								; call it
+				rts										; return value already in d0
+				
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; MyRelString.  Glue to call RelString since args are in registers.
+; The C prototype is:
+;
+;		short MyRelString(StringPtr pStr1, StringPtr pStr2);
+;
+MyRelString		PROC	EXPORT
+				move.l	4(sp),a0						; get first string in a0
+				move.l	8(sp),a1						; get second string in a1
+				moveq.l	#0,d0							; clear out d0
+				move.b	(a0)+,d0						; d0.w <- length of first string
+				swap	d0
+				move.b	(a1)+,d0						; d0.w <- length of second string
+				_RelString								; call it
+				rts										; return value already in d0
+				
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_checkload.  Catch CheckLoad before entry and force all system resources into the
+; system heap by setting the ResSysHeap bit.
+; NOTE: An improvement here would be to have the CheckLoad patch just set & restore
+; THEZONE = SYSZONE around calling through to the original CheckLoad.  This way you
+; could avoid setting and hiding attribute bits.  It is rumored that system pieces
+; besides the Resource Mgr use the resSysHeap bit to figure out whether the resource is
+; in the system heap.  Haven't seen it myself.  RsrcZoneInit does it, but RsrcZoneInit
+; is not called under Process Mgr.
+; Input :	a2 = pointer to resource entry
+;			a4 = handle to resource map
+; Eats a0
+
+; <14> This macro is here because including ResourceMgrPriv.a confuses
+;		a lot of things.
+
+				Macro
+				_IsThisASystemResourceMap
+					selectIsThisASystemResourceMap:	equ	-1
+					DoDispatch	_ResourceDispatch,selectIsThisASystemResourceMap
+				EndM
+				
+a_checkload		PROC	EXPORT
+				EXPORT	SetOldCheckLoad:CODE
+
+				subq	#2,sp
+				move.l	a4,-(sp)
+				_IsThisASystemResourceMap				; Is this the system map or system override?
+				tst.b	(sp)+
+				bne.s	system_rsrc						; if so, branch
+				move.l	(a4),a0							; a0 <- ptr to map
+				btst.b	#mapForceSysHeap,MAttr(a0)		; should all entries in map go in system heap?
+				beq.s	jumptoold						; if not, branch
+system_rsrc
+				bset	#ResSysHeap,RAttr(a2)			; get into the system heap (and stay there!)
+				bne.s	jumptoold						; branch if was already set
+				bset	#ResSysRef,RAttr(a2)			; mark that shouldn't be permanent
+jumptoold
+				move.l	old_checkload,-(sp)				; get address of old routine
+				rts										; and go there
+				
+old_checkload	dc.l	0								; address of old CheckLoad vector
+
+; SetOldCheckLoad.  Save the specified value as the chain address of CheckLoad.
+; I think this is just to save loading A5 to look in the patchtraps table.  Brilliant!
+SetOldCheckLoad
+				lea		old_checkload,a0
+				move.l	4(sp),(a0)						; parameter is address of old checkload
+				rts
+				
+				ENDPROC
+	
+;---------------------------------------------------------------------------------------
+; These routines have been moved out of rsrc_common to allow for their reentrancy,
+; which is mandated by the MPW shell, which can get a grow zone request in
+; _UpdateResFile, which might cause it to call _OpenResFile, which leads to
+; _UpdateResFile.  Although this is really an MPW bug, they claim it's the
+; cornerstone of their memory management.  Hmmm...
+				
+; a_updateresfile.  Call the patch written in C.
+a_updateresfile	PROC	EXPORT
+				IMPORT	C_UPDATERESFILE:CODE
+				
+				movem.l	d0-d2/a1,-(sp)					; save regs
+				move.w	20(sp),-(sp)					; push the refnum
+				jsr		C_UPDATERESFILE					; do it
+				movem.l	(sp)+,d0-d2/a1					; restore regs
+				move.l	(sp)+,a0						; get ret addr
+				addq.w	#2,sp							; get rid of refnum
+				jmp		(a0)							; and return
+				
+				ENDPROC
+
+; a_getresattrs.  Call the patch written in C.
+a_getresattrs	PROC	EXPORT
+				IMPORT	C_GETRESATTRS:CODE
+				
+				movem.l	d0-d2/a1,-(sp)					; save regs
+				subq.w	#2,sp							; make room for the result
+				move.l	22(sp),-(sp)					; push the handle
+				jsr		C_GETRESATTRS					; do it
+				move.w	(sp)+,24(sp)					; set real ret val from ours
+				movem.l	(sp)+,d0-d2/a1					; restore regs
+				move.l	(sp)+,a0						; get ret addr
+				addq.w	#4,sp							; get rid of handle
+				jmp		(a0)							; and return
+				
+				ENDPROC
+
+; a_releaseresource.  Call the patch written in C.
+a_releaseresource	PROC	EXPORT
+				IMPORT	C_RELEASERESOURCE:CODE
+				
+				movem.l	d0-d2/a1,-(sp)					; save regs
+				move.l	20(sp),-(sp)					; push the handle
+				jsr		C_RELEASERESOURCE				; do it
+				movem.l	(sp)+,d0-d2/a1					; restore regs
+				move.l	(sp)+,a0						; get ret addr
+				addq.w	#4,sp							; get rid of handle
+				jmp		(a0)							; and return
+				
+				ENDPROC
+
+; a_getnamedresource.  Call the patch written in C.
+a_getnamedresource	PROC	EXPORT
+				IMPORT	C_GETNAMEDRESOURCE:CODE
+				
+				movem.l	d0-d2/a1,-(sp)					; save regs
+				subq.w	#4,sp							; make room for our result
+				move.l	28(sp),-(sp)					; push the type
+				move.l	28(sp),-(sp)					; push the name ptr
+				jsr		C_GETNAMEDRESOURCE				; do it
+				move.l	(sp)+,28(sp)					; put our retval in real one
+				movem.l	(sp)+,d0-d2/a1					; restore regs
+				move.l	(sp)+,a0						; get ret addr
+				addq.w	#8,sp							; get rid of params
+				jmp		(a0)							; and return
+				
+				ENDPROC
+
+; a_sizersrc.  Call the patch written in C.
+a_sizersrc		PROC	EXPORT
+				IMPORT	C_SIZERSRC:CODE
+				
+				movem.l	d0-d2/a1,-(sp)					; save regs
+				subq.w	#4,sp							; make room for the result
+				move.l	24(sp),-(sp)					; push the handle
+				jsr		C_SIZERSRC						; do it
+				move.l	(sp)+,24(sp)					; set real ret val from ours
+				movem.l	(sp)+,d0-d2/a1					; restore regs
+				move.l	(sp)+,a0						; get ret addr
+				addq.w	#4,sp							; get rid of handle
+				jmp		(a0)							; and return
+				
+				ENDPROC
+				
+;---------------------------------------------------------------------------------------
+; a_getresource.  Patch GetResource to get correct PDEF.  This has to be assembler
+; because System 4.1 and 4.2 _GetResource patches look at return addresses on the stack.
+a_getresource	PROC	EXPORT
+				IMPORT	MyRelString:CODE
+				IMPORT	patchtraps:DATA
+
+				moveq.l	#0,d0
+				move.b	5(sp),d0						; get res id
+				move.l	6(sp),a0						; get res type
+				move.l	a5,-(sp)						; save old a5 on stack
+				movea.l	ProcessMgrGlobals,a5			; get address of our globals
+
+; patch to get correct print driver based on current printer assignments	
+				cmp.l	#'PDEF',a0						; is this a potential print entry point?
+				bne.s	DoRealCall						; if not, branch
+				move.w	8(sp),d0						; get res id (whole word)
+				cmp.w	#7+1,d0							; is it 0-7?
+				bcc.s	DoRealCall						; if not, branch to real call
+
+				movem.l	d1-d2/a1,-(sp)					; save work regs
+				lea		-10(sp),sp						; room for 2 pointers + return value (on bottom)
+				pea		6(sp)							; push ptr to one ptr
+				pea		6(sp)							; push ptr to the other ptr
+				_MFGetPrTypeStrings						; get local and global ref nums
+				moveq.l	#0,d0							; assume pr types the same
+				tst.b	(sp)+							; is pr type locked for this guy?
+				beq.s	@0								; if so, branch (treat as strings equal)
+				jsr		MyRelString						; are they the same?
+				move.l	4(sp),d2						; save local name
+
+; get here with condition codes saying whether the types are the same
+@0
+				addq.w	#8,sp							; get rid of the 2 string ptrs
+				tst.w	d0								; are they the same?
+				beq.s	GotoPDEF						; if equal, branch
+				
+; Set the printer type for the current process, give a _Close call to the .Print driver, and
+; then give it an _Open call.  If the driver is not in yet, _Close will return an error which
+; we ignore.  If it is in, it simple passes it along to the appropriate .XPrint.
+				subq.w	#2,sp							; room for return result
+				move.l	d2,-(sp)						; push local name
+				move.w	BootDrive,-(sp)					; has to be in sys folder
+				move.b	#fsCurPerm,-(sp)				; default arg (need to r/w probably)
+				_OpenRFPerm								; bring to front (already opened)
+				move.w	(sp)+,d2						; save the refnum
+				_PrDrvrOpen								; Open new driver, thus closing old one
+				move.w	d2,-(sp)						; push refnum of (old) local pr type name
+				_CloseResFile							; close old driver's res file
+				move.l	TopMapHndl,a0					; get top map
+				move.l	(a0),a0							; hdl -> ptr
+				move.l	MRefNum(a0),CurMap				; force new guy (who is at top) to be current
+GotoPDEF				
+				movem.l	(sp)+,d1-d2/a1					; restore work regs
+
+; enough of this! call the real routine!
+DoRealCall
+				move.l	patchtraps+RomAllPatchTable.Rom75Patches.GETRESOURCE.oldtrap,a0
+				move.l	(sp)+,a5						; restore old a5
+				jmp		(a0)							; and go to old routine
+
+PrintName		dc.b	'.Print'
+
+				ENDPROC
+
+;---------------------------------------------------------------------------------------
+; a_setgrowzone.  Our patch to SetGrowZone.  Calls a C routine to act on it.  That routine
+; returns an address we should call through to.  Nil if we shouldn't.  We, rather than
+; the C routine, need to do the call, since it requires register setup.
+a_setgrowzone	PROC	EXPORT
+				IMPORT	SafeSetGrowZone:CODE
+SGZPatchRegs	REG		d1-d2/a0-a1						; volatile regs in C routine
+				
+				movem.l	SGZPatchRegs,-(sp)				; save registers
+				move.l	a0,-(sp)						; put proc ptr as only arg
+				jsr		SafeSetGrowZone					; and do it
+				addq.w	#4,sp							; get rid of c param
+				movem.l	(sp)+,SGZPatchRegs				; restore registers
+				tst.l	d0								; check for chain-through address
+				beq.s	SGZDone							; exit if none (BTW: d0.w == noErr!!)
+				move.l	d0,-(sp)						; push chain address for RTS
+SGZDone
+				rts										; return to caller or old trap
+				
+				ENDPROC
+						
+;---------------------------------------------------------------------------------------
+; GetSysHeapString.  Get a copy of the given string in the system heap.
+; The C prototype is:
+;
+;			StringPtr GetSysHeapString(StringPtr pStr);
+;
+GetSysHeapString		PROC	EXPORT
+
+				clr.l	-(sp)							; assume retval is failure
+				move.l	8(sp),a0						; param is src
+				moveq.l	#1,d0							; add 1 to...
+				add.b	(a0),d0							; ...string length to get block len
+				move.l	d0,d1							; save length
+				move.l	a0,a1							; save ptr
+				_NewPtr sys								; get space in system heap
+				bne.s	GSHSDone						; if failure, branch
+				exg.l	a0,a1							; switch src/dest
+				move.l	a1,(sp)							; and do the return value
+				move.l	d1,d0							; save length
+				_BlockMove
+GSHSDone
+				move.l	(sp)+,d0						; pop retval into d0
+				rts
+				
+				ENDPROC
+				
+
+				SEG		'Main'
+
+;------------------------------------------------------------------------------------
+; Process Mgr implements the gestaltOSAttr selector.  Below are the definitions, the
+; selector routine, and the code to install it.  The selector routine is supposed to
+; sit in the system heap so it can be executed directly by applications.  The installer
+; copies the routine there, and was written in assembler to ensure that the effective
+; address we pass is that of the routine itself, rather than its jump table address
+; (which wouldn't be in the system heap).
+;------------------------------------------------------------------------------------
+
+OurGestaltValue		EQU		(1 << gestaltSysZoneGrowable) +			\
+							(1 << gestaltLaunchCanReturn) +			\
+							(1 << gestaltLaunchFullFileSpec) +		\
+							(1 << gestaltLaunchControl) +			\
+							(1 << gestaltTempMemSupport) +			\
+							(1 << gestaltRealTempMemory) +			\
+							(1 << gestaltTempMemTracked) +			\
+							(1 << gestaltIPCSupport) +				\
+							(1 << gestaltSysDebuggerSupport) +		\
+							(1 << gestaltSkiaGlobalsSwitched)
+
+				PROC
+		
+				EXPORT		MyNewGestalt:CODE		
+
+;---------------------------------------------------------------------------------------
+; gestaltOSAttrProc.  The function we tell Gestalt to call when getting OS attributes.
+; This is a Pascal style function looking like --
+;
+;		FUNCTION gestaltOSAttrProc(selector : OSType; VAR result : LONGINT) : OSErr;
+;
+; Stack:	(sp)		return address
+;			4(sp)		address for Gestalt return value (long)
+;			8(sp)		Gestalt selector (long)
+;			0A(sp)		storage for result code (word)
+
+gestaltOSAttrProc
+				move.l		(sp)+,a0					; move return address
+				move.l		(sp)+,a1					; get return value address		
+				move.l		(sp)+,d0					; get selector
+				cmp.l		#gestaltOSAttr,d0			; is it our selector?
+				bne.s		gOSAPError					; jump if not
+				move.l		#OurGestaltValue,(a1)		; place the value
+				clr.w		(sp)						; give good error code
+gOSAPExit
+				jmp			(a0)						; return
+
+; we were called with a selector we don't understand (this should never be needed)
+gOSAPError
+				move.w		#gestaltUndefSelectorErr,(sp)	; set error code
+				bra.s		gOSAPExit					; return
+
+;---------------------------------------------------------------------------------------
+; MyNewGestalt.  Calls _NewGestalt to install the routine to handle the selector for
+; which we are responsible (gestaltOSAttr).
+MyNewGestalt
+MNGSaveRegs		REG			d0-d1/a0-a2					; working registers
+
+				movem.l		MNGSaveRegs,-(sp)			; save working registers
+				lea			gestaltOSAttrProc,a0		; address of routine in our segment
+				move.l		#gestaltOSAttr,d0			; routine selector
+				_NewGestalt								; install our routine		
+				movem.l		(sp)+,MNGSaveRegs			; restore working registers
+				rts										; leave
+		
+				ENDPROC
+
+				END

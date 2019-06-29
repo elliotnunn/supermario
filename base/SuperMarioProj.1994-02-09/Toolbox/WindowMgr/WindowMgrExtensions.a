@@ -1,0 +1,486 @@
+;
+;	File:		WindowMgrExtensions.a
+;
+;	Contains:	Routines stolen from WindowMgr patches
+;
+;				This file contains the glue between LayerMgr.c and WindowMgr.a
+;				It also implements LayerBracket which sets up and restores
+;				Layers for many windowmgr calls. The layerbracket mechanism should
+;				be implemented inside each routine and ripped out of here.
+;
+;	Written by:	Fred Monroe
+;
+;	Copyright:	© 1992 by Apple Computer, Inc.  All rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM7>	 11/3/92	SWC		Changed PaletteEqu.a->Palettes.a.
+;	   <SM6>	  7/1/92	PN		Fine tuning InitFasterInvals
+;	   <SM5>	 6/25/92	PN		Roll in the previous fix into DispTable.a so I don't have to use
+;									settrapaddress
+;	   <SM4>	 6/24/92	PN		Fix AlwaysRectRgn for ROM build since we cannot allocate space
+;									in the ROM
+;	   <SM3>	 5/22/92	FM		Add GetRear Window
+;	   <SM2>	  5/8/92	FM		Make changes for windowmgr
+;
+;
+
+
+		load 'StandardEqu.d'
+		include 'LayerEqu.a'
+		include 'Palettes.a'
+		include 'PalettePriv.a'
+		include 'LinkedPatchMacros.a'
+
+; *** move these equates into system equate files
+
+CurLayer	EQU		$A90
+WMgrUpdate	EQU		$AFC
+
+selectGetDeskPort	equ		-5
+
+
+hasLayerlessApps equ 0
+
+InitWindows		Proc	Export
+				IMPORT	__InitLayers
+
+				subq	#2,sp					; Make room for error result.
+				JSR		__InitLayers
+				addq	#2,sp
+				rts
+				EndProc
+				
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+MakeDeactiveGlue	PROC	EXPORT
+				IMPORT	MakeDeactive
+
+				MOVE.L	(SP)+, A0				; Get return address
+				MOVE.L	(SP), D0				; Rom takes parameter in D0
+				MOVE.L	A0, (SP)				; Put return address on stack
+				JMP		MakeDeactive
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+CallWindowGlue	PROC	EXPORT
+				IMPORT	CallWindow
+				
+				MOVEM.L	A3/D3, -(SP)			; Save A3 and D3
+				MOVE.L	12(SP), D3				; D3 = parameter
+				MOVE.W	16(SP), D0				; D0 = message
+				MOVE.L	18(SP), A3				; A3 = window pointer
+				JSR		CallWindow				; Go into ROM
+				MOVEM.L	(SP)+, A3/D3			; Restore A3 and D3
+				MOVE.L	(SP)+, A0				; Get return address
+				ADDQ.L	#4, SP					; Clean up stack
+				JMP		(A0)					; And go home
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+CallWindowDrawGlue	PROC	EXPORT
+				IMPORT	CallDWindow
+
+				MOVE.L	A3, -(SP)				; Save A3
+				MOVE.L	8(SP), A3				; A3 = window pointer
+				JSR		CallDWindow				; Go into ROM
+				MOVE.L	(SP)+, A3				; Restore A3
+				MOVE.L	(SP)+, A0				; Get return address
+				ADDQ.L	#4, SP					; Clean up stack
+				JMP		(A0)					; And go home
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+CallWindowCalcGlue	PROC	EXPORT
+				IMPORT	CallWCalc
+
+				MOVE.L	A3, -(SP)				; Save A3
+				MOVE.L	8(SP), A3				; A3 = window pointer
+				JSR		CallWCalc				; Go into ROM
+				MOVE.L	(SP)+, A3				; Restore A3
+				MOVE.L	(SP)+, A0				; Get return address
+				ADDQ.L	#4, SP					; Clean up stack
+				JMP		(A0)					; And go home
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; Called by several window manager routines that need to have the current layer saved,
+; set and restored.
+LayerBracket	PROC	ENTRY
+
+;	A0		= address of routine to "bracket"
+;	D0.L	= address of window who's parent should be the current layer
+;	D1.W	= number of words of stack to preserve (parameters + return value)
+; Stack:
+;		|-------------------|
+;		|	D1.W words		|
+;		|	of "parameters"	|
+;		|-------------------|
+;		|	return address	|
+;		|-------------------| <- SP
+
+				MOVE.L	(SP), D2				; Save the return address in D2.
+				SUBQ.L	#8, SP					; We'll need 8 more bytes on the stack.
+				MOVE.L	SP, A1					; Destination of move in A1.
+				MOVE.L	A0, -(SP)				; Push the routine we'll call on the stack.
+				LEA		12(A1), A0				; Source of move in A0.
+				BRA.S	@downDBRA				; Start the copy.
+@copyDownLoop
+				MOVE.W	(A0)+, (A1)+			; Copy a word down.
+@downDBRA		DBRA	D1, @copyDownLoop		; Loop until we're done.
+
+; Now the stack looks like this:
+;		|-------------------| <- A1
+;		|	12 bytes of		|
+;		|	free space		|
+;		|-------------------| <- A0
+;		|	saved			|
+;		|	"parameters"	|
+;		|-------------------|
+;		|	WMgr routine	|
+;		|-------------------| <- SP
+;	D0.L	= address of window who's parent should be the current layer
+;	D1.W	= -1
+;	D2.L	= return address
+
+				MOVE.L	A6, (A1)
+				MOVE.L	A1, A6					; Make a stack frame at A1.
+				MOVE.L	D2, 4(A6)				; Save the return address at 4(A6).
+				SUBQ.L	#4+4, SP				; Save space for results.
+				MOVE.L	D0, -(SP)				; Get window for GetParent.
+				
+	IF hasLayerlessApps THEN
+				IMPORT	__patchGetParent
+				JSR		__patchGetParent		; Get the parent.
+	ELSE
+				IMPORT	__GetParent
+				JSR		__GetParent				; Get the parent.
+	ENDIF
+	
+				IMPORT	__SwapCurLayer
+				JSR		__SwapCurLayer			; Swap the layer and get the old layer.
+				MOVE.L	(SP)+, 8(A6)			; Save the old current layer at 8(A6).
+				MOVE.L	(SP)+, A0				; Get the window manager routine.
+				JSR		(A0)					; And call it.
+
+; We've completed the window manager routine.  The stack looks like this:
+;		|-------------------|
+;		|	old CurLayer	|
+;		|-------------------|
+;		|	return address	|
+;		|-------------------|
+;		|	old A6			|
+;		|-------------------| <- A6
+;		|	return value	|
+;		|-------------------| <- SP
+
+				MOVE.L	8(A6), -(SP)			; Get window for SetCurLayer.
+				_SetCurLayer					; Set it back.
+				MOVE.L	4(A6), D2				; Save the return address in D2.
+				MOVE.L	A6, A0					; Source of move in A0.
+				MOVE.L	(A6), A6				; Remove the stack frame.
+				MOVE.L	A0, D1
+				SUB.L	SP, D1					; D1 is number of bytes to move back up.
+				ASR.L	#1, D1					; Divide by two for word count.
+				LEA		12(A0), A1				; Destination of move in A1.
+				BRA.S	@upDBRA					; Start the copy.
+@copyUpLoop
+				MOVE.W	-(A0), -(A1)			; Copy a word up.
+@upDBRA			DBRA	D1, @copyUpLoop			; Loop until we're done.
+				MOVE.L	A1, SP					; Peel back the stack.
+				MOVE.L	D2, A0					; Get the return address.
+				JMP		(A0)					; And return.
+
+				ENDPROC
+
+	
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__SelectWindow	PatchProc	_SelectWindow
+
+				Import	SelectWindow
+				
+				LEA		SelectWindow,a0
+				IMPORT	TwoByFour
+				JMP		TwoByFour
+
+				ENDPROC
+
+	IF NOT hasLayerlessApps THEN
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__BringToFront	PatchProc	_BringToFront
+				Import	BringToFront
+
+				LEA		BringToFront,a0
+				IMPORT	TwoByFour
+				JMP		TwoByFour
+
+				ENDPROC
+	ENDIF
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__SendBehind	PatchProc	_SendBehind
+				Import	SendBehind
+
+				LEA		SendBehind,a0
+				IMPORT	FourByEight
+				JMP		FourByEight
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__ShowWindow	PatchProc	_ShowWindow
+				Import	ShowWindow
+
+				LEA		ShowWindow,a0
+				EXPORT	TwoByFour
+TwoByFour
+				MOVEQ.L	#2, D1
+				MOVE.L	4(SP), D0
+				IMPORT	LayerBracket
+				JMP		LayerBracket
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__DragWindow	PatchProc	_DragWindow
+				Import	DragWindow
+				
+				LEA		DragWindow,a0
+				MOVEQ.L	#6, D1
+				MOVE.L	12(SP), D0
+				IMPORT	LayerBracket
+				JMP		LayerBracket
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__MoveWindow	PatchProc	_MoveWindow
+				Import		MoveWindow
+
+				LEA		MoveWindow,a0
+				MOVEQ.L	#5, D1
+				MOVE.L	10(SP), D0
+				IMPORT	LayerBracket
+				JMP		LayerBracket
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__ZoomWindow	PatchProc	_ZoomWindow
+				Import		ZoomWindow
+
+				LEA		ZoomWindow,a0
+				EXPORT	FourByEight,WindowAt8
+FourByEight		MOVEQ.L	#4, D1
+WindowAt8		MOVE.L	8(SP), D0
+				IMPORT	LayerBracket
+				JMP		LayerBracket
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__GetAuxWin		PatchProc	_GetAuxWin,(II,IIci)
+				Import		GetAuxWin
+
+				LEA		GetAuxWin,a0
+				MOVEQ.L	#5, D1
+				IMPORT	WindowAt8
+				JMP		WindowAt8
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__SetWinColor	PatchProc	_SetWinColor,(II,IIci)
+				Import		SetWinColor
+
+				LEA		SetWinColor,a0
+				IMPORT	FourByEight
+				JMP		FourByEight
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__SetCtlColor	PatchProc	_SetCtlColor,(II,IIci)
+				Import		SetCtlColor
+
+				LEA		SetCtlColor,A0
+				MOVEQ.L	#4, D1
+				IMPORT	ControlOwner
+				JMP		ControlOwner
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+__GetAuxCtl		PatchProc	_GetAuxCtl,(II,IIci)
+				Import		GetAuxCtl
+
+				LEA		GetAuxCtl,A0
+				MOVEQ.L	#5, D1
+				EXPORT	ControlOwner
+ControlOwner
+				MOVE.L	8(SP), D0
+				IMPORT	LayerBracket
+				BEQ.S	@LayerBracket
+				MOVE.L	D0, A1
+				MOVE.L	(A1), A1
+				MOVE.L	contrlOwner(A1), D0
+@LayerBracket
+				JMP		LayerBracket
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+__DrawNew		PatchProc	_DrawNew
+				Import		DrawNew
+
+				Lea		DrawNew,A0
+				MOVEQ.L	#3, D1
+				MOVE.L	6(SP), D0
+				IMPORT	LayerBracket
+				JMP		LayerBracket
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+LayerDispatch	BeginDispatcher _LayerDispatch
+				DispatchSelectors __GlobalPortRect = selectGlobalPortRect
+				DispatchSelectors __PaintOnePal = selectPaintOnePal
+				DispatchSelectors __EachWindow = selectEachWindow
+	IF hasLayerlessApps THEN
+				DispatchSelectors __patchGetParent = selectGetParent
+	ELSE
+				DispatchSelectors __GetParent = selectGetParent
+	ENDIF
+				DispatchSelectors __WindowType = selectWindowType
+				DispatchSelectors __GetDeskPort = selectGetDeskPort
+				DispatchSelectors __CheckUpdateIn = selectCheckUpdateIn
+				DispatchSelectors __FrontWindowIn = selectFrontWindowIn
+				DispatchSelectors __ActiveWindow = selectActiveWindow
+				DispatchSelectors __GetRootLayer = selectGetRootLayer
+				DispatchSelectors __InitLayers = selectInitLayers
+				DispatchSelectors __NewLayer = selectNewLayer
+				DispatchSelectors __IsLayer = selectIsLayer
+				DispatchSelectors __GetCurLayer = selectGetCurLayer
+				DispatchSelectors __SetCurLayer = selectSetCurLayer
+				DispatchSelectors __SwapCurLayer = selectSwapCurLayer
+				DispatchSelectors __GetSubWindows = selectGetSubWindows
+	IF hasLayerlessApps THEN
+				DispatchSelectors __patchFindLayer = selectFindLayer
+	ELSE
+				DispatchSelectors __FindLayer = selectFindLayer
+	ENDIF
+				DispatchSelectors __PositionWindow = selectPositionWindow
+				DispatchSelectors __AutoPositionWindow = selectAutoPositionWindow
+				DispatchSelectors __GetWindowState = selectGetWindowState
+				DispatchSelectors __SetWindowState = selectSetWindowState
+				DispatchSelectors __CheckWindow = selectCheckWindow
+				DispatchSelectors __RedrawAll = selectRedrawAll
+				EndDispatcher
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+InitFasterInvals InstallProc
+
+				MOVE.L		ExpandMem,A1				; get expanded memory area
+				WITH		ExpandMemRec
+
+; allocate emRectRgn																<SM4>
+
+				MOVE.L 	 #4,D0        		; D0 = size of globals for emRectRgn	<SM4>								<SM2> RLM
+				_NewPtr	 SYS,CLEAR          ; allocate them in system heap			<SM4>
+				MOVE.L	A0,emRectRgn(A1) 	; stuff pointer in our global			<SM4>
+				MOVE.L	A0,A1				; A1-> ptr to globals	
+
+;store away the region handle
+
+				subq	#4,sp				;make room for region handle
+				_NewRgn
+				move.l	(sp)+,(a1)			;store away the region handle
+				rts
+
+				EndProc
+
+;;	MakePatch FasterInvalRect,_InvalRect
+;;	MakePatch FasterValidRect,_ValidRect
+
+FasterInvals	Proc
+
+				Export	FasterInvalRect,FasterValidRect
+
+FasterValidRect
+				moveq	#-1,d0				;flag it as a valid
+				bra.s	IRectCommon
+FasterInvalRect
+				moveq	#0,d0				;flag that it’s an inval
+IRectCommon
+				move.l	4(sp),a0			;get pointer to rectangle 
+				move.l	a4,-(sp)			;save a4 <SM4> 
+				MOVE.L	ExpandMem,A4					; A4 -> Expanded Low Memory	 <SM4>						
+				MOVE.L	ExpandMemRec.emRectRgn(A4),A4	; A4-> ptr to globals <SM4>	
+				move.l	(a4),a1				;get handle to region <SM4>
+				move.l	(sp)+,a4			;restore a4 <SM4>
+				move.l	a1,-(sp)			;pass it on the stack to IvalCommon
+				move.l	(a1),a1
+				add		#rgnBBox,a1			;advance to the bounding box
+				move.w	left(a0),d1			;											<37>
+				cmp.w	right(a0),d1		;if a vertical line							<37>
+				bge.s	@emptyRgn			;	fill in empty rgn						<37>
+				move.w	top(a0),d1			;											<37>
+				cmp.w	bottom(a0),d1		;if a horizontal line						<37>
+				bge.s	@emptyRgn			;	fill in empty rgn						<37>
+				move.l	(a0)+,(a1)+			;smash in the rectangle
+				move.l	(a0),(a1)
+				bra.s	@doInval			;											<37>
+@emptyRgn		clr.l	(a1)+				;empty rgn									<37>
+				clr.l	(a1)				;											<37>
+@doInval									;											<37>
+				jsrROM	IvalCommon			;must JSR, since he expects a return address
+				move.l	(sp)+,(sp)			;get rid of rectangle pointer
+				rts
+
+				EndProc
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; <41> ActivatePalette — ActivatePalette assumes that the window is in the WindowList (i.e. CurLayer).
+;						Therefore, we have to call LayerBracket before ActivatePalette.
+
+ActivatePaletteLayerBracket		PatchProc	_ActivatePalette,(II,IIci)
+				Import	ActivatePalette
+				
+				LEA		ActivatePalette,A0
+				IMPORT	TwoByFour
+				JMP		TwoByFour
+
+				ENDPROC
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+
+;————————————————————————————————————————————————————————————————————————————————————————————————————
+; <SM16> FM SetWinColor and SetCtlColor both look for the rearmost window when
+; <SM16> FM passed a NIL handle. This is a utility routine to do that for them
+
+GetRearWindow	PROC	EXPORT					;					 				<SM16> FM
+				move.l	WindowList,d0			; Get first window					<SM16> FM 
+				move.l	d0,a1					; 									<SM16> FM
+				beq.s	@gotLastWindow			; If no windows, exit loop			<SM16> FM 
+
+@findLastWindowLoop								;									<SM16> FM 
+				move.l	d0,a0					;									<SM16> FM 
+				tst.b	wVisible(a0)			; Is it visible?					<SM16> FM 
+				beq.s	@findNextVisibleWindow	; No, go on to the next one			<SM16> FM 
+				move.l	a0,a1					; Potential last visible window		<SM16> FM 
+
+@findNextVisibleWindow							;									<SM16> FM 
+				move.l	nextWindow(a0),d0		; Get next window					<SM16> FM 
+				bne.s	@findLastWindowLoop		; If there’s a window, branch back	<SM16> FM 
+
+@gotLastWindow									;									<SM16> FM 
+				rts								;									<SM16> FM 
+				ENDPROC							;									<SM16> FM 
+
+				End

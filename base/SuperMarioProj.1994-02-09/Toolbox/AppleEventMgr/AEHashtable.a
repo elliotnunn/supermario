@@ -1,0 +1,3089 @@
+;
+;	File:		AEHashtable.a
+;
+;	Contains:	xxx put contents here xxx
+;
+;	Written by:	xxx put writers here xxx
+;
+;	Copyright:	© 1990, 1992 by Apple Computer, Inc., all rights reserved.
+;
+;   This file is used in these builds: BigBang
+;
+;
+;
+;	Change History (most recent first):
+;
+;	   <SM2>	 6/12/92	RB		This file had a few DC.L which do not work from ROM.  The code
+;									was supposed to store offsets to routines used to allocate,
+;									deallocate and execute memory blocks.  Also, there was an option
+;									to store user supplied routine pointers in this code itself
+;									which was not actually used.  To make this code work from ROM it
+;									all came down to deleting a bunch of useless code, deleting
+;									macros and making the code that returns the default memory
+;									procedures return the standard ones.  Someone is going to have
+;									to take a good look at the functionality they originally wanted
+;									out of this code.  Anyway, the 50% of apps that were breaking on
+;									SuperMario will now run.
+;		 <4>	 1/11/91	Lai		Fix new hash table size bug when number of entries is an exact
+;									power of 2, and bug in GetIndexedEntry
+;		 <3>	12/18/90	Lai		Chagne size of minimum hash table to avoid using excessive
+;									amount of memory
+;		 <2>	12/14/90	gbm		<Lai> Make ptr relative rather than absolute so they can be
+;									relocated
+;		 <1>	12/13/90	Lai		first checked in
+;
+;	To Do:
+;
+
+;;Issues:
+;	Change the interface to make NewHashTable return an OSErr.
+;	Adding extra entries to the end of a table, should add a minimum of 1.5% of
+;		table size to avoid growing very large tables by 6 entries each time.
+;v	Memprocs should be allowed to have Nil entries, and I will use my defaults 
+;v		for them.
+;v	Add a GetMemProcs that just returns the defualt procs.
+;v	Build a conditional assembly that only optomises for AppleEvents.
+;v	Check all SendMsg references and make sure A2 is already offset by headersize!
+;v	With 4->4 hash, can we support key of 0?  There must be some way to flag
+;v		an empty entry.  Typically that is with a Tag of zero.  It could
+;v		be a whole entry of zero for the 4->4.  Does this help?
+;x	Are HashCalcIndex and HashFind always together?  Can we just make them
+;x		a single hook, calling HashMult in the general cases?
+;v	I need a mult4x4 and a Divu4x4, that will work on 68K's.  Find ??? entries.
+;	Could add a String Keyed Table which didn't copy the string keys.
+;x	Could make the Stored String Keys separate handles, so they can be tossed
+;x		when an entry is removed.
+;	Give an error when a value of zero is added to a 4 -> 4 table.
+;	On my proto fx, Handles are not always long-aligned! (just a performance issue)
+;	When a custom hash function is added to a 4->4 table, it can no longer do
+;		on-the-fly hashing.  It should be converted into a non-on the fly
+;		with 4->4 (relying on the idea that there should be no entries yet).
+;		Also GetHashProc must return a pointer to the CheapOHash for 4->4.
+;Notes:
+;	Change FindAnEntry to use BClr	D0,D1 instead of #31 for collision.
+;	Make sure all hash functions return 31 bits not including a zero value.
+;	Make sure long values used throughout, 32 bit clean, unsigned values.
+;	Make sure ExpandTable clears the entries in the second half and extension.
+;	AddEntry should make sure the Key is not zero for 4->4.
+;	Define and use consistent terminology throughout.
+;	Set up consistant register usage.
+;	Add a Find presearch to optomise lookup on an existing entry.
+;		Cmp.L	(A0),D3
+;		Beq.S	@Found
+;		Add.L	D5,A0
+;	Make sure we support zero values.
+;v	Add a CountPaths macro to count the number of paths through it, when debugging
+;	Write a (C?) test program to check all functionality, do performance
+;	Add a flag to the asm code to stub out all functionality when in stub mode,
+;		so the overhead of the timing code can be reported.
+;
+;For eric:
+;	Most functions will work well on highly random data.  We wish to minimize
+;		worst-case behavior for any set of plausable data.  So, design some
+;		nasty data sets, where the keys could cause terrible clumping.  EG
+;		a set of 8 byte keys that all differ by just one bit, or two bits.
+;	For each hash function, use your knowledge of the hash implementation to 
+;		try to devise a data set to produce terrible clumping for that function.  
+;		How plausable are the keys?  Is there a subset of the keys that 
+;		is plausable?  (As we know, this reveals the problems with XOR)
+;		Computing the inverse function is often difficult, or impossible.
+;		Theoretically, a perfect 4->4 hash would produce each bit pattern
+;		exactly once when fed the set of all possible imputs.  (Could this be
+;		a useful test?  Could we derive a better one from this idea?)  An 8->4
+;		hash probably produces a single bit pattern FOR 2^32 DIFFERENT inputs!
+;		Try just feeding the hash function Keys with a single bit on, or a single
+;		zero bit.  How do these values look on the output side?
+;		
+;
+;	File HashedLookup - Simple Hashing functions.
+;
+;	© Apple Computer, Inc. 1989 - 1990
+;		Written by Donn Denman
+;
+;	The Key Manager provides fast lookup in a keyed array of values.  It automatically
+;		manages a hash table which maps a key to a user value.  The key can be 
+;		of fixed size, or variable size up to 255 characters.  The user value 
+;		must be of a fixed size.  The Key Manager allows key/value pairs to be
+;		added or removed from the table.  If the table becomes full beyond a certain
+;		percentage it is automatically expanded.
+;	
+;
+; 	We have special cases for searching for Keys of 4, 8, and Pascal Strings.
+; 	We also have special cases for Data Values of 4, 8, 12, and 4*N bytes.
+;
+;	Special cases are implemented for the following Key/Value sizes:
+;
+;		 input	 output    table
+;		KeySize	ValueSize EntrySize	Notes
+;		-------	--------- ---------	-----
+;		   4	    4	     8		Key points to a non-zero longword.
+;		   8	    4	     16		Key is a pointer to two longwords.
+;		   p	    4	     12		Key is a pascal string of any length.
+;		   4        8	     16		Key is a long, with a double long returned.
+;		   8	    8	     24		Value and Key are pointers to two longwords.
+;		   p	    8	     16		Key is a pascal string, value is two longs.
+;		   4	    n	     n+8	Key is a pascal string, and Value is fixed of size n.
+;		   8	    n	     n+12	Key is a pascal string, and Value is fixed of size n.
+;		   p	    n	     n+8	Key is a pascal string, and Value is fixed of size n.
+;
+;	TYPE
+;		HHand = Handle; 
+;		HEntryPtr = Pointer; ???
+;		HashProc = ProcPtr;
+;		MemBlock = LONGINT;
+;		MemProcs = ^MemProcBlock;
+;		MemProcBlock = RECORD
+;			DerefProc:	ProcPtr;
+;			NewProc:	ProcPtr;
+;			GrowProc:	ProcPtr;
+;			DisposeProc:	ProcPtr;
+;		END;
+;
+;	Function	NewHashTable(NumEntries:LONGINT; KeySize, ValueSize:INTEGER; 
+;				MemHooks:MemProcs; SysHeap:Boolean: VAR Table:HHand): OSErr;
+;	Function	DisposeHashTable(VAR Hash:HHand; MemHooks:MemProcs): OSErr;
+;
+;	Function	AddKeyEntry(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr; Value:HEntryPtr): OSErr;
+;	Function	ReplaceEntry(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr; Value:HEntryPtr):OSErr;
+;	Function	RemoveKeyEntry(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr): OSErr;
+;	Function	GetKeyValue(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr; Value:HEntryPtr): OSErr;
+; 	Function 	CheckKey(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr): boolean;
+;	Function	GetIndexedEntry(Hash:HHand; MemHooks:MemProcs; Index:LONGINT; VAR Value:HEntryPtr): OSErr;
+;
+;	Function	IsHashConsistent(Hash:HHand; MemHooks:MemProcs):Boolean;
+;	Function	GetHashProc(Hash:HHand; MemHooks:MemProcs):HashProc;
+;	Procedure	SetHashProc(Hash:HHand; MemHooks:MemProcs; theHash:HashProc);
+;	Function	GetGrowThreshhold(Hash:HHand; MemHooks:MemProcs):INTEGER;
+;	Procedure	SetGrowThreshhold(Hash:HHand; MemHooks:MemProcs; Percent:INTEGER);
+;	Procedure	GetTableMetrics(Hash:HHand; MemHooks:MemProcs; VAR info: HashInfo);
+;	Function	GetDefaultMemProcs: MemProcs;
+;
+;	Functions provided by the user:
+;
+;	Function	MyHashProc(Key:KeyPtr):LONGINT;
+;	Function 	NewMemory(NewSize:LONGINT; SysHeap:Boolean; VAR Result:MemBlock):OSErr;
+;	Function 	DisposeMemory(block:MemBlock):OSErr;
+;	Function 	SetMemorySize(block:MemBlock; NewSize:LONGINT):OSErr;
+;	Function 	DeRefMemory(block:MemBlock):Ptr;
+;
+; The hash table implementation is optomized primarily for fast lookup,
+;	and secondarily for quick table expansion.
+;
+; The actual hashing function used is determined by the hash table itself (proc ptr).
+;	You can get its value, and set it using GetHashProc and SetHashProc.  However, 
+;	don't change hash functions while there are values in the
+;	table or most of the values will be lost, or a crash could result.
+;
+; The default storage allocator uses Handles, but it can be replaced with your own procs.
+;
+; NewHashTable(NumEntries:LONGINT; KeySize, ValueSize:INTEGER; 
+; ------------		MemHooks:MemProcs; SysHeap:Boolean: VAR Table:HHand): OSErr;
+; 
+;	The NumEntries parameter allows preallocation of the specified
+;		number of hash table entries.  However, any number greater than zero
+;		can be used, since AddKeyEntry will automatically grow the table
+;		when it is considered too full.  The KeySize paramter indicates the
+;		number of bytes in the key.  Acceptable values are 4, 8, 0 and -4.
+;		A KeySize of zero or -4 indicates that the key is a pascal string.
+;		If the KeySize is 0, then the keys will be copied into the hash table,
+;		but if -4 then the caller must keep the pascal strings persistent.
+;
+;	Function	DisposeHashTable(VAR Hash:HHand; MemHooks:MemProcs): OSErr;
+;	Disposes of the memory associated with the given handle (and handles it contains).
+;
+;	Function	AddKeyEntry(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr; Value:HEntryPtr): OSErr;
+;	The result is not too valueable at this time (since it is an offset into an 
+;		unlocked handle.  The Value parameter will be the value associated with
+;		the String on subsequent lookup in the table.
+;
+;	Function	RemoveKeyEntry(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr): OSErr;
+;	Removes the specified entry.  Note that neither the hash table nor the associated strings
+;		list is ever shrunk by entry removal.  The string is left in the list (without
+;		reuse) and the hash table entry is free to be reallocated.
+;		
+;	Function	GetKeyValue(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr; Value:HEntryPtr): OSErr;
+;	The hash table implementation is optomized for fast lookup.  This is the lookup routine.  Given
+;		a pointer to the key, and a pointer to the value to fill, GetKeyValue does a lookup
+;		on the key and copies the value from the hash table to the caller.
+;
+;	Function	GetIndexedEntry(Hash:HHand; MemHooks:MemProcs; Index:LONGINT; VAR Value:HEntryPtr): OSErr;
+;	Returns the value from the indexed location (so you can iterate through the hash table) in the
+;		value var.  The result indicates if the entry is in use, or is beyond the end of
+;		the hash table: 0 - entry is empty, 1 - entry in use, -1 - beyond end of table.
+;
+; 	Function 	CheckKey(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr): Boolean;
+; 	CheckKey - Find the hashed entry if it exists.  Returns zero if the key doesn't exist.
+;
+;
+;	Function	GetHashProc(Hash:HHand; MemHooks:MemProcs):HashProc;
+;	Returns the hash function proc pointer in use by the specified hash table.
+;
+;	Procedure	SetHashProc(Hash:HHand; MemHooks:MemProcs; theHash:HashProc);
+;	Sets the hash function to a new proc pointer, supplied by the user.
+;		Use this to change a hash function's proc pointer (before adding entries).
+;
+;	Function	GetGrowThreshhold(Hash:HHand; MemHooks:MemProcs):INTEGER;
+;	Gets the percentage at which the table is considered full, and is automatically
+;		grown when adding another entry.
+;
+;	Procedure	SetGrowThreshhold(Hash:HHand; MemHooks:MemProcs; Percent:INTEGER);
+;	Sets the percentage at which the table is considered full, and is automatically
+;		grown when adding another entry.
+;
+;	Function	GetDefaultMemProcs: MemProcs;
+;	Returns the default memory procs.
+;
+; Internal Details
+; ----------------
+;
+;	Hash Table Entry 
+;
+;	  hashed key         complete key data here       user's value
+;	+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+;	|      Tag      |      Key      |      Key2     |     Value     |               
+;	+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+;
+;	User does a Find on a key e.g. 'aevtmult'
+;
+;			   SearchKey                    SearchKey1  |   SearchKey2
+;			+---+---+---+---+           +---+---+---+---+---+---+---+---+
+;	          	|    ------>    | --------> | a   e   v   t   m   u   l   t |
+;			+---+---+---+---+           +---+---+---+---+---+---+---+---+
+;
+;	A Hashing function is called to mangle all of the SearchKey bits into a number
+;
+;		     SearchKey1  |   SearchKey2
+;		+---+---+---+---+---+---+---+---+         +---+---+---+---+
+;	        | a   e   v   t | m   u   l   t |  >===>  |      Hash     |
+;		+---+---+---+---+---+---+---+---+         +---+---+---+---+
+;
+;	The top n bits of the hash are masked away, to create an integer of limited range
+;		which is used as a table index.
+;
+;			      Hash                        Hash       
+;			+---+---+---+---+                               +---+---+---+---+
+;	          	|101101001010011|  AND 000000011111111  >===>  |000000001010011|
+;			+---+---+---+---+                               +---+---+---+---+
+;                                                                                    
+;                           HashTable                     			|                         
+;                       +---+---+---+---+                 			|                         
+;                       | T   K1  K2  V |                 			|                         
+;                       +---+---+---+---+                 			|                         
+;                       |               |                 			|                         
+;                       +---+---+---+---+                 			|                         
+;                       |               |                 			|                         
+;                       +---+---+---+---+                 			|                         
+;                       |               |                 			|                         
+;                       +---+---+---+---+                 			|                         
+;                       | T           V |      <--------------------------------+                        
+;                       +---+---+---+---+                                       
+;                       |               |                                          
+;                       +---+---+---+---+                                          
+;                                                                                   
+;	The matching entry is quickly found by matching the full Hash with the 
+;		Tag from the entry.  If a Tag does not match, then the next entry
+;		is searched.  If the Tag matches, the Keys will probably match
+;		the SearchKey identifying the found entry.  A pointer to the Value
+;		is returned.
+;
+;
+;	
+;	String -> Long            Hash Table Entry:
+;
+;	   hashed key      string offset   user's value
+;	+---+---+---+---+---+---+---+---+---+---+---+---+
+;	|      Tag      |     offset    |     Value     |               
+;	+---+---+---+---+---+---+---+---+---+---+---+---+
+;
+;	The keys are recorded in a separate block.
+;	offset is an index to the sting key for the entry.  
+		
+		Print	Off
+
+		INCLUDE	'Traps.a'
+		
+		PRINT	on,NoMDir,noPage,NoHDR
+	
+DoDebug		Equ	0		; 0-none, 1-error breaks, 2-Head/tail, 3-all breaks.
+NotLobotimised		Equ	1	; 1 - normal function, 0 - don't do any operation.
+ForAppleEventsOnly	Equ	1	; 1 - if we should optimize for AppleEvents only.
+For0x0		Equ	0		; change for debugging, or if code will be 
+					;  for a 32 bit CPU only.
+NoStoredHash	Equ	8		; table entries of this size or less dont include the hash.
+CollBit		Equ	31		; bit idicates if this entry is a collision.
+MinExtraEntries	Equ	6		; minumum number of extra entries.
+MinInitalEntries Equ	3		; initial minimum table size expressed as N for 2^N entries.
+PercentFull	Equ	80		; defualt percent considered full.
+NumKeySizes	EQU	3
+
+ModifiedJamesMethod	EQU	0	; use a Modified James hash?
+DoBennetteHash		EQU	0	; use the Bennette hash for 4 bytes?
+
+; Global Error Definitions
+
+ErrAlreadyExists	EQU	-1722		; fix this constant???
+ErrNotFound		EQU	-1723		; fix this constant
+ErrEndOfTable		EQU	-1724		; fix this constant!!!
+
+	IF	For0x0	THEN
+		Machine	MC68020
+	EndIF
+
+****************************************
+*
+* MACRO HEAD, TAIL  routine headers
+*
+****************************************
+;---------------------------------------------------
+; Head and Tail macros for the beginning and end of subroutines.
+;	generates a label for the debugger IFF DoDebug > 1.
+;	generates a link and unlink if DoDebug or LinkSiz specified.
+
+		MACRO
+&Lab	HEAD	&Regs,&LinkSiz				; with label parameter
+&Lab						; generate the label
+		GBLA	&HaveLink
+&HaveLink	SetA	1
+		IF	DoDebug>1 AND &LinkSiz <> 'NoLink'	THEN
+			Link	A6,#&Default(&LinkSiz,'0')
+		GBLC	&DebugLabel			; parameter to pass the label.
+&DebugLabel	SetC	&Lab				; pass the label to the Tail Macro.
+		ElseIF	&LinkSiz<>'' AND &LinkSiz <> 'NoLink'	THEN
+			Link	A6,#&LinkSiz
+		Else
+&HaveLink	SetA	0
+		ENDIF
+		GBLC	&RegList
+&RegList	SetC	&Regs
+		IF	&Regs<>'' THEN
+			MoveM.L	&Regs,-(SP)		; generate register save.
+		ENDIF
+		ENDM
+		
+		
+		MACRO
+		TAIL	&FirstParam
+		GBLA	&HaveLink
+		GBLC	&DebugLabel
+		GBLC	&RegList
+		IF	&RegList<>'' THEN
+			MoveM.L	(SP)+,&RegList		; generate register restore.
+		ENDIF
+		IF 	&HaveLink	Then
+			Unlk	A6
+		EndIF
+		LclA	&p
+		IF	&FirstParam<>''	THEN
+&p			SetA	&Eval(&FirstParam)-ReturnAddr
+			Move.L	(SP)+,A0
+			IF	&p > 8 AND &p < 100	THEN
+			Lea	&p(SP),SP
+			ELSEIF &p>0	THEN
+			AddQ	#&p,SP
+			ELSEIF &p=0	THEN
+				; no parameters to pop.
+			ELSE
+			AError	'Error with Tail Paramter'
+			ENDIF
+			Jmp	(A0)
+		ELSE
+			Rts
+		ENDIF
+		IF 	DoDebug > 1	Then
+			LclA	&i
+			LclA	&c
+			LclA	&L
+&L			SetA	&Len(&DebugLabel)
+&i			SetA	1		
+			IF	&L>15	THEN
+			DC.B	128
+			DC.B	&L
+			ELSE
+			DC.B	128+&L
+			ENDIF
+			While	&i < &Len(&DebugLabel)+1	Do
+&c				SetA	&Ord(&SubStr(&DebugLabel,&i,1))
+			DC.B	&c
+&i				SetA	&i+1		
+			EndWhile
+			Align	2
+		EndIF
+		EndM
+
+		PRINT	on,NoMDir,noPage,NoHDR
+
+;---------------------------------------------------
+; Break to debugger macro
+		Macro
+		BREAK &A
+		IF	DoDebug > 2	THEN
+			STRING PASCAL
+			PEA	#&A
+			dc.w	$abff
+			STRING ASIS
+		ENDIF
+		ENDM
+
+HashLookUp	PROC	EXPORT
+BaseAddress	EQU	*			; base address used for offsets into this code.
+
+		Export	NewHashTable, DisposeHashTable
+		Export	AddKeyEntry, RemoveKeyEntry, GetKeyValue
+		Export	ReplaceEntry, GetIndexedEntry
+		IF	NOT ForAppleEventsOnly	THEN
+			Export	CheckKey
+			Export	GetGrowThreshhold, SetGrowThreshhold
+			Export	SetHashProc, GetHashProc
+			Export	GetDefaultMemProcs, GetTableMetrics
+			Export	IsHashConsistent
+		ENDIF
+
+; Global Sets!
+
+EntrySize	Set	0		; set the current entry size for macros.
+NoSeparateHash	Set	0		; if the entries are so small the Tag is the key, not the hash value.
+
+
+;
+; HashTabRecord - the format of a hash table.
+;
+; Warning!!! Don't change this structure without fixing NewHashTable
+;	since it is dependent on the number of entries and their order!
+;
+
+HashTabRecord	Record	0
+HashMask	DS.L	1			; Long mask to select the offset bits.
+HashTableSize	DS.L	1			; physical size of the table.
+HashNumUsed	DS.L	1			; number of entries in use.
+StringsHand	DS.L	1			; handle to string block, if needed.
+
+HashEntrySize	DS.L	1			; size of an entry.
+HashMultiply	DS.L	1			; Method offset for multiply by entry size.
+HashFind	DS.L	1			; search method offset
+HashExpand	DS.L	1			; expand method offset
+HashCustom	DS.L	1			; custom hashing method offset or ptr.
+
+HashNumExtra	DS.L	1			; number of extra entries at the end of the table.
+HashMagnitude	DS.W	1			; number of bits in hash index.
+HashFullPercent	DS.W	1			; grow the table when more than this percent is used.
+HashPercentUsed	DS.W	1			; current percent used.
+HValueOffset	DS.W	1			; offset to the value within an entry.
+HashKeySize	DS.W	1			; size of a key
+HashValueSize	DS.W	1			; size of a data value.
+
+		Align	4			; long-align all the data.
+HeaderSize	EQU	*
+		EndR
+		
+
+	With	HashTabRecord
+
+;
+; Register Usage
+;
+;	D0 - Current Entry Tag			curTag
+;	D1 - scratch
+;	D2 - scratch
+;	D3 - Target Tag / Table Magnitude	targetTag / tableMagnitude
+;	D4 - Key / HalfTableSize		Key / halfTableSize
+;	D5 - Table Entry Size			EntrySize
+;	D6 - HashMask				hashMask
+;	D7 - collision bit			31
+;
+;	A0 - Current Table Entry Pointer	curPos
+;	A1 - New Table Entry Pointer		newPos
+;	A2 - Table Data Base Pointer		tableBase
+;	A4 - StringTable/Key2			stringTable
+;	A5 - Unused
+;	A6 - Optional Frame Ptr
+;	A7 - SP
+;
+;
+; SendHMsg	&Message	assumes A2 points to the hash table Header.
+; --------				
+		MACRO
+		SendHMsg	&Message		; Using the reversable formula:
+			Lea	BaseAddress,A0		; address = base - offset; offset = base - address;
+			Sub.L	&Message(A2),A0		; get the proc associated with the message.
+			Jsr	(A0)			; call the hook.
+		ENDM
+
+; SendDMsg	&Message	assumes A2 points to the hash table data.
+; --------				
+		MACRO
+		SendDMsg	&Message
+			Lea	BaseAddress,A0		; address = base - offset; offset = base - address;
+			Sub.L	&Message-HeaderSize(A2),A0	; get the proc associated with the message.
+			Jsr	(A0)			; call the hook.
+		ENDM
+
+; SendDMsgOfst	&Message	assumes A2 points to the hash table data.
+; ------------				
+		MACRO
+		SendDMsgOfst	&Message
+			Move.L	&Message-HeaderSize(A2),D0	; get the proc associated with the message.
+			Bsr	CallMessage		; call that message.
+		ENDM
+
+
+;
+; CallMessage - code saver to jump to the specified Memory hook.
+;
+;	Entry:	D0 - offset or ptr to the mem proc to call.
+;
+CallMessage
+			Move.L	D0,A0			; check if it is a ptr or an offset.
+			BClr	#0,D0			; ptrs have the low bit on.
+			Bne.S	@Callit			;  so call them directly.
+			Lea	BaseAddress,A0		; address = base - offset; offset = base - address;
+			Sub.L	D0,A0			; get the proc associated with the message.
+@Callit
+			Jmp	(A0)
+
+
+; MultQ		&ESize,&R	 Multiply Dx by Arg (EntrySize)
+; -----
+		MACRO
+		MultQ	&ESize,&R			; Mult Dx by Arg (EntrySize)
+		Lcla	&m
+		IF	&Type(&ESize) = 'INT'	THEN
+&m			SetA	&ESize
+		ELSE
+&m			SetA	&Eval(&ESize)
+		ENDIF
+		IF	&M = 4	THEN
+			Asl.L	#2,&R			; shift 2: *4
+		ELSEIF	&M = 8	THEN
+			Asl.L	#3,&R			; shift 3: *8
+		ELSEIF	&M = 16	THEN
+			Asl.L	#4,&R			; shift 4: *16
+		ELSEIF	&M = 2	THEN
+			Add.L	&R,&R			; shift 1: *2
+		ELSEIF	&M = 12	THEN
+			Asl.L	#2,&R			; shift 3: *8
+			Move.L	&R,D1			; trashing D1!
+			Add.L	D1,D1
+			Add.L	D1,&R			; 8*(2+1)=24
+		ELSEIF	&M = 24	THEN
+			Asl.L	#3,&R			; shift 3: *8
+			Move.L	&R,D1			; trashing D1!
+			Add.L	D1,D1
+			Add.L	D1,&R			; 8*(2+1)=24
+		ELSEIF	&M = 3	THEN
+			Move.L	&R,D1			; trashing D1!
+			Add.L	D1,D1
+			Add.L	D1,&R
+		ELSEIF	&M = 6	THEN
+			Add.L	&R,&R			; times 2
+			Move.L	&R,D1			; trashing D1!
+			Add.L	D1,D1
+			Add.L	D1,&R
+		ELSEIF	&M = 25	THEN
+			Move.L	&R,D1			; trashing D1!
+			Asl.L	#3,D1			; times 8
+			Add.L	D1,&R			; times (1+8+8+8)
+			Add.L	D1,&R
+			Add.L	D1,&R
+		ELSE
+			Mulu	D5,&R			; Warning!  Assumes that D5 has the EntrySize!
+		ENDIF
+		ENDM
+		
+; MultEntrySize		Multiply D0 by EntrySize
+; -------------
+		MACRO
+		MultEntrySize
+		IF	EntrySize = -1	THEN
+			Move.L	A0,-(SP)
+			SendDMsg	HashMultiply	; do which ever multiply is hooked in now.
+			Move.L	(SP)+,A0
+		ELSE
+			MultQ	EntrySize,D0		; multiply by the entry size.
+		ENDIF
+		ENDM
+		
+; FourByteHash		Computes a Hash In Line, for four byte keys.
+; ------------
+		MACRO
+		FourByteHash
+		IF	DoBennetteHash	THEN
+			Move.L	(A0),D0
+			Move.L	D0,D1
+			Ror.L	#5,D0
+			Eor.L	D1,D0
+			Ror.L	#5,D0
+			Eor.L	D1,D0
+			Ror.L	#5,D0
+			Eor.L	D1,D0
+		ELSE
+			Move.L	(A0),D0
+			Ror.L	#5,D0
+			Add.L	(A0),D0
+			Ror.L	#5,D0
+			Add.L	(A0),D0
+			Ror.L	#5,D0
+			Add.L	(A0),D0
+			Mulu	#$B33D,D0
+		ENDIF
+			BSET	#CollBit-1,D0
+		ENDM
+
+; CheapOHash		Computes a Hash In Line, for small table size.
+; ----------
+		MACRO
+		CheapOHash
+		IF	NoSeparateHash	THEN
+			FourByteHash
+		ELSE
+			AERROR	'CheapOHash called when NoSeparateHash false!'
+		ENDIF
+		ENDM
+
+; InLineHash	Computes the Hash from (A0) into D0 In Line.
+; ----------		KeySize and NoSeparateHash must be set up.
+		MACRO
+		InLineHash
+		IF	KeySize = 0	THEN
+			Move.B	(A0),D1			; get the length
+			MoveQ	#100,D0			; start with some initial value.
+			Add.B	D1,D0
+@AddLoop
+			Rol.L	#3,D0			; try to smear the bits a little.
+			Add.B	(A0)+,D0
+			DBRA	D1,@AddLoop
+			Mulu	#$B33C,D0		; slow, but gives us better bit smearing.
+			BSET	#CollBit-1,D0
+		ELSEIF	KeySize = 4 THEN
+			FourByteHash
+		ELSEIF	KeySize = 8 THEN
+		IF	ModifiedJamesMethod	THEN
+			Move.L	(A0),D0
+			Add.B	(A0)+,D0
+			Roxl.L	#4,D0
+			Add.B	(A0)+,D0
+			Roxl.L	#4,D0
+			Add.B	(A0)+,D0
+			Roxl.L	#4,D0
+			Add.B	(A0)+,D0
+			Roxl.L	#4,D0
+			Add.B	(A0)+,D0
+			Roxl.L	#4,D0
+			Add.B	(A0)+,D0
+			Roxl.L	#4,D0
+			Add.B	(A0)+,D0
+			Roxl.L	#4,D0
+			Add.B	(A0)+,D0
+			BSET	#CollBit-1,D0
+		ELSE
+			Move.L	(A0),D0
+			Rol.L	#5,D0
+			Add.L	(A0),D0
+			Rol.L	#5,D0
+			Add.L	(A0),D0
+			Rol.L	#5,D0
+			Add.L	(A0)+,D0
+			Add.L	(A0),D0
+			Ror.L	#5,D0
+			Add.L	(A0),D0
+			Ror.L	#5,D0
+			Add.L	(A0),D0
+			Ror.L	#5,D0
+			Add.L	(A0),D0
+			Mulu	#$B33D,D0
+			BSET	#CollBit-1,D0
+		ENDIF
+		ELSEIF	KeySize = -1 THEN
+			Bsr	SetUpHashCustom		; make sure the HashCustom field is set up.
+			SubQ	#4,SP			; for result
+			Move.L	A0,-(SP)		; call a custom hash computation.
+			SendDMsgOfst	HashCustom	; with KeyPtr parameter on TOS.
+			Move.L	(SP)+,D0		; return the hashed value.
+		ELSE
+			AERROR	'KeySize is invalid in InLineHash'
+		ENDIF
+			ClearCollided	D0
+		ENDM
+		
+; GetTagInD3	get the tag (usually the hash) into D3.
+; ----------
+		MACRO
+		GetTagInD3
+		IF	NoSeparateHash	THEN
+			Move.L	(A0),D3			; the tag to find is the key.
+		ELSE
+			Move.L	D0,D3			; remember the full hash code.
+		ENDIF
+		ENDM
+		
+
+; SetUpKey	Set up the Key data in reg's D4,A4, based on KeySize.
+; --------
+		MACRO
+		SetUpKey
+		IF	KeySize = 0	THEN
+			; already got the string pointer.
+		ELSEIF	KeySize = -1 THEN
+		; the dynamic case - use the keysize in the table.
+		; tricky code calls it's own macro to expand the various cases.
+OldKeySize		Set	KeySize			; preserve the current keysize setting.
+			Move.W	HashKeySize-HeaderSize(A2),D0	; get the current hash key size.
+			SubQ	#4,D0
+			BLT.S	SetUpKeyString
+			BGT.S	SetUpKeyDouble
+KeySize			Set	4
+			SetUpKey
+			Bra.S	SetUpKeyContinue
+SetUpKeyDouble
+KeySize			Set	8
+			SetUpKey
+		;;;	Bra.S	SetUpKeyContinue  ;;; cuz SetUpKey for 0 expands to nothing.
+SetUpKeyString
+KeySize			Set	0
+			SetUpKey
+KeySize			Set	OldKeySize
+SetUpKeyContinue
+		ELSEIF	KeySize >= 4 THEN
+			Move.L	(A0),D4			; fetch the long key.
+		ELSE
+			AERROR	'KeySize is invalid in SetUpKey'
+		ENDIF
+		IF	KeySize = 8 THEN
+			Move.L	4(A0),A4		; fetch the second long.
+		ENDIF
+		ENDM
+		
+	
+; ClearCollided	&D	Clear the collided bit for a Tag.
+; -------------
+		MACRO
+		ClearCollided	&D
+		IF	NOT NoSeparateHash	THEN
+			BClr	D7,&D			; set the collided flag on the target.
+		ELSE
+			; The collided flag is implicit in the tags value.
+		ENDIF
+		ENDM
+		
+; SetCollided	&D	Set the collided bit for a Tag.
+; -----------
+		MACRO
+		SetCollided	&D
+		IF	NOT NoSeparateHash	THEN
+			BSet	D7,&D			; set the collided flag on the target.
+		ELSE
+			; The collided flag is implicit in the tags value.
+		ENDIF
+		ENDM
+
+; ComputeOldLocation 	computes the correct location for an entry.
+; ------------------			
+		MACRO					; depends on EntrySize
+		ComputeOldLocation
+			And.L	D4,D0			; mask with old hash mask.
+			MultQ	EntrySize,D0		; compute new offset
+			Lea	0(A2,D0.L),A1		; point to new location
+		ENDM
+
+; ComputeNewLocation	compute the location for an entry.
+; ------------------
+		MACRO					; depends on EntrySize
+		ComputeNewLocation
+			And.L	D6,D0			; mask with new table size
+			MultEntrySize			; compute new offset
+			Lea	0(A2,D0.L),A1		; point to new location
+		ENDM
+
+
+; BCollided	&Label	Branch if Collided
+; ---------	
+		MACRO					; branch if a collided entry
+		BCollided	&Label
+		IF	NoSeparateHash	THEN
+			CheapOHash			; if the hash is not cached, then hash
+			Move.L	D0,D1			; remember the computed hash.
+			ComputeOldLocation
+			Move.L	(A0),D0			; restore tag
+			Cmp.L	A0,A1			; curOffset > newOffset means collided
+		ELSE
+			; CCR shows collided in Neg Flag from the Move instruction.
+		ENDIF
+			BMI.S	&Label
+		ENDM
+
+; TestNextBit		test the new high bit used in hash.
+; ---------	
+		MACRO
+		TestNextBit
+		IF	NoSeparateHash	THEN
+			BTst	D3,D1			; test the new high bit used in hash.
+		ELSE
+			BTst	D3,D0			; test the new high bit used in hash.
+		ENDIF
+		ENDM
+		
+; SearchEmptySpot	Find an empty table entry.
+; ---------------
+		MACRO					; EntrySize in D5, ptr before entry in A1.
+		SearchEmptySpot
+			ComputeNewLocation
+			Move.L	A6,D0			; restore tag
+			ClearCollided	D0		; hope new spot won't be in use
+			Tst.L	(A1)			; test if empty
+			Beq.S	@FoundSpot		
+@NextSpot
+			Add.L	D5,A1			; next entry 
+			Tst.L	(A1)			; tag indicate in use?
+			Bne.S	@NextSpot		; loop till empty
+			SetCollided	D0		; flag collided entry
+@FoundSpot	
+		ENDM
+
+; BKeyWrong		Check if this entry is the target.
+; -----------
+		MACRO
+		BKeyWrong	&MissedLabel
+		IF	NoSeparateHash	THEN
+			; already found matching entry
+		ELSEIF KeySize > 0	THEN
+			Cmp.L	4(A0),D4
+			Bne.S	&MissedLabel
+			IF	KeySize = 8	THEN
+			Cmp.L	8(A0),A4
+			Bne.S	&MissedLabel
+			ENDIF
+		ELSEIF KeySize = -1	THEN
+		; handle general case of any key size.
+		; tricky code calls it's own macro to expand the various cases.
+OldKeySize		Set	KeySize			; preserve the current keysize setting.
+			Move.W	HashKeySize-HeaderSize(A2),D1	; get the current key size.
+			SubQ	#4,D1
+			BLT.S	BKeyWrongStringCompare
+			BGT.S	BKeyWrongDoubleCompare
+KeySize			Set	4
+			BKeyWrong	&MissedLabel
+			Bra.S	BKeyWrongContinue
+BKeyWrongStringCompare
+KeySize			Set	0
+			BKeyWrong	&MissedLabel
+			Bra.S	BKeyWrongContinue
+BKeyWrongDoubleCompare
+KeySize			Set	8
+			BKeyWrong	&MissedLabel
+KeySize			Set	OldKeySize
+BKeyWrongContinue
+		ELSE
+			Move.L	(A4),A1
+			Add.L	4(A0),A1		; get the string pointer.
+			MoveQ	#0,D1
+			Move.B	(A1),D1			; get the length byte
+			Move.L	A0,-(SP)
+			Move.L	D4,A0			; point to the parameter string
+@CmpLoop
+			Cmp.B	(A1)+,(A0)+		; does it match?
+			DBNE	D1,@CmpLoop
+			Move.L	(SP)+,A0		; restore entry ptr
+			; continue with flags still set from Cmp
+			Bne.S	&MissedLabel
+		ENDIF
+		ENDM
+
+; PreScanEntries	@Lab,&NumLoops		Generate a Pre-Scan for the matching entry.
+; --------------
+		MACRO
+		PreScanEntries	&Lab,&NumLoops
+		LclA	&Loop
+		LclC	&D
+&D		SetC	&Default(&NumLoops,'MinExtraEntries')
+&Loop		SetA	&Eval(&D)
+		WHILE	&Loop > 0	DO
+			Add.L	D5,A0			; point to next entry.
+			Cmp.L	(A0),D3			; check it too.
+			Beq.S	&Lab
+		
+&Loop			SETA	&Loop-1
+		ENDWHILE		; etc
+		ENDM
+
+
+;
+; Find Entry
+;
+; This chunk of code is a macro, because we want to lay down the
+; 	four different optomised cases based on the KeySize:
+;	PString, Long, Double, and the NoSeparateHash case.
+;
+;	Entry:	A1 - Pointer to the Key.
+;	Exit:	D0 - 0 iff found.
+;		A0 - pointer to the found entry, or first available spot.
+;
+
+; FindAnEntry		Search for the matching entry.
+; -----------		  depends on NoSeparateHash, MinExtraEntries, KeySize, EntrySize
+		MACRO
+		FindAnEntry
+
+		Move.L	D4,A0				; pointer to the key data.
+		SetUpKey				; set up the key data in my regs.
+		
+; compute the hash value for the key.
+
+		InLineHash				; takes Key in A0, returns hash in D0.
+		GetTagInD3				; get the tag (usually the hash) into D3.
+		And.L	D6,D0				; mask down to the index bits.
+		MultEntrySize				; multiply by the entry size.
+		Move.L	A2,A0				; table base pointer.
+		Add.L	D0,A0
+
+; The entry almost certainly exists, so we prescan attempting to locate it.
+; returns D0 - 0 iff found, or Error.
+
+		Move.L	A0,A1				; remember start point
+		Cmp.L	(A0),D3				; check if this tag matches.
+		Beq.S	@MayHaveFound			;  then it is likely to be the target.
+		SetCollided	D3			; now prepare to match a collided entry.
+		PreScanEntries	@MayHaveFound
+		
+; The prescan failed.  We may not have gone far enough, or it might not exist.
+
+		Move.L	A1,A0				; start over again, using the general case.
+		ClearCollided	D3
+		Move.L	(A0),D1				; get the tag.
+		Beq.S	@NotFound			; no tag - empty cell.
+		Cmp.L	D1,D3				; do the tags match?
+		Beq.S	@MayHaveFound			; no, maybe the next will
+@SecondOne
+		SetCollided	D3
+@NextOne
+		Add.L	D5,A0				; point to next entry.
+		Move.L	(A0),D1				; get the tag.
+		Beq.S	@NotFound			; no tag - empty cell.
+		Cmp.L	D1,D3				; do the tags match?
+		Bne.S	@NextOne			; no, maybe the next will
+@MayHaveFound
+		BKeyWrong	@SecondOne		; check if this is the right entry.
+@FoundEntry
+		MoveQ	#0,D0				; return EQ
+@Exit	
+		Rts
+
+@NotFound
+		MoveQ	#-1,D0
+		Bra.S	@Exit
+		
+		ENDM
+		
+		
+		
+
+; CopyAndClearEntry copies a hash table entry from the source to the dest.
+;			Depends on EntrySize.
+;	Entry:	D0 - Tag, perhaps including collision bit.
+;	Exit:	D0 - trashed sometimes.
+;		D1 - trashed.
+
+; CopyAndClearEntry	&Src,&Dest	copies a hash table entry
+; -----------------
+		MACRO
+		CopyAndClearEntry	&Src,&Dest
+		LclA	&Count4
+			Move.L	&Src,D1			; preserve the source ptr!
+			Move.L	D0,(&Dest)+		; copy the tag
+			Clr.L	(&Src)+			; clear the source entry
+		IF	EntrySize = 8	THEN		; custom entry size
+			Move.L	(&Src)+,(&Dest)+	; bytes 4-7
+		ELSEIF	EntrySize < 4	THEN		; custom entry size
+			Move.L	D5,D0			; get the entry
+			Lsr.W	#2,D0			; divide by 4
+			SubQ	#1+1,D0			; one entry already done.
+@MoveLoop
+			Move.L	(&Src)+,(&Dest)+
+			DBRA	D0,@MoveLoop
+		ELSEIF	EntrySize > 8	THEN
+&Count4			SETA	(EntrySize-8)/4
+			WHILE	&Count4 > 0	DO
+			Move.L	(&Src)+,(&Dest)+
+&Count4				SETA	&Count4-1
+			ENDWHILE
+		ENDIF
+			Move.L	D1,&Src			; preserve the source ptr!
+		ENDM
+
+
+
+; Table Expansion
+; ---------------
+
+;Expand Algorithem
+
+;	IF not empty entry THEN
+;		newPos = curPos
+;		IF collided entry THEN
+;			newPos = FindEntry
+;		Else IF NextBit THEN
+;			newPos += TableSize
+;		End IF
+;		IF newPos != curPos THEN
+;			copy entry from curPos to newPos
+;			clearEntry(curPos)
+;		EndIF
+;	EndIf
+
+;Expand Algorithem - as implemented
+;	Note that the compute newPos is a special findentry in the full
+;		table that treats the current entry as if it is available.
+;
+;	IF not empty entry THEN
+;		IF not collided entry THEN
+;			IF NextBit THEN
+;				newPos += TableSize
+;				MoveRecord
+;			EndIf
+;		Else
+;			compute newPos
+;			IF newPos != curPos THEN
+;				MoveRecord
+;			End IF
+;		End IF
+;	EndIf
+
+
+; ExpandEntry	- called by sending the HashExpand message.
+; -----------
+		MACRO
+		ExpandEntry
+;Expand Entry			Depends on EntrySize, NoSeparateHash
+;
+;	Entry:	D2 - Half table size.
+;		D3 - old table magnitude.
+;		D4 - Old hash Mask.
+;		D5 - Entry size.
+;		D6 - Hash Mask.
+;		D7 - Collision bit
+;		A0 - first entry of the table.
+;		A1 - scratch: new table entry ptr.
+;		A2 - hash table data pointer
+;		A4 - Half table size.
+;		A6 - scratch: saves Tag.
+;
+		Move.L	A2,A0				; point to the first entry.
+@CopyLoop
+		Move.L	(A0),D0				; pick up current Tag.
+		Beq.S	@NextRecord			; unused entry?
+
+; check if it is a collided entry.
+
+		BCollided	@Collided		; branch if the entry is a collided one
+
+; copy entries that have their new high bit ON
+
+@NotCollided
+		TestNextBit				; test the new high bit used in hash.
+		Beq.S	@NextRecord			;  skip if bit OFF - it stays in this spot.
+		Move.L	A0,A1				; bump dest pointer by tableSize
+		Add.L	A4,A1
+		; non-collided entries get copied to second half of table, or are correct.
+		
+; This record should be copied into the new table.
+
+@MoveRecord						; D0 - new collided info at this point.
+		CopyAndClearEntry	A0,A1
+		Bra.S	@NextRecord			; go to the next entry.
+
+; find the correct new position for a collided entry.
+
+@Collided
+		IF	NoSeparateHash	THEN
+		Move.L	(A0),A6				; remember the Tag.
+		Move.L	D1,D0				; on-the-fly hash (for SearchEmptySpot)
+		ELSE
+		Move.L	D0,A6				; remember the Tag.
+		ENDIF
+		Clr.L	(A0)
+		SearchEmptySpot				; find next empty entry
+		Move.L	A6,(A0)				; restore current entry
+		Cmp.L	A0,A1				; did it map to the same entry?
+		Bne.S	@MoveRecord			;  no, 	
+							;  yes, just leave it alone
+
+; move past dest record, till done with this half.
+
+@NextRecord
+		Add.L	D5,A0				; point to next dest record.
+		SubQ.L	#1,D2
+		BPL.S	@CopyLoop
+	
+		Rts					; done!
+		
+		ENDM
+		
+
+; CountPath  - counts the number of times the macro was executed.
+; ---------	only runs in debug mode
+		MACRO
+		CountPath	&Label
+		IF	DoDebug	THEN
+			Move.L	A0,-(SP)		; save
+			Lea	@theCount,A0
+			AddQ.L	#1,(A0)			; bump in-line counter
+			Move.L	(SP),A0			; restore
+			Bra	@SkipData
+@theCount		DC.L	1
+@SkipData	
+		ENDM
+
+
+; Deref		&Src,&Dest	Dereference Source to Dest.
+; -----
+		MACRO
+		Deref	&Src,&Dest
+			SubQ	#4,SP
+			Move.L	&Src,-(SP)
+			bsr	DeRefMemory
+			Move.L	(SP)+,&Dest
+		ENDM
+		
+; GrowMem	&Src,&Size	Grow a block to the spec'ed size.
+; -------			  error result in D0.
+		MACRO
+		GrowMem	&Src,&Size
+			SubQ	#2,SP			; for result
+			Move.L	&Src,-(SP)
+			Move.L	&Size,-(SP)
+			bsr	SetMemorySize
+			Move.W	(SP)+,D0
+		ENDM
+		
+; KillMem	&Src		Dispose of a block of memory
+; -------			  error result in D0.
+		MACRO
+		KillMem	&Src
+			SubQ	#2,SP			; for result
+			Move.L	&Src,-(SP)
+			bsr	DisposeMemory
+			Move.W	(SP)+,D0
+		ENDM
+		
+; NewMem	&Size		Create a block of memory
+; -------			  error result in D0.
+		MACRO
+		NewMem	&Size,&SysHeap
+			SubQ	#4,SP			; for VAR
+			Move.L	SP,A0
+			SubQ	#2,SP			; for result
+			Move.L	&Size,-(SP)
+			Move.W	&SysHeap,-(SP)		; pass the sysHeap boolean
+			Move.L	A0,-(SP)		; point to Var
+			bsr	NewMemory
+			Move.W	(SP)+,D0
+			Move.L	(SP)+,A0		; return the block in A0.
+		ENDM
+		
+
+; MyBlockMove 		same interface as blockmove, but no trap.
+; -----------
+		MACRO
+		MyBlockMove
+			SubQ	#1,D0			; Warning: this will not work for zero length!
+@MoveLoop					
+			Move.B	(A0)+,(A1)+
+			DBRA	D0,@MoveLoop
+		ENDM
+		
+; MyBlock4Move 		same interface as blockmove, but no trap.
+; ------------			moves longs at a time.
+		MACRO
+		MyBlock4Move
+			SubQ	#1,D0			; Warning: this will not work for zero length!
+			Lsr.W	#2,D0			; divided by four.
+@MoveLoop					
+			Move.L	(A0)+,(A1)+
+			DBRA	D0,@MoveLoop
+		ENDM
+		
+;--------------------------------------
+;
+;  MULTIPLY, FIND, and EXPAND METHODS
+;
+;--------------------------------------
+
+;--------------------------------------
+;
+;  MULTIPLY METHODS
+;
+;--------------------------------------
+
+;HashMultiply Methods.
+
+EntrySize	Set	8				; generate shift MultQ
+
+MultBy8
+		MultQ	8,D0				; multiply quickly by 8.
+		Rts
+		
+MultBy12
+		MultQ	12,D0				; multiply quickly by 12.
+		Rts
+		
+MultBy16
+		MultQ	16,D0				; multiply quickly by 16.
+		Rts
+		
+MultBy24
+		MultQ	24,D0				; multiply quickly by 24.
+		Rts
+
+; Multiply a Long value in D0 by D5.
+
+MultByN			; multiply slowly by EntrySize.
+		Move.L	D0,-(SP)
+		Mulu	D5,D0				; mult the low order word.
+		Tst.W	(SP)		
+		Beq.S	@GotResult		
+		
+		Move.L	D0,-(SP)
+		Move.W	4(SP),D0			; get the high word.
+		Mulu	D5,D0				; mult the high order word.
+		Swap	D0
+		IF	DoDebug	THEN
+		Tst.W	D0				; non zero only if overflowed.
+		Beq.S	@SkipError
+		Break	'Multiply overflowed!'
+		Clr.W	D0
+@SkipError
+		ENDIF
+		Add.L	(SP)+,D0			; get the final result.
+@GotResult
+		AddQ	#4,SP
+		Rts
+
+		IF	NOT ForAppleEventsOnly	THEN
+		
+;--------------------------------------
+;
+;  FIND  METHODS
+;
+;--------------------------------------
+
+; HashFind Methods
+
+KeySize		Set	4				; has a key 4 bytes long.
+NoSeparateHash	Set	0				; we do have a separate hash for most tables.
+EntrySize	Set	-1				; invalid size will generate general multiply
+
+Find4To8
+Find4ToN
+		FindAnEntry				; expand a find loop, key size 4, with separate hash.
+		
+KeySize		Set	4				; has a key 4 bytes long.
+NoSeparateHash	Set	1				; no stored hash for a Long --> Long table.
+EntrySize	Set	8				; generate shift MultQ
+
+Find4To4
+		FindAnEntry				; expand a find loop, key size 4, no separate hash.
+
+KeySize		Set	0				; has a pascal string key.
+NoSeparateHash	Set	0				; we have a separate hash.
+EntrySize	Set	-1				; invalid size will generate general multiply
+
+FindPTo4
+FindPTo8
+FindPToN
+		FindAnEntry				; expand a find loop, pascal key, no separate hash.
+
+
+KeySize		Set	8				; has a key 8 bytes long.
+NoSeparateHash	Set	0				; we have a separate hash.
+EntrySize	Set	-1				; invalid size will generate general multiply
+
+Find8To4
+Find8ToN
+		FindAnEntry				; expand a find loop, key size 8, no separate hash.
+
+KeySize		Set	8				; has a key 8 bytes long.
+NoSeparateHash	Set	0				; we have a separate hash.
+EntrySize	Set	24				; special case for AppleEvents.
+
+Find8To8
+		FindAnEntry				; expand a find loop, key size 8, entry size 24.
+
+EntrySize	Set	-1				; invalid size will generate general multiply
+KeySize		Set	-1				; set to special value for dynamic key-size test.
+FindNToN
+		FindAnEntry				; general find loop, which calls an external hash.
+
+;--------------------------------------
+;
+;  EXPAND  METHODS
+;
+;--------------------------------------
+
+; dependent on EntrySize, NoSeparateHash
+
+
+; 8 byte entry expand.
+
+EntrySize	Set	8				; entry is 8 bytes long.
+NoSeparateHash	Set	1				; no stored hash - dynamically computed.
+
+Expand4To4
+		ExpandEntry
+
+		
+; 12 byte entryExpand
+
+EntrySize	Set	12				; entry is 12 bytes long.
+NoSeparateHash	Set	0				; has a stored hash.
+
+ExpandPTo4
+		ExpandEntry
+
+; 16 byte entry Expand.
+
+EntrySize	Set	16				; entry is 16 bytes long.
+NoSeparateHash	Set	0				; has a stored hash.
+
+ExpandPTo8
+Expand4To8
+Expand8To4
+		ExpandEntry
+
+; 24 byte expand
+
+EntrySize	Set	24				; entry is 16 bytes long.
+NoSeparateHash	Set	0				; has a stored hash.
+
+Expand8To8		
+		ExpandEntry
+		
+; General Expand		
+
+EntrySize	Set	-1				; invalid size will generate general multiply
+NoSeparateHash	Set	0				; has a stored hash.
+
+Expand8ToN
+ExpandPToN
+Expand4ToN
+		ExpandEntry
+
+
+		ELSE					; NOT ForAppleEventsOnly
+
+;--------------------------------------
+;
+;  FIND  METHODS
+;
+;--------------------------------------
+
+; HashFind Methods
+
+KeySize		Set	8				; has a key 8 bytes long.
+NoSeparateHash	Set	0				; we have a separate hash.
+EntrySize	Set	24				; special case for AppleEvents.
+
+Find8To8
+		FindAnEntry				; expand a find loop, key size 8, no separate hash.
+
+
+NoSeparateHash	Set	0				; we have a separate hash.
+EntrySize	Set	-1				; invalid size will generate general multiply
+KeySize		Set	-1				; set to special value for dynamic key-size test.
+Find4To8
+Find4ToN
+Find4To4
+FindPTo4
+FindPTo8
+FindPToN
+Find8To4
+Find8ToN
+FindNToN
+		FindAnEntry				; general find loop, which calls an external hash.
+
+;--------------------------------------
+;
+;  EXPAND  METHODS
+;
+;--------------------------------------
+
+; dependent on EntrySize, NoSeparateHash
+
+; 24 byte expand
+
+EntrySize	Set	24				; entry is 16 bytes long.
+NoSeparateHash	Set	0				; has a stored hash.
+
+Expand8To8		
+		ExpandEntry
+
+; General Expand		
+
+EntrySize	Set	-1				; invalid size will generate general multiply
+NoSeparateHash	Set	0				; has a stored hash.
+
+Expand4To4
+ExpandPTo4
+ExpandPTo8
+Expand4To8
+Expand8To4
+Expand8ToN
+ExpandPToN
+Expand4ToN
+		ExpandEntry
+
+		ENDIF					; NOT ForAppleEventsOnly
+
+EntrySize	Set	-1				; general multiply for the rest.
+
+;--------------------------------------
+;
+;  HASHING  METHODS
+;
+;--------------------------------------
+
+KeySize		Set	4				; four byte hash.
+Hash4Byte						; long key
+		Move.L	(SP)+,A1			; return addr		
+		Move.L	(SP)+,A0			; data pointer
+		InLineHash
+		Move.L	D0,(SP)				; return result
+		Jmp	(A1)				; rts
+
+KeySize		Set	0				; 0 means pstring hash.
+HashPString						; pascal string key.
+		Move.L	(SP)+,A1			; return addr		
+		Move.L	(SP)+,A0			; data pointer
+		InLineHash
+		Move.L	D0,(SP)				; return result
+		Jmp	(A1)				; rts
+
+KeySize		Set	8				; eight byte hash.
+HashDouble						; double key.
+		Move.L	(SP)+,A1			; return addr		
+		Move.L	(SP)+,A0			; data pointer
+		InLineHash
+		Move.L	D0,(SP)				; return result
+		Jmp	(A1)				; rts
+
+KeySize		Set	-1				; reset to avoid accidental use.
+
+
+;-----------------------------------------------------------------------
+;
+;	Default Memory Access routines.
+;
+;-----------------------------------------------------------------------
+;
+;	TYPE	MemBlock:LONGINT;
+;
+;	Function NewMemory(NewSize:LONGINT; SysHeap:Boolean; VAR Result:MemBlock):OSErr;
+;	Function DisposeMemory(block:MemBlock):OSErr;
+;	Function SetMemorySize(block:MemBlock; NewSize:LONGINT):OSErr;
+;	Function DeRefMemory(block:MemBlock):Ptr;
+;
+;-----------------------------------------------------------------------
+
+;	Function NewMemory(NewSize:LONGINT; SysHeap:Boolean; VAR Result:MemBlock):OSErr;
+NMFrame		Record	{ReturnAddr},Decr
+theError	DS.W	1
+theSize		DS.L	1
+FirstParam	EQU	*
+SysHeap		DS.W	1
+theVar		DS.L	1
+ReturnAddr	DS.L	1
+LocalSize	EQU	*
+		EndR
+		With	NMFrame
+		
+; called by the NewMessage	
+
+NewMemory	Head	,NoLink
+		Move.L	theSize(SP),D0			; size.
+		Tst.B	SysHeap(SP)
+		Beq.S	@NormalNew
+		_NewHandle ,Sys
+		Bra.S	@StuffError
+@NormalNew
+		_NewHandle
+@StuffError
+		Move.W	D0,theError(SP)
+		Move.L	theVar(SP),A1
+		Move.L	A0,(A1)
+		Tail	FirstParam
+
+		EndWith
+		
+	
+;	Function DisposeMemory(block:MemBlock):OSErr;
+
+DMFrame		Record	{ReturnAddr},Decr
+theError	DS.W	1
+theBlock	DS.L	1
+FirstParam	EQU	*
+ReturnAddr	DS.L	1
+LocalSize	EQU	*
+		EndR
+		With	DMFrame
+		
+DisposeMemory	Head	,NoLink
+		Move.L	theBlock(SP),A0			; block.
+		_DisposHandle
+		Move.W	D0,theError(SP)
+		Tail	FirstParam
+	
+		EndWith
+		
+;	Function SetMemorySize(block:MemBlock; NewSize:LONGINT):OSErr;
+
+SMSFrame	Record	{ReturnAddr},Decr
+theError	DS.W	1
+theBlock	DS.L	1
+FirstParam	EQU	*
+theSize		DS.L	1
+ReturnAddr	DS.L	1
+LocalSize	EQU	*
+		EndR
+		With	SMSFrame
+		
+SetMemorySize	Head	,NoLink
+		Move.L	theBlock(SP),A0			; block.
+		Move.L	theSize(SP),D0			; the new size
+		_SetHandleSize
+		Move.W	D0,theError(SP)
+		Tail	FirstParam
+	
+		EndWith
+		
+;	Function DeRefMemory(block:MemBlock):Ptr;
+
+DRFrame		Record	{ReturnAddr},Decr
+thePtr		DS.L	1
+theBlock	DS.L	1
+FirstParam	EQU	*
+ReturnAddr	DS.L	1
+LocalSize	EQU	*
+		EndR
+		With	DRFrame
+
+DeRefMemory	Head	,NoLink
+		Move.L	theBlock(SP),A0			; block.
+		Move.L	(A0),thePtr(SP)
+		Tail	FirstParam
+
+;
+; SetUpMemProcs - Install the default memory procs, if not already done
+;
+;	This macro has been killed.
+;
+
+;
+; SetUpMemProcs		;;; Move.L	MemProcs(SP),D0	; should be done already.
+; _______________
+		MACRO
+		SetUpMemProcs
+		ENDM
+
+
+
+; <SM2> rb, space for variables moved to global record so this code works from ROM.
+
+;
+; SetUpHashCustom - set up the HashCustom field of the table, if it's nil.
+;.
+;	Entry:	A2 - pointer to the data of the hash table.
+;
+SetUpHashCustom
+		Tst.L	HashCustom-HeaderSize(A2)
+		Bne.S	@Exit
+		MoveQ	#-1,D0				; clear the high word.
+		Move.W	HashKeySize-HeaderSize(A2),D0	; case on the key size.
+		SubQ	#4,D0				; pascal, 4 or 8 byte key?
+		BLo.S	@PStringHash
+		BHi.S	@DoubleHash
+		
+		Move.W	#BaseAddress-Hash4Byte,D0	; long key
+		Bra.S	@SetHash
+@PStringHash
+		Move.W	#BaseAddress-HashPString,D0	; pascal string key.
+		Bra.S	@SetHash
+@DoubleHash
+		Move.W	#BaseAddress-HashDouble,D0	; double key.
+@SetHash
+		Move.L	D0,HashCustom-HeaderSize(A2)	; set the hash proc.
+@Exit
+		Rts
+
+		IF	NOT ForAppleEventsOnly	THEN
+		
+;-----------------------------------------------------------------------
+;
+;	String List Management Routines.
+;
+;-----------------------------------------------------------------------
+
+; String List entry format:
+
+ListRecord	Record	0
+LTotalSize	DS.L	1
+LFreeOffset	DS.L	1				; offset to free data.
+LGrowAmount	DS.L	1
+ListData	DS.L	0
+		EndR
+		
+	With	ListRecord
+
+
+;
+; NewList - Create a new list object.
+;
+;	Entry:	D0 - SysHeap boolean
+;		D1 - initial size of the block.
+;	Exit:	D0 - result code.
+;		D1 - Handle to the object.
+;
+NewList
+		MoveM.L	D6/D7/A4,-(SP)
+		Move.L	D1,A4
+		Move.W	D0,D7
+		MoveQ	#0,D6				; clear result
+		
+; make the amount to grow each time the initial size (or 100).
+
+		MoveQ	#100,D2				; minimum grow size.
+		Cmp.L	D2,A4
+		BGE.S	@GrowOK
+		Move.L	D2,A4
+@GrowOK		
+		MoveQ	#ListData,D0			; size must include dispatch, offset to free, total size 
+		Add.L	D0,A4				; add to initial size.
+		NewMem	A4,D7
+		Bne.S	@Error
+		
+		Move.L	A0,D6				; remember the block handle.
+		Deref	A0,A0				; dereference A0 into A0.
+		
+		MoveQ	#ListData,D0
+		Move.L	A4,(A0)+			; remember the total size.  field LTotalSize
+		Move.L	D0,(A0)+			; remember the offset to the free space. field LFreeOffset
+		Move.L	A4,(A0)+			; remember the grow amount.  field LGrowAmount
+		
+		MoveQ	#0,D0
+@Exit
+		Move.L	D6,D1				; return the handle.
+		Tst.W	D0				; set the condition codes.
+		MoveM.L	(SP)+,D6/D7/A4
+		Rts
+@Error
+	Break	'NewList error'
+		Bra.S	@Exit
+		
+;
+; LAddEntry - Add a string to our string list.
+; 	
+;	Entry:	A0 - List block handle.
+;		D4 - Key string pointer.
+;	Exit:	D0 - result code.
+;		D1 - offset to string in the list.
+;
+LAddEntry	Head	D2-D5/A0-A4
+		
+		Move.L	A0,A2				; save list handle.
+		Move.L	D4,A0				; point to the string to add.
+		MoveQ	#0,D3				; get length here.
+		Move.B	(A0),D3				; got the length (minus one).
+		AddQ	#1,D3				; got length including length byte.
+		Deref	A2,A1				; point to the block
+		Move.L	LTotalSize(A1),D5		; get total size.
+		
+@TestFit	
+		Sub.L	LFreeOffset(A1),D5		; amount of room left.
+		Cmp.L	D3,D5				; room for our string?
+		BGE.S	@NoGrow
+		
+		Move.L	LGrowAmount(A1),D5		; grow amount
+		Add.L	LTotalSize(A1),D5		; add to old size.
+		GrowMem	A2,D5				; grow block in A2 to size in D5.
+		Bne.S	@ErrorCase
+		Deref	A2,A1
+		Move.L	D5,LTotalSize(A1)		; remember new size.
+		Bra.S	@TestFit			; fall through on an error.
+
+@ErrorCase
+	Break	'LAddEntry Error'
+		Bra.S	@ErrorReturn
+
+@NoGrow
+		Move.L	D4,A0				; src ptr.
+		Move.L	LFreeOffset(A1),D1		; offset to return.
+		Add.L	D3,LFreeOffset(A1)		; point past the string.
+		Add.L	D1,A1				; point to string place
+		Move.L	D3,D0
+		MyBlockMove
+		MoveQ	#0,D0				; return no error.
+@ErrorReturn
+		Tail
+
+;
+; ListDispose - Dispose is not used now.  This means that removing a hash table
+;	element will not remove its string (just wasted space).
+;
+ListDispose
+		MoveQ	#0,D0
+		Rts
+
+;
+; LKill - Kill ourself, assuming I'm a list object.
+;
+;	Entry:	A0 - List block handle.
+;
+LKill		Head
+		KillMem	A0				; call the dispose proc.
+		Tail
+		
+		EndWith					; ListRecord
+
+		ENDIF					; NOT ForAppleEventsOnly
+
+
+ProcOffsetTable
+;		index = ((p * 3) + V) * 2
+; p -> 4
+		DC.B	12,8				; 12 byte entry with value offset 8.
+		DC.W	BaseAddress-MultBy12		; Mult by 12 function.
+		DC.W	BaseAddress-FindPTo4		; Pascal string Find
+		DC.W	BaseAddress-ExpandPTo4		; 12 byte entryExpand
+; p -> 8
+		DC.B	16,8				; 16 byte entry with value offset 8.
+		DC.W	BaseAddress-MultBy16		; Mult by 16 function.
+		DC.W	BaseAddress-FindPTo8		; Pascal string Find
+		DC.W	BaseAddress-ExpandPTo8		; 16 byte entry Expand.
+; p -> 12+
+		DC.B	0,8				; N byte entry with value offset 8.
+		DC.W	BaseAddress-MultByN		; Mult by N function.
+		DC.W	BaseAddress-FindPToN		; Pascal string Find
+		DC.W	BaseAddress-ExpandPToN		; General Expand
+; 4 -> 4
+		DC.B	8,4				; 8 byte entry with value offset 4.
+		DC.W	BaseAddress-MultBy8		; Mult by 8 function.
+		DC.W	BaseAddress-Find4To4		; NoSeparateHash Find
+		DC.W	BaseAddress-Expand4To4		; 8 byte entry expand.
+; 4 -> 8
+		DC.B	16,8				; 16 byte entry with value offset 8.
+		DC.W	BaseAddress-MultBy16		; Mult by 16 function.
+		DC.W	BaseAddress-Find4To8		; Longword Find
+		DC.W	BaseAddress-Expand4To8		; 16 byte entry expand
+; 4 -> 12+
+		DC.B	0,8				; N byte entry with value offset 8.
+		DC.W	BaseAddress-MultByN		; Mult by N function.
+		DC.W	BaseAddress-Find4ToN		; Longword Find
+		DC.W	BaseAddress-Expand4ToN		; General Expand
+; 8 -> 4
+		DC.B	16,12				; 16 byte entry with value offset 12.
+		DC.W	BaseAddress-MultBy16		; Mult by 16 function.
+		DC.W	BaseAddress-Find8To4		; Double Long Find.
+		DC.W	BaseAddress-Expand8To4		; 16 byte expand
+; 8 -> 8
+		DC.B	24,12				; 24 byte entry with value offset 12.
+		DC.W	BaseAddress-MultBy24		; Mult by N function.
+		DC.W	BaseAddress-Find8To8		; Double Long Find.
+		DC.W	BaseAddress-Expand8To8		; 24 byte expand
+; 8 -> 12+
+LastProcEntry
+		DC.B	0,12				; N byte entry with value offset 12.
+		DC.W	BaseAddress-MultByN		; Mult by N function.
+		DC.W	BaseAddress-Find8ToN		; Double Long Find.
+		DC.W	BaseAddress-Expand8ToN		; General Expand
+
+ProcEntrySize	EQU	*-LastProcEntry
+
+
+;
+; NewHashTable - Creates a new hash table and returns the handle.
+;
+;	Function NewHashTable(NumEntries:LONGINT; KeySize, ValueSize:INTEGER; 
+;			MemHooks:MemProcs; SysHeap:Boolean: VAR Table:HHand): OSErr;
+;
+;
+NewHFrame	Record	{A6Link},Decr
+ResultCode	DS.W	1
+NumEntries	DS.L	1
+FirstParam	EQU	*
+theKeySize	DS.W	1
+ValueSize	DS.W	1
+MemHooks	DS.L	1
+SysHeap		DS.W	1
+ResultHand	DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		EndR
+		
+	With	NewHFrame
+		
+		
+;
+; NewHashTable - Creates a new hash table and returns the handle.
+;
+NewHashTable	Head	D2-D7/A1-A4,LocalSize
+		IF	NotLobotimised	THEN
+
+; set up the memory procs from the parameter, or use default.
+
+		Move.L	MemHooks(A6),D0		; get the hooks, or nil.
+		SetUpMemProcs			; puts hooks, or defualt into A3.
+
+; Use the key and value size params as a table index:  (3 * Key + Size)/2
+;    Key: 0 (p), 4, 8;  VSize: 4, 8, 12   and   8 byte table entries.
+
+		MoveQ	#$FFFFFFFC,D2
+		Move.W	theKeySize(A6),D0		; and the key size
+		And.W	D2,D0				; mask off the low bits.
+		Move.W	D0,theKeySize(A6)
+		MultQ	NumKeySizes,D0			; times number of key sizes (3).
+		Move.W	ValueSize(A6),D1		; get the value size
+		AddQ	#3,D1				; round Value Size up to nearest Long.
+		And.W	D2,D1
+		MoveQ	#12,D2				; pinning valueSize at 12
+		Cmp.W	D2,D1
+		BLE.S	@GetOffset
+		Move.W	D2,D1
+@GetOffset
+		Add.W	D1,D0
+		MultQ	(ProcEntrySize/4),D0		; times 2, cuz 8 byte table entries.
+		Move.W	D0,D6				; remember the offset into ProcOffset Table.
+
+; get the entry size from the table.
+
+		MoveQ	#0,D5
+		Lea	ProcOffsetTable,A0
+		Move.B	1-ProcEntrySize(A0,D6),D7	; get value offset.
+		Swap	D7
+		Move.W	D6,D7				; remember ProcOffsetTable entry.
+		Move.B	0-ProcEntrySize(A0,D6),D5	; get entry size.
+		Bne.S	@HaveEntrySize
+
+; zero means entry size is determined by Value length (and key length)
+
+		Move.W	theKeySize(A6),D5		; PString requires a 4 byte key reference.
+		BGT.S	@HaveKeySize
+		MoveQ	#4,D5				; for the string table offset.
+@HaveKeySize
+		AddQ	#4,D5				; add in overhead for the Tag (to cache the hash value).
+		Add.W	ValueSize(A6),D5		; now have the entry size.
+@HaveEntrySize
+		
+
+; For each case we set up HashCalcIndex, HashFind, and HashExpand hooks (in A0, A1, A2).
+;	We also set up EntrySize, KeySize (in D0,D3).
+;
+; We have special cases for Keys of 4, 8, and Pascal Strings.
+; We also have cases for Values of 4, 8, 12, and 4*N bytes.
+;
+;		KeySize	ValueSize EntrySize	Notes
+;		-------	--------- ---------	-----
+;		   4	    4	 	8	Key points to a non-zero longword.
+;		   8	    4		16	Key is a pointer to two longwords.
+;		   p	    4		12	Key is a pascal string of any length.
+;		   4        8		16	Key is a long, with a double long returned.
+;		   8	    8		24	Value and Key are pointers to two longwords.
+;		   p	    8		16	Key is a pascal string, value is two longs.
+;		   4	    n		n+8	Key is a pascal string, and Value is fixed of size n.
+;		   8	    n		n+12	Key is a pascal string, and Value is fixed of size n.
+;		   p	    n		n+8	Key is a pascal string, and Value is fixed of size n.
+;
+
+		Sub.L	A4,A4				; clear strings object ref.
+		
+		IF	NOT ForAppleEventsOnly	THEN
+		
+		Tst.W	theKeySize(A6)			; test the key size
+		BGT.S	@HaveStringList			; if we are dealing with a PString key then...
+
+; Create the String list.
+
+		Move.L	NumEntries(A6),D1		; get the table size.
+		MultQ	8,D1				; estimate 8 bytes per entry.
+		Move.W	SysHeap(A6),D0			; wheather it goes in the system heap.
+		Bsr	NewList				; create a string list.
+		Bne	@ErrorExit
+		Move.L	D1,A4				; remember the strings object.
+@HaveStringList
+		ENDIF
+		
+; compute the next larger power of two for the number of table entries.
+
+		Move.L	NumEntries(A6),D0		; get the table size.
+		BEQ.S	@FindPower2
+		SubQ.L	#1,D0				; take care of the case where it is already exact power of 2				;
+@FindPower2
+	IF	For0x0	THEN
+		BFFFO	D0{0:31},D1			; get bit number of first one bit.
+		MoveQ	#33,D0				; convert bit field number to bit number (Plus one).
+		Sub.L	D1,D0				; make it the magnitude.
+	ELSE
+		MoveQ	#31,D1
+@FindBit
+		Rol.L	#1,D0				; is the high bit on?
+		DBCS	D1,@FindBit			; Loop till it was on, or done.
+		AddQ	#1,D1				; now create that power of two.
+		Move.W	D1,D0
+	ENDIF
+		MoveQ	#MinInitalEntries,D3
+		Cmp.W	D3,D0				; make sure the table is at least a min size.
+		BLT.S	@UseMinSize
+		Move.W	D0,D3				; remember the order of magnitude.
+@UseMinSize
+		MoveQ	#1,D0				; build a power of two here.
+		Asl.L	D3,D0				; shift the one by the amount.
+		Move.L	D0,D1
+		SubQ.L	#1,D1
+		Move.L	D1,D6				; remember HashMask.
+
+; Multiply the number of entries by the entry size to get the table size.
+
+		Add.W	#MinExtraEntries,D0		; can't overflow a word.
+		Bsr	MultByN				; multiply D0 by D5 with long arith.
+		Move.L	D0,D4
+		MoveQ	#HeaderSize,D0			; plus header size.
+		Add.L	D0,D4
+		Move.L	ResultHand(A6),A2		; clear the result, in case of an error
+		Clr.L	(A2)				
+		NewMem	D4,SysHeap(A6)			; create the hash table.
+		Bne.S	@ErrorExit
+		Move.L	A0,(A2)				; remember the table.
+
+; now set up the header with all of our information.
+
+		Deref	A0,A2				; get a pointer to the table.
+		Move.L	A2,A0
+		Move.L	D6,(A0)+			; set HashMask
+		Move.L	D4,(A0)+			; set HashTableSize
+		Clr.L	(A0)+				; clear HashNumUsed
+		Move.L	A4,(A0)+			; set up StringsHand
+		Move.L	D5,(A0)+			; set up HashEntrySize
+		Lea	ProcOffsetTable,A1		; point to our procs table
+		MoveQ	#-1,D0
+		Move.W	2-ProcEntrySize(A1,D7),D0	; get offset to Mult Proc.
+		Move.L	D0,(A0)+			; stuff HashMultiply
+		Move.W	4-ProcEntrySize(A1,D7),D0	; get offset to Find Proc.
+		Move.L	D0,(A0)+			; stuff HashFind
+		Move.W	6-ProcEntrySize(A1,D7),D0	; get offset to Expand Proc.
+		Move.L	D0,(A0)+			; stuff HashExpand
+		Clr.L	(A0)+				; use default HashCustom to compute hash.
+		MoveQ	#MinExtraEntries,D0
+		Move.L	D0,(A0)+			; stuff initial HashNumExtra
+		Move.W	D3,(A0)+			; HashMagnitude
+		Move.W	#PercentFull,(A0)+		; HashFullPercent
+		Clr.W	(A0)+				; HashPercentUsed
+		Swap	D7
+		Ext.W	D7
+		Move.W	D7,(A0)+			; HValueOffset
+		Move.W	theKeySize(A6),(A0)+		; HashKeySize - size of a key
+		Move.W	ValueSize(A6),(A0)+		; HashValueSize - size of a data value.
+		
+; point to the data start, and set up the number of entries.
+
+		Move.L	A2,A0
+		Add.W	#HeaderSize,A0			; point to the data field.
+		MoveQ	#1,D0				; build a power of two here.
+		Asl.L	D3,D0				; shift the one by the amount.
+		AddQ.L	#MinExtraEntries,D0		; now have total number of entries -1.
+		
+; now clear out the tag for each entry.
+
+@ClearAllEntries
+		Clr.L	(A0)				; clear the tag
+		Add.L	D5,A0				; next entry
+		SubQ.L	#1,D0
+		Bne.S	@ClearAllEntries		; until all done.
+		
+		MoveQ	#0,D0
+@ErrorExit
+		Move.W	D0,ResultCode(A6)		; return an error code.
+		ELSE
+		Move.L	ResultHand(A6),A0
+		Clr.L	(A0)				; always OK if lobotimised.
+		Clr.W	ResultCode(A6)
+		ENDIF					; NotLobotimised
+		Tail	FirstParam
+
+		EndWith					; NewHFrame
+
+DispHFrame	Record	{A6Link},Decr
+theError	DS.W	1
+HHand		DS.L	1
+FirstParam	EQU	*
+MemHooks	DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		EndR
+		With	DispHFrame
+		
+;
+; DisposeHashTable - DeAllocate the hash table, and associated memory.
+;
+;	Function	DisposeHashTable(VAR Hash:HHand; MemHooks:MemProcs): OSErr;
+;
+DisposeHashTable	Head	D3/A3,LocalSize
+		IF	NotLobotimised	THEN
+
+; set up the mem procs.
+
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		SetUpMemProcs				; puts hooks, or defualt into A3.
+
+; dispose of the table.
+
+		Move.L	HHand(A6),A0			; point to the var.
+		Move.L	(A0),D0
+		Clr.L	(A0)
+		Tst.L	D0				; is it gone already?
+		Beq.S	@Done
+		KillMem	D0				; trash the block.
+@Done
+		Move.W	D0,theError(A6)			; return an error code.
+		ELSE
+		Clr.W	theError(A6)			; always OK if lobotimised.
+		ENDIF					; NotLobotimised
+		Tail	FirstParam
+		
+		EndWith
+		
+		
+;
+; GetKeyValue - Find the hashed entry.  Returns an error if not found.
+;	Function	GetKeyValue(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr; Value:HEntryPtr): OSErr;
+;
+;	Note that the result is a pointer into a handle,
+;		so it will become invalid once the heap
+;		is shuffled by allocation within it.
+;
+GetKValueFrame	Record	{A6Link},Decr
+theError	DS.W	1
+HHand		DS.L	1
+MemHooks	DS.L	1
+KeyPtr		DS.L	1
+theVAR		DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		ENDR
+		With	GetKValueFrame
+		
+GetKeyValue	Head	D3-D7/A2-A4,LocalSize
+		IF	NotLobotimised	THEN
+
+		Move.L	HHand(A6),A2			; get the hash object pointer.
+		Move.L	KeyPtr(A6),D4			; pass pointer to the key.
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		Bsr.S	DoStandardFind			; do the standard find operation.
+		
+		Move.W	D0,theError(A6)			; set up the error code.
+		Bne.S	@LeaveTheVAR
+		Add	HValueOffset-HeaderSize(A2),A0	; point to the value field.
+		Move.L	theVAR(A6),A1			; where the result should go.
+		IF	ForAppleEventsOnly	THEN
+		Move.L	(A0)+,(A1)+			; for AppleEvents we know the value size is 8.
+		Move.L	(A0),(A1)			; HashValueSize bytes moved.
+		ELSE
+		Move.W	HashValueSize-HeaderSize(A2),D0	; move the value into the user's data space.
+		MyBlockMove
+		ENDIF
+@LeaveTheVAR
+		ELSE
+		Clr.W	theError(A6)			; always OK if lobotimised.
+		ENDIF					; NotLobotimised
+		Tail	HHand				; restore regs, strip stack and return.
+
+
+;
+; Do the Standard Find call.  This just saves code between GetKeyValue
+;	and CheckKey.
+;
+DoStandardFind
+
+; set up the mem procs.
+
+		SetUpMemProcs				; puts hooks, or defualt into A3.
+
+; deref the hash table and call the find hook.
+
+		Deref	A2,A2				; get the hash object pointer.
+		Move.L	HashEntrySize(A2),D5		; set up entry size, in case it's needed.
+		Move.L	HashMask(A2),D6			; mask to get index bits.
+		Move.L	StringsHand(A2),A4		; handle to strings table.
+		MoveQ	#CollBit,D7
+		Add.W	#HeaderSize,A2			; point beyond the header.
+		
+		SendDMsg	HashFind		; find the entry, if possible.
+		Beq.S	@Exit
+		Move.W	#ErrNotFound,D0			; return not found
+@Exit
+		RTS
+		
+
+		EndWith
+
+
+;
+; CheckKey - Find the hashed entry if it exists.  Returns zero if the key doesn't exist.
+; 	Function 	CheckKey(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr): Boolean;
+;
+CheckKeyFrame	Record	{A6Link},Decr
+theResult	DS.W	1
+HHand		DS.L	1
+MemHooks	DS.L	1
+KeyPtr		DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		ENDR
+		With	CheckKeyFrame
+		
+CheckKey	Head	D3-D7/A2-A4,LocalSize
+		IF	NotLobotimised	THEN
+
+		Break	'CheckKey'
+		Move.L	HHand(A6),A2			; get the hash object pointer.
+		Move.L	KeyPtr(A6),D4			; pass pointer to the key.
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		Bsr.S	DoStandardFind			; do the standard find operation.
+
+		SEQ	D0				; true iff entry found.
+		Neg.B	D0				; return a 1 for true.
+		Move.B	D0,theResult(A6)		; set up the result.
+
+		ELSE
+		Clr.W	theResult(A6)			; always OK if lobotimised.
+		ENDIF					; NotLobotimised
+		Tail	HHand				; restore regs, strip stack and return.
+
+		EndWith
+
+
+;
+; RemoveKeyEntry - Add an entry.  Returns an error if entry already found.
+;
+;	Function	RemoveKeyEntry(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr): OSErr;
+;
+RemoveFrame	Record	{A6Link},Decr
+theResult	DS.W	1
+HHand		DS.L	1
+MemHooks	DS.L	1
+KeyPtr		DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		ENDR
+		With	RemoveFrame
+
+RemoveKeyEntry	Head	D3-D7/A2-A4,LocalSize
+		IF	NotLobotimised	THEN
+	
+; find the entry, or the next empty slot.
+
+		Move.L	HHand(A6),A2			; get the hash object pointer.
+		Move.L	KeyPtr(A6),D4			; pass pointer to the key.
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		Bsr.S	DoStandardFind			; do the standard find operation.
+
+		Bne.S	@NotFound			; Didn't Find it! Give an error.
+
+; now pointing to the entry.  Just zero it, and adjust the counters.
+
+		SubQ.L	#1,HashNumUsed-HeaderSize(A2)	; bump the number used down.
+		Clr.L	(A0)				; clear the entry.
+		
+; must shuffle up collided entries now!
+
+		Bsr.S	ShuffleEntryRun			; move the following entries up if needed.
+@NotFound
+		Clr.W	theResult(A6)			; set up the error code
+
+		ENDIF					; NotLobotimised
+		Tail	HHand				; restore regs, strip stack and return.
+
+		EndWith
+
+NoSeparateHash	Set	1				; so CheapOHash will work.
+;
+; ShuffleEntryRun - Utility routine to shuffle up a run of entries.
+;	When an entry is removed, the following entries (in a run till an empty slot)
+;	must be moved up if they belong higher.  Each slot is temporarily zeroed, a
+;	search for the best empty entry is done, slot restored, and if the found entry is
+;	not the one then it is shuffled up.
+;
+ShuffleEntryRun
+		Move.L	A6,-(SP)
+		Move.L	HashEntrySize-HeaderSize(A2),D0
+		SubQ	#NoStoredHash,D0
+		SEQ	D2				; true iff NoSeparateHash now.
+ShuffleNextEntry
+		Add.L	D5,A0				; point to the next entry
+		Move.L	(A0),D0
+		Beq.S	DoneShuffle
+		Move.L	D0,A6				; remember the Tag.
+		Tst.B	D2				; on-the-fly hashing?
+		Beq.S	@HaveHash			; no, skip extra stuff.
+		CheapOHash
+@HaveHash
+NoSeparateHash	Set	0				; so CheapOHash will work.
+		Clr.L	(A0)
+		SearchEmptySpot				; find next empty entry
+		Move.L	A6,(A0)				; restore current entry
+		Cmp.L	A0,A1				; did it map to the same entry?
+		Beq.S	ShuffleNextEntry		; Tag is adjusted for collision by SearchEmptySpot.
+		Tst.B	D2				; if NoSeparateHash, then collided bit 
+		Beq.S	@OKTag				;  mangled our key, so use the key
+		Move.L	A6,D0				;  verbatim.
+@OKTag	
+		CopyAndClearEntry	A0,A1		; copy the entry up, and clear the current one.
+		Bra.S	ShuffleNextEntry
+DoneShuffle
+		Move.L	(SP)+,A6
+		Rts
+
+;
+; GetIndexedEntry - Get the hashed entry by index.  
+;	Returns zero or ErrNotFound if empty entry or ErrEndOfTable if beyond the last entry.
+;
+;	Function	GetIndexedEntry(Hash:HHand; MemHooks:MemProcs; Index:LONGINT; VAR Value:HEntryPtr): OSErr;
+;	Exit:	Result - 0, or ErrNotFound, or ErrEndOfTable
+;
+GetIndFrame	Record	{A6Link},Decr
+theError	DS.W	1
+HHand		DS.L	1
+MemHooks	DS.L	1
+Index		DS.L	1
+VarValue	DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		ENDR
+		With	GetIndFrame
+		
+GetIndexedEntry	Head	D4-D5/A2-A3,LocalSize
+		IF	NotLobotimised	THEN
+
+; set up the mem procs.
+
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		SetUpMemProcs				; puts hooks, or defualt into A3.
+
+; deref the hash table and index into it.
+
+		Deref	HHand(A6),A2			; get the hash object pointer.
+		Move.W	HashKeySize(A2),D4		; what is the key size?
+		Move.W	HValueOffset(A2),D2		; get the offset to the value.
+		SUB.W	D4,D2				; now D2 is offset to the key
+		Move.L	HashEntrySize(A2),D5		; set up entry size
+		Move.L	Index(A6),D0			; get the index to the entry.
+		SendHMsg	HashMultiply
+		MoveQ	#HeaderSize,D1
+		Add.L	D1,D0				; now have the offset.
+		Cmp.L	HashTableSize(A2),D0		; are we indexing beyond the table?
+		BGE.S	@BeyondEnd			; yes, then error.
+		
+; check if the entry is nil.
+
+		Add.L	D0,A2				; point to the entry.
+		Tst.L	(A2)				; is it empty?
+		Beq.S	@EmptyEntry
+		Add.W	D2,A2				; point to the Key.
+		Move.L	VarValue(A6),A1
+		EXT.L	D4
+		SubQ	#1,D4				; Warning: this will not work for zero length!
+		Lsr.W	#2,D4				; divided by four.
+@MoveLoop					
+		Move.L	(A2)+,(A1)+
+		DBRA	D4,@MoveLoop
+		MoveQ	#0,D0				; return with no error.
+		Bra.S	@Exit
+
+; return an error code.
+
+@BeyondEnd
+		Move.W	#ErrEndOfTable,D0		; indexed beyond the end of the table.
+		Bra.S	@Exit
+@EmptyEntry
+		Move.W	#ErrNotFound,D0			; the indexed entry was empty.
+		Move.L	VarValue(A6),A1
+		Clr.L	(A1)				; clear the result if not found.
+
+; stuff the result and return
+
+@Exit
+		Move.W	D0,theError(A6)			; set up the result code.
+		ELSE
+		Clr.W	theError(A6)			; always OK if lobotimised.
+		ENDIF					; NotLobotimised
+		Tail	HHand				; restore regs, strip stack and return.
+		EndWith
+
+
+;
+; AddKeyEntry - Add an entry.  Returns an error if entry already found.
+;
+;	Function	AddKeyEntry(Hash:HHand; MemHooks:MemProcs; Key:KeyPtr; Value:HEntryPtr): OSErr;
+;
+AddKeyFrame	Record	{A6Link},Decr
+theResult	DS.W	1
+HHand		DS.L	1
+MemHooks	DS.L	1
+KeyPtr		DS.L	1
+ValuePtr	DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		ENDR
+		With	AddKeyFrame
+
+ReplaceEntry
+		MoveQ	#-1,D0
+		Bra.S	AddKeyCommon
+AddKeyEntry	
+		MoveQ	#0,D0
+AddKeyCommon	Head	D3-D7/A2-A4,LocalSize
+		IF	NotLobotimised	THEN
+
+		Move.W	D0,-(SP)			; remember flag if OK to replace an entry.
+		
+; find the entry, or the next empty slot.
+
+		Move.L	HHand(A6),A2			; get the hash object pointer.
+		Move.L	KeyPtr(A6),D4			; pass pointer to the key.
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		Bsr	DoStandardFind			; do the standard find operation.
+		Move.W	D0,D7				; remember if found.
+		Or.W	(SP)+,D0			; if NotFound OR Replacing, then Stuff entry
+		Beq	@AlreadyFound			; we found it AND not replace!  Give an error.
+
+; put the Hash value into the Tag, unless we are dealing with a really small table.
+
+		MoveQ	#HeaderSize,D0
+		Sub.L	D0,A2				; point back to the header info
+		Cmp.W	#NoStoredHash,D5		; is this a really short entry, with no stored hash?
+		Beq.S	@NoTag
+		Move.L	D3,(A0)+			; stuff in the tag
+@NoTag
+
+; check if the key is a PString, and if so, we must copy it.
+
+		Move.W	HashKeySize(A2),D0		; what is the key size?
+
+		IF	NOT ForAppleEventsOnly	THEN
+
+		BGT.S	@StuffKey
+		Beq.S	@CopyString
+		Move.L	A0,A1				; dest is the record.
+		Move.L	KeyPtr(A6),(A1)+
+		Bra.S	@CopyValue
+		
+	
+; compute the offset into the table, so we can recreate the pointer.
+
+@CopyString
+		Sub.L	A2,A0				; now a relative offset.
+		Move.L	A0,-(SP)
+		Move.L	StringsHand(A2),A0		; get the block handle.
+		Move.L	KeyPtr(A6),D4			; point to the key
+		Bsr	LAddEntry			; add a string entry
+		Move.L	D1,D4				; remember the offset.		
+		Move.W	D0,D3				; result code
+		Deref	HHand(A6),A2			; get the table pointer back
+		Move.L	(SP)+,A1			; get back the relative offset.
+		Add.L	A2,A1				; get my entry pointer back.
+		Move	D3,D0				; error on LAddEntry?
+		Bne	@GrowStringError		;   yes, then clear this entry.
+		Move.L	D4,(A1)+			; stuff the string table offset into the entry.
+		Bra.S	@CopyValue
+		
+; copy the key and data values into the record.
+
+@StuffKey
+		ENDIF
+
+		Move.L	A0,A1				; dest is the record.
+		Move.L	KeyPtr(A6),A0			; get pointer to the key.
+		MyBlock4Move				; move the bytes into the record.
+
+; A1 points to the user value, so copy their data in.
+
+@CopyValue
+		Move.L	ValuePtr(A6),A0			; point to the value.
+		Move.W	HashValueSize(A2),D0
+		MyBlock4Move				; move the bytes into the record.
+		Clr.W	theResult(A6)			; set up the result.
+
+; now that we used an empty entry, make sure there is still one at the end of the table.
+
+		Move.L	A2,A0				; table pointer.
+		Add.L	HashTableSize(A2),A0		; point to the end of the table.
+		Sub.L	D5,A0				; point to the last entry.
+		SubQ	#4,A1				; point within the entry just set.
+		Cmp.L	A0,A1				; are we beyond the last entry?
+		BLT.S	@HaveEnoughExtra		; yes, then we will have to add extra entries.
+	
+; multiply new extra entries by the entry size.
+
+		MoveQ	#MinExtraEntries,D0
+		SendHMsg	HashMultiply		; do which ever multiply is hooked in now.
+		Add.L	HashTableSize(A2),D0		; add MinExtraEntries to the end.
+		Move.L	D0,A4				; save new table size
+
+; Grow the hash table by the min entry size.
+
+		GrowMem	HHand(A6),A4			; grow the block
+		Bne.S	@GrowExtraError
+		Deref	HHand(A6),A2			; grow the block
+		Move.L	A4,HashTableSize(A2)		; remember new size.
+		AddQ.L	#MinExtraEntries,HashNumExtra(A2) ; bump the number of extra.
+		
+; zero out the new entries.
+
+		Move.L	A4,D0				; get the offset to the end.
+		MoveQ	#MinExtraEntries-1,D1
+@ClearLoop
+		Sub.L	D5,D0				; point to the last entry.
+		Clr.L	0(A2,D0.L)			; zero out the new entry.
+		DBRA	D1,@ClearLoop
+		
+@HaveEnoughExtra
+
+; compute the percentage of records in use.
+; Note that we don't handle the Extra entries right - used ones are counted, unused are not!
+
+		Move.W	D7,D0				; did we find the entry? (are we replacing)
+		Beq.S	@SameNumUsed			;  yes, then the same number is in use, we're done.
+		AddQ.L	#1,HashNumUsed(A2)		; bump the number used.
+		Move.L	HashNumUsed(A2),D0
+		MultQ	25,D0				; multiply long D0 by 25 (100/4)
+		Move.W	HashMagnitude(A2),D1		; get N where TableSize = 2^N.
+		SubQ	#2,D1				
+		Lsr.L	D1,D0				; calc the percentage
+		Move.W	D0,HashPercentUsed(A2)		; remember the percent used (for debugging).
+
+; now check if the table needs to be expanded.
+
+		Move.W	D0,D1				; get the amount used.
+		MoveQ	#0,D0				; load a result code of no error.
+		Cmp.W	HashFullPercent(A2),D1		; is it too much.
+		BLE.S	@TableBigEnough
+		
+; expand the table
+
+		Bsr.S	ExpandTable			; grow the table.
+		
+@SameNumUsed
+@TableBigEnough
+@SetResultCode
+		Move.W	D0,theResult(A6)		; return with no error
+		ELSE
+		Clr.W	theResult(A6)			; always OK if lobotimised.
+		ENDIF					; NotLobotimised
+		Tail	HHand				; restore regs, strip stack and return.
+
+		IF	NotLobotimised	THEN
+		
+; found an entry, and not replacing.  Return an error.
+
+@AlreadyFound
+		Move.W	#ErrAlreadyExists,D0		; return with an error, if it already exists.
+		Bra.S	@SetResultCode
+
+; couldn't grow the string table.  Clear the current entry and return the error.
+
+@GrowStringError
+		Clr.L	-(A1)				; clear tag
+		Bra.S	@SetResultCode			;  couldn't create string entry.
+		
+; couldn't add the required extra entries, so clear the last one.
+
+@GrowExtraError
+		Move.L	HashTableSize(A2),D1		; offset to the end.
+		Sub.L	D5,D1
+		Clr.L	0(A2,D1.L)
+		Bra.S	@SetResultCode
+
+		ENDIF					; NotLobotimised
+		
+;
+; ExpandTable - time to grow the table by doubleing it.
+;
+;	I have access to the caller's stack frame. AddKeyFrame
+;	Entry:	A6 - Caller's stack frame (AddKeyFrame)
+;		D5 - Entry size
+;		A2 - pointer to the table.
+;		D6 - HashMask
+;	Exit:	D0 - result code from the grow.
+;
+ExpandTable	
+
+; Grow the table to double it's current size 2^(n+1)
+
+		Move.L	D6,D4				; old hash mask.
+		
+		AsL.L	#1,D6
+		AddQ.L	#1,D6				; build the new mask
+
+; we are adding entries to the table (otherwize we wouldn't be here).
+; make the number of extra entries at least 3% of the table size,
+; since growing a large table just to add "extra" space is a pain.
+
+		Move.L	D6,D3				; compute desired numExtra in D3.
+		Asr.L	#5,D3				; divide by 32, gives about 3%
+		Move.L	HashNumExtra(A2),D1
+		Cmp.L	D3,D1				; is this larger?
+		BLT.S	@NumExtraOK
+		Move.L	D1,D3				; use numExtra, since it's bigger.
+@NumExtraOK
+		Move.L	D3,D0				; num extra.
+		Add.L	D6,D0				; plus number of entries-1.
+		AddQ.L	#1,D0				; now have the total number of entries.
+		SendHMsg	HashMultiply		; do which ever multiply is hooked in now.
+		MoveQ	#HeaderSize,D1			; plus header size for total table size.
+		Add.L	D1,D0
+		Move.L	D0,A4				; remember new total table size
+		GrowMem	HHand(A6),A4			; grow the table, if we can.
+		Bne	@ErrorReturn
+		
+; it grew, without an error!		
+		
+		Deref	HHand(A6),A2			; get the table pointer back.
+
+; zero out all of the "New" entries.
+
+		Move.L	A4,D2				; new table size.
+		Sub.L	HashTableSize(A2),D2		; number of new entries made.
+		Move.L	A2,A0
+		Add.L	HashTableSize(A2),A0		; point to the first new entry
+@ClearLoop
+		Clr.L	(A0)				; zero an entry
+		Add.L	D5,A0				; bump pointer
+		Sub.L	D5,D2				; done?
+		BHI.S	@ClearLoop
+		
+; move the "extra" entries to the bottom of the table.
+
+; compute a pointer past the last extra entry, where they now sit.
+
+		Move.L	A2,A1			
+		Add.L	HashTableSize(A2),A1		; compute a pointer past the last extra entry (old table)
+		Move.L	A4,HashTableSize(A2)		; remember new table size
+
+; compute half the new table size (not counting header and extra entries).
+
+		Move.L	D6,D0				; get the number of entries-1 (hashMask)
+		Lsr.L	#1,D0
+		AddQ.L	#1,D0				; get Half table number of entries.
+		SendHMsg	HashMultiply		; do which ever multiply is hooked in now. Mulu D5,D0
+		Move.L	D0,A4				; remember half table size.
+		
+; copy each extra down to the end of the table.
+
+		Move.L	A1,A0				; pointer past last Extra.
+		Move.L	HashNumExtra(A2),D2		; number of entries to move.
+@CopyLoop
+		Sub.L	D5,A0				; compute a pointer a half table 
+		Move.L	A0,A1
+		Add.L	A4,A1				;    size beyond the last extra (where to move the extras).
+		Move.L	(A0),D0				; get the Tag for CopyAndClear...
+		CopyAndClearEntry	A0,A1		; copy each entry to the bottom of the table.
+		SubQ.L	#1,D2
+		BNE.S	@CopyLoop
+
+; save a pointer to the first "extra" entry.
+
+		Pea	0(A0,A4.L)			; pointer to the first "Extra" entry.
+
+; set up the registers for the main table expand.
+
+		Move.L	D6,HashMask(A2)			; remember new hash mask.
+		Move.L	D3,HashNumExtra(A2)		; remember new extra entries.
+		Move.W	HashMagnitude(A2),D3		; set up some reg's the way expand wants.
+		AddQ.W	#1,HashMagnitude(A2)		; the magnitued is bumped by one.
+
+		MoveQ	#CollBit,D7			; collision bit.
+		MoveQ	#HeaderSize,D1			; plus header size for total table size.
+		Add.L	D1,A2				; compute pointer to the first entry.
+		Move.L	D6,D2				; get the number of entries-1 (hashMask)
+		Lsr.L	#1,D2				; get Half table number of entries-1.
+		
+
+;	Entry:	D2 - Half table size.
+;		D3 - old table magnitude.
+;		D4 - Old hash Mask.
+;		D5 - Entry size.
+;		D6 - Hash Mask.
+;		D7 - Collision bit
+;		A0 - first entry of the table.
+;		A1 - scratch: new table entry ptr.
+;		A2 - hash table data pointer
+;		A4 - Half table size.
+;		A6 - scratch: saves Tag.
+
+		Move.L	A6,-(SP)
+		SendDMsg	HashExpand		; do the inner expand loop.
+		Move.L	(SP)+,A6
+
+; for each "extra" entry, place it in the right spot, if we can.
+
+		Move.L	(SP)+,A0			; get the pointer to the first "extra" entry.
+		Sub.L	D5,A0				; point to the previous entry
+		Bsr	ShuffleEntryRun			; move the following entries up if needed.
+		MoveQ	#0,D0
+@ErrorReturn
+		Rts
+		
+		EndWith
+
+
+;*****************************************************
+;
+;  For AppleEvents only, we do not include this code
+;
+;*****************************************************
+
+		IF	NOT ForAppleEventsOnly	THEN
+		
+;
+;	Function	IsHashConsistent(Hash:HHand; MemHooks:MemProcs):Boolean;
+;	
+;		Exit:	D1 - number of collided entries.
+;
+
+TestConFrame	Record	{A6Link},Decr
+theResult	DS.W	1
+HHand		DS.L	1
+MemHooks	DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		ENDR
+		With	TestConFrame
+
+NoSeparateHash	Set	1				; so I can generate cases for on-the-fly hashing.
+
+IsHashConsistent	Head	D3-D7/A2-A4,LocalSize
+		IF	NotLobotimised	THEN
+
+		Move.W	#$0101,theResult(A6)		; set both bytes true.
+
+; set up the mem procs.
+
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		SetUpMemProcs				; puts hooks, or defualt into A3.
+
+		Deref	HHand(A6),A2			; get the table pointer.
+		Move.L	HashEntrySize(A2),D5		; entry size.
+
+; check if the hash mask matches the table magnitude.
+
+		Move.W	HashMagnitude(A2),D3		; get the magnitude.
+		MoveQ	#1,D0				; get a 1 bit
+		Lsl.L	D3,D0
+		SubQ.L	#1,D0
+		Move.L	HashMask(A2),D6
+		Cmp.L	HashMask(A2),D0			; is the mask right?
+		Bne	@BadHashMask
+
+; check that the table size is the number of entries plus header size plus extra.
+
+		AddQ.L	#1,D0				; number of regular entries.
+		Move.L	HashNumExtra(A2),D1		; get number of extra.
+		Add.L	D1,D0
+		SendHMsg	HashMultiply		; times the entry size.
+		MoveQ	#HeaderSize,D1
+		Add.L	D1,D0
+		Move.L	HashTableSize(A2),D1
+		Cmp.L	D1,D0
+		Bne	@BadNumExtra
+
+; make sure that the last entry is empty.
+
+		Sub.L	D5,D0
+		Tst.L	0(A2,D0.L)			; is the last entry zero?
+		Bne	@BadLastEntry
+
+; scan the table.
+
+		Sub.L	A3,A3				; number of collided entries.
+		Move.L	HashTableSize(A2),D7		; Compute of bytes left to check.
+		MoveQ	#HeaderSize,D0			; Total size - Header Size.
+		Sub.L	D0,D7	
+		MoveQ	#0,D2				; number of empty entries.
+		MoveQ	#8,D3				; entry size for on-the-fly hash.
+		MoveQ	#-1,D4				; current entry number.
+		Add.W	#HeaderSize,A2			; data pointer.
+		Move.L	A2,A0
+	IF	NOT ForAppleEventsOnly	THEN
+		Cmp.L	D3,D5				; is this an on the fly cell?
+		Beq.S	@OnTheFlyScam
+	ENDIF
+@Scamloop
+		AddQ.L	#1,D4				; entry number.
+		Move.L	(A0),D0				; get the tag.
+		Beq.S	@EmptyCell
+		Bpl.S	@NotCollided
+		AddQ	#1,A3
+		And.L	D6,D0				; mask to index
+		Cmp.L	D4,D0				; index should be less than entry number
+		BHS.S	@BadIndex
+		Bra.S	@NextEntry
+@EmptyCell
+		AddQ.L	#1,D2
+		Bra.S	@NextEntry
+@NotCollided
+		And.L	D6,D0				; mask to index
+		Cmp.L	D4,D0				; index should be less than entry number
+		BNE.S	@BadIndex
+@NextEntry	
+		Add.L	D5,A0
+		Sub.L	D5,D7				; done?
+		BNE.S	@ScamLoop
+		Bra.S	@CheckMetrics
+
+	IF	NOT ForAppleEventsOnly	THEN
+@OnTheFlyScam
+		AddQ.L	#1,D4				; entry number.
+		Move.L	(A0),D0				; get the tag.
+		Beq.S	@OTFEmptyCell
+		CheapOHash				; if the hash is not cached, then hash
+		Move.L	D0,A4
+		ComputeNewLocation
+		Cmp.L	A0,A1				; curOffset > newOffset means collided
+		Bpl.S	@OTFNotCollided
+		AddQ	#1,A3
+		Move.L	A4,D1
+		And.L	D6,D1				; mask to index
+		Cmp.L	D4,D1				; index should be less than entry number
+		BHS.S	@BadIndex
+		Bra.S	@OTFNextEntry
+@OTFEmptyCell
+		AddQ.L	#1,D2
+		Bra.S	@OTFNextEntry
+@OTFNotCollided
+		Move.L	A4,D1
+		And.L	D6,D1				; mask to index
+		Cmp.L	D4,D1				; index should be less than entry number
+		BNE.S	@BadIndex
+@OTFNextEntry	
+		Add.L	D5,A0
+		Sub.L	D5,D7				; done?
+		BNE.S	@OnTheFlyScam
+
+	ENDIF
+;
+; A3 - number of collided entries
+; D2 - number of empty entries
+;
+
+@CheckMetrics
+		Move.L	D6,D0				; check if the number of used entries matches.
+		AddQ.L	#1,D0				; total number of entries (minus extra).
+		Add.L	HashNumExtra-HeaderSize(A2),D0
+		Sub.L	D2,D0				; number of used entries.
+		Move.L	HashNumUsed-HeaderSize(A2),D1
+		Cmp.L	D1,D0
+		Bne.S	@NumUsedIsWrong
+		Bra.S	@Exit
+		
+;	D0 - Current Entry Tag			curTag
+;	D1 - scratch
+;	D2 - scratch
+;	D3 - Target Tag / Table Magnitude	targetTag / tableMagnitude
+;	D4 - Key / HalfTableSize		Key / halfTableSize
+;	D5 - Table Entry Size			EntrySize
+;	D6 - HashMask				hashMask
+;	D7 - collision bit			31
+;
+;	A0 - Current Table Entry Pointer	curPos
+;	A1 - New Table Entry Pointer		newPos
+;	A2 - Table Data Base Pointer		tableBase
+;	A3 - MemProcs Pointer			memProcs
+;	A4 - StringTable/Key2			stringTable
+;	A5 - Unused
+;	A6 - Optional Frame Ptr
+;	A7 - SP
+
+@BadIndex
+		Break	'An index is bad ((A0), D0, D4).'
+		Bra.S	@ClearResult
+@NumUsedIsWrong
+		Break	'Hash num used doesnt match the table (D1, D0).'
+		Bra.S	@ClearResult
+@BadNumExtra
+		Break	'num extra or hashmask times entrysize plus headersize not tablesize (D1, D0).'
+		Bra.S	@ClearResult
+		
+@BadHashMask
+		Break	'hash mask doesnt jibe with table magnitude (D3, D6).'
+		Bra.S	@ClearResult
+		
+@BadLastEntry
+		Break	'Last entry not empty (zero). ((A2)+D0)'
+		MoveQ	#-1,D0
+@ClearResult
+		Clr.W	theResult(A6)
+@Exit
+		Move.L	A3,D1				; return the number of collided entries.
+		ELSE
+		ST	theResult(A6)			; always OK if lobotimised.
+		ENDIF					; NotLobotimised
+		Tail	HHand				; restore regs, strip stack and return.
+
+		EndWith
+
+;
+; GetTableMetrics - Return the number of entries, and the full table size in bytes.
+;
+;	Procedure	GetTableMetrics(Hash:HHand; MemHooks:MemProcs; VAR info: HashInfo);
+;
+;
+;	HashInfo = RECORD
+;			usedEntries: LONGINT;
+;			collidedEntries: LONGINT;
+;			totalEntries: LONGINT;
+;			tableSize: LONGINT;
+;		END;
+;
+
+HashInfoRec	Record	0
+usedEntries	DS.L	1
+collidedEntries	DS.L	1
+totalEntries	DS.L	1
+tableSize	DS.L	1
+		ENDR
+		
+GetTMFrame	Record	{A6Link},Decr
+HHand		DS.L	1
+MemHooks	DS.L	1
+VarInfo		DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		ENDR
+		With	GetTMFrame
+		
+GetTableMetrics	Head	A2-A3,LocalSize
+		IF	NotLobotimised	THEN
+
+; set up the mem procs.
+
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		SetUpMemProcs				; puts hooks, or defualt into A3.
+
+; call IsHashConsistent(Hash:HHand; MemHooks:MemProcs):Boolean;
+
+		Clr.W	-(SP)
+		Move.L	HHand(A6),-(SP)
+		Move.L	MemHooks(A6),-(SP)
+		Bsr	IsHashConsistent
+		Tst.B	(SP)+				; did I get an error?
+		Beq.S	@ClearResult
+
+; deref the hash table and index into it.
+
+		Deref	HHand(A6),A2			; get the hash object pointer.
+		Move.L	VarInfo(A6),A0
+		Move.L	HashNumUsed(A2),(A0)+		; return the number of entries. (usedEntries)
+		Move.L	D1,(A0)+			; return num collided (collidedEntries)
+		Move.L	HashMask(A2),D0			; compute the total number of entries.
+		AddQ.L	#1,D0
+		Add.L	HashNumExtra(A2),D0
+		Move.L	D0,(A0)+			; return totalEntries.
+		Move.L	HashTableSize(A2),(A0)		; return the full table size.
+		Bra.S	@Exit
+
+@ClearResult
+		Move.L	VarInfo(A6),A0
+		Clr.L	(A0)+				; clear usedEntries, collidedEntries
+		Clr.L	(A0)+				;  totalEntries, tableSize.
+		Clr.L	(A0)+
+		Clr.L	(A0)+
+@Exit
+		ENDIF					; NotLobotimised
+		Tail	HHand
+		
+		EndWith
+
+;
+; GetHashProc - return the hash proc currently in use.  Note that the default proc
+;		is in the pack, and since the pack moves, the proc will become invalid!
+;
+;	Function	GetHashProc(Hash:HHand; MemHooks:MemProcs):HashProc;
+
+GetHFrame	Record	{A6Link},Decr
+GetHProc	DS.L	1
+GetHHand	DS.L	1
+MemHooks	DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		EndR
+		With	GetHFrame
+		
+GetHashProc	Head	A2-A3,LocalSize
+		IF	NotLobotimised	THEN
+
+; set up the mem procs.
+
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		SetUpMemProcs				; puts hooks, or defualt into A3.
+
+		Deref	GetHHand(A6),A2			; get the hash object pointer.
+		Add.W	#HeaderSize,A2			; point to the data.
+		Bsr	SetUpHashCustom			; make sure the hash proc is defined.
+		Lea	BaseAddress,A0
+		Sub.L	HashCustom-HeaderSize(A2),A0
+		Move.L	A0,GetHProc(A6)			; stuff the proc.
+		ELSE
+		Clr.L	GetHProc(A6)			; always OK if lobotimised.
+		ENDIF					; NotLobotimised
+		Tail	GetHHand			; restore regs, strip stack and return.
+		
+		EndWith
+		
+
+;	Procedure	SetHashProc(Hash:HHand; MemHooks:MemProcs; theHash:HashProc);
+
+SetHFrame	Record	{A6Link},Decr
+SetHHand	DS.L	1
+MemHooks	DS.L	1
+SetHProc	DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		EndR
+		With	SetHFrame
+		
+SetHashProc	Head	A2-A3,LocalSize
+		IF	NotLobotimised	THEN
+
+; set up the mem procs.
+
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		SetUpMemProcs				; puts hooks, or defualt into A3.
+
+; point into the table.
+
+		Deref	SetHHand(A6),A2			; get the hash object pointer.
+		
+		Move.L	SetHProc(A6),D0			; get the proc ptr.
+		BSet	#0,D0				; set the low bit to flag that it's a ptr.
+		Move.L	D0,HashCustom(A2)		; stuff the proc.
+		Move.L	#BaseAddress-FindNtoN,HashFind(A2); point to the general find routine (which calls this hash)
+		
+		ENDIF					; NotLobotimised
+		Tail	SetHHand			; restore regs and return.
+		
+		EndWith
+		
+; GetGrowThreshhold
+;
+;	Gets the percentage at which the table is considered full, and is automatically
+;		grown when adding another entry.
+;	
+;	Function	GetGrowThreshhold(Hash:HHand; MemHooks:MemProcs):INTEGER;
+
+GetGTFrame	Record	{A6Link},Decr
+theResult	DS.W	1
+GetGTHand	DS.L	1
+MemHooks	DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		EndR
+		With	GetGTFrame
+		
+GetGrowThreshhold	Head	A2-A3,LocalSize
+		IF	NotLobotimised	THEN
+
+; set up the mem procs.
+
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		SetUpMemProcs				; puts hooks, or defualt into A3.
+
+		Deref	GetGTHand(A6),A2		; get the hash object pointer.
+		Move.W	HashFullPercent(A2),theResult(A6)	; return the percentage.
+		ELSE
+		Clr.W	theResult(A6)			; always OK if lobotimised.
+		ENDIF					; NotLobotimised
+		Tail	GetGTHand			; restore regs, strip stack and return.
+		
+		EndWith
+		
+; SetGrowThreshhold
+;
+;	Sets the percentage at which the table is considered full, and is automatically
+;		grown when adding another entry.
+;	
+;	Procedure	SetGrowThreshhold(Hash:HHand; MemHooks:MemProcs; Percent:INTEGER);
+
+SetGTFrame	Record	{A6Link},Decr
+SetTHand	DS.L	1
+MemHooks	DS.L	1
+Percent		DS.W	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		EndR
+		With	SetGTFrame
+		
+SetGrowThreshhold	Head	A2-A3,LocalSize
+		IF	NotLobotimised	THEN
+
+; set up the mem procs.
+
+		Move.L	MemHooks(A6),D0			; get the hooks, or nil.
+		SetUpMemProcs				; puts hooks, or defualt into A3.
+
+		Deref	SetTHand(A6),A2			; get the hash object pointer.
+		Move.W	Percent(A6),HashFullPercent(A2)	; stuff the percentage.
+		ENDIF					; NotLobotimised
+		Tail	SetTHand			; restore regs and return.
+		
+		EndWith
+		
+; GetDefaultMemProcs - returns the default memory procs. 
+		
+;	Function	GetDefaultMemProcs: MemProcs;
+
+GetDMPFrame	Record	{A6Link},Decr
+MemProcs	DS.L	1
+ReturnAddr	DS.L	1
+A6Link		DS.L	1
+LocalSize	EQU	*
+		EndR
+		With	GetDMPFrame
+		
+GetDefaultMemProcs	Head	A2-A3,LocalSize
+		IF	NotLobotimised	THEN
+
+		Break	'GetDefaultMemProcs'
+; set up the mem procs.
+
+		Clr.L	D0				; nil ensures the hooks will be set up.
+		SetUpMemProcs				; puts hooks, or defualt into A3.
+
+		Move.L	MemProcs(A6),A1			; get place to stuff the procs.
+		lea	DeRefMemory,a0			;					<SM2> rb
+		Move.L	A0,(A1)+			; stuff all the procs.			<SM2> rb
+		lea	NewMemory,a0			;					<SM2> rb
+		Move.L	a0,(A1)+			;					<SM2> rb
+		lea	SetMemorySize,a0		;					<SM2> rb
+		Move.L	a0,(A1)+			;					<SM2> rb
+		lea	DisposeMemory,a0		;					<SM2> rb
+		Move.L	a0,(A1)				;					<SM2> rb
+		ENDIF					; NotLobotimised
+		Tail	ReturnAddr			; restore regs, strip stack and return.
+		
+		EndWith
+		
+		ENDIF					; ForAppleEventsOnly.
+		
+		EndWith
+		
+		
+	EndWith
+		
+	End

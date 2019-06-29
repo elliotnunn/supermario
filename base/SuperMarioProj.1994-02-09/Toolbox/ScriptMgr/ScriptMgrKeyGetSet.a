@@ -1,0 +1,2184 @@
+;
+;	File:		ScriptMgrKeyGetSet.a
+;
+;	Contains:	Script Manager routines KeyScript, Get/SetEnvirons, Get/SetScript.
+;
+;	Written by:	JDT	Joe Ternasky
+;				KWK	Ken Krugler
+;				MED	Mark Davis
+;				LDC	Lee Collins
+;				PKE	Peter Edberg
+;				SMB	Sue Bartalo
+;
+;	Copyright:	© 1986-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<52>	 8/14/92	JH		#1039719,1039768 <DTY>: Change 50 which saves a5 and restores it
+;									will cause a crash at boottime because now we call the process
+;									manager. Add the check to expandmem global before messing around
+;									with a5 and calling process manager.
+;		<51>	  8/4/92	KST		Oop, last minute change is bad. movea.l should really be move.l
+;		<50>	  8/4/92	KST		#1038311 <gbm>: <HA>: Set up a5 before calling
+;									SetTextServiceLanguage(), and SetDefaultInputMethod() calls.
+;		<49>	 7/30/92	SMB		#1037480 <cv>: Fix error handling code to push the byte
+;									identifying the current menu item number onto the stack into its
+;									expected position.
+;		<48>	 7/15/92	SMB		#1035923,1033475 (revisited), <kt>: Add bug #s and Kenny Tung's
+;									reviewing initials for change <47> since the CheckInMultiple
+;									script was upset with my erroneous bug # detail.
+;		<47>	 7/15/92	SMB		Wasn't deactivating old-style IM before going to a TSM-style IM;
+;									need to get the ID of the old-style JIM from the component ptr
+;									passed to _GetDefaultInputMethod.
+;		<46>	 6/30/92	SMB		#1033475,#1030903, <pke>: Add bug #s and Peter Edberg's
+;									reviewing initials for change <45> since the CheckInMultiple
+;									script was upset with my erroneous bug # detail.
+; 									change <45> since the CheckInMultiple script didn't like me.
+;		<45>	 6/30/92	SMB		Changed the input method updating model per different
+;									specifications by TSM. The most important part of this change
+;									was to no longer deactivate an old-style input method when
+;									switching to a KCHR or a TSM-style input method in another
+;									script. This guarantees that if the old-style IM was the default
+;									IM for Japanese, then it would still be activated when switched
+;									to the Japanese script for input. However, when activating a
+;									TSM-style IM, must now check if the default is currently set to
+;									old-style and deactivate this one before activating the
+;									TSM-style IM. (See UpdateInputMethods for details.) • Added
+;									error handling in the case that the call to UpdateInputMethods
+;									failed. Now restore the previous KeyScript and LastScript
+;									values. • Fixed a stack bug that shows up (at least) when an
+;									initial KeyScript call is made to set the KCHR for the system
+;									script. The menu item # is expected on the stack but it wasn't
+;									pushed when app-specific globals did not exist in the CheckKybd
+;									code. (See PushItemAndSetKybd for details.) • Fixed another bug
+;									in SetKybd to test for a NIL keyboard menu pointer before using
+;									it.
+;		<44>	 6/17/92	SMB		#1006394,<ha>: Per technote #160, a developer may call SetScript
+;									(once with smScriptKeys and once with smScriptIcon) and
+;									KeyScript to change the default keyboard layout.  (This assumes
+;									s/he had already added the KCHR and icon resources to the System
+;									file.) Calling SetScript to update the ‘itlb’ to point to this new
+;									KCHR still works but calling KeyScript w/ the KCHR’s script no longer
+;									sets the KCHR as the active KCHR since the keyboard menu doesn’t
+;									include it yet. (this broke in System 7)  The problem is that
+;									the keyboard menu needs to be rebuilt to incorporate this
+;									keyboard layout that was added to the system and which is now
+;									desired by the application.  We have a private ScriptUtil call to
+;									do this, _RebuildKeybdMenu, which currently is only called by
+;									the Mover.  It is now called in KeyScript when the verb is
+;									smKeyRoman, smKeySysScript, smKeySwapScript, or when an explicit
+;									script code is specified.  Once the menu is rebuild, we re-search
+;									the menu for the desired KCHR.  If the keyboard layout is not found,
+;									the menu will default to the system script’s current keyboard 
+;									layout rather than display a trashed icon.
+;									• #1031491: when switching from an application using an old-style
+;									IM to the Finder using a keyboard layout, will now correctly 
+;									deactivate the old-style IM before making the keyboard layout
+;									active. Initially attempted to fix this for B2 or B3, but I have
+;									now added a specific test for this scenario (switching from old-style
+;									IM to a KCHR) in CheckKybd in order for the code changes to be utilized.
+;		<43>	 6/12/92	FM		Changed the call to SwapKbd to always be made through th
+;									internal vectors. Removed the obsolete smgrKeyGetSetInPtch27
+;									conditional.
+;		<42>	  6/5/92	SMB		#1029675,<pke>: When switching from old-style IM to any keyboard
+;									layout need to deactivate the old-style IM. So, now calling
+;									UpdateInputMethods for all setting of the keyboard. This change
+;									required adding a call to SetKybd before the call to
+;									utSetTextServiceLanguage. A number of KeyScript calls funnel out
+;									through SetKybd including RotateScript, SetSysScript,
+;									SetLastScript and an explicit script code (with the latter three
+;									.
+;		<41>	 5/20/92	PKE		#1019369,<ha>: Update handling of GetEnvirons verb
+;									smKeyDisableState to use the new lock state maintained in the
+;									application script globals. SetEnvirons can continue to write
+;									into the SMgrRecord, since we don't really want it to change the
+;									lock state (KeyScript should be used instead).
+;		<40>	 5/10/92	SMB		#1026551,<pke>: Add support for new private verb,
+;									smKeySynchKbdMenuState: SynchKbdMenuState disables the keyboard
+;									menu appropriately for the state of the current applications
+;									smgrAppDisableKybds flag. Called from DrawMenuBar (the SE/Plus
+;									patch version (!) and the ROM version of the code). (Previously
+;									were patching DrawMenuBar in ScriptMgrSysMenuPatch.a but this
+;									didn't work for the SE/Plus since they were completely patched
+;									out as a linked patch.  The SMgr is installed first, so the
+;									linked patch walked all over us!)
+;		<39>	 4/29/92	JSM		Load StandardEqu.d, include ScriptPriv.a, MenuMgrPriv.a and add
+;									an END statement so we can compile this file standalone.
+;		<38>	 4/29/92	JSM		Get rid of conditionals: ScriptMgrKeyboardMenu,
+;									smgrKeyScriptDoItlk, smgrSys7Extensions are always true, leave
+;									smgrKeyGetSetInPtch27 conditionals for now until we fix the ROM
+;									build.
+;		<37>	 4/23/92	SMB		#1025355,<kjo>: Was not correctly searching for the menu item
+;									that corresponded to the default input type for the script.
+;									Needed to compare the menu item's type to the script's default
+;									input type before testing if the ID was the same.
+;		<36>	 4/22/92	SMB		#1027747,<cv>: #1022196: In CheckKbd, need to branch to SetKybd
+;									if the application globals aren't initialized rather than
+;									exiting.  This ensures that the system script's default KCHR is
+;									available at boot rather than KCHR (0).
+;		<35>	 4/10/92	SMB		#1026551,<pke>: ,#1026911: Modify KeyScript handling of
+;									disabling the keyboard menu items to now use the byte
+;									information in the application-specific globals instead of the
+;									script manager record. Also, for KeyScript calls to
+;									enable/disable the About Keyboards menu item, must be sure item
+;									#1 is this menu item (if it didn't get added it may be a KCHR or
+;									input method for the system script).
+;		<34>	  4/8/92	PKE		#1026741,<cv>: Fix Get/SetScript to put ScriptRecord ptr in a0
+;									when dispatching to script Get/SetScript for private verbs.
+;		<33>	  4/7/92	SMB		Need to add a conditional for the ROM build around the call to
+;									utSetTextServiceLanguage.
+;		<32>	  4/6/92	SMB		#1024484,<pke>: #1022196,1024484,+others: Fixed change <28> the
+;									right way: must get the system script's default menu item # from
+;									the script record; can't assume it's #3: this is guaranteed to
+;									be in the system script (if the About Keyboards… menu item
+;									exist!) but isn't necessarily the default. This fix takes care
+;									of the case that the About Keyboards menu item might not exist!
+;									Made routine UpdateInputMethods into a proc that's exported so
+;									that ptchSystemMenu in ScriptMgrSysMenuPatch.a can use it. Also
+;									generalized it a bit so that it applies when switching from
+;									either KCHRs or IMs to IMs. (used to be IM -> IM only). • PKE
+;									#1022875 (smb reviewed): Add smKeyRoman verb for KeyScript (for
+;									use in KSWP) that sets keyboard script to Roman only if multiple
+;									scripts are installed; otherwise, it does nothing, and the
+;									corresponding KSWP key combination is not stripped from the
+;									event queue.
+;		<31>	  3/6/92	JH		2 locals were added to the stack frame for change <22> .
+;									Regrettably, the equ for frame size was left above the 2 new
+;									locals so the link instruction wasn't actually grabbing enough
+;									stack space. Changing now.
+;		<30>	  3/1/92	JSM		Forgot to add a semicolon before comments on two lines in last
+;									revision. Always build before checking in.
+;		<29>	 2/28/92	YK		In CheckKybd, save d4 and keep new script code in d4 since
+;									smgrKeyScript has not been changed at this point.(and it should
+;									be so) Pass d4 to GetScript to get language code. Point the
+;									correct AuxKeyboardMenuInfo to get a item type.
+;		<28>	 2/19/92	DTY		When switching keyboard scripts, if the input item could not be
+;									found, or if the default input method could not be found, switch
+;									to the system script. The code confuses the script number and
+;									the menu item number at this point. The system script will be
+;									menu item 3, not 1.
+;		<27>	 2/11/92	DCL		Changed the name of TSMEqu.[aph] to TextServices.[aph] for
+;									better read-ability.
+;		<26>	 2/10/92	KST		We need to include TSMPrivate.a as well. Also InformTSM's
+;									ChangetoOldJIM message now takes a parameter.
+;		<25>	  2/4/92	JSM		Include TSMEqu.a and change a bge.s to bge so ROM build works
+;									with last change.
+;		<24>	  2/1/92	KST		Need to inform TSM when switching from a new to old Japanese
+;									input method. Need to call SetTextServiceLanguage when we switch
+;									to a script which does not need IM. Call SetDefaultInputMethod
+;									when switch to a TSM styled IM.
+;		<23>	 1/15/92	SMB		Add code to support old Input Methods… must also support
+;									switching from an old im -> old im, old im -> new im, new im ->
+;									new im, new im -> old im. #1019369: add GetEnvirons verb to
+;									return keyboard disabled state (for PKE).
+;		<22>	 1/10/92	SMB		Bug fix to restore the stack correctly. Update
+;									GetDefaultInputMethod & SetDefaultInputMethod calls to reflect
+;									change in interface (now use scriptLangRec).
+;		<21>	12/21/91	RB		Need to include Components.a for this file to build for ROM.
+;		<20>	12/16/91	pvh		Nuke last change. We can do it in UpdateKeybdMenu instead.
+;		<19>	12/14/91	JH		<pvh>: THIS IS TEMPORARY, it's 12:30am and John & I need to go
+;									home. A4 not set to point to correct AuxKbdMenuRecord when
+;									calling UpdateKeyboardMenu, so we'll do it now. The
+;									AuxKbdMenuInfoRecord needs to be initialized with default script
+;									system info (script #1). Right now there is nothing there so we
+;									get trash as the KbdMenu icon.
+;		<18>	12/11/91	SMB		Updating to support input methods in the keyboard menu. Renamed
+;									AuxKeyboardMenuInfo members with new names. Renamed
+;									scriptRecord's scriptKCHRCount member to scriptInputCount.
+;		<17>	 11/8/91	SMB		#1015613 (for CubeE & Bruges) - Fix bug that shows up when an
+;									application has no menu bar. We really want to use the system
+;									menu bar (SystemMenuList) and not the current menu bar which may
+;									be an application's menu bar.
+;		<16>	10/28/91	PKE		#1014967 (for Cube-E & Bruges): KeyScript call with
+;									smKeyDisableKybds verb should set the keyboard to system script
+;									if it is not already in the system script or Roman. Also clean
+;									up a few conditionals and remove some obsolete code.
+;		<15>	  2/9/91	PKE		smb,#81488: Fix KeyScript bug that permitted keyboard switching
+;									that was supposed to be disallowed by a previous call to
+;									KeyScript with the verbs smKeyDisableKybds or
+;									smKeyDisableKybdSwitch. This caused problems with Mover, etc.
+;		<14>	  1/7/91	SMB		(JDR) Need to modify since the Keyboard menu structures have to
+;									always exist so the KeyScript verb "NextKeybdInScript" is
+;									meaningful (and functions!). Now testing smgrKbdMenuAvail(sGlb)
+;									to do the right thing when a menu does/doesn't exist! Added test
+;									for case of Roman script code on a Roman-only system; must call
+;									CheckKybd to update KCHR/icon resources for keyboard switching
+;									within a script. In this case, will update the scriptKeysItemNum
+;									field of the script record directly since won't call
+;									UpdateKeybdMenu.
+;		<13>	12/15/90	PKE		(gbm) Make KeyScript set smgrKeyScriptResult field which is now
+;									used by GetOSEvent patch. Clean up dispatching. Move 'itlk'
+;									disposing and reloading to SwapKybd, where it should have been
+;									all along. This fixes bugs with some European keyboards when
+;									using Keyboard menu, etc.
+;		<12>	12/14/90	SMB		(csd) Fixed bug #74905 by adding support for new KeyScript verb,
+;									smKeyEnableAboutKybds, to enable the About Keyboards… modal
+;									dialog. Modified to guarantee fetching resources from the system
+;									resource file.
+;		<11>	 9/10/90	PKE		For consistency and code sharing, make GetScript and SetScript
+;									accept the special negative script codes (iuSystemScript,
+;									iuCurrentScript).
+;		<10>	 8/16/90	SMB		Added support for new KeyScript verb to disable the About… menu
+;									item when another modal dialog is up.
+;		 <9>	 8/14/90	SMB		Fixed RotateScript to correctly save & restore a3 for the new
+;									disabled keyboard code rather than do a nasty bus error!
+;		 <8>	  8/7/90	SMB		Added support for new KeyScript verbs: smKeyDisableKybds,
+;									smKeyEnableKybds, and smKeyDisableKybdSwitch.  Potential bug:
+;									cleared d1 and moved long (.l) into d3.  Also, do not need to 0
+;									base the menu item loop control; this causes the last menuitem
+;									to always reset to the system's default, item 1.
+;		 <7+>	 7/20/90	SMB		Potential bug: cleared d1 and moved long (.l) into d3.  Also, 
+;									do not need to 0 base the menu item loop control; this causes 
+;									the last menuitem to always reset to the system's default, item 1.
+;									Added support for new KeyScript verbs: smKeyDisableKybds,
+;									smKeyEnableKybds, and smKeyDisableKybdSwitch.
+;		 <7>	 7/17/90	PKE		Adapt to updated ItlbRecord, in which itlbReserved3 field is
+;									renamed itlbEncoding.
+;		 <6>	 7/16/90	PKE		Use new name for field in ExpandMemRec: emItlCache2Ptr is now
+;									emItlSysCachePtr. Renamed Cache2Rec to NewItlCacheRec.
+;		 <5>	  7/5/90	PKE		NEEDED FOR SIXPACK: Fix GetScript handling of unimplemented
+;									verbs (old bug, fix needed for Sound Cdev).
+;		 <4>	  6/1/90	SMB		Adding support for Next Script and Next Keyboard.
+;		 <3>	 5/31/90	PKE		Added new scrTable entries for new GetScript verbs
+;									smScriptValidStyles, smScriptAliasStyle.
+;		 <2>	 5/13/90	SMB		Modifying KeyScript to use new Keyboard Menu.
+;		 <1>	 4/10/90	PKE		New today - extracted from ScriptMgrUtil.a and
+;									ScriptMgrExtTail.a; included in both of those files.
+;									Conditionalized so it can be used with ROM builds too.
+;
+;	Relevant recent comments from ScriptMgrExtTail.a below
+;		<x9>	 3/21/90	PKE		Changed scrTable so GetScript and SetScript support new
+;									smScriptAppFondSize and smScriptHelpFondSize verbs.
+;		<x3>	 1/17/90	PKE		Added handling of new GetEnvirons verb smRegionCode.
+;	   <1.6>	 10/2/89	PKE		Added code in GetEnvirons/SetEnvirons to handle new smKCHRCache
+;									verb.
+;	   <1.5>	 9/18/89	PKE		Moved KeyScript here from ptch 4 so we can move 'itlk'
+;									GetResource after the point at which meta-script numbers are
+;									mapped to real script numbers and checks are made for script
+;									installed and enabled. Replaced the _GetScript call in this
+;									'itlk' stuff with a direct access to ScriptRecord since we have
+;									already done the validity checking.
+;	   <1.4>	 9/17/89	PKE		Moved GetEnvirons/SetEnvirons and GetScript/SetScript here from
+;									ptch 4 for 7.0 so we can remove Get/SetScript from PTCH files
+;									and so we don't have to also add Get/SetEnvirons there. Added
+;									new smDoubleByte verb for Get/SetEnvirons.
+;
+;	Relevant recent comments from ScriptMgrUtil.a below
+;	   <2.7>	 9/18/89	PKE		Move KeyScript to ptch 27 so we can make a bug fix in itlk
+;									processing for both old and new ROMs. Change its vector here to
+;									be a dummy and stuff real address in ptch 27.
+;	   <2.6>	 9/17/89	PKE		For 7.0, move Get/SetEnvirons and Get/SetScript to ptch 27.
+;									Change the vectors for these routines to be dummy vectors here;
+;									ptch 27 will stuff the real addresses.
+;	   <2.0>	 6/30/89	PKE		NEEDED FOR AURORA: Optimize table access in Get/SetEnvirons and
+;									Get/SetScript (from code review).
+;	   <1.9>	 6/23/89	PKE		Add four verbs to GetScript/SetScript which correspond to new
+;									font&size information in ScriptRecord; skip definition of
+;									buildLevel (done in ScriptEqu.priv).
+;	   <1.5>	  3/5/89	PKE		Use KeyScript patch from KeyHack.a for Big Bang (as well as ROM)
+;___________________________________________________________________________________________________
+;	To Do:
+;	•	These are not supported in script systems so the values can be re-used:
+;	-10 is switch to next input method in current keyscript			(**)			<8>
+;	-11 is switch to last-used input method in cur keyscript		(**)			<8>
+;	•	work on error handling in UpdateInputMethods: (see old->new)
+; 	<??> this is a problem if _SetDefaultInputMethod fails: if an old-style IM was previously  
+; 	<??> active then there's a problem cause now its deactivated and secret script flag is unset.
+; 	<??> ow, can use the previous TSM-style IM but must reset smgrKeyScript (to smgrLastScript) since it was set above. 
+;	• eventually remove the smgrDisableKybds verb from the envTable (used by Get/SetEnvirons)
+;		(see ScriptPriv.a too)
+;	• in RotateScript: instead of 'cmp.b' followed by 'tst.b' of smgrAppDisableKybds(ax),
+;		simply do a tst.b followed by beq, bgt, blt for each disable/enable state.
+;	• I think there's a problem with using scriptInputCount as a default loop controller for searching 
+;		for the desired input.  The loop should start with the script's menu items rather than starting
+;		from the beginning of the AuxMenuInfo structure sine the scriptInputCount is the count of the
+;		current script's menu items.
+;___________________________________________________________________________________________________
+
+			LOAD	'StandardEqu.d'			; <39>
+			include 'ScriptPriv.a'			; <39>
+			include 'Components.a'			; <21> rb
+			include 'TextServices.a'		; <25> JSM   <27> dcl
+			include 'TSMPrivate.a'			; <26> KST
+			include	'MenuMgrPriv.a'			; <39>
+			include 'Processes.a'			; <50> KST
+			include 'MFPrivate.a'			; <50> KST
+
+			blanks	on
+			string	asis
+;formFeed
+		
+			proc
+			export	KeyScript
+			import	StdUnlink
+
+; ----------------------------------------------------------------------------
+; procedure:	KeyScript(code: Integer);
+; input:	(sp).w	Script code, or various negative verbs for special functions.
+; warning:	This routine follows Pascal register conventions.
+;
+; KeyScript is used to change the current keyboard script.  It also swaps
+; to the KCHR of the new key script and draws its script icon in the upper
+; right corner of the menu bar.
+;
+; If the script code passed indicates an smgrEntry that is nil, or the
+; smgrEntry is present but the script is disabled, the key script is left
+; in place.
+;
+; If the script code is -1, then KeyScript searches through the smgrEntry
+; table, looking for the next present and enabled script, and makes it the
+; current one.  If the script code is -2, then KeyScript will attempt to
+; switch to the system script.  If the script code is -3, then KeyScript
+; will swap the current key script with the last key script.
+; ----------------------------------------------------------------------------
+
+ksRecord	record	{a6link},decr
+ksArgs		equ		*-8						; size of arguments.
+code		ds.w	1						; new keyboard script code.
+selector	ds.l	1						; trap selector value.
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6 register.
+lastScript	ds.w	1						; save last script in case of error in UpdateInputMethods	<45>
+scriptLangRec	ds.l	1					; script word / language word					<22>
+CompDesc	ds		ComponentDescription	;												<18>
+ksLocals	equ		*						; size of local variables.			
+			endr
+
+maxVerb		equ	18							; max abs value of special verb					<13><32><40>
+
+sGlb		equ	a2							; preserve across traps in smgrKeyScriptDoItlk code
+
+; Link the stack and load the Script Manager globals pointer.  If the
+; Script Manager is disabled, return immediately.
+
+KeyScript
+			with	ksRecord,smgrRecord
+			link	a6,#ksLocals			; link the stack.
+			move.l	sGlb, -(sp)				; save register
+
+			GetSMgrCore sGlb				; load script manager globals.
+			
+; The Portable and IIci ROMs have code to do the following at this point			<1><16>
+; (but this is the wrong place to do it, so now we put it in SwapKybd)				<13>
+; 	1.	If we already have an itlk, dispose of it
+;	2.	Get the new KCHR ID number (assumes KeyScript param is an explicit
+;		script code - wrong!) and bail if we cannot find it.
+;	3.	Load an itlk resource with same ID if present, detach it, store its handle
+
+;-----------------------------------
+; Check for meta-script numbers:
+;	-1 is rotate to next available script.
+;	-2 is switch directly to the system script.
+;	-3 is switch directly to the last key script.
+;	-4 is rotate to next keyboard in script.										<4>
+;	-5 is switch to previously-used keyboard in current keyscript	(*)				<8>
+;	-6 is disable keyboards not in the system script or roman script				<8>
+;	-7 is enable all keyboards														<8>
+;	-8 is toggle inline input for current keyscript					(**)			<8>
+;	-9 is toggle default line direction (TESysJust)					(**)			<8>
+;	-10 is switch to next input method in current keyscript			(**)			<8>
+;	-11 is switch to last-used input method in cur keyscript		(**)			<8>
+;	-12 is disable switching from the current keyboard								<8>
+;	-13	is disable About… menu item since another modal dialog is up	(***)		<10>
+;	-14 is re-enable About… menu item									(***)		<13>
+;	-15 is Set default line dir to left-right, align left			(**)			<32>
+;	-16 is Set default line dir to right-left, align right			(**)			<32>
+;	-17 is Set keyscript to Roman if non-Roman scripts are installed				<32>
+;	-18 is synchronize keyboard menu state to current process' flag		(***)		<40>
+;
+; (*) Not implemented in System 7													<8>
+; (**) Not implemented in System, may be implemented by script systems				<8>
+; (***) Implemented but private verbs.												<32>
+;-----------------------------------
+
+; clean up dispatching and set smgrKeyScriptResult field.							<13>
+			clr.b	smgrKeyScriptResult(sGlb) ; initialize result field				<13> 
+			move.w	code(a6),d0				; script code or neg verb
+			blt.s	@negVerb				; if verb, go handle it.
+; handle direct script code
+; In case of Roman-only, must still call CheckKybd to update KCHR/icon resources for
+; 	keyboard switching within a script.												<14>
+			beq.s	@DoneScriptChk			; 										<14>
+			cmpi.b	#1,smgrEnabled(sGlb)	; more than one enabled script?
+			ble		KybdDone				; if not, do nothing.
+			cmp.w	#smgrCount,d0			; scriptCode >= smgrCount?
+			bgt		KybdDone				; if so, bail out.
+@DoneScriptChk
+			st		smgrKeyScriptResult(sGlb) ; say we handled the code.
+			bra		CheckKybd				; and now go do it.
+
+; check neg verbs - slick new way											<13>
+@negVerb
+			neg.w	d0
+			cmp.w	#maxVerb,d0
+			bgt		KybdDone				; invalid verb, bail
+			
+; valid verb, handle it.
+			subq.w	#1,d0					; make 0 based index
+			lsl.w	#2,d0					; make into long offset
+			lea		DispTable,a0			; get table pointer
+			move.l	0(a0,d0.w),d0			; envChk offset in lo word, doVerb offset in hi
+
+			lea		0(a0,d0.w),a1			; make pointer to environment check routine
+			jmp		(a1)					; and go to it.
+			
+;----------------------------------------------------------------------------		<13>
+; New dispatch table for KeyScript.
+; Checks environment for each verb, and skips action if the verb does nothing
+; useful in current environment. If it does something, the smgrKeyScriptResult
+; flag is set.
+;
+
+DispTable
+;			verb action routine offset		 environment check routine offset	verb
+;			--------------------------		 --------------------------------	----
+	dc.w	RotateScript		- DispTable, envMultScr			- DispTable		; -1, smKeyNextScript
+	dc.w	SetSysScript		- DispTable, envMultScr			- DispTable		; -2, smKeySysScript
+	dc.w	SetLastScript		- DispTable, envMultScr			- DispTable		; -3, smKeySwapScript
+	dc.w	NextKybdInScript	- DispTable, envMultKCHR		- DispTable		; -4, smKeyNextKybd
+	dc.w	KybdDone			- DispTable, KybdDone			- DispTable		; -5, smKeyXxx (unimp)
+	dc.w	DisableKybds		- DispTable, envKeyMenu			- DispTable		; -6, smKeyDisableKybds
+	dc.w	EnableKybds			- DispTable, envKeyMenu			- DispTable		; -7, smKeyEnableKybds
+	dc.w	KybdDone			- DispTable, KybdDone			- DispTable		; -8, smKeyXxx (unimp)
+	dc.w	KybdDone			- DispTable, KybdDone			- DispTable		; -9, smKeyXxx (unimp)
+	dc.w	KybdDone			- DispTable, KybdDone			- DispTable		; -10, smKeyXxx (unimp)
+	dc.w	KybdDone			- DispTable, KybdDone			- DispTable		; -11, smKeyXxx (unimp)
+	dc.w	DisableKybdSwitch	- DispTable, envKeyMenu			- DispTable		; -12, smKeyDisableKybdSwitch
+	dc.w	DisableModalDialog	- DispTable, envAboutKeyMenu	- DispTable		; -13, smKeyDisableAboutKybds	<35>
+	dc.w	EnableModalDialog	- DispTable, envAboutKeyMenu	- DispTable		; -14, smKeyEnableAboutKybds	<35>
+	dc.w	KybdDone			- DispTable, KybdDone			- DispTable		; -15, smKeySetDirLeftRight (unimp)	<32>
+	dc.w	KybdDone			- DispTable, KybdDone			- DispTable		; -16, smKeySetDirRightLeft (unimp)	<32>
+	dc.w	SetRoman			- DispTable, envMultScr			- DispTable		; -17, smKeyRoman		<32>
+	dc.w	SynchKbdMenuState	- DispTable, envKeyMenu			- DispTable		; -18, smKeySynchKbdMenuState	<40>
+DispTableEnd
+
+	IF maxVerb <> (DispTableEnd - DispTable)/4 THEN
+			aerror	'ScriptMgrKeyGetSet.a: maxVerb does not match DispTable size'
+	ENDIF
+;----------------------------------------------------------------------------		<13>
+; Environment check routines (envChk).
+; The following conditions apply at entry, and must be preserved for JmpDoVerb:
+;	d0 hi word has offset from DispTable to verb routine.
+;	a0 has DispTable ptr.
+; (also sGlb has SMgrRecord pointer; preserve this through entire routine)
+
+envMultScr
+			cmpi.b	#1,smgrEnabled(sGlb)	; more than one enabled script?
+			ble		KybdDone				; if not, do nothing.
+			bra.s	JmpDoVerb
+envMultKCHR
+			movem.l	a0/d0,-(sp)
+			move.w	CurMap,-(sp)			; leave cur resfile refnum on stack
+			clr.w	-(sp)					; specify system file
+			_UseResFile						;
+			subq	#2,sp					; room for Count1Resources result
+			move.l	#'KCHR',-(sp)
+			_Count1Resources
+			move.w	(sp)+,d1
+			_UseResFile						; restore old resfile (refnum on stack)
+			movem.l	(sp)+,a0/d0
+			cmp.w	#1,d1					; more than one KCHR?
+			ble		KybdDone				; if not, do nothing.
+			bra.s	JmpDoVerb
+envAboutKeyMenu
+			tst.b	smgrKbdMenuAvail(sGlb)	; Keyboard menu displayed?				<14>
+			beq		KybdDone				; if not, do nothing.
+			with	AuxKeyboardMenuInfo		;													<35>
+			move.l	smgrKeyboardMenuPtr(sGlb),a1	; test if first menu item is About…			<35>
+			move.w	#AuxMenuInfoSize*1,d1	; get to menu item offset in aux menu info recordd	<35>
+			cmp.l	#0,IconSuiteH(a1,d1)	; if NIL then is About								<35>
+			bne		KybdDone				; otherwise, do nothing								<8>
+			endWith							;													<35>
+			bra.s	JmpDoVerb
+envKeyMenu
+			with	ExpandMemRec			;													<35>
+			move.l	ExpandMem,a1			; get ExpandMemRec ptr								<35>
+			move.l	emScriptAppGlobals(a1),a1	; get globals handle							<35>
+			move.l	a1,d1					; is it 0 (no app-specific ScriptMgr globals)?		<35>
+			beq		KybdDone				; if so, don’t do anything							<35>
+			addq.l	#1,d1					; is it -1 (no Process Mgr yet, use sys cache)?		<35>
+			beq		KybdDone				; if so, don’t do anything							<35>
+
+			move.l	(a1),a1					; dereference - get ptr to globals					<35>
+			move.l	a1,-(sp)				; save for action routine (since use a1 for JmpDoVerb)	<35>
+			endWith							;													<35>
+			; fall through to JmpDoVerb
+envAlways
+JmpDoVerb
+			st		smgrKeyScriptResult(sGlb) ; ok, we're really handling this verb.
+			swap	d0						; get offset to verb action routine
+			lea		0(a0,d0.w),a1			; make pointer to verb action routine
+			jmp		(a1)					; and go to it.
+
+;----------------------------------------------------------------------------		<13>
+; Entry points corresponding to different verb action routines (doVerb).
+
+SetRoman									; -17, smKeyRoman						<32>
+;sets keyboard script to Roman only if multiple scripts are installed				<32>
+			clr.w	d0						; Roman script							<32>
+			bra		CheckKybd				; go set it								<32>
+SetSysScript								; -2, smKeySysScript					<13>
+			move.w	smgrSysScript(sGlb),d0	; load system script code.
+			bra		CheckKybd				; yes -> use system script.
+
+SetLastScript								; -3, smKeySwapScript					<13>
+			move.w	smgrLastScript(sGlb),d0	; load last script.
+			cmp.w	smgrKeyScript(sGlb),d0	; same as current?
+			beq		RotateScript			; yes -> rotate
+			bra		CheckKybd				; yes -> use last script.
+
+NextKybdInScript							; -4, smKeyNextKybd									<8>
+
+; do nothing if all keyboard switching is disabled												<15>
+			with	ExpandMemRec, SMgrAppRecord	;												<35>
+			move.l	ExpandMem,a1			; get ExpandMemRec ptr								<35>
+			move.l	emScriptAppGlobals(a1),a1	; get globals handle							<35>
+			move.l	a1,d1					; is it 0 (no app-specific ScriptMgr globals)?		<35>
+			beq		KybdDone				; if so, don’t do anything							<35>
+			addq.l	#1,d1					; is it -1 (no Process Mgr yet, use sys cache)?		<35>
+			beq		KybdDone				; if so, don’t do anything							<35>
+			move.l	(a1),a1					; dereference - get ptr to globals					<35>
+			cmp.b	#1,smgrAppDisableKybds(a1)	; all switching disabled?						<35>
+			endWith							;													<35>
+;;			cmp.b	#1,smgrDisableKybds(sGlb) ; all switching disabled?							<15><35>
+			beq		KybdDone				; if so, do nothing.								<15>
+
+; get Next Keyboard in the current script
+			with	ScriptRecord, AuxKeyboardMenuInfo
+			movem.l	d2-d5/a3,-(sp)			
+			move.w	smgrKeyScript(sGlb),d0	; get the key script code.				<13>
+			move.w	d0,d1					; copy script code.
+			lsl.w	#2,d1					; find smgrEntry offset.
+			move.l	smgrEntry(sGlb,d1.w),a0
+			
+; get the input, the item # for this input, and the total # of inputs for this script
+			moveq	#0,d1					;										<8>
+			move.b	scriptKeysItemNum(a0),d1	; current input menu item number
+			moveq	#0,d4
+			move.b	scriptInputCount(a0),d4
+			move.l	smgrKeyboardMenuPtr(sGlb),d2
+			
+; set ptr to current item in AuxMenuInfo record
+			move.l	d2,a3
+			move.l	d1,d3					;										<8>
+			mulu.w	#AuxMenuInfoSize,d3
+			add.l	d3,a3					; ptr to current aux info
+					
+; is this the last input item of this script in the menu?
+			cmp.w	itemScriptPosn(a3),d4	; get the posn of this KCHR within its script
+			bhi.s	@IncrItemNum			; nope
+; go to first input item in this script
+			sub.w	d4,d1					
+			; falls through: incr to get the correct item # of the 1st input item in this script			
+
+@IncrItemNum
+			add.w	#1,d1					; get next item in this script
+; set new input item for this script: need ptr to current item in AuxMenuInfo record
+			move.l	d2,a3					; keyboard menu info ptr				<12>
+			move.l	d1,d3					; new item								<12>
+			mulu.w	#AuxMenuInfoSize,d3		; offset to item's aux info				<12>
+			add.l	d3,a3					; ptr to new item's aux info			<12>
+
+; -----------------------------------------------------------------------------		<18>
+; find out the type of input														<18>
+			tst.b	itemType(a3)			; Is this new input a KCHRitem?
+			beq.s	@KCHRinput
+			import	UpdateInputMethods		;										<32>
+			bsr		UpdateInputMethods		; 										<23>
+			tst.w	d2						; error result?
+			beq.s	@RestoreStack			; no error, finish up
+; don't change anything since can't get next item
+			movem.l	(sp)+,d2-d5/a3
+			bra		KybdDone
+; ------------------------------------------										<18>
+; move new KCHR id into itlbKeys temporarily (since not writing to ‘itlb’ resource in memory)
+@KCHRinput
+			move.w	itemRsrcID(a3),scriptBundle.itlbKeys(a0)	; move new KCHR id into itlbKeys	<12>
+@RestoreStack
+			movem.l	(sp)+,d2-d5/a3
+
+; want new input item # on the stack for the call to UpdateKeybdMenu
+			move.w	d1,-(sp)
+			; d0 = script code for SetKybd code
+; rearranged to correctly handle keybd switching when no menu exists.				<14>
+; if the kbd menu exists, don't update the scriptKeysItemNum yet. Need to erase the	<14>
+; mark for the previous kbd before overwriting it.									<14>
+			tst.b	smgrKbdMenuAvail(sGlb)	; is the kbd menu displayed?			<14>
+;;			bne		SetKybd					; yes, so continue
+			bne		UpdateMenuAndKCHR		; skip all the IM stuff							<45>
+			move.b	d1,scriptKeysItemNum(a0)	; no, save new item # in the scriptRecord	<14> 
+;;			bra		SetKybd					; d0,a0 and sGlb must be set correctly before bra
+			bra		UpdateMenuAndKCHR		; skip all the IM stuff							<45>
+			endWith
+
+; -------------------------------------------										<40>
+SynchKbdMenuState							; -18, smKeySynchKbdMenuState			<40>
+
+;		Set the keyboard menu state to correspond to the application’s 
+;		desired setting (enable/disable) in the application-specific
+;		global flag, smgrAppDisableKybds.
+;
+			with SMgrAppRecord				
+			move.l	(sp)+,a1					; restore ptr to appl-specific globals
+			cmp.b	#0,smgrAppDisableKybds(a1)	; is everything enabled?
+			beq.s	@EnableItems				; yes
+; some level of disabling is desired
+			cmp.b	#1,smgrAppDisableKybds(a1)	; can we switch scripts at all?
+			beq		@DisableItems				; nope.
+; application setting is disable kybds not in Sys/Roman script
+			GetSMgrCore	a0						; get script manager core
+			move.w	smgrKeyScript(a0),d0		; check current keyboard
+			beq.s	@DisableItems				; if already Roman, we're OK
+			cmp.w	smgrSysScript(a0),d0		; is it system script?
+			beq.s	@DisableItems				; if so, we're also OK
+			move.w	#smKeySysScript,-(sp)		; not OK, ask for keybd in sys script
+			_KeyScript
+@DisableItems
+			import	DisableKeyboardItems
+			bsr		DisableKeyboardItems		; disable all menu items
+			bra		KybdDone					; 										<8>
+@EnableItems
+			import	EnableKeyboardItems
+			bsr		EnableKeyboardItems
+			bra		KybdDone					; 										<8>
+			endWith
+
+; -------------------------------------------										<8>
+DisableKybds								; -6, smKeyDisableKybds					<8>
+			with SMgrAppRecord				;										<35>
+			move.l	(sp)+,a1				; restore ptr to appl-specific globals	<35>
+			st		smgrAppDisableKybds(a1)	; T=>disable keybds not in Sys/Roman script	<35>
+;;			st		smgrDisableKybds(sGlb)	; T=>disable keybds not in Sys/Roman script	<8><35>
+			move.w	smgrKeyScript(sGlb),d0	; check current keyboard				<16>
+			beq.s	@kybdSysOrRoman			; if already Roman, we're OK			<16>
+			cmp.w	smgrSysScript(sGlb),d0	; is it system script?					<16>
+			beq.s	@kybdSysOrRoman			; if so, we're also OK					<16>
+			move.w	#smKeySysScript,-(sp)	; not OK, ask for keybd in sys script	<16>
+			_KeyScript						; call ourselves (via trap: patchable)	<16>
+@kybdSysOrRoman								;										<16>
+			import	DisableKeyboardItems	;										<8>
+			bsr		DisableKeyboardItems	;										<8>
+			bra		KybdDone				; 										<8>
+			endWith
+
+; -------------------------------------------										<8>
+EnableKybds									; -7, smKeyEnableKybds					<8>
+			with SMgrAppRecord				;										<35>
+			move.l	(sp)+,a1				; restore ptr to appl-specific globals	<35>
+			sf		smgrAppDisableKybds(a1)	; T=>disable keybds not in Sys/Roman script	<35>
+;;			sf		smgrDisableKybds(sGlb)	; T=>disable keybds not in Sys/Roman script	<8><35>
+			import	EnableKeyboardItems		;										<8>
+			bsr		EnableKeyboardItems		;										<8>
+			bra		KybdDone				; 										<8>
+			endWith							;													<35>
+
+; -------------------------------------------										<8>
+DisableKybdSwitch							; -12, smKeyDisableKybdSwitch			<8>
+			with SMgrAppRecord				;										<35>
+			move.l	(sp)+,a1				; restore ptr to appl-specific globals	<35>
+			move.b	#1,smgrAppDisableKybds(a1)	; disable all keybds to prevent switching	<35>
+;;			move.b	#1,smgrDisableKybds(sGlb) ; disable all keybds to prevent switching	<8><35>
+			bsr		DisableKeyboardItems	;										<8>
+			bra		KybdDone				; 										<8>
+			endWith							;													<35>
+
+; -------------------------------------------										<10>
+DisableModalDialog							; -13, smKeyDisableAboutKybds			<12>
+											; renamed from ModalDialogPresent
+; disable About Keyboards… menu item since another modal dialog is up
+; get menu handle for DisableItem call
+
+; If an application doesn't have a menuBar then _GetMHandle will fail. What we 	<17>
+; really want is to use the system menuBar and not the application menuBar.			<17>
+			move.l	a4,-(sp)				; preserve contents						<17>
+			move.l	MenuList,-(sp)			; save the current menuList since it may be an apps menu
+			move.l	SystemMenuList,MenuList	;										<17>
+
+			subq	#4,sp					; result for _GetMHandle
+			move.w	#kKeyboardMenuID, -(sp)	; menuID
+			_GetMHandle
+			tst.l	(sp)					; leave menu handle on stack for DisableItem call
+			beq.s	RestoreStack			; nil hdl implies no menu
+			move.w	#1,-(sp)				; item # for About Keyboards…
+			_DisableItem
+			move.l	(sp)+,MenuList			; restore the menuList					<17>
+			move.l	(sp)+,a4				; restore contents						<17>
+			bra		KybdDone
+
+; -------------------------------------------										<12>
+EnableModalDialog							; -14, smKeyEnableAboutKybds
+; get menu handle for EnableItem call
+
+; If an application doesn't have a menuBar then _GetMHandle will fail. What we 	<17>
+; really want is to use the system menuBar and not the application menuBar.			<17>
+			move.l	MenuList,-(sp)			; save the current menuList since it may be an apps menu
+			move.l	SystemMenuList,MenuList	;										<17>
+			
+			subq	#4,sp					; result for _GetMHandle
+			move.w	#kKeyboardMenuID, -(sp)	; menuID
+			_GetMHandle
+			tst.l	(sp)					; leave menu handle on stack for _EnableItem call
+			beq.s	RestoreStack			; nil hdl implies no menu
+			move.w	#1,-(sp)				; item # for About Keyboards…
+			_EnableItem
+			move.l	(sp)+,MenuList			; restore the menuList					<17>
+			bra		KybdDone
+
+; -------------------------------------------										<12>
+RestoreStack
+			addq.w	#4,sp					; pop handle
+			move.l	(sp)+,MenuList			; restore the menuList					<17>
+			bra		KybdDone				
+
+; --------------------------------------------------------------------------------- <4>
+	
+; Now we have a legal script code in d0, so check the script entry to make
+; sure that the script is installed and enabled.  If either one of these
+; tests fails, bail out.
+
+CheckKybd
+ChkKbdRegs	reg		a3/a4/d0/d2/d3/d5			; now saving (using) d5 in the place of d2	<32>using d2 again<37>
+
+			with	scriptRecord, ScriptSystemGlobals			;
+			move.w	d0,d1					; copy script code.
+			lsl.w	#2,d1					; find smgrEntry offset.
+			move.l	smgrEntry(sGlb,d1.w),d1	; script entry = nil?
+			beq		KybdDone				; yes -> bail out.
+			move.l	d1,a0					; load script entry pointer.
+			tst.b	scriptEnabled(a0)		; entry disabled?
+			beq		KybdDone				; yes -> bail out.
+
+; must skip this if keyboard switching level doesn't allow it 						<15>
+			with	ExpandMemRec, SMgrAppRecord	;												<35>
+			move.l	ExpandMem,a1			; get ExpandMemRec ptr								<35>
+			move.l	emScriptAppGlobals(a1),a1	; get globals handle							<35>
+			move.l	a1,d1					; is it 0 (no app-specific ScriptMgr globals)?		<35>
+			beq		PushItemAndSetKybd		; if so, don’t do anything							<35><36>need bogus item on stack <45>
+			addq.l	#1,d1					; is it -1 (no Process Mgr yet, use sys cache)?		<35>
+			beq		PushItemAndSetKybd		; if so, don’t do anything							<35><36>need bogus item on stack <45>
+			move.l	(a1),a1					; dereference - get ptr to globals					<35>
+			cmp.b	#1,smgrAppDisableKybds(a1)	; what level of switching is enabled?			<35>
+			endWith							;													<35>
+;;			cmp.b	#1,smgrDisableKybds(sGlb) ; what level of switching is enabled?	<15>
+			bcs.s	@switchOK				; all, go do it							<15>
+			beq		KybdDone				; none, do nothing.						<15>
+; here, we can only switch if specified script is system or Roman					<15>
+			cmp.w	#smRoman,d0				; is it Roman?							<15>
+			beq.s	@switchOK				; if so, go do it						<15>
+			cmp.w	smgrSysScript(sGlb),d0	; is it system?							<15>
+			bne		KybdDone				; if not, do nothing					<15>
+@switchOK									;										<15>
+
+; --------------------------------------------------------------------------------- <4>
+; In case default input (KCHR or input method) changed must update default input 
+; menu item #. An example of this is when Keybd Cdev changes the KCHR for a script: 
+; it makes a SetScript call w/ verb ‘smScriptKeys’ for the new KCHR and then KeyScript
+; is called w/ the script code.  When KeyScript is called w/ a script code it comes
+; through here so the script's menu item # must be set here.						<4>
+; --------------------------------------------------------------------------------- <4>
+
+			with	AuxKeyboardMenuInfo,itlbRecord
+			move.w	d4,-(sp)				; save d4 so can use it to update script	<32>
+			movem.l	ChkKbdRegs,-(sp)		;										<29><32>
+			move.w	d0,d4					; save script							<29>
+			
+; Want to see if the scriptKeysItemNum reflects the script's default KCHR in the itlb 
+;	if not, need to update the scriptKeysItemNum.
+; test if there's a MenuList yet: explicitly test for -1 or 0.
+			moveq	#0,d1					; clear for use
+			move.b	scriptKeysItemNum(a0),d1	; init to new script's default item num	<32>
+			move.l	MenuList,d0
+			beq		@HaveItemNum			; bra if 0
+			add.l	#1,d0
+			beq		@HaveItemNum			; bra if -1
+			clr.w	d5						; clear item count							<14>
+			move.b	scriptInputCount(a0),d5	; initialize item count to script's input count	<14>
+			tst.b	smgrKbdMenuAvail(sGlb)	; is the kbd menu displayed?				<14>
+			beq.s	@HaveItemCount			; no, so have count	(assumes Roman-only)	<14>
+			
+; need a count of the # of menuItems for the loop to search for the default input
+; If an application doesn't have a menuBar then _GetMHandle will fail. What we 			<17>
+; really want is to use the system menuBar and not the application menuBar.				<17>
+			move.l	MenuList,-(sp)			; save the current menuList since it may be an apps menu
+			move.l	SystemMenuList,MenuList	;											<17>
+			
+			move.l	a0,-(sp)				; save script ptr
+			subq	#6,sp					; results of next 2 calls
+			move.w	#KKeyboardMenuID,-(sp)
+			_GetMHandle						; leave handle on the stack for count
+			tst.l	(sp)					;										<14><17>
+			bne.s	@CountItems				;										<14><17>
+			add.w	#10,sp					; no menu, pop stack	(includes a0)	<14><17>
+			move.l	(sp)+,MenuList			; restore menuList						<17>
+			moveq	#0,d1					; clear for use
+			move.b	scriptKeysItemNum(a0),d1	; use new script's default item num	<32>
+			bra		@HaveItemNum			; no menu handle: defaults to zero		<14><17>
+
+@CountItems									;										<14><17>
+			_CountMItems
+			move.w	(sp)+,d5
+			move.l	(sp)+,a0				; restore script ptr
+			move.l	(sp)+,MenuList			; restore menuList						<17>
+			
+@HaveItemCount
+			move.l	smgrKeyboardMenuPtr(sGlb),a4
+			moveq	#0,d3					; clr storage for input ID
+			move.w	scriptBundle.itlbKeys(a0),d3	; assume input type is a KCHR
+			move.b	#KCHRitem,d2			; save for correct comparison below					<37>
+			
+; set ptr to default item in AuxMenuInfo record to determine type of input for this script
+			moveq	#0,d0
+			move.b	scriptKeysItemNum(a0),d0		; get current item num
+			mulu.w	#AuxMenuInfoSize,d0				; offset to current item's aux info
+
+; -----------------------------------------------------------------------------					<18>
+; Find out the type of input to set up d3 (storage of the default input) correctly				<18>
+; Won't ever be both KCHRs and IMs so whatever the default input type is, then we can assume	<37>
+;	this will be the same for all inputs of this script.										<37>
+
+			cmp.b	#TSMIMitem,itemType(a4,d0.w)	; what type of input for this script?		<23> <29>
+			blt.s	@InputLoopStart				; bra if a KCHR
+;;			bgt.s	@OldIMLoop					; what to do for an old-style IM				<23><37>
+			; otherwise fall into code that gets the default IM whether new-style or 6.x-compatible
+
+; get the default input method for this script to see if item # changed
+; need the default language for this script
+			move.l	a0,-(sp)					; save script ptr								<25>
+			subq	#4,sp						; result
+			move.w	d4,-(sp)					; script										<29>
+			move	#smScriptLang,-(sp)			; verb: I want the default lang from the 'itlb'
+			_GetScript
+			move.l	(sp)+,d0					; default langCode
+			move.w	d4,scriptLangRec(a6)		; script										<22>
+			move.w	d0,scriptLangRec+2(a6)		; language										<22>
+			
+; now get the component identifier or FEP ID for the default input method		
+			subq	#6,sp						; 2 = OSErr result, 4 = VAR: component identifier
+			lea		2(sp),a0					; return default component identifier on stack (above result)
+			move.l	a0,-(sp)					; push stack addr for comp id
+			pea		scriptLangRec(a6)			;												<22>
+			_GetDefaultInputMethod				; returns either a TSM or old-style IM ID
+
+; now see if there's really a default IM: check the results of _GetDefaultInputMethod
+			move.b	#TSMIMitem,d2				; assume is a TSM input method					<37>
+			move.w	(sp)+,d0					; result										<22>
+			move.l	(sp)+,d3					; need default component identifier here
+			move.l	(sp)+,a0					; restore script ptr							<25>
+			tst.w	d0							; bad result from GetDefaultInputMethod?		<22>
+			beq.s	@InputLoopStart				; no, continue
+
+; not TSM-style so test if the default is the old-style IM 
+			cmp.w	#tsmInputMethodIsOldErr,d0	; is this the special error?					<37>
+			beq.s	@OldIMLoop					; yes											<37>
+			; otherwise, using system script's default if we fail
+
+; Error so must use the system script's default menu item # in case can't find default IM:		<32>
+; 	need to get this from the script record - item #3 is not guaranteed to be 					<32>
+; 	the default, only that it's in the system script											<32>
+			move.w	smgrSysScript(sGlb),d1		; get the system script ID						<32>
+			move.w	d1,d4						; say system script is the new keyscript now	<32>
+			lsl.w	#2,d1						; find smgrEntry offset.						<32>
+			move.l	smgrEntry(sGlb,d1.w),a0		; want script entry pointer in a0				<32>
+			moveq	#0,d1						; clear for use									<32>
+			move.b	scriptKeysItemNum(a0),d1	; now have system script's default menu item #!	<32>
+			bra		@HaveItemNum				; go set the keyboard							<32>
+			
+@OldIMLoop
+; if an old IM then know it's the Japanese script; ptr to script system globals is in a0
+; now get the ID for the default IM																<23>
+;;			move.w	imMethod(a0),d3				; unnecessary now <37>
+			move.b	#oldIMitem,d2				; is a 6.x-compatible JIM						<37>
+			; fall into InputLoopStart
+
+@InputLoopStart
+			moveq	#1,d1						; item counter: start w/ menu item #1			<32>
+; -----------------------------------------------------------------------------					<18>
+@InputLoop
+; d3 = default item ID for this script
+; d4 = script code
+; a0 = pointer to script system globals
+; a4 = smgrKeyboardMenuPtr
+; if iconSuiteH is NIL then not a "real" input menuitem (may be a disabled line, About Kbds…, etc.)
+			move.w	d1,d0
+			move.l	a4,a3						; menu ptr
+			mulu.w	#AuxMenuInfoSize,d0
+			add.w	d0,a3						; pt to next menuItem’s aux info
+			tst.l	IconSuiteH(a3)
+			beq.s	@NextItem
+
+; compare if this item's type is the same as the default input's "type" (TSMIMitem, KCHRitem, or oldIMitem)			<37>
+; if is, can now compare the ID
+			cmp.b	itemType(a3),d2				; are these the same type? if so, bra accordingly	<37>
+			bne.s	@NextItem					; not the right type so fetch next input			<37>
+
+; find out the type of input to know what to compare								<18>
+			cmp.b	#TSMIMitem,itemType(a3)		; what type of input is this?		<23>
+			blt.s	@IsKCHR						; bra if a KCHR
+			bgt.s	@IsOldIM					; bra if an old-style IM			<23>
+			; otherwise fall into new-style input method code						<23>
+; -----------------------------------------------
+; is a new-style input method
+			cmp.l	auxItemInfo(a3),d3			; is this THE input method?			<18>
+			bne.s	@NextItem
+			bra		@HaveItemNum
+
+; -----------------------------------------------
+@IsKCHR
+@IsOldIM
+; is a KCHR or old-style input method: compare the ID with the default
+			cmp.w	itemRsrcID(a3),d3			; is this THE KCHR or old-style input method ID?
+			beq		@HaveItemNum
+
+; -----------------------------------------------
+@NextItem
+			add.w	#1,d1
+			dbra	d5,@InputLoop
+;;			move.w	#3,d1						; can’t find input item, use system script (item 3) <28>
+; Use the system script's default menu item # since can't find input item:					<32>
+; 	need to get this from the script record - item #3 is not guaranteed to be the default	<32>
+; 	only that it's in the system script (and ONLY if About Keyboards… menu item exists!)	<32>
+
+;---------------------------------------------------------------------------------------------
+;•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+;---------------------------------------------------------------------------------------------
+
+; A developer may have added a new KCHR to the system file and then called SetScript(desired_Script, smScriptKeys, xx)
+; and KeyScript(desired_Script) to make the KCHR active.  We need to add it to the keyboard menu to find it.
+
+			move.l	a0,-(sp)					; save script ptr for SetKybd call
+			tst.b	d2
+			bne		@RestoreA0	
+			
+; rebuild the menu and see if the desired KCHR appears
+			subq	#2,sp						; OSErr result
+			_RebuildKeybdMenu
+			cmp.w	#noErr,(sp)+
+			bne.s	@RestoreA0
+			
+; now try again to find the KCHR
+			move.w	d4,d0						; copy script code
+			lsl.w	#2,d0						; find smgrEntry offset
+			move.l	smgrEntry(sGlb,d0.w),a0		; load script entry pointer
+			addq	#4,sp						; pop old a0
+			
+; get count of menu items
+			clr.w	d5							; clear item count						
+			move.b	scriptInputCount(a0),d5		; initialize item count to script's input count
+			tst.b	smgrKbdMenuAvail(sGlb)		; is the kbd menu displayed?			
+			beq.s	@HaveMenuItemCnt			; no, so have count	(assumes Roman-only)
+			
+			move.l	MenuList,-(sp)				; save the current menuList since it may be an apps menu
+			move.l	SystemMenuList,MenuList
+			
+			move.l	a0,-(sp)					; save script ptr
+			subq	#6,sp						; results of next 2 calls
+			move.w	#KKeyboardMenuID,-(sp)
+			_GetMHandle							; leave handle on the stack for count
+			tst.l	(sp)
+			bne.s	@CountMenuItems
+			add.w	#10,sp						; no menu, pop stack	(includes a0)
+			move.l	(sp)+,MenuList				; restore menuList						
+			moveq	#0,d1						; clear for use
+			move.b	scriptKeysItemNum(a0),d1	; use new script's default item num
+			bra		@HaveItemNum				; no menu handle: defaults to zero		
+
+@CountMenuItems									
+			_CountMItems
+			move.w	(sp)+,d5
+			move.l	(sp)+,a0					; restore script ptr
+			move.l	(sp)+,MenuList				; restore menuList					
+@HaveMenuItemCnt
+			move.l	smgrKeyboardMenuPtr(sGlb),a4
+			moveq	#1,d1						; item counter: start w/ menu item #1		
+; ----------------------------------------------				
+@KCHRLoop
+; d3 = default item ID for this script
+; d4 = script code
+; a0 = pointer to script system globals
+; a4 = smgrKeyboardMenuPtr
+; if iconSuiteH is NIL then not a "real" input menuitem (may be a disabled line, About Kbds…, etc.)
+			move.w	d1,d0
+			move.l	a4,a3						; menu ptr
+			mulu.w	#AuxMenuInfoSize,d0
+			add.w	d0,a3						; pt to next menuItem’s aux info
+			tst.l	IconSuiteH(a3)
+			beq.s	@GetNextMenuItem
+
+; Is this input a KCHR?
+			cmp.b	#KCHRitem,itemType(a3)		; Is this input a KCHR?
+			bne.s	@GetNextMenuItem			; not the right type so fetch next input
+; Is a KCHR so compare the ID with the default
+			cmp.w	itemRsrcID(a3),d3			; is this the KCHR ID?
+			beq.s	@HaveItemNum
+
+@GetNextMenuItem
+			add.w	#1,d1
+			dbra	d5,@KCHRLoop
+			bra.s	@UseSysScriptInput
+@RestoreA0
+			move.l	(sp)+,a0					; restore script ptr for SetKybd
+;---------------------------------------------------------------------------------------------
+;•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+;---------------------------------------------------------------------------------------------
+@UseSysScriptInput
+			move.w	smgrSysScript(sGlb),d1		; get the system script ID					<32>
+			move.w	d1,d4						; say system script is new keyscript now (for SetKybd)	<32>
+			lsl.w	#2,d1						; find smgrEntry offset.					<32>
+			move.l	smgrEntry(sGlb,d1.w),a0		; load script entry pointer (must be a0 for below)	<32>
+			moveq	#0,d1						; clear for use								<32>
+			move.b	scriptKeysItemNum(a0),d1	; now have system script's default menu item #!	<32>
+@HaveItemNum			
+			movem.l	(sp)+,ChkKbdRegs
+; d0 must be the new keyboard script code for SetKybd call
+; d1 must be new input menu item #
+			move.w	d4,d0						; use the script in d4 since it may have changed since d0 was set	<32>
+			move.w	(sp)+,d4					; restore d4 now							<32>
+; want new input menu item # on the stack for the call to UpdateKeybd						<4>
+			move.w	d1,-(sp)					; input item num							<4>
+
+			
+; Update the script record w/ the new item # if the kbd menu isn't available. This 
+; will allow the switching between keybds w/in a script to work correctly.					<14>
+; a0 must be the current script record for updating the new item #
+; d0 must be the new keyScript
+			tst.b	smgrKbdMenuAvail(sGlb)		; does the kbd menu exist?					<14>
+			bne		SetKybd						; if menu exists don't save item # here		<14>
+			move.b	d1,scriptKeysItemNum(a0)	; update script record w/ current item #	<14>
+			endWith
+
+			bra		SetKybd						; make it the key script.
+			endWith								;
+; -----------------------------------------------------------------------------
+; bug fix for no app-specific globals yet but need to set KCHR									<45>
+; must have item # on the stack for SetKybd!													<45>
+; On Entry: d0 is the script code: MUST PRESERVE for SetKybd!									<45>
+;			a0 is the ptr to the current script: MUST PRESERVE for SetKybd!						<45>
+
+PushItemAndSetKybd								;												<45>
+
+			with	ScriptRecord				;												<45>
+			moveq	#0,d1						;												<45>
+			move.b	scriptKeysItemNum(a0),d1	; now have system script's default menu item #!	<45>
+			move.w	d1,-(sp)					; gotcha!										<45>
+			bra		SetKybd						; oh for the glory of another bug fix!			<45>
+			endWith
+
+; -----------------------------------------------------------------------------
+RotateScript								; renamed - was RotateKybd						<4>
+; In order to change the key script, we use the 'itlm' resource to get the next
+; script. Then we update the script mgr and keyboard menu.
+
+; if disabledItems flag is set then 															<8>
+; 	if KeyScript <> SysScript then KeyScript = SysScript
+;	else KeyScript = Roman
+			with	ExpandMemRec, SMgrAppRecord	;												<35>
+			move.l	ExpandMem,a1			; get ExpandMemRec ptr								<35>
+			move.l	emScriptAppGlobals(a1),a1	; get globals handle							<35>
+			move.l	a1,d1					; is it 0 (no app-specific ScriptMgr globals)?		<35>
+			beq		KybdDone				; if so, don’t do anything							<35>
+			addq.l	#1,d1					; is it -1 (no Process Mgr yet, use sys cache)?		<35>
+			beq		KybdDone				; if so, don’t do anything							<35>
+			move.l	(a1),a1					; dereference - get ptr to globals					<35>
+			cmp.b	#1,smgrAppDisableKybds(a1)	; are all keyboards in the menu disabled?		<35>
+;;			cmp.b	#1,smgrDisableKybds(sGlb)	; are all keyboards in the menu disabled?		<8><35>
+			beq		KybdDone				; yes, do nothing									<8>
+
+			move.l	a3,-(sp)				; preserve											<9>
+			tst.b	smgrAppDisableKybds(a1)	; are all keyboards in the menu disabled?			<35>
+;;			tst.b	smgrDisableKybds(sGlb)	; are there disabled items?							<8><35>
+			beq.s	@DoNormalRotate			; no, so do normal rotate!							<8>
+			endWith							;													<35><40>
+
+; all keybds disabled except ones in Sys/Roman script
+			move.w	smgrKeyScript(sGlb),d0	; get the key script code.							<8>
+			cmp.w	smgrSysScript(sGlb),d0	; is the key script = the system script				<8>
+			bne.s	@GetSysScript			; no												<8>
+			move.w	#smRoman,d0				; yes, so set the key script = Roman script			<8>
+			bra.s	@GetScriptEntry			;													<8>
+			
+@DoNormalRotate								;													<8>
+; use the itlm ordering to determine the next script
+; get ptr to record containing ascending ordering of scripts and itl info (per itlm)
+			with	scriptRecord			;
+			move.w	smgrKeyScript(sGlb),d0	; get the key script code.
+			with	ExpandMemRec
+			move.l	ExpandMem,a3
+			move.l	emItlSysCachePtr(a3),a3	;										<6>
+			move.w	(a3)+,d1				; # of enabled scripts
+			sub.w	#1,d1					; want 0 based for loop counter
+			endWith
+			
+; find the current KeyScript in the record & then get the next script for the rotate
+@itlCache2Loop
+			with	NewItlCacheRec
+			cmp.w	(a3),d0					; is this the current script #
+			bne.s	@NextScript				; nope, try again
+			tst.w	d1						; last script in record?
+			beq.s	@GetSysScript
+			add.w	#newItlCacheRecSize,a3	; set ptr to next enabled script
+			move.w	(a3),d0
+			bra.s	@GetScriptEntry
+@NextScript
+			add.w	#newItlCacheRecSize,a3	; set ptr to next enabled script
+			dbra.w	d1,@itlCache2Loop
+			; shouldn't ever fall through here
+			endWith
+			
+@GetSysScript
+; reset itlCache2 ptr and get first script in cache (which is the system script)
+			with	ExpandMemRec
+			move.l	ExpandMem,a3
+			move.l	emItlSysCachePtr(a3),a3	;										<6>
+			move.w	2(a3),d0				; skip over # of enabled scripts and get sys script #
+			endWith
+@GetScriptEntry
+			move.l	(sp)+,a3				; restore								<9>
+			move.w	d0,d1					; copy the script code.
+			lsl.w	#2,d1					; find smgrEntry offset.
+			move.l	smgrEntry(sGlb,d1.w),a0	; script entry
+
+; want new input menu item # on the stack for the call to UpdateKeybdMenu			<4>
+			moveq	#0,d1						;									<4>
+			move.b	scriptKeysItemNum(a0),d1	;									<4>
+			move.w	d1,-(sp)					;									<4>
+			endWith	
+			
+; ----------------------------------------------------------------------------
+; We found the script entry pointer and are ready to change the current
+; key script, for better or worse.  Remember to save the current keyboard
+; script for special toggling verbs.
+;
+;	d0.w	New keyboard script code.
+;	a0.l	New keyboard script entry.
+;	sGlb	Script Manager globals pointer. (a2.l for new ROMs & 7.0, a1.l otherwise)
+;
+; We get into SetKybd from RotateScript, NextKybdInScript, and CheckKybd 
+; (which is branched to from SetRoman, SetSysScript, SetLastScript and 
+; when the script code is smRoman)
+; ----------------------------------------------------------------------------
+
+SetKybd
+			move.w	smgrLastScript(sGlb),lastScript(a6)		; save for error handling	<45>
+			move.w	smgrKeyScript(sGlb),d1	; load old key script.
+			move.w	d1,smgrLastScript(sGlb)	; save old key script.
+			move.w	d0,smgrKeyScript(sGlb)	; set the keyboard script.
+			add.w	#1,smgrMunged(sGlb)		; update munged counter.
+
+			moveq	#0,d0					; clear									<45>
+			move.w	(sp),d0					; new input menuitem # saved on stack	<45>
+			movem.l	d1/d2/a3,-(sp)			;										<45>	
+			move.l	smgrKeyboardMenuPtr(sGlb),d2	; 								<45>
+			beq.s	@SetTSLang				; if 0, no menu d.s. yet				<45>
+			
+; set ptr to new item in AuxMenuInfo record
+			with	AuxKeyboardMenuInfo		;										<45>
+			move.l	d2,a3					;										<45>
+			mulu.w	#AuxMenuInfoSize,d0		;										<45>
+			add.l	d0,a3					; ptr to current aux info				<45>
+
+			cmp.b	#KCHRitem,itemType(a3)	; is the new input a KCHR?				<45>
+			beq.s	@SetTSLang				; yes, so don't call UpdateInputMethods	<45>
+
+			move.w	smgrLastScript(sGlb),d0	; last key script						<45>
+			lsl.w	#2,d0					; find smgrEntry offset.				<45>
+			move.l	smgrEntry(sGlb,d0.w),a0	; script entry							<45>	
+			bsr		UpdateInputMethods		;										<45>
+			tst.w	d2						; error result
+			beq.s	@SetTSLang				; no error, finish up
+
+			movem.l	(sp)+,d1/d2/a3			;										<45>
+
+; error so reset key script and last script
+			move.w	smgrLastScript(sGlb),d1	; get previous keyScript				<45>
+			move.w	d1,smgrKeyScript(sGlb)	; restore previous keyScript			<45>
+			move.w	lastScript(a6),smgrLastScript(sGlb)	; restore previous lastScript	<45>
+; fetch previous item #
+			lsl.w	#2,d1					; find smgrEntry offset.				<43>
+			move.l	smgrEntry(sGlb,d1.w),a0	; script entry							<43>	
+			move.b	ScriptRecord.scriptKeysItemNum(a0),1(sp)	; get current item num	<43><49>
+			bra.s	UpdateMenuAndKCHR
+			endWith
+
+@SetTSLang
+			movem.l	(sp)+,d1/d2/a3			; d1 = lastScript						<45>
+; inform TSM if key script has changed so can synch the IM to the new script/lang	<KSCT #24>
+			move.w	smgrKeyScript(sGlb),d0	; 						 				<45>
+			cmp.w	d0,d1					; have we switched scripts?
+			beq.s	UpdateMenuAndKCHR		; no so TSM doesn't care to know
+			move.w	d0,d1					; utSetTextServiceLanguage wants keyScript in d1			
+; input to utSetTextServiceLanguage is d1.w = new keyscript code
+			import	utSetTextServiceLanguage	;									<24>
+			bsr		utSetTextServiceLanguage
+											;										<33>
+;------------------------------------------------------------------------------
+; jump here from NextKybdInScript: script's unchanged and not an IM so skip IM stuff<45>
+UpdateMenuAndKCHR							;										<45>
+
+;------------------------------------------------------------------------------	
+; If we are in ptch 27, have to jsr through vectors to SwapKybd,SwapIcon 			<1.5>
+			move.l	SmgrRecord.sVectSwapKybd(sGlb),a0	; load address of SwapKybd	<1.5>
+			jsr		(a0)								; jsr to it					<1.5>
+
+; ----------------------------------------------------------------------------
+; Input to UpdateKeyboardMenu is the menu ID and menu item # in d0.
+; Now using test of smgrKbdMenuAvail(sGlb) to determine if no menu exists!			<14>
+			with	smgrRecord,ScriptRecord,ItlbRecord
+			move.w	(sp)+,d0				; item # (only exists if there's a menu!)	<14>
+			tst.b	smgrKbdMenuAvail(sGlb)	; is the kbd menu displayed?			<14>
+			beq.s	@NoMenu
+			swap	d0						; put in high word
+			move.w	#kKeyboardMenuID,d0		; menu id
+			import	UpdateKeybdMenu
+	 		bsr		UpdateKeybdMenu			; updates scriptKeysItemNum (& menu!)
+@NoMenu
+			endwith
+
+; Unlink the stack and return to the caller.
+
+KybdDone
+			move.l	(sp)+,sGlb				; restore reg
+	
+			move.w	#ksArgs, d0				; for StdUnlink
+			bra		StdUnlink				; standard exit
+
+			endWith
+			endproc
+;formFeed
+;--------------------------------------------------------------------------------	<23>
+;	Utility UpdateInputMethods
+;
+; 	Handles the necessary updating when switching between input methods and
+;	keyboard layouts.  Supports switching between old-style IMs, new-style IMs,
+;	from an old IM to a new IM, from a new IM to an old IM, from an IM to a 
+;	keyboard layout and from a keyboard layout to an IM.
+;
+;	Called internally from NextKybdInScript & RotateScript, and externally from ptchSystemMenu.
+;
+;•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+; Case								Action
+;------------------------------------------------------------------------------------------------
+; KCHR => KCHR						call SetTextServicesLanguage (done outside of this routine)	
+; TSM-style IM => KCHR				call SetTextServicesLanguage (done outside of this routine)	
+; old-style JIM => KCHR				call SetTextServicesLanguage (done outside of this routine)
+;------------------------------------------------------------------------------------------------
+; old-style JIM => old-style JIM	call IntfActivate;	if failed, no change
+;														else _InformTSM and secret _SetScript
+; KCHR => old-style JIM				call IntfActivate;	if failed, no change
+;														else _InformTSM and secret _SetScript
+; TSM-style IM => old-style JIM		call IntfActivate;	if failed, no change
+;														else _InformTSM and secret _SetScript
+;------------------------------------------------------------------------------------------------
+; TSM-style IM => TSM-style IM		call SetDefaultInputMethod
+;
+; old-style JIM => TSM-style IM		deactivate the old-style JIM •IF• the script of the TSM-style
+;									IM is Japanese.
+;									call SetDefaultInputMethod
+;
+; KCHR => TSM-style IM				if the script of the TSM-style IM is Japanese call 
+;									GetDefaultInputMethod to determine if the the current default
+;									is an old-style JIM. If so, deactivate it.
+;									call SetDefaultInputMethod
+;•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+
+;
+;	Input
+;	d2 = smgrKeyboardMenuPtr, ptr to AuxKeyboardMenuInfo record
+;	a0 = ptr to current script record (based on KeyScript) (used for old input item)
+;	a3 = ptr to AuxKeyboardMenuInfo record, smgrKeyboardMenuPtr, for the new input item
+;
+;	Uses
+;	d0 = current item num (preserved since is the new script code)
+;	d1   (preserved since is the new input item # for the script)
+;	d3
+;	a2 = ptr to current item's aux menu info (AuxKeyboardMenuInfo record)
+;	a4
+;
+;	Output
+;	d2.w =  00 for no error
+;		 = $FFFF for error occurred.
+;	sets KeyScript when necessary (everything except when going from old->old)
+;	regs restored
+;	Also, must make a utSetTextServiceLanguage afterwards if the script changed to be sure
+;	that TSM cleans up the previous state of its world correctly.
+;--------------------------------------------------------------------------------
+;formFeed
+			proc
+			export	UpdateInputMethods
+					
+updIMRecord	record	{a6link},decr
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6 register.
+scriptLang	ds.l	1						; script word / language word
+tsmCompDesc	ds		ComponentDescription	; component description record										
+updIMLocals	equ		*						; size of local variables.			
+			endr
+
+UpdateInputMethods
+
+UpdateRegs	reg	d0/d1/d3/a0/a2/a3/a4
+
+			with	updIMRecord, smgrRecord
+			link	a6,#updIMLocals					; link the stack.
+
+			movem.l	UpdateRegs,-(sp)				; save
+			with	ScriptRecord, AuxKeyboardMenuInfo, ScriptSystemGlobals, intfRecord
+			
+;•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+; new input: KCHR
+;•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+; if the new input is a KCHR (no matter the old input), simply exit because SetTextServicesLanguage
+; will handle this correctly.
+			cmp.b	#KCHRitem,itemType(a3)			; is the new input a KCHR?								
+			beq		@DoneUpdating
+			
+; get input type of current item
+			moveq	#0,d0
+			move.b	scriptKeysItemNum(a0),d0		; get current item num
+			
+; set ptr to current item in AuxMenuInfo record
+			move.l	d2,a2
+			move.l	d0,d3
+			mulu.w	#AuxMenuInfoSize,d3
+			add.l	d3,a2							; ptr to current item's aux info
+
+			cmp.b	#TSMIMitem,itemType(a3)			 ; is the new input a TSM-style IM?
+			beq.s	@Switch2NewIM
+			; otherwise, new input is an old-style JIM
+			
+;•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+; new input: old-style JIM
+;•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+			
+;----------------------------------------------------
+; scenario 1: TSM-style IM to old-style JIM
+; The user wants to use an old-style IM now but has been using a new-style IM:
+; activate the old-style IM (but don't need to worry about closing the new-style IM
+; due to secret script flag that gets set w/ a SetScript call)
+;
+; scenario 2: KCHR to old-style JIM
+; The user wants to use an old-style IM now but has been using a KCHR: activate the 
+; old-style IM but don't worry about the KCHR because utSetTextServiceLanguage will
+; be called later and this will signal TSM to synchronize the KCHR for the IM, the
+; script and the language.
+;
+; scenario 3: old-style JIM to old-style JIM
+; Activating another old-style JIM will deactivate the previous old-style JIM
+;----------------------------------------------------
+
+; call local version of UserIDIntf using the input method ID of the new item
+			Import	GetKanjiUserIDIntf
+			move.w	itemRsrcID(a3),-(sp)				; pass input method ID of new item
+			bsr		GetKanjiUserIDIntf
+
+; test if an error occured: if so, didn't active old-style IM so don't make secret SetScript call.
+			GetSMgrCore	a1								; get Script Mgr core
+			move.l	smgrEntry+(smJapanese*4)(a1),a1		; load doubleTalkRecord for Japanese.
+			tst.w	FISError(a1)						; bad index?
+			bne		@ErrorStop							; yes -> bail.
+
+; tell TSM that the user switched to an old-style Japanese input method								<24>
+; _InformTSM will set the default IM with the FEP ID in itemRsrcID(aa3).
+			move.w	scriptLang+2(a6),-(sp)				; preserve language							<32>
+			subq	#2,sp								; OSErr result								<24>
+			move.w	#kMsgChangeToOldJIM,-(sp)			; message number							<24>
+			move.w	#smJapanese,scriptLang(a6)			; store the script in the record			<26>
+			move.w	itemRsrcID(a3),scriptLang+2(a6)		; store the ID								<26>
+			pea		scriptLang(a6)						; we need a parameter now					<26>
+			_InformTSM									;											<24>
+			move.w	(sp)+,d0							; temp storage								<32>
+			move.w	(sp)+,scriptLang+2(a6)				; restore language							<32>
+			tst.w	d0									;											<32>
+			bne		@ErrorStop							;											<24>
+
+; set secret script flag that says we are using old-style input method
+			subq	#2,sp								; result
+			move.w	#smJapanese,-(sp)					; script
+			move	#kUsingOldInputMethodVerb,-(sp)		; verb: are we using an old IM?
+			move.l	#UsingOldStyleIM,-(sp)				; TRUE	
+			_SetScript
+			tst.w	(sp)+								; ignore result OSErr
+			GetSMgrCore	a1								; get Script Mgr core						<32>
+			move.w	#smJapanese,smgrKeyScript(a1)		; update the keyScript						<32>												<18>
+			bra		@DoneUpdating
+			
+
+;•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+; new input: TSM-style IM
+;•••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••
+@Switch2NewIM
+;----------------------------------------------------
+; scenario 1: TSM-style IM to TSM-style IM
+; Activating another TSM-style IM will deactivate the previous TSM-style IM
+;
+; scenario 2: KCHR to TSM-style IM
+; If the script of the TSM-style IM is Japanese, and in case an old-style
+; JIM was active before the KCHR was activated, must call GetDefaultInputMethod
+; to determine the current IM. If it returns with an old-style JIM, must
+; deactivate this before activating the TSM-style IM.  When utSetTextServiceLanguage
+; is called later, this signals TSM to synchronize the KCHR for the IM, the script
+; and the language.
+;
+; scenario 3: old-style IM to TSM-style IM
+; Deactivate the old-style JIM if the script of the TSM-style JIM is Japanese.
+; Activate the TSM-style JIM.
+;----------------------------------------------------
+; A3 = the new input, new TSM-style input method
+
+; get component info to get script		
+			subq	#2,sp					; OSErr result
+			move.l	auxItemInfo(a3),-(sp)	; get more info on this component
+			pea		tsmCompDesc(a6)			; VAR: component description space
+			moveq	#0,d0					; faster and smaller to use this method!	<45>
+			move.l	d0,-(sp)				; NIL => don't care about name
+			move.l	d0,-(sp)				; NIL => don't care about component's info string
+			move.l	d0,-(sp)				; NIL => don't care about icon
+			_GetComponentInfo
+			tst.w	(sp)+
+			bne		@ErrorStop				; bra if error (invalidComponentID)
+
+; now get script		
+			move.l	tsmCompDesc.componentFlags(a6),d0
+			and.l	#ScriptMask, d0			; only care about script code in low word
+			lsr.w	#8,d0					; shift script to low nibble
+			move.w	d0,scriptLang(a6)		; store the script in the record		<22>
+			
+; need the default language for this script
+			subq	#4,sp					; result
+			move.w	d0,-(sp)				; script
+			move	#smScriptLang,-(sp)		; verb: gimme the default lang from the 'itlb'
+			_GetScript
+			move.l	(sp)+,d1				; default langCode
+			move.w	d1,scriptLang+2(a6)		; store the language in the record		<22>
+			
+			cmp.b	#TSMIMitem,itemType(a2)	; is the old input a TSM-style IM?								
+			beq.s	@ActivateTSMinput		; yes, so just activate new input
+
+			cmp.w	#smJapanese,scriptLang(a6)	; is the script Japanese?	
+			bne.s	@ActivateTSMinput		; no, so don't deactivate the old-style JIM
+
+; Our new input is Japanese BUT our old input might be an old-style JIM •OR• a KCHR possibly preceded by an 
+; old-style JIM, so must first deactivate the old-style JIM if it is the current default input method.
+
+; get the default Japanese input method: the component identifier for TSM-style IMs or
+; the FEF ID for old-style IMs
+			subq	#2,sp						; OSErr result
+			pea		tsmCompDesc(a6)				; use this space temporarily: returns default component id
+			pea		scriptLang(a6)				; wants a ptr to this record
+			_GetDefaultInputMethod				; need to preserve a2/a3/d3/d4 ....
+			cmp.w	#tsmInputMethodIsOldErr,(sp)+	; is this the special old-style JIM error?
+			bne.s	@ActivateTSMinput			; if not, can assume TSM-style IM is the current default
+
+; a2 = old-style JIM to deactivate
+; get name & volref num of desired IM from table of input methods
+			GetSMgrCore	a1							; get Script Mgr core
+			move.l	smgrEntry+(smJapanese*4)(a1),a1		; load doubleTalkRecord for Japanese.
+
+			move.l	a1,-(sp)					; save Japanese script record ptr
+			subq	#4,sp						; result
+			move.l	intfArray(a1),-(sp)			; load table handle
+			move.w	tsmCompDesc+2(a6),-(sp)		; load ID of desired input method			<47>
+
+			Import	GetIDEntry
+			bsr		GetIDEntry
+			move.l	(sp)+,a4					; have input record ptr
+			move.l	(sp)+,a1					; restore script record ptr
+			tst.w	FISError(a1)				; bad index?
+			bne		@ActivateTSMinput			; yes -> then just activate new input.
+
+			btst.b	#intfFReady-8,intfFlags(a4)	; is the IM ready?
+			beq		@ActivateTSMinput			; no -> then just activate new input.
+
+; set up for deactivate call by loading name and volref num
+			move.w	intfVol(a4),-(sp)			; load volref num
+			pea		intfFile(a4)				; load name of input method
+			IntfDeactivate						; now deactivate current IM
+			bclr.b	#intfFActive-8,intfFlags(a4)	; clear active bit.
+
+@ActivateTSMinput
+; now set (activate) the input method
+
+		;; set up front process's A5 ...	; <KSCT #50>
+		;  this code could be called from GetOSEvent when user press Cmd-space, or Cmd-option-space,
+		;  however, the call is called with Process Manager's A5, _SetDefaultInputMethod could call
+		;  FixTSMDocument which could trigger application's AppleEvent handler. When we run in the
+		;  AppleEvent handler, application expects a5 points to its globals or else ....
+		;  Here, D0/A0/A1 are free registers
+			
+			move.l	a5,-(sp)							; save a5						<#50><52> moved this
+			move.l	ExpandMem,a0						; ExpandMemRec pointer	<52>
+			tst.w	ExpandMemRec.emProcessMgrExists(a0)	; See if Process Manager is around <52>
+			beq.s	@noProcessMgr						; It’s not.  Don’t do any of change 50 <52>
+		 	
+			
+			suba.w	#10,sp					; room for result and PSN		<#50>
+			pea		2(sp)					; ptr(PSN)						<#50>
+			_GetFrontProcess				;								<#50>
+			move.w	(sp)+,d0				; any error?					<#50>
+			bne.s	@bail					; yes							<#50>
+			subq	#4,sp					; result						<#50>
+			pea		4(sp)					; ptr(PSN)						<#50>
+			_PEntryFromProcessSerialNumber	; get the pentry				<#50>
+			move.l	(sp)+,d0				; d0 = pEntry					<#50>
+			beq.s	@bail					; no pEntry						<#50>
+			movea.l	d0,a0					; a0 = pEntry					<#50>
+			movea.l	$54(a0),a0				; a0 = pcb handle				<#50>
+			movea.l	(a0),a1					; a1 = pcb pointer				<#50>
+			movea.l	$34(a1),a5				; a5 = process's a5				<#50>
+			
+@bail
+			adda	#8,sp					; restore stack					<#50>
+			
+@noProcessMgr
+			subq	#2,sp					; OSErr result
+			move.l	auxItemInfo(a3),-(sp)	; make this component the new default
+			pea		scriptLang(a6)			; want a ptr for the script and lang codes		<22>
+			_SetDefaultInputMethod
+			move.w	(sp)+,d0				; any error?
+			
+			
+			movea.l	(sp)+,a5				; restore a5					<#50>
+
+			bne		@ErrorStop				; assume didn't update and use current IM if we fail
+			GetSMgrCore	a1					; get Script Mgr core				<32>
+			move.w	scriptLang(a6),smgrKeyScript(a1)	; update the keyScript	<32>
+			; fall into cleanup
+;----------------------------------------------------
+@DoneUpdating
+			movem.l	(sp)+,UpdateRegs		; save
+			move.w	#0,d2					; indicate no error upon return
+			unlk	a6						; unlink the stack.
+			rts
+
+;----------------------------------------------------			
+@ErrorStop
+; don't change anything since can't get next item
+			movem.l	(sp)+,UpdateRegs		; save
+			move.w	#$FFFF,d2				; indicate error upon return
+			unlk	a6						; unlink the stack.
+			rts
+			endWith
+			endProc
+			
+; end of UpdateInputMethods utility routine
+;--------------------------------------------------------------------------------	<23>
+;formFeed
+; ------------------------------------------------------------------------------------------------------
+; function:	utSetTextServiceLanguage						<02Feb92 #24>
+; input:	d1.w = new keyscript code.
+; output:	d0.w = result from TSM
+; warning:	To be called by Assembly code only !!
+; except a0/d0, all registers preserved
+;
+; 02Feb92 KSCT	New today
+; 04Aug92 KSCT	Has to set up A5 to front process's A5 before calling _SetTextServiceLanguage.
+;				This code could be called from GetOSEvent when user press Cmd-space, or Cmd-option-space,
+;				However, the call is called with Process Manager's A5, _SetDefaultInputMethod could call
+;				FixTSMDocument which could trigger application's AppleEvent handler. When we run in the
+;				AppleEvent handler, application expects a5 points to its globals or else ....	<#50>
+; --------------------------------------------------------------------------------------------------------
+
+utSetTextServiceLanguage	PROC EXPORT	; <KSCT #24, #50>
+
+		movem.l	d1-d2/a1/a5,-(sp)		; save regs						<#50>
+
+		suba	#6,sp					; room for result and a script/language Record
+		lea		2(sp),a0				; a0 = scriptLangRec ptr
+		move.w	d1,(a0)					; set new script
+		
+		subq	#4,sp					; result
+		move.w	d1,-(sp)				; script
+		move	#smScriptLang,-(sp)		; verb: gimme the default lang from the 'itlb'
+		_GetScript
+		move.l	(sp)+,d0				; get default langCode
+		lea		2(sp),a0				; a0 = scriptLangRec ptr
+		move.w	d0,2(a0)				; set new language
+		
+		move.l	a0,-(sp)				; push param
+		
+		move.l	ExpandMem,a0						; ExpandMemRec pointer	<52>
+		tst.w	ExpandMemRec.emProcessMgrExists(a0)	; See if Process Manager is around <52>
+		beq.s	@noProcessMgr						; It’s not.  Don’t do any of change 50 <52>
+		
+	;; set up front process's A5 ...	; <KSCT #50>
+
+		suba.w	#10,sp					; room for result and PSN		<#50>
+		pea		2(sp)					; ptr(PSN)						<#50>
+		_GetFrontProcess				; get PSN of the front process	<#50>
+		move.w	(sp)+,d0				; any error?					<#50>
+		bne.s	@bail					; yes !							<#50>
+		subq	#4,sp					; room for result				<#50>
+		pea		4(sp)					; push ptr(PSN)					<#50>
+		_PEntryFromProcessSerialNumber	; get the pEntry				<#50>
+		move.l	(sp)+,d0				; d0 = pEntry					<#50>
+		beq.s	@bail					; no pEntry						<#50>
+		movea.l	d0,a0					; a0 = pEntry					<#50>
+		movea.l	$54(a0),a0				; a0 = pcb handle				<#50>
+		movea.l	(a0),a1					; a1 = pcb pointer				<#50>
+		movea.l	$34(a1),a5				; a5 = process's a5				<#50>
+		
+@bail
+		adda	#8,sp					; restore stack					<#50>
+
+@noProcessMgr							; we jump here if no process mananger <52>
+		_SetTextServiceLanguage			; inform TSM with the new current key script
+		move.w	(sp),d0					; result code
+		adda	#6,sp					; restore stack
+		movem.l	(sp)+,d1-d2/a1/a5		; restore regs					<#50>
+		rts								; and return
+
+			ENDP						; <KSCT #24>
+;formFeed
+
+			proc
+			import	StdUnlink
+			export	GetEnvirons,SetEnvirons
+			
+; ----------------------------------------------------------------------------
+; function:	GetEnvirons(verb: Integer): LongInt;
+; input:	(sp).w	Verb value.
+; output:	(sp).l	Result, script manager global variable.
+; warning:	This routine follows Pascal register conventions.
+;
+; For most verbs, this routine retrieves a value from the Script Manager
+; globals and returns it.
+; ----------------------------------------------------------------------------
+
+geRecord	record	{a6link},decr
+result		ds.l	1						; result code.
+geArgs		equ		*-8						; size of arguments.
+verb		ds.w	1						; verb value.
+selector	ds.l	1						; trap selector.
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6 register.
+geLocals	equ	*							; size of local variables.
+			endr
+
+; Link the stack, clear the result, and load the verb.
+
+GetEnvirons
+			with	smgrRecord,geRecord
+			link	a6,#geLocals			; link the stack.
+			move.l	#0,d0					; clear param value.
+			GetSMgrCore a1					; load SMgr globals.
+
+; Convert the verb into a length and offset in the Script Manager globals.
+; Fetch the Script Manager globals pointer and add the offset to it.
+
+GetNormal
+			move.w	verb(a6),d2				; load the verb.
+			cmp.w	#smLastEVerb,d2			; verb > smLastEVerb?
+			bhi.s	GetDone					; yes -> bail out.
+
+			cmp.w	#smKCHRCache,d2			; special handling for this one?	<1.6>
+			beq.s	GetExpandMem			; branch if so						<1.6>
+
+			cmp.w	#smKeyDisableState,d2	; another with special handling		<41>
+			beq.s	GetKeyDisableState		; branch if so						<41>
+
+			lea		envTable,a0				; load table pointer.
+			move.l	#0,d1					; clear offset.
+		
+			add.w	d2,a0					;									<06/30/89 pke>
+			move.b	(a0)+,d1				;									<06/30/89 pke>
+			lea		0(a1,d1.w),a1			; offset pointer.
+			move.b	(a0),d1					;									<06/30/89 pke>
+
+; Copy the Script Manager global to the parameter.
+
+			subq	#2,d1					; length - 2?
+			bmi.s	GetByte					; <0 -> copy 1 byte.
+			beq.s	GetWord					; =0 -> copy 1 word.
+GetLong		move.l	(a1),d0					; copy the long.
+			bra.s	GetDone					; bail out.
+GetByte		move.b	(a1),d0					; copy the byte.
+			bra.s	GetDone					; bail out.
+GetWord		move.w	(a1),d0					; copy the word.
+
+; Store the parameter, unlink the stack, and return to the caller.
+
+GetDone
+			move.l	d0,result(a6)			; store result. Fixed for SysVers<$700	<1/30/89 pke>
+
+			move.w	#geArgs, d0				; for StdUnlink
+			bra		StdUnlink				; standard exit
+
+GetExpandMem								;									<1.6>
+			with	ExpandMemRec			;									<1.6>
+			move.l	ExpandMem,a0			; ExpandMemRec pointer				<1.6>
+			move.l	emKeyCache(a0),d0		; KCHR pointer						<1.6>
+			bra.s	GetDone					;									<1.6>
+			endwith							;									<1.6>
+
+GetKeyDisableState								;												<41>
+			with	ExpandMemRec,SMgrAppRecord	;												<41>
+			move.l	ExpandMem,a0				; get ExpandMemRec ptr							<41>
+			move.l	emScriptAppGlobals(a0),a0	; get globals handle							<41>
+			move.l	a0,d1						; is it 0 (no app-specific ScriptMgr globals)?	<41>
+			beq.s	GetDone						; if so, return 0 (keybds are not locked)		<41>
+			addq.l	#1,d1						; is it -1 (no Process Mgr yet)?				<41>
+			beq.s	GetDone						; if so, return 0 (keybds are not locked)		<41>
+			move.l	(a0),a0						; dereference - get ptr to globals				<41>
+			move.b	smgrAppDisableKybds(a0),d0	; get keyboard lock state						<41>
+			bra.s	GetDone						;												<41>
+			endwith	;ExpandMemRec,SMgrAppRecord	;												<41>
+
+			endWith
+
+
+; ----------------------------------------------------------------------------
+; function:	SetEnvirons(verb: Integer; param: LongInt): OSErr;
+; input:	(sp).w	Verb value.
+; 			(sp).l	Param value.
+; output:	(sp).w	Result, OSErr.
+; warning:	This routine follows Pascal register conventions.
+;
+; For most verbs, this routine stores the parameter value in the Script
+; Manager globals.
+; ----------------------------------------------------------------------------
+
+seRecord	record	{a6link},decr
+result		ds.w	1						; result code.
+seArgs		equ		*-8						; size of arguments.
+verb		ds.w	1						; verb value.
+param		ds.l	1						; parameter value.
+selector	ds.l	1						; trap selector.
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6 register.
+seLocals	equ		*						; size of local variables.
+			endr
+
+; Link the stack and check the verb.
+
+SetEnvirons
+			with	smgrRecord,seRecord
+			link	a6,#seLocals			; link the stack.
+			move.w	#smBadVerb,result(a6)	; assume bad verb.
+			GetSMgrCore a1					; load SMgr globals.
+		
+; Convert the verb into a length and offset in the Script Manager globals.
+; Fetch the Script Manager globals pointer and add the offset to it.
+
+SetNormal
+			move.w	verb(a6),d2				; load verb.
+			cmp.w	#smLastEVerb,d2			; verb > smLastEVerb?
+			bhi.s	SetDone					; yes -> bail out.
+			add.w	#1,smgrMunged(a1)		; update munge count.
+
+			cmp.w	#smKCHRCache,d2			; does this set ExpandMem instead?	<1.6>
+			beq.s	SetExpandMem			; branch if so						<1.6>
+
+			lea		envTable,a0				; load table pointer.
+			move.l	#0,d1					; clear offset.
+		
+			add.w	d2,a0					;							<06/30/89 pke>
+			move.b	(a0)+,d1				;							<06/30/89 pke>
+			lea		0(a1,d1.w),a1			; offset pointer.
+			move.b	(a0),d1					;							<06/30/89 pke>
+
+; Copy the parameter value into a Script Manager global.
+
+			move.l	param(a6),d0			; load param value.
+			subq	#2,d1					; length - 2?
+			bmi.s	SetByte					; <0 -> copy 1 byte.
+			beq.s	SetWord					; =0 -> copy 1 word.
+SetLong		move.l	d0,(a1)					; copy the long.
+			bra.s	SetVerb					; bail out.
+SetByte		move.b	d0,(a1)					; copy the byte.
+			bra.s	SetVerb					; bail out.
+SetWord		move.w	d0,(a1)					; copy the word.
+
+; The verb was legal, so return noErr.
+
+SetVerb
+			move.w	#noErr,result(a6)		; return noErr.
+
+; Unlink the stack and return to the caller.
+
+SetDone
+
+			move.w	#seArgs, d0				; for StdUnlink
+			bra		StdUnlink				; standard exit
+
+SetExpandMem								;								<1.6>
+			with	ExpandMemRec			;								<1.6>
+			move.l	ExpandMem,a0				; ExpandMemRec pointer		<1.6>
+			move.l	param(a6),emKeyCache(a0)	; set KCHR pointer			<1.6>
+			bra.s	SetVerb						;							<1.6>
+			endwith							;								<1.6>
+
+			endWith
+
+
+; The environment verb table is used by GetEnvirons and SetEnvirons.  Each
+; verb is represented by a tuple of the form <offset>,<length>.  The offset
+; is a byte index into the Script Manager globals, and the length is the
+; size of the variable in bytes.  The tuples are index by the verb codes.
+;
+; Note that the smKCHRCache verb is not handled through this table, since
+; the corresponding global is in the ExpandMemRec and not the SMgrRecord <1.6>.
+
+envTable	
+			with	smgrRecord				;
+			dc.b	smgrVersion,2			; smVersion verb.
+			dc.b	smgrMunged,2			; smMunged verb.
+			dc.b	smgrEnabled,1			; smEnabled verb.
+			dc.b	smgrBidirect,1			; smBidirect verb.
+			dc.b	smgrFontForce,1			; smFontForce verb.
+			dc.b	smgrIntlForce,1			; smIntlForce verb.
+			dc.b	smgrForced,1			; smForced verb.
+			dc.b	smgrDefault,1			; smDefault verb.
+			dc.b	smgrPrint,4				; smPrint verb.
+			dc.b	smgrSysScript,2			; smSysScript verb.
+			dc.b	smgrLastScript,2		; smLastScript verb.
+			dc.b	smgrKeyScript,2			; smKeyScript verb.
+			dc.b	smgrSysRef,2			; smSysRef verb.
+			dc.b	smgrReservedB,4			; smKeyCache verb.
+			dc.b	smgrKeySwap,4			; smKeySwap verb.
+			dc.b	smgrGenFlags,4			; smGenFlags verb.				<7/7/87med>
+			dc.b	smgrOverride,4			; smOverride verb.				<7/7/87med>
+			dc.b	smgrCharPortion,2		; smCharPortion verb			<8/18/87med>
+
+			; new verbs for 7.0
+			dc.b	smgrDoubleByte,1		; smDoubleByte verb.
+			dc.b	smgrDummy,4				; dummy for smKCHRCache verb	<x3>
+			dc.b	smgrRegionCode,2		; smRegionCode verb				<x3>
+			dc.b	smgrDisableKybds,1		; smKeyDisabState verb			<23>
+
+			endWith
+			endproc
+			
+
+			proc
+			import	StdUnlink
+			export	GetScript,SetScript
+			
+; These constants are only required until we can get them out of the		<6/24/88ldc>
+; East Asian script systems.
+; smScriptName will not always = smLastSVerb, but it will mark the
+; last public verb before the lower bound of the Kanji private verbs.
+
+firstKanjiVerb	equ	smScriptName+2
+lastKanjiVerb	equ	76
+
+; ----------------------------------------------------------------------------
+; function:	GetScript(script, verb: Integer): LongInt;
+; input:	(sp).w	Script code.
+;			(sp).w	Verb value.
+;			(sp).l	Selector.
+; output:	(sp).l	Result, script entry variable.
+; warning:	This routine follows Pascal register conventions.
+;			This routine may not return directly.
+;
+; GetScript attempts to dispatch to the script indicated.  If the script
+; code is illegal, the script is not installed, or the script is disabled,
+; it returns 0.
+; The dispatch here is different than that of other script interface system
+; routines.  In this case, the application has directly specified which
+; script it wants to use, instead of using the font of the current GrafPort.
+;<11/10/87med>	Merged in public verbs from RomanUtil
+;
+; Handle special negative script codes, like Intl Utils routines				<11>
+; ----------------------------------------------------------------------------
+
+gsRecord	record	{a6link},decr
+result		ds.l	1						; result code.
+gsArgs		equ		*-8						; size of arguments.
+script		ds.w	1						; script code.
+verb		ds.w	1						; verb value.
+selector	ds.l	1						; trap selector.
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6 register.
+gsLocals	equ		*						; size of local variables.
+			endr
+
+; Link the stack and find the entry pointer for the appropriate script.
+; If the script is not installed, exit immediately.
+
+GetScript
+			with	smgrRecord,gsRecord
+			link	a6,#gsLocals			; link the stack.
+			move.w	script(a6),d0			; get script code.
+
+			bsr		MapScript				; map ScriptCode, set up pointers	<11>
+			beq.s	@GetDone				; bail if err (d0 already 0)		<11>
+
+			move.w	verb(a6),d2				; private verb?						<11/10/87med>
+			bge.s	@GetCheckKanji			; aaargh!							<6/24/88ldc>
+@GetPrivate
+			with	ScriptRecord			;
+			move.l	a1,a0					; copy ScriptRecord ptr				<34>
+			move.l	scriptTrap(a0),a1		; load trap vector.					<34>
+			unlk	a6						; unlink the stack.
+			jmp		(a1)					; jump to trap vector.				<34>
+			endWith	;ScriptRecord			;
+
+; Something is wrong, so it's time to punt.  Unlink the stack, and return
+; to the caller.
+
+@GetPunt
+			clr.l	d0						; default result
+			bra.s	@GetDone				; done
+
+;<6/24/88ldc>	added the following check for KanjiTalk private verbs	
+@GetCheckKanji
+			cmp.w	#firstKanjiVerb, d2		; is this in the Kanji Talk private range?
+			blt.s	@GetPublic				; if yes then do private
+			cmp.w	#lastKanjiVerb, d2		; else fall through to GetPublic
+			ble.s	@GetPrivate
+
+; assume that range from 0 through smLastSVerb is filled with either
+; public or Kanji verbs - there are no other holes.								<06/23/89 pke>
+
+			cmp.w	#smLastSVerb,d2						; verb > smLastSVerb?
+			bhi.s	@GetPunt							; yes => bail out.		<5>
+			sub.w	#(lastKanjiVerb-smScriptName),d2	; get rid of Kanji hole
+@GetPublic
+		
+			lea		scrTable,a0				; load table pointer.
+			move.l	#0,d1					; clear offset.
+		
+			add.w	d2,a0					;									<06/30/89 pke>
+			move.b	(a0)+,d1				;									<06/30/89 pke>
+			lea		0(a1,d1.w),a1			; offset pointer.					
+			move.b	(a0),d1					;									<06/30/89 pke>
+
+; Copy the script entry variable to the parameter.
+
+			clr.l	d0						; clear top bytes
+			sub.w	#2,d1					; length - 2?
+			bmi.s	@GetByte				; <0 -> copy 1 byte.
+			beq.s	@GetWord				; =0 -> copy 1 word.
+@GetLong
+			move.l	(a1),d0					; >0 -> copy the long.
+			bra.s	@GetDone				; bail out.
+@GetByte
+			move.b	(a1),d0					; copy the byte.
+			bra.s	@GetDone				; bail out.
+@GetWord
+			move.w	(a1),d0					; copy the word.
+
+; Store the parameter, unlink the stack, and return to the caller.
+
+@GetDone
+			move.l	d0,result(a6)			; store variable.
+
+			move.w	#gsArgs, d0				; for StdUnlink
+			bra		StdUnlink				; standard exit
+
+			endWith
+	
+
+; ----------------------------------------------------------------------------
+; function:	SetScript(script,verb: Integer; param: LongInt): OSErr;
+; input:	(sp).w	Script code.
+;			(sp).w	Verb value.
+; 			(sp).l	Param value.
+; output:	(sp).w	Result, OSErr.
+; warning:	This routine follows Pascal register conventions.
+;			This routine may not return directly.
+;
+; SetScript attempts to dispatch to the script indicated.  If the script
+; code is illeagal, the script is not installed, or the script is disabled,
+; it returns an error code.
+; The dispatch here is different than that of other script interface system
+; routines.  In this case, the application has directly specified which
+; script it wants to use, instead of using the font of the current GrafPort.
+;<11/10/87med>	Merged in public verbs from RomanUtil
+;
+; Handle special negative script codes, like Intl Utils routines				<11>
+; ----------------------------------------------------------------------------
+
+ssRecord	record	{a6link},decr
+result		ds.w	1						; result code.
+ssArgs		equ		*-8						; size of arguments.
+script		ds.w	1						; script code.
+verb		ds.w	1						; verb value.
+param		ds.l	1						; parameter value.
+selector	ds.l	1						; trap selector.
+return		ds.l	1						; return address.
+a6link		ds.l	1						; old a6 register.
+ssLocals	equ		*						; size of local variables.
+			endr
+
+; Link the stack, assume failure, and find the entry pointer for the
+; appropriate script.  If the script is not installed, exit immediately.
+
+SetScript
+			with	smgrRecord,ssRecord
+			link	a6,#ssLocals			; link the stack.
+			move.w	script(a6),d0			; get script code.
+
+			bsr		MapScript				; map ScriptCode, set up pointers	<11>
+			beq.s	@SetBadScript			; bail if err						<11>
+
+			move.w	verb(a6),d2				; private verb?						<11/10/87med>
+			bge.s	@SetCheckKanji			; first check for Kanji private		<6/23/88ldc>
+@SetPrivate
+			with	ScriptRecord			;
+			move.l	a1,a0					; copy ScriptRecord ptr				<34>
+			move.l	scriptTrap(a0),a1		; load trap vector.					<34>
+			unlk	a6						; unlink the stack.
+			jmp		(a1)					; jump to trap vector.				<34>
+			endWith	;ScriptRecord			;
+	
+	
+; <6/24/88ldc> added four lines to check for Kanji private range
+@SetCheckKanji
+			cmp.w	#firstKanjiVerb, d2		; is this in the Kanji Talk private range?
+			blt.s	@SetPublic				; if yes then do private
+			cmp.w	#lastKanjiVerb, d2		; else fall through to GetPublic
+			ble.s	@SetPrivate
+
+; assume that range from 0 through smLastSVerb is filled with either
+; public or Kanji verbs - there are no other holes.								<06/23/89 pke>
+
+			cmp.w	#smLastSVerb,d2						; verb > smLastSVerb?
+			bhi.s	@SetBadVerb							; yes => bail out.
+			sub.w	#(lastKanjiVerb-smScriptName),d2	; get rid of Kanji hole
+@SetPublic
+	
+; Use the verb to find a length and offset in the table.  Add the offset to
+; the script pointer to form the source pointer.
+
+			with	scriptRecord
+			add.w	#1,scriptMunged(a1)		; update munge count.
+			lea		scrTable,a0				; load table pointer.
+			move.l	#0,d1					; clear offset.
+		
+			add.w	d2,a0					;									<06/30/89 pke>
+			move.b	(a0)+,d1				;									<06/30/89 pke>
+			lea		0(a1,d1.w),a1			; offset pointer.
+			move.b	(a0),d1					;									<06/30/89 pke>
+
+			endWith
+
+; Copy the parameter value into a script entry variable.
+
+			move.l	param(a6),d0			; load param value.
+			sub.w	#2,d1					; length - 2?
+			bmi.s	@SetByte				; <0 -> copy 1 byte.
+			beq.s	@SetWord				; =0 -> copy 1 word.
+@SetLong
+			move.l	d0,(a1)					; copy the long.
+			bra.s	@SetVerb				; bail out.
+@SetByte
+			move.b	d0,(a1)					; copy the byte.
+			bra.s	@SetVerb				; bail out.
+@SetWord
+			move.w	d0,(a1)					; copy the word.
+
+@SetVerb
+; The verb is legal, so return noErr.
+
+			move.l	#0,d0					; noError
+	
+@SetDone
+; Unlink the stack and return to the caller.
+
+			move.w	d0,result(a6)			; return noErr.
+
+			move.w	#ssArgs, d0				; for StdUnlink
+			bra		StdUnlink				; standard exit
+
+; error exits
+
+@SetBadScript
+			move.w	#smBadScript,d0			; assume bad script.
+			bra.s	@SetDone				; done
+
+@SetBadVerb
+			moveq	#smBadVerb,d0			; bad verb
+			bra.s	@SetDone				; done
+			endWith
+	
+; The script entry verb table is used by GetScript and SetScript.  Each
+; verb is represented by a tuple of the form <offset>,<length>.  The offset
+; is a byte index into the script entry, and the length is the size of the
+; variable in bytes.
+
+scrTable
+			with	scriptRecord				;
+			dc.b	scriptVersion,2				;  0 smScriptVersion verb.
+			dc.b	scriptMunged,2				;  2 smScriptMunged verb.
+			dc.b	scriptEnabled,1				;  4 smScriptEnabled verb.
+			dc.b	scriptRight,1				;  6 smScriptRight verb.
+			dc.b	scriptJust,1				;  8 smScriptJust verb.
+			dc.b	scriptRedraw,1				; 10 smScriptRedraw verb.
+			dc.b	scriptSysFond,2				; 12 smScriptSysFond verb.
+			dc.b	scriptAppFond,2				; 14 smScriptAppFond verb.
+			dc.b	scriptBundle.itlbNumber,2	; 16 smScriptNumber verb.
+			dc.b	scriptBundle.itlbDate,2		; 18 smScriptDate verb.
+			dc.b	scriptBundle.itlbSort,2		; 20 smScriptSort verb.
+			dc.b	scriptBundle.itlbFlags,2	; 22 smScriptFlags verb.
+			dc.b	scriptBundle.itlbToken,2	; 24 smScriptToken verb.		<3/6/87med>
+			dc.b	scriptBundle.itlbEncoding,2	; 26 smScriptEncoding verb.		<7>
+			dc.b	scriptBundle.itlbLang,2		; 28 script language
+			dc.b	scriptBundle.itlbNumRep,2	; 30 number/date
+			dc.b	scriptBundle.itlbKeys,2		; 32 smScriptKeys verb.
+			dc.b	scriptBundle.itlbIcon,2		; 34 smScriptIcon verb.
+			dc.b	scriptPrint,4				; 36 smScriptPrint verb.
+			dc.b	scriptTrap,4				; 38 smScriptTrap verb.
+			dc.b	scriptCreator,4				; 40 smScriptCreator verb.
+			dc.b	scriptFile,4				; 42 smScriptFile verb.
+			dc.b	scriptName,4				; 44 smScriptName verb.
+
+			; new verbs for 7.0
+			dc.b	scriptMonoFondSize,4		; 78-32=46 smScriptMonoFondSize
+			dc.b	scriptPrefFondSize,4		; 80-32=48 smScriptPrefFondSize
+			dc.b	scriptSmallFondSize,4		; 82-32=50 smScriptSmallFondSize
+			dc.b	scriptSysFondSize,4			; 84-32=52 smScriptSysFondSize
+			dc.b	scriptAppFondSize,4			; 86-32=54 smScriptSysFondSize
+			dc.b	scriptHelpFondSize,4		; 88-32=56 smScriptSysFondSize
+			dc.b	scriptValidStyles,1			; 90-32=58 smScriptValidStyles		<3>
+			dc.b	scriptAliasStyle,1			; 92-32=60 smScriptAliasStyle		<3>
+			
+			endWith
+
+; ----------------------------------------------------------------------------	<11>
+; MapScript	 -	map ScriptCode to real script, set up record pointers, check
+;				for errors
+;
+; input:	d0.w	ScriptCode
+; output:	a0.l	SMgrRecord pointer
+; 			a1.l	ScriptRecord pointer
+;			condition codes: Z set if err, clear otherwise
+;			d0.l	clear if err, =a1 otherwise
+; ----------------------------------------------------------------------------
+
+MapScript
+			with	SMgrRecord,ScriptRecord
+			tst.w	d0						; real or special?
+			bpl.s	@doneMap				; if real, don't need to map it
+@trySystem
+			addq.w	#1,d0					; is it SystemScript (-1)?
+			bne.s	@tryCurrent				; no, check for other codes
+			GetSMgrCore a0					; get SMgrRecord pointer
+			move.w	smgrSysScript(a0),d0	; get system script
+			bra.s	@doneMap
+@tryCurrent
+			addq.w	#1,d0					; is it CurrentScript (-2)?
+			bne.s	@error					; no, bail
+			subq	#2,sp					; leave space for returned script
+			_FontScript						; NOT IntlScript
+			move.w	(sp)+,d0				; get current script
+@doneMap
+			cmp.w	#smgrCount-1,d0			; in range?
+			bhi.s	@error					; no -> punt.
+
+; OK, we have a good script code in d0, use it to get ScriptRecord
+			GetSMgrCore a0					; SMgrRecord pointer
+			lsl.w	#2,d0					; make script code a long offset
+			move.l	smgrEntry(a0,d0.w),d0	; script installed?
+			beq.s	@error					; bail if not
+			move.l	d0,a1					; copy ScriptRecord pointer
+			tst.b	scriptEnabled(a1)		; script enabled?
+			bne.s	@done					; if so, done (Z clear)
+@error
+			moveq	#0,d0					; set Z & clear d0
+@done
+			rts
+			endwith	;SMgrRecord,ScriptRecord
+
+			endproc
+
+			end

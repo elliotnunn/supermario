@@ -1,0 +1,3552 @@
+;
+;	File:		InternationalPACK.a
+;
+;	Contains:	Date, time, and sorting routines for language-independent programs. These routines
+;				help maintain international parameter blocks as resources of type 'itl_' where the
+;				last character is a digit (0 through 4). The date and time routines translate the
+;				long integer "seconds" count into strings whose formats are specified in the
+;				parameter blocks. The magnitude string comparison routine for Roman languages was
+;				designed and implemented by Dr. J. Coonen. Later modifications allow the parameter
+;				blocks to change the sorting algorithm for non-Roman languages. For 7.0, the type
+;				select utilities (for keyboard navigation) are added here.
+;
+;	Written by:	AJH	Andy Hertzfeld
+;				JTC	Jerome Coonen
+;				MED	Mark Davis
+;				JDT	Joe Ternasky
+;				DRS	daan strebe
+;				LDC	Lee Collins
+;				PKE Peter Edberg
+;				ngk Nick Kledzik
+;				…and a cast of thousands
+;
+;	Copyright:	© 1983-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<46>	10/16/92	PKE		Move itl1 extension offsets into Packages.a. Include Packages.a
+;									instead of PackMacs.a.
+;		<45>	  6/2/92	PKE		#1028868 <smb>: Really fix problem of crashing when resource is
+;									not loaded: the problem was not ResLoad being false, but GetIntl
+;									not handling low-memory failure to load resource when GetIntl
+;									was called internally (with ResLoad always TRUE). Now GetIntl
+;									always returns NIL handle if a resource fails to load. Also
+;									revert to making direct calls to GetIntl pay attention to
+;									ResLoad (as in <43>), but handle ResLoad as a byte.
+;		<44>	  6/1/92	DTY		#1028868 <FM>: The previous change only turns on ResLoad (if
+;									it’s false) for calls to GetIntl made internally.  This isn’t
+;									enough.  There are some cases where an external call to GetIntl
+;									will fail and crash because ResLoad is false, and it’s not
+;									turned on before getting an ‘itl ’ resource. Get rid of the
+;									check to see if the call to GetIntl is made from an internal 
+;									call, and always turn on ResLoad before getting an ‘itl ’
+;									resource.
+;		<43>	 5/14/92	PKE		#1028868,<bbm>: Fix crash in internal call to GetIntl (e.g. from
+;									MagString) if ResLoad false and itl resource purged. Fix
+;									GetItlTable to handle ResLoad false by returning nil handle.
+;		<42>	 4/22/92	JSM		Get rid of useNewItlCache (which was never used) and
+;									FixNonRomanTypeSelect (which was only used once) conditionals.
+;		<41>	 4/22/92	PKE		#1026767: (no reviewer before check-in: it is late at night,
+;									nobody is around, I am going out of town early tomorrow morning,
+;									and I have to have this in for the a7 build) Stop caching
+;									handles to itl2/itl4 resources, since itl2/itl4 resources can be
+;									changed under us; use cached IDs instead. Also, in GetIntl move
+;									DoneIntl and FailIntl above UnlockIt call to make sure we always
+;									unlock (since we may have gotten locked before making an
+;									internal call to GetIntl); this is a continuation of fix <40>.
+;		<40>	 4/17/92	PKE		#1027387,<DTY>: Fix <35> below - removing the check for
+;									emItlDirectGetIntl at the end of GetIntl caused the PACK to
+;									become unlocked prematurely (this is a bug in 7up too). However,
+;									the emItlDirectGetIntl scheme was brain-dead anyway. Instead, do
+;									locking/unlocking a better way: bracket all internal calls to
+;									other externally-callable PACK 6 routines with an
+;									increment/decrement of emItlDontUnlockYet (renamed from
+;									emItlDirectGetIntl), and have UnlockIt not unlock if
+;									emItlDontUnlockYet is non-zero. Also, add missing calls to
+;									LockIt before LoadResource in MagString, DatePString, and
+;									TimePString, and add missing call to UnlockIt in QuickExit from
+;									MagString (this last missing UnlockIt was responsible for PACK 6
+;									remaining locked in many cases, which was what 7up was trying to
+;									fix).
+;		<39>	 4/15/92	PKE		#1023781,<dty>: Fix <36> below - need to use it0 or itl1 handle,
+;									as appropriate; itl2 has nothing to do with dates or times!!
+;									Also test if intlParam handle is unloaded; if so, load it.
+;		<38>	  4/3/92	PKE		#1015311,<smb>: Fix <37> below - If you change IntlMaxID, you
+;									also need to add a 0 entry in CacheOffset.
+;		<37>	  4/2/92	DTY		#1015311,<SLS>: Change IntlMaxID to 5 now that we have 'itl5'
+;									resources.
+;		<36>	  4/1/92	DTY		#1025710,<pvh>: IUDatePString and IUTimePString will crash if
+;									intlParam is nil. Add checks for nil to these two routines. If
+;									intlParam is nil, get the default 'itl2' resource.
+;		<35>	  1/7/92	DTY		Checking emItlDirectGetIntl before calling UnlockIt causes the
+;									PACK to not get unlocked sometimes. Take out this check. (This
+;									was done as a patch by 7 Up.)
+;		<34>	10/16/91	PKE		For Cube-E (and Bruges): Increment PACK 6 version number.
+;		<33>	 10/8/91	PKE		For Cube-E (and Bruges): Fix IUScriptOrder and IUTextOrder (by
+;									fixing internal routine intScriptCodeToSort) to ignore FontForce
+;									flag, and to sort non-enabled scripts last. Clean up some more
+;									conditionals.
+;		<32>	 9/20/91	PKE		Remove CubeE conditionals, since the new plan (according to
+;									Darin) is that everything for Cube-E goes in without
+;									conditionals. While I'm at it, remove some ">=$700" conditionals
+;									and pre-7.0-only code.
+;		<31>	 9/15/91	PKE		smb,#85675: IUSetIntl was causing crashes. It assumed that
+;									_HomeResFile returned the actual refNum (not 0) for the system
+;									file, so it failed to remove an ‘INTL’ resource before adding
+;									another one with the same ID. Also, it was setting the
+;									resChanged attribute with _SetResAttrs instead of calling
+;									ChangedResource.
+;		<30>	  3/1/91	ngk		pke,#77804: use secondary difference when differentiating
+;									between better possibilities for type selecting.
+;		<29>	 2/21/91	PKE		gbm,#82260: TypeSelect does not work if system script is
+;									non-Roman but Roman name is typed.
+;		<28>	 2/21/91	ngk		dho: fix bug introduced by change <27>
+;		<27>	 2/11/91	ngk		dho, #80563: Fix TypeSelect wrap around bug.
+;		<26>	 1/10/91	PKE		(fjs) Fix bugs in GetIntl that can result in a call to
+;									UseResFile with an invalid refNum, and a call to HLock with an
+;									invalid handle. Make MagPString and MagIdPString load handle
+;									passed to them if necessary.
+;		<25>	12/19/90	PKE		(VL) Have app caches ignore SetScript changes to itl2 or itl4
+;									ID, since IUClearCache eliminates the need for this. This
+;									isolates each application’s cache from the effects of other
+;									apps. Add private ClearCacheSys routine. Protect against bad
+;									selectors.
+;		<24>	12/14/90	PKE		(DC) Use itl1 extension, if present, to make IUDateString,
+;									IUDatePString, and IULDateString produce correct abbreviated
+;									date and handle calendars with >7 days or >12 months (So that
+;									localizers can fix bug #49924 correctly). Force IUGetIntl to
+;									load sys cache from System file, and make sys cache relatively
+;									immune to a SetScript change to itl2 or itl4 ID.
+;		<23>	10/21/90	gbm		(with dba) Fix an assembly warning
+;		<22>	 9/14/90	BG		Removed <13>. 040s are behaving more reliably now.
+;		<21>	 9/10/90	PKE		Merge common code from TextOrder and TypeSelectCompare into
+;									GetScriptItl for code sharing; change it to take its ScriptCode
+;									and sysFlag parameters on the stack; make it accessible through
+;									dispatcher for internal use.
+;		<20>	  9/6/90	PKE		Change TypeSelectCompare to use only primary sorting order, and
+;									to use correct way of getting itl2 handles.
+;		<19>	 8/29/90	PKE		Let IUGetItlTable provide whiteSpaceList too.
+;		<18>	 8/26/90	PKE		NEEDED FOR SIXPACK: Fixed a register trashing bug introduced in
+;									<16> in the internal routine GetLArray. If IULDateString or
+;									IULTimeString were passed an intlParam value of 0, this bug
+;									would cause GetIntl to look for an invalid resource type;
+;									GetIntl wouldn’t find it, and these procedures would bail,
+;									returning null strings.
+;		<17>	 8/24/90	PKE		Let IUGetItlTable provide unTokenTable too.
+;		<16>	  8/1/90	PKE		NEEDED FOR SIXPACK: Change IUGetIntl to do better error
+;									reporting. Change all Pack6 routines that make internal GetIntl
+;									calls to actually check if there was an error (what a concept).
+;									This fixes crashes that occurred in low-memory situations,
+;									including BRC #70045 (string compare routines were crashing in
+;									two-byte systems).
+;		<15>	 7/30/90	gbm		axe branch to next instruction
+;		<14>	 7/25/90	PKE		Modify so that application itl cache is part of new
+;									application-specific script globals. Remove code in ClearCache
+;									and GetIntl that creates the cache; app-specific script globals
+;									are now allocated by InitScriptApp.
+;		<13>	 7/17/90	BG		Added EclipseNOPs for flakey 040s.
+;		<12>	 7/16/90	PKE		Use new names for fields in ExpandMemRec: emItlCache2Ptr is now
+;									emItlSysCachePtr, emItlAppCachePtr is now emItlAppCacheHndl.
+;									Renamed Cache2Rec to NewItlCacheRec.
+;		<11>	  7/5/90	PKE		Fixed bugs in new cache scheme (see <10>): register use bug was
+;									wiping out the script code used for finding the right cache
+;									entry, so we didn’t find a match and defaulted to system script;
+;									save app cache handle (!); better handling of BlockMove errs,
+;									etc. Changed IUClearCache to fit more nicely into this scheme.
+;									Reworked itl2 handle fetching for IUTextOrder and IUTextOrderSys
+;									to use new caching via GetScriptItl entry point; ensures that
+;									IUTextOrderSys uses system sorting and not app sorting.
+;		<10>	  7/2/90	PKE		Redo GetIntl’s itl2/itl4 caching to use emItlAppCachePtr so
+;									Process Mgr can swap cache for each application. Put in
+;									framework for private IUTextOrderSys routine - a new entry point
+;									for IUTextOrder that uses the system’s cached itl2/itl4 handles
+;									instead of the current application’s cached handles.
+;		 <9>	  5/8/90	PKE		Changed script and language sorting routines to use new
+;									emScriptMap and emLangMap tables, which are set up from ‘itlm’
+;									resource. Use new emItlCache2 for improved caching of ‘itl2’ and
+;									‘itl4’ resource handles. Changed ClearCache to work with new
+;									cache.
+;		 <8>	  5/3/90	ngk		Fixed bug in TypeSelectNewKey of script not being set in tsr.
+;		 <7>	  5/2/90	ngk		Added private TypeSelect (a.k.a. keyboard navigation) routines.
+;		 <6>	 4/10/90	PKE		Conditionalized <2.3> and <3> so object compares work against
+;									official 6.0.x sources. Used smgrSys7Extensions instead of
+;									SysVers where appropriate.
+;		 <5>	 3/21/90	PKE		Added private IUMagWPString interface.
+;		 <4>	  3/2/90	PKE		Use new name IUNSortFrame for the extended IUSortFrame in System
+;									7.0; use new name nItl4Rec for the extended Itl4Rec (used in
+;									GetItlTable). Updated version number. Extended langScriptTable
+;									to accomodate all current language codes (need to put this in a
+;									resource soon!!). Fixed up header and tabs.
+;		 <3>	  1/4/90	dba		get rid of assembly warnings by using ALIGN statement and using
+;									low-memory for an empty string
+;		 <2>	12/19/89	EMT		(with dba) Cleared itl2Handle in MagWString, which is an
+;									undocumented call used by Microsoft.
+;		 <1>	12/18/89	CCH		Adding for the first time into BBS.
+;	(BBS versions above, EASE versions below)
+;	   <2.3>	11/17/89	dba		got rid of checks for 64K ROMs
+;	   <2.2>	10/31/89	PKE		Lock package before GetResource calls in new routines
+;									(IUTextOrder, IUGetItlTable)!! Also, in LockIt and UnlockIt,
+;									get handle directly from AppPacks instead of using
+;									RecoverHandle (takes care of problems when Pack6 is called from
+;									MultiFinder).
+;	   <2.1>	 10/5/89	PKE		Clear ignChar flag in FetchChar; fixes bug (BRC #54591) with
+;									sorting of ignorable characters.
+;	   <2.0>	 9/22/89	PKE		Added GetItlTable routine. Implemented the remaining special
+;									negative ScriptCodes and LangCode values for ScriptOrder,
+;									LangOrder, and TextOrder.
+;	   <1.9>	 9/18/89	PKE		Rearrange parameters for IUTextOrder; use different lang code
+;									to signal mapping to default lang for script.
+;	   <1.8>	 9/15/89	PKE		Add 7.0 functions ClearCache, MagPString, MagIdPString,
+;									ScriptOrder, LangOrder, and TextOrder.
+;	   <1.7>	 8/26/89	PKE		Delete load 'nEqu.d'.
+;	   <1.6>	 3/10/89	PKE		Add sorting support for 'ß and extended Mac character set (incl.
+;									ﬁ,ﬂ). Should revise to get project & vernier info from the same
+;									table at the same time.
+;	   <1.5>	 2/22/89	PKE		Change GetIntl to determine the script itself if the
+;									smgrIntlForce flag is true, instead of calling IntlScript to do
+;									this. This makes GetIntl independent of the a5 world when
+;									smgrIntlForce is true, which is most of the time. Need to
+;									include ScriptEqu.priv for this.
+;	   <1.4>	 2/21/89	PKE		Fix up includes: always include 'inc.sum.a'.
+;	   <1.3>	 2/14/89	PKE		Updated to use MPW 3.0 final ScriptEqu.a equate names
+;	   <1.2>	 1/17/89	CCH		Changed LongMonth to LongMonth1 and LongDay to LongDay1.
+;	   <1.1>	 1/16/89	CCH		Merged 6.0.3 final sources into 7.0.
+;	   <1.0>	11/16/88	CCH		Added to EASE.
+;	(pre-EASE history below)
+;				 7/11/88	ldc		fixed IUSetIntl stack frame values
+;				 6/27/88	ldc		fixed IUEqualString (MagIDString) to only return 1 in place of
+;									-1
+;				 6/16/88	ldc		moved NeedUnlock and DirectGetIntl to expandMem
+;				 6/13/88	ldc		allow caller of GetLArray to select itlx
+;				  6/1/88	med		DatePString common entry must go to LongerDate, NOT DoLongForm
+;
+;				 3/21/88	med		Do not use cache if expandMem version is not correct
+;				  2/5/88	med		Use Cache Offsets table to avoid some calculation.
+;				  2/5/88	med		Moved cache storage into expandmem
+;				 1/25/88	med		Gave SetIntl a frame, to prevent spurious errors
+;				 1/19/88	med		Skip cache if id = 0,1; since MacWrite breaks it
+;				 1/19/88	med		We know the script manager is always there, so don't check
+;				 1/13/88	med		Added MakeDatLString, MakeTimLString; restructured entries
+;									slightly
+;				 1/13/88	drs		Fixed equates and stack frame. Produces identical code.
+;				  1/7/88	med		Changed label 'NoCache' to 'GotNoCache': must be new name
+;									conflict
+;				  1/4/88	drs		Fixed lock/unlock of Pack6
+;				  1/4/88	med		Fixed TestMetric Offset for new dispatch
+;				12/22/87	med		Fixed two nasty bugs with ligatures: oeœ = œoe, and oer < and >
+;									œdipus
+;				11/16/87	med		GetIntl now takes verbs 0,1,2,4
+;				 5/15/87	drs		Created a cache for the handle loaded from GetIntl so that
+;									subsequent calls could used LoadResource. Optimizations
+;									throughout the sorting routine. Fixed bug in FetchChar which
+;									updated the character pointer wrongly. Global reorganization of
+;									entire sort routine. Don't start initialization until strings
+;									are proven to be unequal and quick exit if they are equal.
+;
+;		Changes for performance enhancements above
+;
+;	  <S132>	 3/24/87	med		Fixed the BMI in TestMetric, and the CLR.L in GetTheIntl to
+;									unlock properly.
+;				  3/2/87	med		Used _HPurge instead of direct call. Cleared d1 in GetTheIntl.
+;									This routine calls GetIntl, which unlocks the package if d1 is
+;									set, so for safety, it should be cleared.
+;				 1/19/87	jdt		Replaced resource type constants with literals.
+;				  1/5/87	jdt		Minor changes to GetIntl routine for clarity. Replaced script
+;									manager core macro with check for _ScriptUtil trap implemented.
+;									Changed dispatch to use _HGetState when new ROMs are present.
+;									Changed d2 to d7 in MakeTimeString and removed saving of d2 in
+;									AppendNumCom. Added call to ExitHook in MagComString exit code.
+;									Removed CCR save and restore in TwoMoreChars.
+;				11/25/86	jdt		Changed the equate files just one more time.
+;				11/18/86	MED		Fixed register save/restore with MakeTimPString; Modified movem
+;									calls generally by using REG
+;				11/13/86	MED		Redid equates
+;				 9/18/86	JDT		Modified GetIntl routine to handle switch-launch. We cannot
+;									assume that the script manager has been installed.
+;				 9/11/86	MED		Save and restore d2 over appendNum call for safety.
+;				  9/3/86	JDT		Modified GetIntl to use the ScriptUtil trap.
+;				 8/30/86	JDT		GetIntl now uses the Script Manager to find the ITLx resources.
+;				 8/28/86	JDT		Removed support for LocalRtn in string comparison. A4 is now a
+;									handle to the international parameter block that contains the
+;									new sorting hooks.
+;				 8/26/86	JDT		Moved localization hooks from ITL1 to new ITL2 resource.
+;				 8/25/86	JDT		Modified the GetIntl routine to look for ITLx resources.
+;				 7/29/86	MED		Changed AppendNum (and AppendLongNum) to use NumToString in the
+;									'approved' manner.
+;
+;		Changes for Script Manager support above
+;
+;				 6/10/86	MED		Added: hooks in string comparison, ignore flags.
+;				 5/20/86	JDT		Put MagWString back in, depending on the Microsoft flag.
+;				  5/9/86	JDT		Removed Kanji routines from Pack6. They now reside in their own
+;									package, Pack8.
+;				  5/7/86	JDT		Bracked all Kanji routines by calls to saveLock and checkLock,
+;									to preserve the (un)locked status of the package.
+;				 3/26/86	MED		Changed inKanji to be zero if CharMode > 1
+;				 3/22/86	MED		Added separate entry for Microsoft (WeakMag)
+;				 3/21/86	KWK		Changed version number to use equate
+;				 3/10/86	MED		Cleaned up extended routines
+;				  3/3/86	MED		added:
+;									short form formats: added 3,4,5 for myd,dym,ydm.
+;									timeCycle: 128 for 0:00 AM/PM instead of 12:00 AM/PM.
+;									longDateFormat: first+second*4+third*16+fourth*64, where 0 =
+;									day, 1 = weekday, 2 = month, 3 = year.
+;									suppressDay: now a bitmap to suppress 0,1,2,3.
+;									old forms all should work as before.
+;				 2/19/86	MED		now interleaves katakana, hiragana, kana
+;				 2/17/86	MED		Added routines to access KIS vectors (text manipulation)
+;				12/16/85	MED		Added basic support for double-byte characters
+;
+;		Changes for Kanji Interface System support above
+;
+;				12/30/85	JTC		Fix reg save bug in SetIntl. <30Dec85 JTC>
+;				12/18/85	JTC		Last nanosecond changes for Mac+: Fix old JTC bug with string
+;									comparisons trashing D3. Have the package preserve its
+;									lockedness across the call. <18Dec85 JTC>
+;				  2/4/84	JTC		fixed oe ligature problem
+;				 1/11/84	AJH		believe it or not, there was a 12 AM bug, too...
+;				  1/6/84	AJH		fixed short year bug
+;				  1/5/84	AJH		made it use medium mode for day, too
+;				  1/4/84	AJH		fixed 12 PM bug (was giving 00 PM)
+;				  1/3/84	AJH		alternate entry points added for Random Wigginton
+;				12/22/83	AJH		GetIntl was staying locked...
+;				11/17/83	JTC		Added MagIdString compare.
+;				11/12/83	AJH		Fixed bug in "medium long" option
+;				11/10/83	AJH		Added "medium long" date option
+;				 11/8/83	AJH		Made "GetIntl" preserve lock state
+;				 11/7/83	AJH		Integrated Jerome's magnitude compare
+;				 11/3/83	AJH		Added "wantSeconds" parameter to time formatting
+;___________________________________________________________________________________________________
+;	To Do:
+;	•	Always call LockIt at entry instead of waiting for first time that might move memory 
+;___________________________________________________________________________________________________
+
+			load	'StandardEqu.d'
+			include	'Packages.a'					; <46>
+			include 'ScriptPriv.a'
+			include 'IntlUtilsPriv.a'				; <7>
+			string	asis
+
+EmptyString		equ		Lo3Bytes	; handy empty string					<3>
+
+			proc
+
+;---------------------------------------------------------------------------------------------------------
+; Local Variable Equates.
+;---------------------------------------------------------------------------------------------------------
+
+;---------------------------------------------------------------------------------------------------------
+; International Parameter Block Definitions
+;---------------------------------------------------------------------------------------------------------
+
+IntlMaxID      equ	 5		     ; <37> maximum resource ID number.
+
+; Parameter Block 0 Offsets
+
+IntlDecPoint   EQU	 0		     ;decimal point character
+IntlThouSep    EQU	 1		     ;thousands separator character
+IntlListSep    EQU	 2		     ;list separator character
+
+IntlCurSym     EQU	 3		     ;3 byte currency symbol
+IntlCurFmt     EQU	 6		     ;currency format flags
+
+IntlDateOrder  EQU	 7		     ;order for short form dates
+IntlSDLZFlags  EQU	 8		     ;leading zero flags for dates
+IntlDSep       EQU	 9		     ;seperator character for dates
+
+IntlTimeMode   EQU	 10		     ;12 or 24 hour time mode flag
+IntlTLZFlags   EQU	 11		     ;time leading zero flags
+IntlAMSuffix   EQU	 12		     ;suffix string for AM times
+IntlPMSuffix   EQU	 16		     ;suffix string for PM times
+IntlTSep       EQU	 20		     ;time separator character
+Intl24Suffix   EQU	 21		     ;suffix for 24 hr mode
+
+IntlMetric     EQU	 29			;boolean for English/Metric
+
+; Parameter Block 1 Offsets.
+; Get rid of unused ones.												<24>
+
+IntlSunday     EQU	 0			;string for Sunday
+
+IntlJanuary    EQU	 112		;string for January
+
+IntlDaySupress EQU	 304		;boolean for supressing day-of-week
+IntlLongOrder  EQU	 305		;boolean for selecting order
+IntlLDayLZFlag EQU	 306		;boolean for day# leading zeros
+IntlMonLen     EQU	 307		;month length for medium date
+
+IntlStr1       EQU	 308		;long date prefix string
+IntlStr2       EQU	 312		;long date day seperator string
+IntlStr3       EQU	 316		;long date month seperator string
+IntlStr4       EQU	 320		;long date date seperator string
+IntlStr5       EQU	 324		;long date year suffix string
+
+; New offsets for itl1 extension. Moved to Packages.a.				<24><46>
+
+; Note: Each list above begins with a count of items,
+; followed by that many variable-length pstrings.
+
+; Since these routines are accessed as a "package", the first code is
+; a dispatcher which strips the selection parameter and cases out on it.
+
+;---------------------------------------------------------------------------------------------------------
+; Package dispatch
+;---------------------------------------------------------------------------------------------------------
+
+maxSelector	equ	52					;										<25>
+
+IntlUnit
+		bra.s	RealStart			; skip over header
+
+; Standard resource header.
+
+		dc.w	0					; flags word.
+		dc.b	'PACK' 				; resource type is PACK.
+		dc.w	6					; resource ID number is 6.
+		dc.w	$701				; version number.						<4><34>
+
+; The real code starts here.  We dispatch
+; to the appropriate routine based on the selector parameter.
+
+; Note!: the dispatch changed around August 87, but is not marked			<1/4/88med>
+
+RealStart
+
+		with	ExpandMemRec
+		move.l	expandMem, a0		; get expand mem					<6/16/88ldc>
+		clr.w	emItlNeedUnlock(a0)	; clear both emItlNeedUnlock & emItlDontUnlockYet		<40>
+		endwith	;ExpandMemRec
+
+		move.l	(sp)+,a0			; save return address.
+		move.w	(sp)+,d0			; pop the selector.
+		move.l	a0,-(sp)			; restore return address.
+
+		cmp.w	#maxSelector,d0		;										<25>
+		bhi.s	@bail				; bail if selector high or negative		<25>
+
+		lea		IntlTable,a0		; get jump table address.
+		add.w	0(a0,d0.w),a0		; compute dispatch address.
+		jmp		(a0)				; jump into routine.
+
+@bail								;										<25>
+		rts							;										<25>
+
+
+		; import/export needed for separate type select procedures 							; <7>
+		import	TypeSelectClear, TypeSelectNewKey, TypeSelectFindItem, TypeSelectCompare	; <7>
+		export	ScriptOrder, MagWPString, LockIt, UnLockIt, intScriptCodeToReal, GetScriptItl ; <7><20>
+
+	; Package dispatch table.
+IntlTable
+		dc.w	MakeDateString	- IntlTable	; 00
+		dc.w	MakeTimeString	- IntlTable	; 02
+		dc.w	TestMetric		- IntlTable	; 04
+		dc.w	GetIntl			- IntlTable	; 06
+		dc.w	SetIntl			- IntlTable	; 08
+		dc.w	MagString		- IntlTable	; 10 and CompString
+		dc.w	MagIdString		- IntlTable	; 12 and EqualString
+		dc.w	MakeDatPString	- IntlTable	; 14
+		dc.w	MakeTimPString	- IntlTable	; 16
+		dc.w	MagWString		- IntlTable	; 18 (private interface)
+		dc.w	MakeLDatString	- IntlTable	; 20 (Script Mgr 2.0)
+		dc.w	MakeLTimString	- IntlTable	; 22 (Script Mgr 2.0)
+		; System 7 extensions:
+		dc.w	ClearCache		- IntlTable	; 24						<1.8>
+		dc.w	MagPString		- IntlTable	; 26 (and CompPString)		<1.8>
+		dc.w	MagIdPString	- IntlTable	; 28 (and EqualPString)		<1.8>
+		dc.w	ScriptOrder		- IntlTable	; 30						<1.8>
+		dc.w	LangOrder		- IntlTable	; 32						<1.8>
+		dc.w	TextOrder		- IntlTable	; 34 (and StringOrder)		<1.8>
+		dc.w	GetItlTable		- IntlTable	; 36						<2.0>
+		dc.w	MagWPString		- IntlTable	; 38 (private interface)	<5>
+		dc.w	TypeSelectClear		- IntlTable	; 40 (private interface)	<7>
+		dc.w	TypeSelectNewKey	- IntlTable	; 42 (private interface)	<7>
+		dc.w	TypeSelectFindItem	- IntlTable	; 44 (private interface)	<7>
+		dc.w	TypeSelectCompare	- IntlTable	; 46 (private interface)	<7>
+		dc.w	TextOrderSys		- IntlTable	; 48 (private interface)	<10>
+		dc.w	GetScriptItl		- IntlTable	; 50 (private interface)	<21>
+		dc.w	ClearCacheSys		- IntlTable	; 52 (private interface)	<25>
+
+;---------------------------------------------------------------------------------------------------------
+; Utility Routines
+;---------------------------------------------------------------------------------------------------------
+; UnlockIt is a short utility that unlocks the package.
+; Simplified <1/4/88med>
+
+UnlockIt
+		with 	ExpandMemRec
+		move.l	ExpandMem,a0			; ExpandMem ptr
+		tst.b	emItlDontUnlockYet(a0)	; are we really leaving PACK 6?			<40>
+		bne.s	@0						; if not, don't even try to unlock		<40>
+		tst.b	emItlNeedUnlock(a0)		; did we lock it?						<40>
+		beq.s	@0						; if not, don't unlock it
+		endWith	;ExpandMemRec
+
+		move.l	AppPacks+(6*4),a0		; get handle directly					<2.2>
+
+		_HUnlock						; unlock the package.
+@0
+		rts								; return to the caller.
+
+;---------------------------------------------------------------------------------------------------------
+; LockIt is a short utility that locks the package if we locked it
+; Simplified <1/4/88med>
+
+LockIt
+		move.l	AppPacks+(6*4),a0		; get handle directly						<2.2>
+		_HGetState						; get lock state new way.
+		tst.b	d0						; was it already locked (negative)? (d0)	<1/4/88med>
+		blt.s	@LockReturn				; yes, done
+		_HLock							; lock the package down.
+
+		with	ExpandMemRec
+		move.l	ExpandMem, a0			; ExpandMem ptr							<6/16/88ldc>
+		st		emItlNeedUnlock(a0)		; remember that we locked it			<6/16/88ldc><40>
+		endwith	;ExpandMemRec
+
+@LockReturn
+		rts
+
+;---------------------------------------------------------------------------------------------------------
+;---------------------------------------------------------------------------------------------------------
+; The following are frames, equates and utilities for date and time conversions.
+; They share a fair amount of common code, so the entries are a bit odd.
+
+DateTimeFrame	record	{oldA61},decrement
+argFrameT1		EQU		*
+return1			ds.l	1
+argFrame1		EQU		argFrameT1-*
+theTime			ds.l	1				; LongInt	; 14
+longFlag		ds.w	1				; BOOLEAN	; 12
+result			ds.l	1				; str255	; 8
+intlParam		ds.l	1				; Handle	; 4
+oldA61			ds.l	1				; 		; 0
+
+garbage			ds.b	2				;-2
+longdate		ds		LongDateRec
+MPByte			ds.w	1				;-18
+TempStr			ds.b	10				;-28
+LocSiz			EQU		*
+				ENDR
+
+		WITH	DateTimeFrame
+DateTimeRegs	reg	D3-D7/A2-A4			; common entry/exit regs				<18Nov86MED>
+DayInteger		equ	longDate.dayOfWeek
+SecondInteger	equ	longDate.second
+MinuteInteger	equ	longDate.minute
+HourInteger		equ	longDate.hour
+DateInteger		equ	longDate.day
+MonthInteger	equ	longDate.month
+YearInteger		equ	longDate.year
+
+
+;---------------------------------------------------------------------------------------------------------
+; The following is a set of common utility routines for decimal conversion,
+; string manipulation, etc.
+;---------------------------------------------------------------------------------------------------------
+; AppendLongNum appends a four digit number to the current string
+; Note: we use this unusual method of adding zeros so that StringToNum adds the proper form.
+
+AppendLongNum
+		st		d1					; leading zeros
+		add.w	#10000,d0			; for zeros
+		bra.s	AppendNumCom		; go to it
+
+;---------------------------------------------------------------------------------------------------------
+; AppendNum -- given an integer in D0, and a leading zero flag in D1, append
+; its 2 low order digits to the string pointed to by A0.  D0 and D1 are
+; clobbered.
+
+AppendNum
+		tst.b	d1					; leading zeros?
+		beq.s	AppendNumCom		; no
+		add.w	#100,d0				; for zeros
+
+;---------------------------------------------------------------------------------------------------------
+AppendNumCom
+		ext.l	d0					; longize (always positive)
+		movem.l	a0/d1,-(sp)			; save the registers.
+		lea		TempStr(a6),a0		; space for string
+		_NumToString				; put string in apStr(a6)
+		movem.l	(sp)+,a0/d1			; restore the registers.
+		lea		TempStr(a6),a1		; get string in local frame
+		tst.b	d1					; want leading zeros on two digit num?
+		beq.s	@1					; no, just add string
+		move.b	(a1)+,d0			; get length
+		subq.w	#1,d0				; subtract
+		move.b	d0,(a1)				; set length one byte up
+@1
+		bsr.s	AppendString		; append a1 to a0
+		rts
+
+;---------------------------------------------------------------------------------------------------------
+; AppendChar appends the character in D0 to the string pointed to by A0.
+; It filters out NULLs (ASCII 0).
+
+AppendChar
+	       TST.B	 D0				;is it null?
+	       BEQ.S	 @1				;if so, ignore it
+
+	       MOVEQ	 #0,D1
+	       MOVE.B	 (A0),D1		;get current length of string
+	       ADDQ.B	 #1,(A0)		;bump it by one
+
+	       MOVE.B	 D0,1(A0,D1)	;store away the new character
+@1
+	       RTS						;return to our caller
+
+;---------------------------------------------------------------------------------------------------------
+; AppendString appends the string pointed to by A1 to the string pointed
+; to by A0.
+; If a string can't be found, the NoAppend entry point is used.					<24>
+
+AppendString
+	       MOVEQ	#0,D2			;zero high part
+	       MOVE.B	(A1)+,D2		;get the length
+AppStrLoop
+	       MOVE.B	(A1)+,D0		;get next character
+	       BSR.S	AppendChar		;append it
+	       SUBQ	 	#1,D2			;more to do?
+	       BNE.S	AppStrLoop		;loop till done
+NoAppend
+	       RTS						;all done
+
+;---------------------------------------------------------------------------------------------------------
+; Append4 appends the four character string pointed at by A1 to the string
+; pointed to by A3.
+
+Append4
+	       MOVE.L	A3,A0				;get result string ptr
+	       MOVEQ	#4,D2				;4 characters to process
+	       BRA.S	AppStrLoop			;use common code
+
+;---------------------------------------------------------------------------------------------------------
+; The following is a set of common utility routines for setting up the date time.
+;---------------------------------------------------------------------------------------------------------
+; GetTheDate is a utility subroutine shared by the date and time routines
+; The time longInt is passed in the stack frame.
+;
+; It makes a3 point to the result string, sets it to null, gets itl0 handle in a4,
+; and now sets Z if itl0 couldn't be loaded.										<16>
+;---------------------------------------------------------------------------------------------------------
+
+GetTheDate
+			BSR.S	 GetTArray
+			MOVEQ	 #0,D0				;we need INTL 0
+			BRA	 	GetTheINTL			;get resource handle in A4
+										; and set Z if we fail					<16>
+
+;---------------------------------------------------------------------------------------------------------
+GetTArray
+			MOVE.L	 theTime(A6),D0		;get the time (common)					<1/13/88med>
+			LEA	 	YearInteger(A6),A0	;point to word array
+			_Secs2Date					;convert to tractable integers
+
+			; copied from below (6.0.6 fix)										<16>
+			MOVE.L	 result(A6),A3		;get the result string
+			CLR.B	 (A3)				;start it out with length 0
+			RTS
+
+; added new routine for long times <1/13/88med>
+
+;---------------------------------------------------------------------------------------------------------
+GetLArray
+; a4 = intlParam. if nil, we load a new one.
+; d0.w = itlx type from caller (0 or 1).
+; Now sets Z if we can't load the itl resource.									<16>
+
+		; rearrange so Z is set if we can't load handle (6.0.6 fix)				<16>
+		move.w	d0,-(sp)				;save d0								<18>
+		move.l	theTime(A6),-(sp)		; @LongDateTime
+		pea		longDate(A6)			;point to word array
+		_LongSecs2Date					;convert to tractable integers
+
+		MOVE.L	 result(A6),A3			;get the result string
+		CLR.B	 (A3)					;start it out with length 0
+
+		move.w	(sp)+,d0				; restore d0							<18>
+		move.l	a4,d1					; nil handle?
+		beq		GetTheIntl				; if so, get resource handle in A4 (else set Z)
+		rts								; else we have a good handle
+
+;---------------------------------------------------------------------------------------------------------
+; PROCEDURE IULDateString(theTime: Comp; longFlag:BOOLEAN; VAR result: str255; intlParam: Handle);
+; MakeDatPString is an alternate for of MakeDateString added for Randy.  It has
+; an additional parameter, which is the INTL parameter block handle, which it
+; uses instead of getting it from resources.
+;<1/13/88med>	Added
+;---------------------------------------------------------------------------------------------------------
+
+MakeLDatString
+		MOVE.L	(SP)+,D0			;get return address
+		MOVE.L	(SP)+,A0			;get parameter handle
+		MOVE.L	D0,-(SP)			;replace return address
+		LINK	A6,#LocSiz			;get local space					<18Dec85  JTC>
+		MOVEM.L DateTimeRegs,-(SP)	;save work regs						<18Nov86MED>
+		MOVE.L	A0,A4				;keep pBlock in A4
+
+;<6/11/88ldc>	need itl1 or 0 depending on long or short form
+;		seems like longFlag isn't really a flag, but an enumerated type
+;		check on this.
+
+		moveq	#1, d0				; assume itl1
+		tst.b	longFlag(A6)		; long date form?
+		bne.s	@elseGLA			; else just call GetLArray
+		moveq	#0, d0				; itl0
+@elseGLA
+		BSR.s	GetLArray			; included theTime					<1/13/88med>
+		beq		DoneMDS				; bail if we couldn't load itl0/1	<16>
+		bra.s	DateCommon			; jump to common date routine		<1/13/88med>
+
+;---------------------------------------------------------------------------------------------------------
+; PROCEDURE MakeDatePString(theTime: LongInt; longFlag:BOOLEAN; VAR result: str255; intlParam: Handle);
+; MakeDatPString is an alternate for of MakeDateString added for Randy.  It has
+; an additional parameter, which is the INTL parameter block handle, which it
+; uses instead of getting it from resources.
+;---------------------------------------------------------------------------------------------------------
+
+MakeDatPString
+		MOVE.L	(SP)+,D0			;get return address
+		MOVE.L	(SP)+,A0			;get parameter handle
+		MOVE.L	D0,-(SP)			;replace return address
+
+		LINK	A6,#LocSiz			;get local space			     	<18Dec85  JTC>
+		MOVEM.L DateTimeRegs,-(SP)	;save work regs						<18Nov86MED>
+		MOVE.L	A0,d0				; Make sure there is a valid intlParam					<36>
+		bz.s	@getDefaultItl		; Handle was nil.  Go get the default 'itl' resource.	<36><39>
+		move.l	d0,a4				;														<36>
+		tst.l	(a4)				; is it loaded												<39>
+		bne.s	@gotValidHandle		; if so, done												<39>
+		bsr		LockIt				; lock ourselves down										<40>
+		move.l	a4,-(sp)			;															<39>
+		_LoadResource				; else load it												<39>
+		bra.s	@gotValidHandle		;														<36>
+		
+@getDefaultItl						;														<36><39>
+		moveq	#0,d0				; assume 'itl0' resource								<36><39>
+		TST.B	longFlag(A6)		; long or short date?										<39>
+		beq.s	@gotWhichItl		; if short, have correct 'which' param						<39>
+		moveq	#1,d0				; set 'itl1' resource										<39>
+@gotWhichItl						;															<39>
+		bsr		GetTheIntl			;														<36>
+		beq		DoneMDS				; bail if we couldn't load default itl						<39>
+@gotValidHandle						;														<36>
+		BSR.s	GetTArray			; included theTime					<1/13/88med>
+
+; common entry must go to LongerDate, NOT DoLongForm <6/1/88med>
+DateCommon
+		TST.B	longFlag(A6)		; long form? (1,2)					<6/1/88med>
+		BEQ.S	ShorterDate			; no (0)							<6/1/88med>
+		BRA		LongerDate			; long form, have parameter
+
+;---------------------------------------------------------------------------------------------------------
+; table for short date order
+
+OrderTable
+		dc.w	 2,6,4,5,0,$8007	;month, day,	year
+		dc.w	 4,5,2,6,0,$8007	;day,	month,	year
+		dc.w	 0,$8007,2,6,4,5	;year,	month,	day
+		dc.w	 2,6,0,$8007,4,5	;month, year,	day
+		dc.w	 4,5,0,$8007,2,6	;day,	year,	month
+		dc.w	 0,$8007,4,5,2,6	;year,	day,	month
+
+
+;---------------------------------------------------------------------------------------------------------
+; PROCEDURE MakeDateString(theTime: LongInt; longFlag:BOOLEAN; VAR result: str255);
+;
+;   MakeDateString produces a result string from the input parameter based
+;   on the current settings in the international resource block.  It provides
+;   both a long and short form of the date.
+;---------------------------------------------------------------------------------------------------------
+
+MakeDateString
+		LINK	A6,#LocSiz			;get space for our locals		     <18Dec85  JTC>
+		MOVEM.L	DateTimeRegs,-(SP)	;save work registers
+
+		BSR		GetTheDate			;get the date/time integers
+		beq		DoneMDS				; bail if we couldn't load itl0		<16>
+
+;;DateCommon	; moved higher <6/1/88med>
+
+		TST.B	longFlag(A6)		;long or short?
+		BNE.S	DoLongForm			;if long, go do it
+
+; the caller is requesting a short-form date so inspect the parameters in the
+; resource block and build a string for her
+
+ShorterDate
+		MOVEQ	#0,D0					;clear out high part of D0
+		MOVE.L	(A4),A0					;get pBlock ptr
+		MOVE.B	IntlDateOrder(A0),D0	;get order indicator
+		MULU	#12,D0					;multiply by 12 for index
+
+		MOVEQ	#2,D3					;three fields to handle
+		LEA		OrderTable(D0),A2		;point to the order table entry
+
+; here is the loop where we process one field at a time.  The order is
+; determined by the 4 byte/entry table pointed at by A2
+
+DateLoop
+		MOVEQ	#0,D0					;clear out high part
+		MOVE.W	(A2)+,D0				;get date array index
+		MOVE.W	(A2)+,D1				;get flag bit index
+
+		MOVE.L	(A4),A0					;get pBlock ptr
+		BTST	D1,IntlSDLZFlags(A0)	;test the appropriate flag bit
+		SNE		D1						;record the boolean
+
+		MOVE.W	YearInteger(A6,D0),D0	;get the value to append
+		MOVE.L	A3,A0					;get the string ptr
+
+		TST.W	D1						;is it the year command?
+		BPL.S	@1						;if not, skip
+		TST.B	D1						;long form enabled?
+		BNE.S	LongYear1
+
+		DIVU	#100,D0					;compute year mod 100
+		SWAP	D0						;remainder in D0
+@1
+		BSR		AppendNum				;append it
+TestLast
+		TST		D3						;is it the last one?
+		BEQ.S	SkipSep					;the last one doesn't have a separator
+
+; append the separator character
+
+		MOVE.L	(A4),A0					;get pBlock pointer
+		MOVE.B	IntlDSep(A0),D0			;get the separator character
+		MOVE.L	A3,A0					;point A0 at the result string
+		BSR		AppendChar				;append the character in D0
+
+; loop till we've processed all three fields
+
+SkipSep
+		DBRA		D3,DateLoop			;loop until finished
+
+; all done so clean up the stack and go home
+
+DoneMDS
+		BSR		UnlockIt				;unlock the package
+		MOVEM.L	(SP)+,DateTimeRegs		;restore registers					<18Nov86MED>
+		UNLK		A6					;deallocate stck frame
+		MOVE.L	(SP)+,A0				;get the return address
+		ADD		#10,SP					;strip parameters
+		JMP		(A0)					;return to caller
+
+; handle the case of the long year (all four digits)
+
+LongYear1
+		BSR		AppendLongNum
+		BRA.S	TestLast
+
+; handle the long form of the date.  We must get the INTL 1 resource to
+; get all those strings
+
+DoLongForm
+		MOVEQ	#1,D0					;get INTL 1
+		BSR		GetTheINTL				;get the resource
+		beq		DoneMDS					; bail if we couldn't load itl0			<16>
+
+LongerDate
+		MOVE.L	(A4),A2 				; point to record with A2
+
+; generalize the old formats
+
+		move.b	IntlLongOrder(A2),d5	; get the order byte
+		bne.s	@1						; zero, get old format?
+		move.b	#1+0*4+2*16+3*64,d5		; weekday,day,month,year
+		bra.s	@2						; continue
+@1
+		cmp.b	#$FF,d5 				; 255, get old format?
+		bne.s	@2						; continue
+		move.b	#1+2*4+0*16+3*64,d5		; weekday,month,day,year
+@2
+		moveq	#0,d6					; longize
+		move.b	IntlDaySupress(A2),d6	; get suppression byte
+		cmp.b	#$FF,d6 				; old style?
+		bne.s	@3						; no, skip
+		moveq	#2,d6					; suppress day
+@3
+		move.w	#IntlStr1,d7			; get offset
+		lea	0(a2,d7),a1					; point at first prefix
+		move.l	a3,a0					; point at string
+		bsr	Append4 					; and stick it on
+
+LongDateLoop
+		addq.w	#4,d7					; point to next separator
+		move.b	d5,d0					; get part number
+		and.w	#3,d0					; out of the composite
+		lsr.b	#2,d5					; and remove it
+		btst.l	d0,d6					; suppress element?
+		bne.s	@1						; yes, skip
+		add.w	d0,d0					; make word offset
+		lea		LongDispatch,a1 		; get dispatch
+		add.w	0(a1,d0.w),a1			; add offset
+		jsr		(a1)					; call it
+		lea		0(a2,d7),a1				; pass separator
+		bsr		Append4 				; and stick it on
+@1
+		cmp.w	#IntlStr5,d7			; at end yet?
+		blo.s	LongDateLoop			; and loop til done
+		BRA.S	DoneMDS					; all done!
+
+LongDispatch
+		dc.w	LongDay1-LongDispatch		; day
+		dc.w	LongWeekDay-LongDispatch	; weekday
+		dc.w	LongMonth1-LongDispatch		; month
+		dc.w	LongYear2-LongDispatch		; year
+
+LongDay1
+		MOVE.W	DateInteger(A6),D0			;get day of month
+		MOVE.B	IntlLDayLZFlag(A2),D1		;get leading zero supress flag
+		bra	 	AppendNum					;append it and return from there
+
+LongWeekDay
+		MOVE.W	DayInteger(A6),D0			; get the day of week
+		; support for 7.0 itl1 extension										<24>
+		cmp.w	#itl1ExtFlag,localRtn(a2)	; extended itl1?
+		beq.s	@doExt						; if so, handle differently
+		cmp.w	#7,d0						; out of range or negative?
+		bhi.s	NoAppend					; if so, bail
+
+@doOld
+		SUBQ	#1,D0						; make it zero based [0..6]
+		ASL		#4,D0						; multiply by 16
+		LEA		IntlSunday(A2,D0),A1		; get string ptr
+
+		CMP.B	#abbrevDate,longFlag(A6)	; is it abbreviated?
+		BEQ		AbbrevString				; if so, go truncate it				<24>
+		bra		AppendString				; otherwise, append name and return
+
+		; support for 7.0 itl1 extension										<24>
+@doExt
+		cmp.b	#abbrevDate,longFlag(A6)	; is it abbreviated?
+		beq.s	@doExtAbbrev				; if so, deal with it.
+		cmp.w	#7,d0						; in range?
+		bls.s	@doOld						; if so, use old code
+
+		; here we need extra day name
+		subq.w	#7,d0						; extra day number
+		move.l	#itl1XDayOffset,d2			; offset to extra days list
+		bsr		GetListString				; get pointer to name in a1;
+		bge.s	NoAppend					; if no extra day name, bail
+		; here we are pointing to the correct pstring
+		bra		AppendString				; append name and return
+
+@doExtAbbrev
+		; here we need abbrev day name
+		move.l	#itl1AbDayOffset,d2			; offset to abbrev days list
+		bsr.s	GetListString				; get pointer to abbrev in a1;
+		bge.s	@doOld						; if no abbrev, go truncate
+		; here we are pointing to the correct pstring
+		bra		AppendString				; append name and return
+
+LongMonth1
+		MOVE.W	MonthInteger(A6),D0			; get the month
+		; support for 7.0 itl1 extension										<24>
+		cmp.w	#itl1ExtFlag,localRtn(a2)	; extended itl1?
+		beq.s	@doExt						; if so, handle differently
+		cmp.w	#12,d0						; out of range or negative?
+		bhi.s	NoAppend					; if so, bail
+
+@doOld
+		SUBQ	#1,D0						; make it zero based [0..11]
+		ASL		#4,D0						; multiply by 16
+		LEA		IntlJanuary(A2,D0),A1		; get string ptr
+
+		CMP.B	#abbrevDate,longFlag(A6)	; is it abbreviated?
+		BEQ.S	AbbrevString				; if so, go truncate it
+		bra		AppendString				; otherwise, append name and return
+
+		; support for 7.0 itl1 extension										<24>
+@doExt
+		cmp.b	#abbrevDate,longFlag(A6)	; is it abbreviated?
+		beq.s	@doExtAbbrev				; if so, deal with it.
+		cmp.w	#12,d0						; in range?
+		bls.s	@doOld						; if so, use old code
+
+		; here we need extra month name
+		sub.w	#12,d0						; extra month number
+		move.l	#itl1XMonOffset,d2			; offset to extra months list
+		bsr.s	GetListString				; get pointer to name in a1;
+		bge.s	NoAppend					; if no extra month name, bail
+		; here we are pointing to the correct pstring
+		bra		AppendString				; append name and return
+
+@doExtAbbrev
+		; here we need abbrev month name
+		move.l	#itl1AbMonOffset,d2			; offset to abbrev months list
+		bsr.s	GetListString				; get pointer to abbrev in a1;
+		bge.s	@doOld						; if no abbrev, go truncate
+		; here we are pointing to the correct pstring
+		bra		AppendString				; append name and return
+
+LongYear2
+		MOVE.W	YearInteger(A6),D0		;get the year
+		bra		AppendLongNum			;append it and return from there
+
+AbbrevString
+		ADDQ	#1,A1					;bump past length
+		MOVEQ	#0,D2					;clear high part
+		MOVE.B	IntlMonLen(A2),D2		;get month length
+		BRA		AppStrLoop				;append it, return to caller
+
+
+;-------------------------------------------------------------------------------	<24>
+; GetListString
+;
+; Local routine for code saving. Gets a string specified by index in d0 from
+; itl1 table whose offset is in d2.l.
+;
+; input:
+;	string index [1..n] in d0
+;	table offset in d2
+;	itl1 pointer in a2
+; output:
+;	Caller should use bge to branch if failure.
+;	If no failure, string pointer is in a1 
+; effects:
+;	Does not change a0 (current date string pointer)
+;-------------------------------------------------------------------------------
+
+GetListString
+		move.l	0(a2,d2.w),d2				; get offset to list
+		beq.s	@fail						; if none, bail (with nZvc)
+		lea		0(a2,d2.l),a1				; make pointer to list
+		cmp.w	(a1)+,d0					; is our string# in the list?
+		bgt.s	@fail						; if not, bail
+		subq.w	#1,d0						; set up for dbra
+		moveq	#0,d2						; for longizing
+		bra.s	@endLoop
+@loop
+		move.b	(a1)+,d2					; this pstring length
+		add.w	d2,a1						; skip, point to next pstring
+@endLoop
+		dbra	d0,@loop
+		moveq	#-1,d0						; set cond codes to Nzvc
+@fail
+		rts
+
+;---------------------------------------------------------------------------------------------------------
+; PROCEDURE IULTimeString(theTime: Comp; wantSeconds: BOOLEAN; VAR result: str255; intlParam: Handle);
+;
+; MakeTimPString is an alternate entry point for Randy.  It takes the pBlock
+; handle as an additional parameter instead of getting it from resources
+;<1/13/88med>	Added
+;---------------------------------------------------------------------------------------------------------
+
+MakeLTimString
+		MOVE.L	(SP)+,D0 				;get return address
+		MOVE.L	(SP)+,A0 				;get pBlock handle
+		MOVE.L	D0,-(SP)				;replace return address
+
+		LINK	A6,#LocSiz				;get space for our locals			<18Dec85  JTC>
+		MOVEM.L	DateTimeRegs,-(SP)		;save work registers				<18Nov86MED>
+		MOVE.L	A0,A4					;keep pBLock handle in A4
+
+;<6/11/88ldc>	change GetLArray so caller specifies which itlx
+		MOVEQ	#0,D0					;want itl0
+		BSR		GetLArray				; included theTime					<1/13/88med>
+		beq		DoneMDS					; bail if we couldn't load itl0		<16>
+		BRA.s	MTimeCommon				;use common code for the rest
+
+;---------------------------------------------------------------------------------------------------------
+; PROCEDURE MakeTimeString(theTime: LongInt; wantSeconds: BOOLEAN; VAR result: str255; intlParam: Handle);
+;
+; MakeTimPString is an alternate entry point for Randy.  It takes the pBlock
+; handle as an additional parameter instead of getting it from resources
+;---------------------------------------------------------------------------------------------------------
+
+MakeTimPString
+		MOVE.L	(SP)+,D0 				;get return address
+		MOVE.L	(SP)+,A0				;get pBlock handle
+		MOVE.L	D0,-(SP)				;replace return address
+
+		LINK	A6,#LocSiz				;get space for our locals			<18Dec85  JTC>
+		MOVEM.L	DateTimeRegs,-(SP)		;save work registers				<18Nov86MED>
+		MOVE.L	A0,d0					; Make sure there is a valid intlParam					<36>
+		bz.s	@getDefaultItl0			; Handle was nil.  Go get the default 'itl0' resource.	<36><39>
+		move.l	d0,a4					;														<36>
+		tst.l	(a4)					; is it loaded												<39>
+		bne.s	@gotValidHandle			; if so, done												<39>
+		bsr		LockIt					; lock ourselves down										<40>
+		move.l	a4,-(sp)				;															<39>
+		_LoadResource					; else load it												<39>
+		bra.s	@gotValidHandle			;														<36>
+		
+@getDefaultItl0							;														<36><39>
+		moveq	#0,d0					; Get default 'itl0' resource if handle was nil.		<36><39>
+		bsr		GetTheIntl				;														<36>
+		beq		DoneMDS					; bail if we couldn't load default itl0						<39>
+@gotValidHandle							;														<36>
+		BSR		GetTArray				;included theTime					<1/13/88med>
+		BRA.s	MTimeCommon				;use common code for the rest
+
+
+;---------------------------------------------------------------------------------------------------------
+; PROCEDURE MakeTimeString(theTime: LongInt; wantSeconds: BOOLEAN; VAR result: str255);
+;
+;  MakeTimeString produces a result string from the input parameter based
+;  on the current settings in the international resource block.
+;---------------------------------------------------------------------------------------------------------
+
+MakeTimeString
+		LINK	A6,#LocSiz				;get space for our locals			<18Dec85  JTC>
+		MOVEM.L	DateTimeRegs,-(SP)		;save work registers				<18Nov86MED>
+
+		BSR		GetTheDate				;get the date/time integers
+		beq		DoneMDS					; bail if we couldn't load itl0		<16>
+
+; pre-process the hour integer to reflect a 12 or 24 hour time system as
+; indicated in the parameter block
+
+MTimeCommon
+		LEA		HourInteger(A6),A2		;point at the hour number
+		MOVE.W	(A2),D7					;remember it
+		SUB		#12,D7					;subtract 12
+
+		MOVE.L	(A4),A0					;get pointer to pBlock
+		MOVE.B	IntlTLZFlags(A0),D4		;get time leading zero flags
+
+		TST.B	IntlTimeMode(A0)		;12 or 24 hr cycle (or special12)?
+		BEQ.S	@1						;skip if 24
+		bmi.s	@11						; normal 12 hour
+		tst.b	d7						; special 12 hour: is it AM?
+		bmi.s	@1						; yes, skip
+		bra.s	@0						; no, adjust for PM
+
+@11
+		TST		(A2)					;12 AM?
+		BNE.S	@2						;if not, skip
+
+		MOVE.W	#12,(A2)				;12 AM, not 00 AM
+		BRA.S	@1						;skip the rest...
+@2
+		TST.B	D7						;is it AM?
+		BMI.S	@1						;if negative, skip
+		BNE.S	@0						;if non-zero, go update it
+
+		MOVEQ	#12,d7 					;12 PM is not 00 PM
+@0
+		MOVE.W	d7,(A2)					;update hour
+
+; OK, set up the loop count and dive in
+
+@1
+		MOVEQ	#2,D3					;3 times through the loop
+		
+		TST.B	longFlag(A6)			;want seconds?
+		BNE.S	TimeLoop				;if so, we're cool
+		SUBQ	#1,D3					;skip the seconds
+
+TimeLoop
+		MOVE.W	(A2)+,D0				;get the integer
+		MOVE.L	A3,A0					;point to the string
+		TST.B	D4						;test the current LZ flag
+		SMI		D1						;set D1 accordingly
+		BSR		AppendNum				;append the number
+		ADD.B	D4,D4					;shift flags for next time
+
+; now print the separator if necessary
+
+		TST		D3						;the last one?
+		BEQ.S	@1						;if so, skip the separator
+		
+		MOVE.L	(A4),A1					;get pointer to pBlock
+		MOVE.B	IntlTSep(A1),D0			;get the date separator
+		BSR		AppendChar				;append it
+
+; loop until finished
+
+@1
+		DBRA	D3,TimeLoop				;loop 3 times total
+
+; now append a trailing string based on the current hour (AM or PM, etc.)
+		
+		MOVE.L	(A4),A1					;point to pBlock
+		TST.B	IntlTimeMode(A1)		;12 or 24 hr mode?
+		BEQ.S	Mode24					;branch if 24 hr
+		
+		LEA		IntlAMSuffix(A1),A1		;point to suffix string
+ModeCommon
+		TST.B	D7						;AM or PM?
+		BMI.S	AppendTrailer			;if AM, skip
+		ADDQ	#4,A1					;bump to PM
+AppendTrailer
+		BSR		Append4					;append the suffix
+
+; OK, the time string is built so restore the registers and return to the caller
+
+		BRA		DoneMDS					;use common exit code
+
+; use 24-hr trailer
+
+Mode24
+		LEA		Intl24Suffix(A1),A1		;point to suffix string
+		BRA.S	ModeCommon				;use common code
+
+		ENDWITH ;DateTimeFrame
+
+;---------------------------------------------------------------------------------------------------------
+; FUNCTION TestMetric: BOOLEAN;
+;
+;  TestMetric returns TRUE if the current international resource block is
+;  configured for metric.
+;---------------------------------------------------------------------------------------------------------
+
+TestMetric
+		CLR.W	4(SP)					;assume false <fixed offset>		<1/4/88med>
+		
+		move.l	a4,-(sp)				; save a4							<1/4/88med>
+		moveq.l	#0,d0
+		BSR		GetTheIntl				;get it
+		move.l	a4,a0					; intl handle for outside use		<1/4/88med>
+		move.l	(sp)+,a4				; restore a4						<1/4/88med>
+
+		beq		UnlockIt				; bail if GetIntl error				<16>
+		
+		MOVE.L	(A0),A0					;handle to pointer
+		
+		TST.B	IntlMetric(A0)			;is the metric flag set?
+		BEQ.S	@1						;if so, we're done
+		ADDQ.B	#1,4(SP)				;return true			<18Dec85  JTC> <fixed offset> <1/4/88med>
+@1
+		BRA		UnlockIt				;unlock it, return to caller		<18Dec85  JTC><S132>
+
+
+;---------------------------------------------------------------------------------------------------------
+; PROCEDURE ClearCache;
+;
+;  Clears out cache memory for resources, so apps can supply their own itl2/itl4. New.	<1.8>
+;  New implementation for new cache structure.											<9>
+;
+;	Removed the code for handling the internal entry point ClearCacheInt -				<11>
+;	we no longer need it, and it was wrong anyway. Rewrote to use app cache,
+;	creating one if necessary.
+;
+;	No longer create app cache, since it is done in InitScriptApp						<14>
+;---------------------------------------------------------------------------------------------------------
+
+		with	ExpandMemRec,SMgrAppRecord
+; Add new entry point to clear the system cache											<25>
+ClearCacheSys								;											<25>
+		move.l	ExpandMem,a0				; get ExpandMemRec ptr						<25>
+		move.l	emItlSysCachePtr(a0),d0		; get cache pointer							<25>
+		beq.s	ccExit						; if 0, don't do anything					<25>
+		move.l	d0,a0						;											<25>
+		bra.s	ClearCacheCommon			; 											<25>
+ClearCache
+		move.l	ExpandMem,a0				; get ExpandMemRec ptr
+		move.l	emScriptAppGlobals(a0),a0	; get globals handle
+		move.l	a0,d0						; is it 0 (no app-specific ScriptMgr globals)?
+		beq.s	ccExit						; if so, don't do anything
+		addq.l	#1,d0						; is it -1 (no Process Mgr yet, use sys cache)?
+		beq.s	ccExit						; if so, don’t do anything
+
+		move.l	(a0),a0						; dereference - get ptr to globals
+		lea		smgrAppCacheCount(a0),a0	; point to record count
+ClearCacheCommon							;											<25>
+		move.w	(a0)+,d0					; get count, point to cache start
+		moveq	#-1,d1						; for flagging invalid IDs					<41>
+		bra.s	@enterLoop
+@loop
+		addq	#2,a0						; skip script code
+		move.w	d1,(a0)+					; invalid itl2 ID							<41>
+		clr.l	(a0)+						; nil itl2 handle							<41>
+		move.w	d1,(a0)+					; invalid itl4 ID							<41>
+		clr.l	(a0)+						; nil itl4 handle							<41>
+@enterLoop
+		dbra	d0,@loop
+ccExit
+		bra.s	UnlockIt					; unlock it, return to caller
+
+		endwith	;ExpandMemRec,SMgrAppRecord
+
+;---------------------------------------------------------------------------------------------------------
+; PROCEDURE GetItlTable(script:ScriptCode; tableCode: Integer;
+;	VAR itlHandle: Handle; VAR offset: LongInt; VAR length: LongInt);
+;
+;  Permits access to tables in itl2, itl4
+;  <2.0> new
+;---------------------------------------------------------------------------------------------------------
+
+gtRecord		record	{a6link},decr	;
+gtArgs			equ		*-8				; size of arguments
+script			ds.w	1				; script code
+table			ds.w	1				; table selector
+itlHandlePtr	ds.l	1				; address of itlHandle longword
+offsetPtr		ds.l	1				; address of offset longword
+lengthPtr		ds.l	1				; address of length longword
+return			ds.l	1				; return address.
+a6link			ds.l	1				; old link pointer.
+gtLocals		equ	*					; size of local variables.
+				endr					;
+
+GetItlTable
+		with	gtRecord,SMgrRecord,ScriptRecord
+		link	a6,#gtLocals
+		move.l	a2,-(sp)				; save a2
+
+; process script code, check validity
+		move.w	script(a6),d0			; get ScriptCode
+		blt.s	@mapScript				; if special, go map to real script
+		cmp.w	#smgrCount-1,d0			; invalid?
+		ble.s	@gotScript				; if not, we have a good script code
+		bra		@gtError				; otherwise, bail
+@mapScript
+		add.w	#1,d0					; is it iuSystemScript (-1)?
+		blt.s	@getCurrent				; no, check for other codes
+		GetSMgrCore a0					; get SMgrRecord pointer
+		move.w	smgrSysScript(a0),d0	; get system script
+		bra.s	@gotScript
+@getCurrent
+		add.w	#1,d0					; is it iuCurrentScript (-2)?
+		blt		@gtError				; no, bail
+		subq.w	#2,sp					; leave space for returned script
+		_FontScript						; NOT IntlScript
+		move.w	(sp)+,d0
+
+; OK, we have a good script code in d0, use it to get ScriptRecord
+@gotScript
+		lsl.w	#2,d0					; make script code a long offset
+		GetSMgrCore a0					; SMgrRecord pointer
+		move.l	smgrEntry(a0,d0.w),d0	; script's ScriptRecord pointer
+		beq		@gtError				; bail if not installed
+		move.l	d0,a0					; copy
+		tst.b	scriptEnabled(a0)		; script enabled?
+		beq		@gtError				; bail if not
+
+; If table selector ok, use it to locate resource info.
+		move.w	table(a6),d1			; get table selector
+		lea		TableLocator,a2			; point to locator table (1st wd is max)	<17>
+		cmp.w	(a2)+,d1				; too big (unsigned)?						<17>
+		bhi		@gtError				; if so, bail
+		add.w	d1,d1					; mult by 2
+		move.w	d1,d0					; copy
+		add.w	d1,d0
+		add.w	d1,d0					; now it is multiplied by 6
+		add.w	d0,a2					; now point to info for correct table
+		tst.w	(a2)+					; which resource?
+		bne.s	@getitl4
+
+; Get itl2 info
+		subq	#4,sp					; space for returned handle
+		move.l	#'itl2',-(sp)			; push resource type
+		move.w	scriptBundle.itlbSort(a0),-(sp) ; push resource ID
+		bsr		LockIt					; lock the package!!					<2.2>
+		_GetResource
+		move.l	(sp)+,d0				; get itl2 handle
+		beq.s	@gtError				; bail if nil
+
+; OK, we're cool. Get offset and length from resource.
+		move.l	d0,a1					; copy resource handle
+		move.l	(a1),d0					; resource pointer						<43>
+		beq.s	@gtError				; bail if resource not loaded			<43>
+		move.l	d0,a0					; copy pointer							<43>
+		move.w	(a2)+,d0				; get offset for offset!
+		moveq	#0,d1					; for longizing
+		move.w	0(a0,d0.w),d1			; get offset
+		move.w	(a2)+,d0				; get offset for length
+		moveq	#0,d2					; for longizing
+		move.w	0(a0,d0.w),d2			; get length
+		bra.s	@gtSetResult
+
+; Get itl4 info
+@getItl4
+		subq	#4,sp					; space for returned handle
+		move.l	#'itl4',-(sp)			; push resource type
+		move.w	scriptBundle.itlbToken(a0),-(sp) ; push resource ID
+		bsr		LockIt					; lock the package!!					<2.2>
+		_GetResource
+		move.l	(sp)+,d0				; get itl2 handle
+		beq.s	@gtError				; bail if nil
+
+; OK, we're cool. Get offset and length from resource.
+		move.l	d0,a1					; copy resource handle
+		move.l	(a1),d0					; resource pointer						<43>
+		beq.s	@gtError				; bail if resource not loaded			<43>
+		move.l	d0,a0					; copy pointer							<43>
+		move.w	(a2)+,d0				; get offset for offset!
+		move.l	0(a0,d0.w),d1			; get offset
+		move.w	(a2)+,d0				; get offset for length
+		moveq	#0,d2					; for longizing
+		move.w	0(a0,d0.w),d2			; get length
+
+; now we have handle in a1, offset in d1, length in d2; set result.
+@gtSetResult
+		move.l	itlHandlePtr(a6),a0
+		move.l	a1,(a0)
+		move.l	offsetPtr(a6),a0
+		move.l	d1,(a0)
+		move.l	lengthPtr(a6),a0
+		move.l	d2,(a0)
+
+		move.l	(sp)+,a2				; restore a2
+		unlk	a6						; unlink stack
+		move.l	(sp)+,a0				; pop return addr
+		add.w	#gtArgs,sp				; kill args
+		move.l	a0,-(sp)				; push return addr
+		bra.s	UnlockIt				; unlock it, return to caller
+
+@gtError
+		moveq	#0,a1					; make handle nil
+		moveq	#0,d1
+		moveq	#0,d2
+		bra.s	@gtSetResult
+		endwith	;gtRecord,SMgrRecord,ScriptRecord
+
+TableLocator
+		with	nItl4Rec				;										<4>
+		dc.w	iuWhiteSpaceList		; max selector							<17><19>
+		;	0/1 for itl2/4,offset for offset,offset for length
+		dc.w	0,wordTableOffset,wordTableLen	; WordSelectTable
+		dc.w	0,wrapTableOffset,wrapTableLen	; WordWrapTable
+		dc.w	1,defPartsOffset,defPartsLength	; NumberPartsTable
+		dc.w	1,unTokenOffset,unTokenLength		; unTokenTable				<17>
+		dc.w	1,whtSpListOffset,whtSpListLength	; whiteSpaceList			<19>
+		endwith
+
+;---------------------------------------------------------------------------------------------------------
+; GetTheINTL is an internal entry point for GetIntl.  It expects the 'which'
+; parameter in d0 and returns the resource handle in a4.
+; It now also returns Z set if GetIntl failed.								<16>
+;---------------------------------------------------------------------------------------------------------
+
+GetTheINTL
+		with	ExpandMemRec				;										<40>
+		sub.l	#4,sp						; make room for the handle.
+		move.w	d0,-(sp)					; push 'which' argument.
+		move.l	ExpandMem,a4				; ExpandMem ptr							<40>
+		addq.b	#1,emItlDontUnlockYet(a4)	; say this is internal call				<40>
+		bsr.s	GetIntl						; get the ITLx resource.				<40>
+		subq.b	#1,emItlDontUnlockYet(a4)	; end of internal call					<40>
+		move.l	(sp)+,a4					; copy result to a4.
+		move.l	a4,d0						; is handle ok? set cond codes			<16>
+		rts									; return to the caller.
+		endwith	;ExpandMemRec				;										<40>
+
+;---------------------------------------------------------------------------------------------------------
+; Cache memory for resources. Three records comprise the cache, one for each of
+; three international resources. These records will be checked before
+; performing a GetResource.
+;---------------------------------------------------------------------------------------------------------
+cache		record	0
+theID		ds.w	1
+theHandle	ds.l	1
+			endr
+
+; offsets in expandMem. 0 means don't cache, -1 means doesn't exist			<2/5/88med>
+			with	ExpandMemRec
+CacheOffset
+			with	NewItlCacheRec
+			dc.b	0,	0,	itl2Id, -1, itl4Id, 0		; offsets in NewItlCacheRec	<9><38>
+			endwith
+			align	2
+
+;---------------------------------------------------------------------------------------------------------
+; FUNCTION GetIntl(which: INTEGER): Handle;
+;
+; GetIntl returns a handle to the international parameter block specified
+; by the "which" parameter and the resource id numbers kept in the Script
+; Manager globals.
+; 5/15/87 <daan> Extensive revisions to cache the Intl block handle and call
+; 	LoadResource when possible.
+;---------------------------------------------------------------------------------------------------------
+
+giRecord	record	{a6link},decr	;
+result		ds.l	1				; handle to intl block.
+which		ds.w	1				; which argument.
+return		ds.l	1				; return address.
+a6link		ds.l	1				; old link pointer.
+state		ds.w	1				; old lock state.
+
+sAppGlobHnd	ds.l	1				; handle to app script globals & itl cache	<10><14>
+sysFlag		ds.w	1				; non-zero => use sys itl cache				<11>
+saveRefNum	ds.w	1				; saved ref num of current resource file	<24>
+saveResLoad	ds.b	1				; saved value of ResLoad at entry			<43><45>
+			ds.b	1				; filler										<45>
+
+giLocals	equ	*					; size of local variables.
+			endr					;
+
+
+GetIntl1Regs	reg		a3/a4/d3-d5	; define regs								<11>
+
+
+		with	giRecord			;
+GetIntl
+
+; Link the stack and clear the result.  If the 'which'
+; argument is illegal, return immediately.
+
+		link	a6,#giLocals			; link the stack.
+		movem.l	GetIntl1Regs,-(sp)
+		clr.l	result(a6)				; clear result handle.
+
+;		clr.l	sAppGlobHnd(a6)			;										<10><26>
+		clr.w	sysFlag(a6)				; use app cache							<11>
+	
+		move.w	#resNotFound,ResErr		; assume illegal 'which' arg		<16>
+
+		move.w	which(a6),d0			; load 'which' argument.
+		cmp.w	#IntlMaxID,d0			; which > IntlMaxID?
+		bhi		FailIntl				; yes -> bail out.
+
+; Do not use cache if expandMem version is not correct.						<3/21/88med>
+; Don't bother testing anymore, it is always there in 7.0.					<9>
+
+		clr.l	d3						; longize
+
+		move.b	CacheOffset(d0.w),d3	; get offset						<3/21/88med>
+		blt		FailIntl				; no resource, bail					<2/5/88med>
+
+; Get the new ITLx resource if it exists.  The resource type is calculated
+; by adding the 'which' parameter to the base type, ITL0.  The resource id
+; number is found in the script bundle of the current IntlScript.
+;
+; If the smgrIntlForce flag is on (which is most of the time), we know that IntlScript
+; will force the script to the system script. So, if we do it here, we can avoid
+; the a5 dependence of IntlScript (by doing this, however, the smgrForced and smgrDefault
+; flags will not be set as they would have with IntlScript). The reason for doing this
+; is to make GetIntl independent of the a5 world for most cases (i.e., when IntlForce is
+; on <02/22/89 pke>.
+
+NewIntl
+		subq.l	#2,sp						; make room for IntlScript result		<9>
+
+		with	SMgrRecord,ScriptRecord		;										<9>
+
+		GetSMgrCore a0						; load script manager globals.			<02/22/89 pke>
+		move.b	smgrIntlForce(a0),d0		; load IntlForce flag.					<02/22/89 pke>
+		beq.s	@DoIntlScr					; if 0, call IntlScript					<02/22/89 pke>
+		move.w	smgrSysScript(a0),d0		; otherwise, use system script			<02/22/89 pke>
+		move.w	d0,(sp)						; arg for _GetScript					<02/22/89 pke>
+		bra.s	@HaveScript					;										<02/22/89 pke>
+@DoIntlScr									;										<02/22/89 pke>
+
+		_IntlScript							; get the IntlScript code.
+@HaveScript									; now script code is on stack			<02/22/89 pke>
+											;										<9>
+		move.w	(sp)+,d0					; get script code
+		move.w	d0,d2						; save in d2
+		GetSMgrCore	a0						; get SMgrRecord pointer
+		lsl.w	#2,d0						; make long offset
+		move.l	smgrEntry(a0,d0.w),a1		; get ScriptRecord pointer
+		move.w	which(a6),d0				; load 'which' argument.
+		add.w	d0,d0						; make word offset
+		move.w	scriptBundle(a1,d0.w),d4	; get resource id
+
+		endwith	;SMgrRecord,ScriptRecord	;										<9>
+
+GetIntlCommon								; code shared with GetScriptItl			<11>
+
+		clr.w	ResErr						; now assume no errs					<16>
+		clr.l	sAppGlobHnd(a6)				; nothing to lock/unlock				<26>
+		move.b	ResLoad,saveResLoad(a6)		; save orig value of ResLoad			<43><45>
+		bne.s	@doneSetResLoad				; if already TRUE, no need to set		<43><45>
+		move.l	ExpandMem,a0				; ExpandMem ptr							<43><45>
+		tst.b	emItlDontUnlockYet(a0)		; if this is external call...			<43><45>
+		beq.s	@doneSetResLoad				; ...don't change ResLoad				<43><45>
+		st		ResLoad						; else set it TRUE						<43><44>
+@doneSetResLoad								;										<43>
+
+; skip cache if id = 0,1; since MacWrite breaks it <1/19/88med>
+
+		tst.w	d3							; no cache?
+
+		beq		GotNoCache					; bail									<1/19/88med>
+
+; Set up a4 to point to the right place. Assumes script code in d2 (not true for	<9>
+; all settings of conditionals! Need to fix them up some more).
+; Rewrote this (down through @gotCachePtr) to use new ItlAppCache. I also			<10>
+; eliminated the code that cleared the new cache if someone had tried to
+; clear the old one, since no developers know how to clear the old cache.
+
+		with	SMgrAppRecord				;												<14>
+		move.l	Expandmem,a4
+		tst.w	sysFlag(a6)					; use sys cache?								<11>
+		bne.s	@useSysCache				; if flag says yes, go do it					<11>
+		move.l	emScriptAppGlobals(a4),a1	; get handle to globals							<14>
+		move.l	a1,d0						; is it 0 (no app-specific ScriptMgr globals)?
+		beq.s	@useSysCache				; if so, use sys cache							<14>
+		addq.l	#1,d0						; is it -1 (no Process Mgr yet, use sys cache)?
+		beq.s	@useSysCache				; if so, use sys cache
+		move.l	a1,sAppGlobHnd(a6)			; save handle for lock/unlock
+		move.l	(a1),a1						; dereference - get ptr to globals & app cache
+		lea		smgrAppCacheCount(a1),a1	; point to record count							<14>
+		bra.s	@gotCachePtr
+		endwith	;SMgrAppRecord				;												<14>
+
+@useSysCache
+		move.l	emItlSysCachePtr(a4),a1		; get pointer to sys itl cache
+;		clr.l	sAppGlobHnd(a6)				; nothing to lock/unlock				<26>
+		move.w	#-1,sysFlag(a6)				; we are now using the sys cache		<26>
+
+@gotCachePtr
+		with	NewItlCacheRec
+		move.w	(a1)+,d0					; get record count, point to cache start
+		move.l	a1,a4						; work with copy
+		bra.s	@endLoop					; decrement for dbra, test for 0
+@loop
+		cmp.w	(a4),d2						; is this rec for this script
+		beq.s	@a4SetupDone
+		adda.w	#newItlCacheRecSize,a4		; skip to next record
+@endLoop
+		dbra	d0,@loop
+		move.l	a1,a4						; oops, we failed, set to first entry
+@a4SetupDone
+		add.w	d3,a4						; select itl2 or itl4 handle
+		endwith	;NewItlCacheRec
+
+; continue on for good citizens <1/19/88med>
+
+		MOVE.W	cache.theID(a4),d0		; check cached ID							<41>
+		cmp.w	#-1,d0					; is it -1 (invalid)?						<41>
+		beq.s	@gotID					; if so, use value in d4 from ScriptRecord	<41>
+		move.w	d0,d4					; else use cached ID						<41>
+@gotID									;											<41>
+		MOVE.L	cache.theHandle(a4),d0	; do we have a handle?
+		BEQ.S	GotNoCache				; too bad
+		; skip old branch to make all caches immune to ID changes unless cleared	<24><25>
+
+IsCache
+		MOVEA.L	d0,a0					; get in addr reg
+		MOVE.L	a0,result(a6)			; assume cache is ok				<2/5/88med>
+		TST.L	(a0)					; if ptr's ok, skip this nonsense
+		BNE		DoneIntl				; don't bother unlocking			<2/5/88med>
+		MOVE.L	a0, -(sp)				; push the handle for load
+		BSR		LockIt					; take the plunge
+										;									<10>
+		move.l	sAppGlobHnd(a6),d0		; do we need to lock script app globals?
+		beq.s	@noLock					; if not, skip
+		move.l	d0,a0
+		_HLock
+@noLock
+		_LoadResource					; load 'em up
+
+		tst.w	ResErr					; any errs?							<16>
+		beq.s	UnlockIntl				; go finish up if not				<16>
+		clr.l	result(a6)				; if so, clear returned handle		<16>
+
+		BRA.S	UnlockIntl				; unlock
+
+GotNoCache
+		SUBQ.L	#4, sp					; room for getresource handle
+		CLR.L	d0						; clean up high word
+		move.w	which(a6),d0			; load 'which' argument.
+		add.l	#'itl0',d0				; load base type.
+		move.l	d0,-(sp)				; push resource type.
+		MOVE.W	d4,-(sp)				; push resource id					<2/5/88med>
+
+; Whatever resource we decided to load, go get it and return the resulting handle.
+
+		BSR		LockIt
+										;									<10>
+		tst.w	sysFlag(a6)				; get system resources?				<26>
+		beq.s	@setupApp				; if not, do app setup				<26>
+		move.w	CurMap,saveRefNum(a6)	; save current resource file		<24>
+		clr.w	-(sp)					; use system						<24>
+		_UseResFile						;									<24>
+		bra.s	@doneSetup				;									<24>
+@setupApp								;									<26>
+		move.l	sAppGlobHnd(a6),d0		; need to lock script app globals?
+		beq.s	@doneSetup				; if not, all done					<24><26>
+		move.l	d0,a0
+		_HLock
+@doneSetup
+		_GetResource					; get the param block.
+
+										;									<24>
+		move.l	(sp)+,d0				; did we get a handle?				<24>
+		tst.w	ResErr					; error reported?					<45>
+		beq.s	@noResErr				; if not, go check handle			<45>
+		clr.l	d0						; if so, force handle to NIL		<45>
+		bra.s	@doneErrChk				; 									<45>
+@noResErr								; here, no error was reported		<45>
+		tst.l	d0						; but check if handle is NIL		<45>
+		bne.s	@doneErrChk				; if not, ResErr is OK				<45>
+		move.w	#resNotFound,ResErr		; otherwise, make it useful			<16>
+@doneErrChk								;									<16>
+
+		tst.w	d3						; no cache?
+		beq.s	FinishIntl				; done.
+		MOVE.W	d4,cache.theID(a4)		; update theID (from stack)			<2/5/88med>
+
+;;;		MOVE.L	d0,cache.theHandle(a4)	; cache the handle (no more!!)		<24><41>comment out
+
+; Restore the state and unlock the package if necessary.
+; Unlink the stack and return to the caller.
+
+FinishIntl
+										;									<24>
+		MOVE.L	d0, result(a6)			; also return the handle			<24>
+		tst.w	sysFlag(a6)				; get system resources?				<26>
+		beq.s	@doneRestore			; if not, skip restore				<26>
+		move.w	saveRefNum(a6),-(sp)	; restore saved resource file		<24><26>
+		_UseResFile						;									<24><26>
+@doneRestore							;									<26>
+
+UnlockIntl
+										;									<10>
+		move.l	sAppGlobHnd(a6),d0		; need to unlock script app globals?
+		beq.s	@doneAppCleanup			; if not, done app cleanup			<24><26>
+		move.l	d0,a0
+		_HUnlock
+; Moved CurMap restore to FinishIntl										<26>
+@doneAppCleanup							;									<26>
+DoneIntl								; move above Unlock call			<41>
+		move.b	saveResLoad(a6),ResLoad	; restire orig ResLoad				<43><45>
+FailIntl								; move above Unlock call			<41>
+		BSR	    UnlockIt
+		movem.l	(sp)+,GetIntl1Regs
+		unlk	a6						; unlink the stack.
+		move.l	(sp)+,a0				; pop return address.
+		add.l	#2,sp					; pop the arguments.
+		jmp		(a0)					; return to the caller.
+
+;---------------------------------------------------------------------------------------------------------
+; GetScriptItl																<11><21>
+;
+; FUNCTION IUGetScriptItl(theID: INTEGER; script: ScriptCode; sysFlag: INTEGER): Handle;
+;
+; The following routine is a special interface to GetIntl. In addition
+; to the usual 'which' parameter, it expects:
+;	script: ScriptCode, which may be a special negative code
+;	sysFlag: 0 for app cache, -1 for sys cache
+;
+; The following code performs the relevant operations from the initial part of
+; GetIntl, modified as necessary, then rejoins GetIntl for the stuff we need.
+
+GetScriptItl
+		move.l	(sp)+,a0				; pop return address				<21>
+		move.w	(sp)+,d1				; pop sysFlag						<21>
+		move.w	(sp)+,d0				; pop script						<21>
+		move.l	a0,-(sp)				; push return address				<21>
+
+; Now stack is set up like entry to GetIntl, so we can do the link.
+; We also have script in d0, sysFlag in d1
+		link	a6,#giLocals			; link the stack.
+		movem.l	GetIntl1Regs,-(sp)
+		clr.l	result(a6)				; clear result handle.
+
+;		clr.l	sAppGlobHnd(a6)			;								comment out <26>
+		move.w	d1,sysFlag(a6)			;									<21>
+
+		move.w	#resNotFound,ResErr		; assume illegal 'which' arg		<21>
+
+		move.w	which(a6),d2			; load 'which' argument.			<21>
+		cmp.w	#IntlMaxID,d2			; which > IntlMaxID?				<21>
+		bhi.s	FailIntl				; yes -> bail out.					<21>
+
+		clr.l	d3						; longize
+
+		lea		CacheOffset,a0			; point to table of offsets			<21>
+		move.b	0(a0,d2.w),d3			; get cache offset from table		<21>
+		blt		FailIntl				; no resource, bail					<21>
+
+; we still have ScriptCode in d0. Map it to real code, check that script	<21>
+; is installed and enabled, end up with script code in d2, resource ID
+; in d4. Leave a4 alone.
+
+		with	SMgrRecord,ScriptRecord			;
+		bsr		intScriptCodeToReal				; map it to real script code
+		cmp.w	#smgrCount-1,d0					; valid?
+		bhi.s	FailIntl						; if not, bail
+		move.w	d0,d2							; save in d2
+		lsl.w	#2,d0							; make script code a long offset
+		GetSMgrCore a0							; SMgrRecord pointer
+		move.l	smgrEntry(a0,d0.w),d0			; ScriptRecord ptr. Script installed?
+		beq.s	FailIntl						; if not, can't get resource ID
+		move.l	d0,a1							;
+		tst.b	scriptEnabled(a1)				; script enabled?
+		beq.s	FailIntl						; if not, bail
+		move.w	scriptBundle.itlbSort(a1),d4	; itl2 resource id
+		endwith	;SMgrRecord,ScriptRecord		;
+
+; now we have script code in d2, cache offset in d3, resource ID in d4,
+; and stack frame set up as needed. Rejoin main GetIntl code.
+		bra.s	GetIntlCommon			; go get itl2 handle
+
+		endWith	;giRecord
+		endWith	;ExpandMemRec
+
+
+;---------------------------------------------------------------------------------------------------------
+; PROCEDURE SetIntl(resFile: INTEGER; theID: INTEGER; theBlock: Handle);
+;
+;   SetIntl appends (or replaces) an INTL parameter block in the resource
+; file specified by the "resFile" parameter.
+;---------------------------------------------------------------------------------------------------------
+;
+siRecord	record	{a6link},decr	; Added frame 					<1/25/88med>
+resFile		ds.w	1				; resource file
+theId		ds.w	1				; 0,1
+theBlock	ds.l	1				; handle						<7/11/88ldc> change from w to l
+return		ds.l	1				; return address.
+a6link		ds.l	1				; old link pointer.
+siLocals	equ		*				; size of local variables.
+			endr					;
+SetIntlRegs	reg	D3-D5/A3			;								<18Nov86MED>
+
+SetIntl
+		with	siRecord
+		link	a6,#siLocals		; allocate									<1/25/88med>
+		BSR	    LockIt
+		MOVEM.L	SetIntlRegs,-(SP)	;save work registers						<30Dec85  JTC>
+;		MOVE.L	theBlock(SP),A0		;get the block handle (was 24 when D1...)	<18Dec85  JTC>
+;		MOVEM.W	24(SP),D3-D4		;get the ID and resFile (was 28 when D1...)	<18Dec85  JTC>
+		move.w	resFile(a6),d4		; get resource file							<1/25/88med>
+
+		bne.s	@doneFixRequest		;if nonzero, it is a real refNum			<31>
+		move.w	SysMap,d4			;else map it to real refNum for System		<31>
+@doneFixRequest						;now we have real refNum					<31>
+
+		move.w	theId(a6),d3		; get id									<1/25/88med>
+		move.l	theBlock(a6),a0		; get the block handle						<1/25/88med>
+
+; copy the INTL parameter block into a new handle
+
+		_HandToHand					;clone the handle
+		MOVE.L	A0,A3				;keep the clone in A3
+
+; remember the current resFile and make this one the current one
+
+		SUBQ	#2,SP				;make room for result
+		_CurResFile					;remember it on the stack
+		
+		MOVE.W	D4,-(SP)			;push the resFile
+		_UseResFile					;use this one
+
+; determine if this resource is already in the file; if it is, remove it
+
+		SUBQ	#4,SP				;make room on stack
+		MOVE.L	#'INTL',-(SP)		;push the INTL type
+		MOVE.W	D3,-(SP)			;push the ID
+		_GetResource				;get the resource
+		MOVE.L	(SP)+,D5			;did we get it?
+		BEQ.S	@GoAddIt			;if not, we're cool
+
+; unfortunately, there's already one there, but it might not be in our
+; particular file.  Check this out using HomeResFile
+
+		SUBQ	#2,SP				;make room for result
+		MOVE.L	D5,-(SP)			;push the handle
+		_HomeResFile				;see where it came from
+
+		move.w	(sp)+,d0			;get the old INTL's file refNum				<31>
+		bne.s	@doneFixHome		;if nonzero, it is a real refNum			<31>
+		move.w	SysMap,d0			;else map it to real refNum for System		<31>
+@doneFixHome						;now we have real refNum for old INTL		<31>
+		cmp.w	d0,d4				;same as caller's refNum?					<31>
+
+		BNE.S	@GoAddIt			;if not, we're cool
+
+; better remove the resource
+
+		MOVE.L	D5,-(SP)			;push the handle
+		_RmveResource 				;remove it
+
+; O.K., now we can add the resource to our file
+
+@GoAddIt
+		MOVE.L	A3,-(SP)			;push the handle to be added
+		MOVE.L	#'INTL',-(SP)		;push the type
+		MOVE.W	D3,-(SP)			;push the ID
+		PEA		EmptyString 		;push NIL string for name
+		_AddResource
+
+; make sure we make it purgable
+
+		MOVE.L	A3,-(SP)			;push the handle
+
+		MOVE.W	#resPurgeable,-(SP)	;purgeable								<31>
+		_SetResAttrs				;set attributes							<31>
+		MOVE.L	A3,-(SP)			;push the handle again					<31>
+		_ChangedResource			;mark it changed (the right way)		<31>
+
+; better update the resFile to make sure it gets written out
+
+		MOVE.W	D4,-(SP)			;push resFile refNum
+		_UpdateResFile				;update it
+		
+		MOVE.L	A3,A0				; pass the handle						<3/2/87med>
+		_HPurge						; make it really purgable				<3/2/87med>
+;		BSET	#6,(A3)				;make it really purgable				<3/2/87med>
+
+; all done with SetINTL; clean up the stack and go home
+
+		_UseResFile					;restore old resFile
+
+		MOVEM.L	(SP)+,SetIntlRegs	;restore work registers					<30Dec85  JTC>
+		unlk	a6					; deallocate frame						<1/25/88med>
+		BSR		UnlockIt
+		MOVE.L	(SP)+,A0			;get the return address
+		ADDQ	#8,SP				;strip parameters
+		JMP		(A0)				;return to caller
+
+		endwith	;siRecord			;										<11>
+
+;------------------------------------------------------------------------
+; Interscript sorting <1.8>
+;
+; FUNCTION ScriptOrder(script1, script2: ScriptCode): Integer;
+;
+;	For now, this sorts system script first and sorts the rest in
+;	numerical order of script code. A script code of iuSystemScript
+;	is mapped to the system script.
+;
+; FUNCTION LangOrder(language1, language2: LangCode): Integer;
+;
+;	This sorts languages in different scripts by the script. Languages
+;	in the same script are, for now, just sorted in numerical order.
+;
+; FUNCTION TextOrder(aPtr, bPtr: Ptr; aLen, bLen: Integer; aScript,
+;		bScript: ScriptCode; aLang, bLang: LangCode): Integer;
+;
+;	This calls ScriptOrder on the scripts and returns that result if
+;	nonzero; otherwise it calls LangOrder on the languages and returns
+;	that result if nonzero; otherwise it gets the itl2 for the script,
+;	and calls MagPString with that itl2 handle, returning the MagPString
+;	result.
+;------------------------------------------------------------------------
+bignum			equ	32767			; largest positive int
+noScriptFlag	equ	bignum
+tableHeaderSize	equ	4				; header size in script & font map tables	<9>
+
+ScriptOrder
+		move.l	(sp)+,a1			; save return addr
+		move.w	(sp)+,d2			; get script 2
+		move.w	(sp)+,d1			; get script 1
+		move.l	a1,-(sp)
+		bsr.s	intScriptOrder
+		bra.s	OrderExit
+LangOrder
+		move.l	(sp)+,a1			; save return addr
+		move.w	#noScriptFlag,d2	; no associated script
+		swap	d2					; put in high word
+		move.w	(sp)+,d2			; get lang 2
+		move.w	#noScriptFlag,d1	; no associated script
+		swap	d1					; put in high word
+		move.w	(sp)+,d1			; get lang 1
+		move.l	a1,-(sp)
+		bsr.s	intLangOrder
+OrderExit
+		move.w	d0,4(sp)			; set result
+		bra.s	UnlockIt			; return from UnlockIt
+
+;---------------------------------------------------------------
+; intScriptOrder
+; On entry, d1 & d2 contain ScriptCode in low word
+; On exit, d0.w contains order result, with cond codes N and Z set appropriately.
+; Uses a0-a1,d0-d2, plus saved a2/d3-d4
+;
+intScriptOrder
+		with	ExpandMemRec				;								<9>
+		movem.l	a2/d3-d4,-(sp)				; save regs						<9>
+		cmp.w	d1,d2						; are scripts equal?			<9>
+		beq.s	commonOrderEqual			; if so, save a lot of work		<9>
+intScriptOrderForLangs						; entry point with regs saved	<9>
+		move.l	ExpandMem,a2				; get ExpandMem ptr				<9>
+		move.l	emScriptMapPtr(a2),a2		; get script map data ptr		<9>
+		move.w	d2,d4						; save script2
+		move.w	d1,d0						; set up to map script1
+		bsr		intScriptCodeToSort			; map it to sort position		<9>
+		move.w	d0,d3						; save mapped value
+		move.w	d4,d0						; set up to map script2
+		bsr		intScriptCodeToSort			; map it to sort position		<9>
+		move.w	d0,d4						; save mapped value
+
+; intScriptCodeToSort has mapped system script to 0 so it sorts first		<9>
+
+		endwith	;ExpandMemRec
+		bra.s	commonOrder
+
+;---------------------------------------------------------------
+; intLangOrder
+; On entry, d1 & d2 contain LangCode in low word, assoc ScriptCode in high word.
+; On exit, d0 contains order result, with cond codes N and Z set appropriately.
+; Uses a0-a1,d0-d2, plus saved a2/d3-d4
+;
+intLangOrder
+		with	ExpandMemRec				;								<9>
+		movem.l	a2/d3-d4,-(sp)				; save regs						<9>
+		cmp.l	d1,d2						; are langs equal?				<9>
+		beq.s	commonOrderEqual			; if so, save a lot of work		<9>
+		move.l	ExpandMem,a2				; get ExpandMem ptr				<9>
+		move.l	emLangMapPtr(a2),a2			; get lang map data ptr			<9>
+		move.l	d2,d4						; save lang2/script2
+		move.l	d1,d0						; set up to map lang1
+		bsr		intLangCodeToScript			; map to real script code		<9>
+		move.l	d0,d3						; save mapped value
+		move.l	d4,d0						; set up to map lang2
+		bsr		intLangCodeToScript			; map to real script code		<9>
+
+; If real script codes are different, then return sorting order for
+; the scripts.
+		cmp.w	d3,d0					; how do we look?					<9>
+		beq.s	@mapLangs				; if same, go map langs.			<9>
+		move.w	d3,d1					; set up for intScriptOrderForLangs	<9>
+		move.w	d0,d2					; "									<9>
+		bra.s	intScriptOrderForLangs	;									<9>
+
+; Scripts are identical. If lang codes in d0 hi are too, return 0.
+@mapLangs
+		cmp.l	d3,d0					; look at everything.
+		beq.s	commonOrderEqual		; if identical, save some work
+		
+		bsr		intLangScriptToSort		; map lang & script info to sort position	<9>
+		move.w	d0,d4					; save it
+		move.l	d3,d0
+		bsr		intLangScriptToSort		; map lang & script info to sort position	<9>
+		move.w	d0,d3					; save it
+
+; fall through to commonOrder
+		endwith	;ExpandMemRec			;									<9>
+
+;---------------------------------------------------------------
+; now return ordering of scripts/langs
+commonOrder
+		moveq	#-1,d0				; assume item1 < item2
+		cmp.w	d4,d3				; what's the real scoop?
+		blt.s	@2					; if as assumed, we're done
+		bgt.s	@1					; if item1 > item2, deal with it
+		clr.w	d0					; that leaves item1 = item2
+		bra.s	@2					; and we're done
+@1		moveq	#1,d0				; handling item1 > item2
+@2		;tst.w	d0					; not necessary
+commonOrderExit
+		movem.l	(sp)+,a2/d3-d4		; restore temp regs
+		rts
+commonOrderEqual					;										<9>
+		clr.w	d0					; item1 = item2
+		bra.s	commonOrderExit
+
+;---------------------------------------------------------------
+; Map ScriptCode value to sort position.
+; At entry, d0 contains ScriptCode. a2 points to script map data table.
+; At exit, d0 contains sorting position.
+; Uses a0-a1,d0-d2.
+; Invalid ScriptCodes are mapped to a large number.
+;
+
+intScriptCodeToSort
+		tst.w	d0
+		bge.s	@gotScript				; if non-negative, get sort position
+
+		addq.w	#1,d0					; is it iuSystemScript (-1)?
+		beq.s	@doneMap				; if it is, already have result
+		addq.w	#1,d0					; is it iuCurrentScript (-2)?
+		bne.s	@doErr					; no, return error result
+ 		subq	#2,sp					; leave space for returned script
+		_RealScript						; NOT IntlScript. Change FontScript to RealScript	<33>
+		move.w	(sp)+,d0
+
+; Now have real script code in d0.w, map it to sort position.
+@gotScript
+		cmp.w	(a2),d0					; is our code past end of table?
+		bgt.s	@doErr					; if so, bail
+		lsl.w	#2,d0						; make a long offset
+		move.w	tableHeaderSize(a2,d0.w),d0	; get sort position from table
+@doneMap
+		rts
+@doErr
+		move.w	#bignum,d0				; sort at end.
+		rts
+
+;---------------------------------------------------------------
+; Map ScriptCode value to real script code.
+; At entry, d0 contains ScriptCode.
+; At exit, d0 contains real script code.
+; Uses a0-a1,d0-d2.
+; Invalid ScriptCodes are mapped to a number larger than 64.
+;
+
+intScriptCodeToReal
+		with	SMgrRecord
+		tst.w	d0
+		bge.s	@doneMap				; if non-negative, we-re done
+
+		addq.w	#1,d0					; is it iuSystemScript (-1)?
+		blt.s	@getCurrent				; no, check for other codes
+		GetSMgrCore a0					; get SMgrRecord pointer
+		move.w	smgrSysScript(a0),d0	; get system script
+		rts
+@getCurrent
+		addq.w	#1,d0					; is it iuCurrentScript (-2)?
+		blt.s	@doErr					; no, handle error
+		subq.w	#2,sp					; leave space for returned script
+		_FontScript						; NOT IntlScript
+		move.w	(sp)+,d0
+		rts
+@doErr
+		move.w	#bignum,d0				; sort at end.
+@doneMap
+		rts
+		endwith	;SMgrRecord
+
+;---------------------------------------------------------------
+; Map LangCode value to real script code, save info needed to get lang code.
+; At entry, d0 lo contains LangCode and d0 hi contains an associated ScriptCode
+;	(=noScriptFlag if it is meaningless). a2 points to language data map table.
+; At exit, d0 lo contains real script code. d0 hi contains a real lang code, or -1 to use
+;	current language for script in d0 lo, or -2 to use default lang for script in d0 lo.
+; Uses a0-a1,d0-d2.
+; Invalid LangCodes (or invalid associated ScriptCodes) will produce a large number for
+;	the real script code and 0 for the real lang code.
+;
+
+intLangCodeToScript
+		with	SMgrRecord
+		tst.w	d0
+		bge.s	@realLang				; if non-negative, map lang to script		<9>
+
+		add.w	#1,d0					; shift to get rid of hole at -1
+		beq.s	@doScriptErr
+
+		asr.w	#1,d0					; C = current/default lang bit
+		scs		-(sp)					; save bit state
+
+		cmp.w	#-3,d0					; -1,-2,-3 are valid here					<9>
+		bgt.s	@mapScript				; handle -1, -2 with intScriptCodeToReal	<9>
+		blt.s	@doScriptErrPop			; handle < -3 as err						<9>
+		swap	d0						; set up to map specified script			<9>
+@mapScript								;											<9>
+		bsr.s	intScriptCodeToReal		; map to real script code					<9>
+		cmp.w	#smgrCount-1,d0			; is script ok?
+		bhi.s	@doScriptErrPop			; bail if not
+		swap	d0						; save how to get lang code
+		move.w	#-1,d0					; assume current lang
+		tst.b	(sp)+					; get current or default?
+		bne.s	@doneLangFlag			; if current, flag is ok
+		move.w	#-2,d0					; set flag to be default
+@doneLangFlag
+		swap	d0						; everything in its proper place
+		rts
+
+; Map lang code to script code using table.											<9>
+@realLang
+		move.w	d0,d1					; copy lang code
+		swap	d0						; save real lang code in d0 hi
+		cmp.w	(a2),d1					; is our code past end of table?
+		bgt.s	@doRangeErr				; if so, bail
+		lsl.w	#2,d1							; make lang code into long offset
+		move.w	tableHeaderSize+2(a2,d1.w),d0	; get real script code for lang
+		rts
+@doRangeErr
+		move.w	#bignum,d0				; sort at end (move.w preserves lang code)	<9>
+		rts
+
+@doScriptErrPop
+		addq.w	#2,sp					; remove flag from stack
+@doScriptErr
+		move.l	#bignum,d0				; sort at end, arbitrary lang code			<9>
+		rts
+		endwith	;SMgrRecord
+
+;---------------------------------------------------------------	<9>
+; Map lang and script info to sort position.
+; At entry, d0 lo contains real script code. d0 hi contains a real lang code, or -1 to use
+;	current language for script in d0 lo, or -2 to use default lang for script in d0 lo.
+;	a2 points to language map data table.
+; At exit, d0.w contains sort position.
+; Uses a0-a1,d0-d2.
+;
+
+intLangScriptToSort
+		with	SMgrRecord,ScriptRecord, ExpandMemRec
+		
+		move.w	d0,d1					; save script code
+		swap	d0						; get lang code
+		tst.w	d0						; (we need cc for just low word)
+		bpl.s	@mapLangToSort			; if positive, it is real, map it
+		addq.w	#1,d0					; -1 or -2?
+		bne.s	@getDefault		
+		
+		GetSMgrCore a0					; SMgrRecord pointer
+		move.w	d1,d0					; copy script code
+		lsl.w	#2,d0					; make it a long offset
+		move.l	smgrEntry(a0,d0.w),d0	; ScriptRecord pointer
+		beq.s	@getDefault				; if no ScriptRecord, bail
+		move.l	d0,a0					; copy
+		tst.b	scriptEnabled(a0)		; script enabled?
+		beq.s	@getDefault						; if not, ScriptRecord not valid
+		move.w	scriptBundle.ItlbLang(a0),d0	; resource id
+		bra.s	@gotLang
+@getDefault
+		move.l	ExpandMem,a0
+		move.l	emScriptMapPtr(a0),a0	; get script map data ptr					<9>
+		cmp.w	(a0),d1					; is script code past end of table?
+		bgt.s	@doErr					; if so, bail
+		lsl.w	#2,d1							; make script code a long offset
+		move.w	tableHeaderSize+2(a0,d1.w),d0	; get default lang from table
+@gotLang
+
+; Map lang code in d0.w to sort position using table.
+@mapLangToSort
+
+		cmp.w	(a2),d0					; is our code past end of table?
+		bhi.s	@doErr					; if so, bail
+		lsl.w	#2,d0						; make a long offset
+		move.w	tableHeaderSize(a2,d0.w),d0	; get sort position from table
+		rts
+
+@doErr
+		move.w	#bignum,d0				; sort at end.								<9>
+		rts
+		endwith	;SMgrRecord,ScriptRecord, ExpandMemRec
+
+;------------------------------------------------------------------------
+;
+; Public routine
+;
+; IUTextOrder(aPtr, bPtr: Ptr; aLen, bLen: Integer;
+;				aScript, bScript: ScriptCode; aLang, bLang: LangCode);
+;
+; Private routine.															<10>
+; • IUTextOrderSys uses the system itl cache (instead of the app itl cache)
+; to get handle for the itl2 resource.
+;
+; IUTextOrderSys(aPtr, bPtr: Ptr; aLen, bLen: Integer;
+;				aScript, bScript: ScriptCode; aLang, bLang: LangCode);
+;
+; Unimplemented but possible private routine.								<10>
+; • IUTextOrderHndl uses a specifed 'itl2' handle. We only use the handle
+; to compare strings if script and language are identical, so we only need
+; one handle.
+;
+; IUTextOrderHndl(aPtr, bPtr: Ptr; aLen, bLen: Integer;
+;				aScript, bScript: ScriptCode; aLang, bLang: LangCode;
+;				sortHandle: Handle);
+;
+;------------------------------------------------------------------------
+
+toRecord	record	{a6link},decr	;										<2.0>
+result		ds.w	1				; result.
+toArgs		equ		*-8				; size of arguments						<2.0>
+aStr		ds.l	1				; aStr pointer.
+bStr		ds.l	1				; bStr pointer.
+aLen		ds.w	1				; aStr length
+bLen		ds.w	1				; bStr length
+toXtraArgs	equ		*-8				; size of extra args over MagString 	<2.0>
+aScript		ds.w	1				; aStr script
+bScript		ds.w	1				; bStr script
+aLang		ds.w	1				; aStr language
+bLang		ds.w	1				; bStr language
+return		ds.l	1				; return address.
+a6link		ds.l	1				; saved a6 reg							<2.0>
+sysFlag		ds.w	1				; non-zero => use sys itl cache			<10>
+toLocals	equ		*				;										<2.0>
+			endr
+
+		export		TextOrder		; <30>
+
+		with	toRecord
+TextOrder
+		link	a6,#toLocals		;										<2.0>
+		clr.w	sysFlag(a6)			;										<10>
+		bra.s	TextOrderCommon		;										<10>
+TextOrderSys						;										<10>
+		link	a6,#toLocals		;										<10>
+		move.w	#-1,sysFlag(a6)		;										<10>
+TextOrderCommon						;										<10>
+; check scripts
+		move.w	aScript(a6),d1		; get script1							<2.0>
+		move.w	bScript(a6),d2		; get script2							<2.0>
+		bsr.s	intScriptOrder
+		bne.s	@exit				; if so, we're done
+; check languages
+		move.w	aScript(a6),d1		; get associated script for lang1 		<2.0>
+		swap	d1					; put it in high byte					<2.0>
+		move.w	aLang(a6),d1		; get lang1								<2.0>
+		move.w	bScript(a6),d2		; get associated script for lang2 		<2.0>
+		swap	d2					; put it in high byte					<2.0>
+		move.w	bLang(a6),d2		; get lang2								<2.0>
+		bsr.s	intLangOrder
+		beq.s	@tryText			; if not, go compare text
+@exit
+		move.w	d0,result(a6)		; otherwise, set result					<2.0>
+		unlk	a6					; unlink stack							<2.0>
+		move.l	(sp)+,a0			; pop return addr
+		add.w	#toArgs,sp			; kill args
+		move.l	a0,-(sp)			; push return addr
+		bra.s	UnlockIt			; return from UnlockIt
+
+; Both strings have same script and language; have to actually compare them!
+; Create a stack frame for MagPString and go there. Use GetItlScript to get	<21>
+; itl2 handle from cache, using specified script.
+
+@tryText
+		with	ExpandMemRec			;									<40>
+		sub.l	#4,sp					; make room for the itl handle.		<11>
+		move.w	#2,-(sp)				; push 'which' argument for itl2.	<11>
+		move.w	aScript(a6),-(sp)		; push ScriptCode					<21>
+		move.w	sysFlag(a6),-(sp)		; push sysFlag						<21>
+		move.l	ExpandMem,a0				; ExpandMem ptr						<40>
+		addq.b	#1,emItlDontUnlockYet(a0)	; say this is internal call			<40>
+		bsr		GetScriptItl				; get itl handle (does it all now)	<11><21>
+		move.l	ExpandMem,a0				; ExpandMem ptr						<40>
+		subq.b	#1,emItlDontUnlockYet(a0)	; end of internal call				<40>
+		move.l	(sp)+,a1				; pop handle into a1 (null if err)	<11>
+		endwith	;ExpandMemRec			;									<40>
+
+@cleanUp
+		unlk	a6						; unlink stack						<2.0>
+		move.l	(sp)+,a0				; temporarily pop return
+		addq	#toXtraArgs,sp			; destroy extra args
+		move.l	a1,-(sp)				; push itl2 Handle for MagPString
+		move.l	a0,-(sp)				; and push return.
+		bra		MagPString				; someone else's job now…
+		endwith	;toRecord
+
+
+;------------------------------------------------------------------------
+; FUNCTION MagString  (A,B:str255; Alen,Blen:integer): integer;
+; FUNCTION MagIdString(A,B:str255; Alen,Blen:integer): integer;
+;
+; Designed for international flavors of magnitude string comparison
+; by J. Coonen	27 Oct 83.
+;
+;------------------------------------------------------------------------
+;------------------------------------------------------------------------
+; Macro:	CallHook
+; Input:	a4.l	international hooks parameter block (itl2).
+; Warning:	This routine trashes d0.
+;			This routine does not return directly.
+;
+; Calls one of the new hook routines from itl2 to perform special
+; processing for sorting algorithm.
+;------------------------------------------------------------------------
+		MACRO
+		CallHook	&offset
+			move.w	&offset(a4),d0
+			jsr		0(a4,d0.w)		; go and return from there.
+		ENDM
+;------------------------------------------------------------------------
+;
+; In adding the Script Manager support, we call routines that trash the
+; standard scratch regs, so we remap the register usage. MED
+;
+;	d0	scratch
+;	d1	scratch
+;	d2	scratch/temporary storage for return value
+;	d3	end-of-strings: 2-both empty, 1-one empty, 0-neither empty
+;	d4	character return (now two byte)
+;	d5	eos (fetch)/low byte(vernier)
+;	d6	temporary storage
+;
+;	a0	scratch
+;	a1	scratch
+;	a2	string data structure/deciding char (vernier)
+;	a3	string pointer/table ptr (vernier,proj,lig)
+;	a4	hook international parameter block (ITL2).
+;
+;------------------------------------------------------------------------
+; Start code: allocate string data structures and save a4 for hook block
+; resource handle (using Andy's routine).
+;------------------------------------------------------------------------
+; 5/15/87 <daan> Massive reorganization, renaming, and optimizing to
+; squeeze as much out o' this puppy as we can. It worked.
+; <1.8>		Added MagPString and MagIdPString
+;------------------------------------------------------------------------
+
+		with	IUNSortFrame,IUStrData	; Use IUNSortFrame				<4>
+
+SortRegs	reg	D3-D6/A2-A4			;									<18Nov86MED>
+
+MagWString							;									<22Mar86 MED>
+		LINK	A6,#LkSize			;									<22Mar86 MED>
+		CLR.B	WantMag(A6)			; mark weak identity compare only	<22Mar86 MED>
+		st		WeakMag(a6)			; mark as weak identity compare		<22Mar86 MED>
+		move.w	#-1, d2				; return for less than				<6/27/88ldc>
+
+		clr.l	itl2Handle(a6)		; no itl2 handle supplied 					<2>
+
+		BRA.S	ComWString			;									<22Mar86 MED>
+
+; 3 new entry points for System 7												<1.8>
+MagWPString							;											<5>
+		MOVE.L	(SP)+,D0			; get return address						<5>
+		MOVE.L	(SP)+,A0			; get parameter handle						<5>
+		MOVE.L	D0,-(SP)			; replace return address					<5>
+		LINK	A6,#LkSize			;
+		CLR.B	WantMag(A6)			; mark weak identity compare only
+		st		WeakMag(a6)			; mark as weak identity compare
+		move.w	#-1, d2				; return for less than
+		move.l	a0,itl2Handle(a6) 	; save supplied itl2 handle					<5>
+		BRA.S	ComWString			;
+
+MagIdPString						;											<1.8>
+		MOVE.L	(SP)+,D0			; get return address						<1.8>
+		MOVE.L	(SP)+,A0			; get parameter handle						<1.8>
+		MOVE.L	D0,-(SP)			; replace return address					<1.8>
+		LINK	A6,#LkSize
+		CLR.B	WantMag(A6)			; mark weak identity compare only
+		move.w	#1, d2				; '<' value for EqualString
+									; which only returns 0 or 1
+		move.l	a0,itl2Handle(a6) 	; save supplied itl2 handle					<1.8>
+		BRA.S	ComString
+MagPString							;											<1.8>
+		MOVE.L	(SP)+,D0			; get return address						<1.8>
+		MOVE.L	(SP)+,A0			; get parameter handle						<1.8>
+		MOVE.L	D0,-(SP)			; replace return address					<1.8>
+		LINK	A6,#LkSize
+		MOVE.B	#1,WantMag(A6)		; true mag compare
+		move.w	#-1, d2				; allows -1 for '<'
+		move.l	a0,itl2Handle(a6) 	; save supplied itl2 handle					<1.8>
+		BRA.S	ComString
+
+
+MagIdString
+		LINK	A6,#LkSize
+		CLR.B	WantMag(A6)			; mark weak identity compare only
+		move.w	#1, d2				; '<' value for EqualString
+									; which only returns 0 or 1				<6/27/88ldc>
+		clr.l	itl2Handle(a6)		; no itl2 handle supplied					<1.8>
+
+		BRA.S	ComString
+MagString
+		LINK	A6,#LkSize
+		MOVE.B	#1,WantMag(A6)		; true mag compare
+		move.w	#-1, d2				; allows -1 for '<'						<6/27/88ldc>
+
+		clr.l	itl2Handle(a6)		; no itl2 handle supplied					<1.8>
+
+ComString
+		sf		WeakMag(a6)			; mark as strong identity compare		<22Mar86 MED>
+
+;-------------------------------------------------------------------------------
+; 5/15/87 <daan> Advance pointers so far as the two strings are equal. If they
+; happen to be exactly equal to the end, then so much the better; forget the
+; expensive resource loading and initializations, set the status and exit.
+;-------------------------------------------------------------------------------
+ComWString
+		MOVEA.L		AStrText(a6),a0		; a string pointer
+		MOVEA.L		BStrText(a6),a1		; b string pointer
+		MOVE.W		AStrLen(a6),d0		; a length
+
+		BNE.S		@1					; remove null cases
+		MOVE.W		BStrLen(a6),d1		; b length
+		BEQ.S		QuickExit			; = 0 also
+		MOVEQ.L		#-1,d0				; <> 0 so a < b
+		BRA.S		QuickExit
+
+@1		MOVE.W		BStrLen(a6),d1		; b length
+		BNE.S		@2					; <> 0 either
+		MOVEQ.L		#1,d0				; = 0 so a > b
+		BRA.S		QuickExit
+
+@2		CMP.W		d0,d1				; can mag(a) = mag(b)?
+		BNE.S		NotShortEQ			; mags not trivially equal
+
+		SUBQ.W		#1,d0				; loop optimize
+@3		CMPM.B		(a0)+,(a1)+			; check equality
+		DBNE		d0,@3				; branch if strings not exhausted
+		BNE.S		FixLength			; didn't run out of characters
+		MOVEQ.L		#0,d0				; did run out; mag(a) = mag(b)
+
+QuickExit
+		MOVE.W		d0,result(a6)		; comparison result
+		bpl.s		@doQuick			; check for -1 because
+										; IUEqualString replaces -1 with 1
+
+;  <6/27/88ldc> fix so that IUEqualString only returns 0 and 1
+		move.w		d2, result(a6)		; d2 contains 1 if this is IUEqualString
+@doQuick
+		bsr			UnlockIt			; might have been locked by this point		<40>
+		UNLK		A6					; clean up stack and quit
+		MOVEA.L		(sp)+,a0
+		ADDA.W		#ParamBytes,sp
+		JMP			(a0)
+
+QuickPopExit							;									<16>
+		MOVEM.L 	(sp)+,SortRegs  	; restore work regs					<16>
+		moveq.l		#0,d0				; say strings are equal				<16>
+		bra.s		QuickExit			; and return						<16>
+
+FixLength
+		ADDQ.W		#1,d0				; repair lengths
+		MOVE.W		d0,d1
+		BRA.S		MainComp
+
+NotShortEQ
+		SUBQ.W		#1,d0				; loop optimization
+@1		CMPM.B		(a0)+,(a1)+			; check equality
+		BNE.S		@2					; no match
+		SUBQ.W		#1,d1
+		DBEQ		d0,@1				; branch iff neither exhausted
+		BNE.S		QuickExit			; string A ran out; d0 = -1
+		MOVEQ.L		#1,d0				; string B ran out; quickexit
+		BRA.S		QuickExit
+
+@2		ADDQ.W		#1,d0				; repair length
+
+MainComp
+		SUBA.L		#1,a0				; repair addresses
+		SUBA.L		#1,a1
+		MOVEM.L 	SortRegs,-(SP)  	; use D3&A4 as temp cells			<18Dec85  JTC>
+		MOVE.W		d0,AInfo.StrCnt(A6)
+		MOVE.W		d1,BInfo.StrCnt(A6)
+		MOVE.L		a0,AInfo.StrPtr(A6)
+		MOVE.L		a1,BInfo.StrPtr(A6)
+		CLR.L		AInfo.BufChar(A6)	; nil buffer on input, false JustA, IgnChar
+		CLR.L		BInfo.BufChar(A6)	; nil buffer on input, false JustA, IgnChar
+
+		move.l		itl2Handle(a6),d0	;											<1.8><26>
+		beq.s		@useDefault			;											<26>
+		move.l		d0,a0				;											<26>
+		move.l		(a0),a4				; get pointer								<26>
+		move.l		a4,d0				; resource purged?							<26>
+		bne.s		@gotPointer			; if not, pointer ok, continue				<26>
+		move.l		a0,a4				; copy handle								<26>
+		bsr			LockIt				; gonna move memory, lock ourselves down	<40>
+		move.l		a4,-(sp)			;											<26>
+		_LoadResource					; load resource								<26>
+		tst.w		ResErr				; any errs?									<26>
+		beq.s		@gotHandle			; if not, handle ok, continue				<26>
+@useDefault								;											<26>
+
+		moveq		#2,d0				; get ITL2 for hooks.			<28Aug86  JDT>
+		bsr			GetTheINTL			; puts ITL2 handle in a4.
+
+		beq			QuickPopExit		; bail if can't load itl2 resource	<16>
+
+@gotHandle								;									<1.8><26>
+		movea.l		(a4),a4				; dereference handle
+@gotPointer								;									<26>
+
+; Initialize the Sorting Hooks stuff.
+
+		CLR.B		WeakEq(A6)			; initialize flag
+		CallHook	InitHook			; call InitHook routine.		<28Aug86  JDT>
+		BRA.S		MagLoop
+
+
+;------------------------------------------------------------------------
+; MOVED HERE FOR PROXIMITY (Formerly TwoMoreChars)
+; When both strings have more characters, do a first compare for the
+; easy case of equality. Otherwise, project the characters onto their
+; so-called rows and compare.  If their projections differ, duck soup.
+; Else mark the strings as equivalent, if they haven't been so marked
+; already.
+;------------------------------------------------------------------------
+CompareChars
+		CMP.W		D4,D6				; D4-B	D6-A
+		BEQ.S		MagLoop				; look no further
+
+		LEA			BInfo(A6),A2		; B data structure
+		BSR			ProcessChar			; Mapped char in d4
+
+		LEA			AInfo(A6),A2		; A data structure
+		BSR			ProcessChar			; Mapped char in d4
+
+;------------------------------------------------------------------------
+; After processing, if mapped characters differ, then the comparison is
+; unambiguous.
+;------------------------------------------------------------------------
+
+		CMP.W		BInfo.MapChar(A6),D4	; compare second char.
+		beq.s		MappedEqual
+
+; check for tweeking. If either char is ignorable, the string is weakly equal.
+
+		move.b		AInfo.IgnChar(a6),d0	; A ignore flag
+		or.b		BInfo.IgnChar(a6),d0	; B ignore flag
+		bne.s		@1						; at least one ignorable
+		CMP.W		BInfo.MapChar(A6),D4	; set status codes
+		bra.s		MagFiniNE				; and exit
+
+; also, fix the noFetch flags for next fetch.
+; if A has an ignorable, don't fetch B's next char, and vv (unless both are ignore)
+
+@1
+		move.b		AInfo.IgnChar(a6),d0	; ignorable?
+		move.b		BInfo.IgnChar(a6),d1	; ignorable?
+		not.b		d0						; reverse
+		move.b		d0,AInfo.NoFetch(a6)	; store
+		not.b		d1						; reverse
+		move.b		d1,BInfo.NoFetch(a6)	; store
+
+;------------------------------------------------------------------------
+; If the mapped characters are equal, save any necessary state.
+;------------------------------------------------------------------------
+MappedEqual
+		TST.B		WeakEq(A6)
+		BNE.S		MagLoop 				; already weakly equal
+
+		ADDQ.B		#1,WeakEq(A6)			; set up proper state
+		MOVE.W		AInfo.CurChar(A6),AInfo.DecChar(A6)
+		MOVE.W		BInfo.CurChar(A6),BInfo.DecChar(A6)
+
+;------------------------------------------------------------------------
+; Fetch a character from each string, checking for end of string, and
+; make the quick check for bit equality.
+;------------------------------------------------------------------------
+MagLoop
+		LEA			AInfo(A6),A2			; string A data structure
+		BSR			FetchChar
+		MOVE.W		D4,D6					; copy character
+		MOVE.B		D5,D3					; end of string indicator
+
+		LEA			BInfo(A6),A2			; string B data structure
+		BSR			FetchChar
+
+		ADD.B		D5,D3					; 2-both empty 1-one empty
+											; 0-neither empty
+		BEQ.S		CompareChars
+		SUBQ.B		#2,D3
+		BEQ.S		NoMorechars
+
+;------------------------------------------------------------------------
+; Fall through to here when just one string is exhausted.
+;
+; Deal specially with ignore characters.
+; If we are weakly equal,
+; the non-exhausted string has the ignore flag on,
+; and the non-exhausted string has all ignorable characters afterward,
+; then we are still weakly equal
+;------------------------------------------------------------------------
+
+		move.b		d5,d3					; save status
+		TST.B		WeakEq(A6)				; set status code
+		BEQ.S		OneStrDone
+
+		LEA			AInfo(A6),A2			; assume string A data structure
+		tst.b		d5						; B exhausted?
+		bne.s		@1						; yes
+		LEA			BInfo(A6),A2			; string B data structure
+@1
+		bra.s		@3						; map the last char
+@2
+		BSR			FetchChar				; get character
+		tst.b		d5						; exhausted?
+		bne.s		CheckNoMore				; yes, check weak flags
+@3
+		BSR			ProcessChar				; map it, find if ignorable
+		tst.b		IgnChar(a2)				; is it?
+		bne.s		@2						; yes, keep looping
+
+OneStrDone
+;------------------------------------------------------------------------
+; Trick: since D3 is 0 if B is nonempty and 1 if B is empty,
+; corresponding to A<B and A>B, respectively, just double D5 and
+; compare with #1 immediate to get proper result.
+; No special care required for MagIdCompare -- they're always unequal.
+;------------------------------------------------------------------------
+		ADD.B		D3,D3					; 0-B full  2-B empty
+		CMPI.B		#1,D3
+;------------------------------------------------------------------------
+; Finally, store -1,0,1 in result field according to A<B, A=B, A>B.
+; If just comparing for identity, force absolute(result) into D0.
+;------------------------------------------------------------------------
+MagFini
+		BEQ.S		MagFiniEQ
+MagFiniNE
+		BCS.S		@2						; unsigned less than
+@1
+		MOVEQ		#1,D0					; greater-than code
+		BRA.S		MagExit
+@2
+		tst.b		WeakMag(a6)				; weak compare? 			<22Mar86 MED>
+		bne.s		@25						; yes, skip force			<22Mar86 MED>
+		TST.B		WantMag(A6)
+		BEQ.S		@1						; just force 1 for unequal
+@25
+		MOVEQ		#-1,D0					; less-than code
+		BRA.S		MagExit
+MagFiniEQ
+		MOVEQ		#0,D0					; equal code
+
+;------------------------------------------------------------------------
+; Exit code.
+;------------------------------------------------------------------------
+MagExit
+
+		MOVE.W		D0,result(a6)			; return result
+		CallHook	ExitHook				; 						<28Aug86  JDT>
+
+		BSR			UnlockIt				; unlock the package
+		MOVEM.L 	(sp)+,SortRegs			; restore work regs		<18Dec85  JTC>
+		UNLK		a6
+		MOVEA.L		(sp)+,a0
+		ADDA.W		#ParamBytes,sp
+		JMP			(a0)
+
+;------------------------------------------------------------------------
+; When both strings are exhuasted simultaneously, either:
+;	WeakEq = 1, in which case row-relation must be arbitrated, subject
+;		to the JustAfter flag; or
+;	WeakEq = 0, in which case the strings are in fact equal.
+; In the former case, if WantMag is set, then presume equality.
+;------------------------------------------------------------------------
+NoMoreChars
+		TST.B		WeakEq(A6)
+		BEQ.S		MagFiniEQ
+
+CheckNoMore
+		TST.B		WantMag(A6)
+		BEQ.S		MagFiniEQ
+
+		LEA			AInfo.DecChar(A6),A2 		; get deciding char
+		BSR.S		VernierChar
+		MOVE.W		D4,D6						; save off
+		LEA			BInfo.DecChar(A6),A2
+		BSR.S		VernierChar
+		CMP.W		D4,D6						; compare as A-B
+		BNE.S		MagFiniNE
+
+;------------------------------------------------------------------------
+; If both row characters are equal, decide with JustAfter flag:
+;	A=0 B=0 	A=B
+;	A=0 B=1 	A<B
+;	A=1 B=0 	A>B
+;	A=1 B=1 	A=B
+; So the condition bits can be set properly just by comparing the flags!
+;------------------------------------------------------------------------
+		MOVE.B		AInfo.JustAfter(A6),D0
+		CMP.B		BInfo.JustAfter(A6),D0
+		BRA.S		MagFini
+
+
+;------------------------------------------------------------------------
+; FUNCTION VernierChar
+;	Input:	A2	= pointer to relevant DecChar
+;
+; Vernier tuning of characters within rows.
+; The default ordering for diacriticals is:
+;	acute		--	'
+;	grave		--	`
+;	circumflex	--	^
+;	umlaut		--	<double dot>
+;	tilde		--	~
+;	circle		--	<like the A in Angstrom>
+;	slash		--	/ <Swedish>
+;	cedilla 	--	,
+;
+; The general ordering for letters is thus:
+;	A  A'  `A  A^  A-umlaut  A~  A-circle  A/  A,  a  a'  `a  a^ ...
+;
+; Since most of the accented characters are correctly ordered in the
+; character mapping, some simple adjustments are required.  Adding $22
+; to a lower-case letter forces it between its accented CAPS and accented
+; lowers.  The four letters requiring special treatment are:
+;	O-slash  $AF	-->   $88
+;	A-grave  $CB	-->   $7F
+;	A-tilde  $CC	-->   $80 followed by low-order $80 to force between
+;							$80 and $81
+;	O-tilde  $CD	-->   $86
+; If the CurChar has nonzero low-order information, Vernier just maps
+; to CurChar.
+;------------------------------------------------------------------------
+VernierChar
+		MOVE.B		(A2)+,D4		; hi byte of DecChar
+		MOVE.B		(A2),D5 		; low byte
+
+		CallHook	VernierHook
+		bne.s		@9				; skip other vernier
+
+		tst.b		d5				; special char?
+		bne.s		@9				; skip other vernier
+
+
+		LEA			VernTable,A3	; tuning table
+
+		CMP.B		(A3)+,D4		; less than lower a
+		BCS.S		@9
+		CMP.B		(A3)+,D4		; greater than lower z
+		BHI.S		@3
+
+		ADDI.B		#$22,D4 		; magic translation
+		BRA.S		@9
+@3
+		CMP.B		(A3)+,D4		; is it in list now?
+		BEQ.S		@8
+		ADDQ.L		#2,A3			; skip over hi and low
+		TST.B		(A3)
+		BNE.S		@3
+		BRA.S		@9				; no sub at all
+@8
+		MOVE.B		(A3)+,D4
+		MOVE.B		(A3),D5
+@9
+		LSL.W		#8,D4			; put hi and low together
+		OR.B		D5,D4
+		RTS
+
+;------------------------------------------------------------------------
+; The vernier table consists of byte pairs for final tweaking.
+;------------------------------------------------------------------------
+VernTable
+		dc.b  $61				; 'a' for lower-case test
+		dc.b  $7B				; '{' = 'z'+1 for lower-case test
+		dc.b  $AF, $87, $00		; O-slash ---> after O-tilde
+		dc.b  $CB, $7E, $00		; A` - redo to fit with stuff below			<03/10/89 pke>
+		dc.b  $CC, $80, $01		; A-tilde ---> between A-umlaut and A-circle
+		dc.b  $CD, $86, $00		; O-tilde ---> after O-umlaut
+		dc.b  $83, $70, $00		; redo É to fit with stuff below			<03/10/89 pke>
+; added support for char set extensions <03/10/89 pke>
+		dc.b  $E5, $7F, $00		; Â
+		dc.b  $E6, $72, $00		; Ê
+		dc.b  $E7, $7D, $00		; Á
+		dc.b  $E8, $73, $00		; Ë
+		dc.b  $E9, $71, $00		; È
+		dc.b  $EA, $80, $00		; Í
+		dc.b  $EB, $82, $00		; Î
+		dc.b  $EC, $83, $00		; Ï
+		dc.b  $ED, $81, $00		; Ì
+		dc.b  $EE, $80, $00		; Ó
+		dc.b  $EF, $82, $00		; Ô
+		dc.b  $F1, $81, $00		; Ò
+		dc.b  $F2, $80, $00		; Ú
+		dc.b  $F3, $82, $00		; Û
+		dc.b  $F4, $81, $00		; Ù
+		dc.b  $F5, $8B, $00		; ı (change to 'i' + $22)
+
+		dc.b  $00, $00			; stop codes
+		align					;											<3>
+
+
+;------------------------------------------------------------------------
+; FUNCTION FetchChar
+;	Input:	A2 =	string data structure
+;	Output: D4.B =	next character
+;			D5 =	nonzero iff string exhausted
+;			CurChar, StrPtr, IgnChar reset
+;
+; Note that expansion presumes that second character is not ASCII NULL.
+; Note that expansion character is a byte only.
+;------------------------------------------------------------------------
+; 5/15/87 <daan> Reorganized, optimized, and bug-fixed.
+;------------------------------------------------------------------------
+FetchChar
+		clr.b		ignChar(a2)			; reset ignChar						<2.1>
+
+		MOVEQ		#0,D5				; presume string non0
+		tst.b		NoFetch(a2)			; ignorable?
+		bne.s		@20					; yes, skip
+		MOVE.B		BufChar(A2),D4		; presume char from buf
+		bne.s		@15					; get a char unless one is waiting
+		MOVEA.L 	StrPtr(A2),A3
+		MOVE.B		(A3)+,d4			; get a character regardless
+		lsl.w		#8,D4				; put char in upper byte
+		SUBQ.W		#1,StrCnt(A2)		; decrement string length (Z cleared iff ≠)
+		addx.w		d5,d5				; set x=1 if string len = 0
+		CallHook	FetchHook			; call fetch hook: return d4,a3,d5
+		MOVE.L 		A3,StrPtr(A2)
+		move.w		d4,CurChar(a2)		; save input char
+		rts
+
+@15
+		lsl.w		#8,D4				; put char in upper byte
+		clr.b		BufChar(A2)			; kill buffered char
+		move.w		d4,CurChar(a2)		; save input char
+		rts
+
+@20
+		clr.b		NoFetch(a2)			; not any more, it ain't
+		move.w		CurChar(a2),d4		; get same char
+		rts
+
+;------------------------------------------------------------------------
+; After a byte is input, it is mapped to a family character (e.g. all
+; A's and a's are mapped to 'A'), and expanded if one of the ligatures
+; AE, ae, OE, oe.  Then the Info structure is passed to the international
+; routine for one last chance to tweak.
+;------------------------------------------------------------------------
+ProcessChar
+										; just fall into...
+
+;------------------------------------------------------------------------
+; FUNCTION projectChar
+;	Input:	A2 =	string data structure
+;	Output: D4 = 	Mapped character
+;
+; Uses table for all values.
+; If the CurChar has any nonzero tail, then set   MapChar := CurChar.
+; Special processing for double-byte characters
+;------------------------------------------------------------------------
+projectChar
+		CLR.W		MapChar(A2)			; clear hi/low halves
+		move.w		CurChar(a2),d4		; get current
+		CallHook	ProjectHook			; call it
+		bne.s		SkipProject			; skip if NE
+
+		lsr			#8,d4				; get char in lower byte
+		MOVE.B		ProjTable(D4),D4	; look up mapping
+										; then fall through to...
+		CMP.B		LigTable(PC),D4 	; ligature iff $AE
+		bne.s		ProjectD4			; fix D4 and return				<12/22/87med>
+
+;------------------------------------------------------------------------
+; PROCEDURE xLigature
+;	Input:	D4 = MapChar hi byte;  A2 =    string data structure
+;
+; <03/10/89 pke>	added ß, ﬁ, ﬂ. Need to turn this into a loop, get
+;			count from table, used defined constant to mark
+;			ligature above and in ProjTable.
+;------------------------------------------------------------------------
+xLigature
+		LEA			LigTable,A3
+
+		MOVE.B		CurChar(A2),D4		; restore character
+
+		CMP.B		(A3)+,D4			; AE
+		BEQ.S		@18
+
+		ADDQ.L		#3,A3
+		CMP.B		(A3)+,D4			; ae
+		BEQ.S		@18
+
+		ADDQ.L		#3,A3
+		CMP.B		(A3)+,D4			; OE
+		BEQ.S		@18
+
+		ADDQ.L		#3,A3
+		CMP.B		(A3)+,D4			; oe
+		BEQ.S		@18
+
+		ADDQ.L		#3,A3
+		CMP.B		(A3)+,D4			; ß
+		BEQ.S		@18
+
+		ADDQ.L		#3,A3
+		CMP.B		(A3)+,D4			; ﬁ
+		BEQ.S		@18
+
+		ADDQ.L		#4,A3				; ﬂ, by default
+@18
+		MOVE.B		(A3)+,CurChar(A2)
+		MOVE.B		(A3)+,D4
+		MOVE.B		(A3),BufChar(A2)
+		TST.B		WeakEq(A6)			; only set JustAfter if not yet we		<12/22/87med>
+		BNE.S		ProjectD4 			; already weakly equal					<12/22/87med>
+		ADDQ.B		#1,JustAfter(A2)
+ProjectD4
+		asl.w		#8,d4				; restore to high byte					<12/22/87med>
+SkipProject
+		MOVE.W		D4,MapChar(A2)		; hi-order MapChar
+		rts
+
+;------------------------------------------------------------------------
+; Table of default ligature expansions.
+;------------------------------------------------------------------------
+LigTable
+		dc.b  $AE, 'A', 'A', 'E'	; note: $AE must be first
+		dc.b  $BE, 'a', 'A', 'e'
+		dc.b  $CE, 'O', 'O', 'E'
+		dc.b  $CF, 'o', 'O', 'e'
+		dc.b  $A7, 's', 'S', 's'	; ß <03/10/89 pke>
+		dc.b  $DE, 'f', 'F', 'i'	; ﬁ <03/10/89 pke>
+		dc.b  $DF, 'f', 'F', 'l'	; ﬂ <03/10/89 pke>
+
+;------------------------------------------------------------------------
+; Table projecting all byte values into 'rows':
+;	-- All letters are mapped to the CAPITAL form, sans diacriticals.
+;	-- Non-breaking space is mapped to space.
+;	-- All double quotes are mapped to ASCII double quote $22.
+;	-- All single quotes are mapped to ASCII single quote $27
+;		(this doesn't include acute $AB and ASCII grave $60).
+;	-- All AE/OE/ﬁ/ﬂ/ß ligatures are mapped to ligature-AE $AE.
+;	-- Superscripted, underscored a and o ($BB and $BC) are symbols,
+;		and thus mapped to themselves rather than 'A' and 'O'.
+;	-- Em-dash and minus sign ($D0 and $D1) are mapped to selves rather
+;		than ASCII hyphen $2D.
+;	-- All other characters in $00 to $FF are mapped to themselves.
+;------------------------------------------------------------------------
+ProjTable
+		dc.b  $00, $01, $02, $03, $04, $05, $06, $07
+		dc.b  $08, $09, $0A, $0B, $0C, $0D, $0E, $0F
+		dc.b  $10, $11, $12, $13, $14, $15, $16, $17
+		dc.b  $18, $19, $1A, $1B, $1C, $1D, $1E, $1F
+	
+		dc.b  ' ', '!', '"', '#', '$', '%', '&', $27	; $20
+		dc.b  '(', ')', '*', '+', ',', '-', '.', '/'
+		dc.b  '0', '1', '2', '3', '4', '5', '6', '7'
+		dc.b  '8', '9', ':', ';', '<', '=', '>', '?'
+	
+		dc.b  '@', 'A', 'B', 'C', 'D', 'E', 'F', 'G'	; $40
+		dc.b  'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O'
+		dc.b  'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W'
+		dc.b  'X', 'Y', 'Z', '[', '\', ']', '^', '_'
+	
+		dc.b  '`', 'A', 'B', 'C', 'D', 'E', 'F', 'G'	; $60
+		dc.b  'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O'
+		dc.b  'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W'
+		dc.b  'X', 'Y', 'Z', '{', '|', '}', '~', $7F
+	
+		dc.b  'A', 'A', 'C', 'E', 'N', 'O', 'U', 'A'	; $80
+		dc.b  'A', 'A', 'A', 'A', 'A', 'C', 'E', 'E'
+		dc.b  'E', 'E', 'I', 'I', 'I', 'I', 'N', 'O'
+		dc.b  'O', 'O', 'O', 'O', 'U', 'U', 'U', 'U'
+	
+		dc.b  $A0, $A1, $A2, $A3, $A4, $A5, $A6, $AE	; ß is ligature				<03/10/89 pke>
+		dc.b  $A8, $A9, $AA, $AB, $AC, $AD, $AE, 'O'
+		dc.b  $B0, $B1, $B2, $B3, $B4, $B5, $B6, $B7
+		dc.b  $B8, $B9, $BA, $BB, $BC, $BD, $AE, 'O'
+	
+		dc.b  $C0, $C1, $C2, $C3, $C4, $C5, $C6, $22	; note: $22 = "
+		dc.b  $22, $C9, ' ', 'A', 'A', 'O', $AE, $AE
+		dc.b  $D0, $D1, $22, $22, $27, $27, $D6, $D7
+		dc.b  'Y', 'Y', $DA, $DB, $DC, $DD, $AE, $AE	; add Ÿ & ﬁ,ﬂ ligatures		<03/10/89 pke>
+	
+		dc.b  $E0, $E1, $E2, $E3, $E4, 'A', 'E', 'A'	; add Â,Ê,Á
+		dc.b  'E', 'E', 'I', 'I', 'I', 'I', 'O', 'O'	; add Ë,È,Í,Î,Ï,Ì,Ó,Ô		<3/10/89 pke>
+		dc.b  $F0, 'O', 'U', 'U', 'U', 'I', $F6, $F7	; add Ò,Ú,Û,Ù,ı				<03/10/89 pke>
+		dc.b  $F8, $F9, $FA, $FB, $FC, $FD, $FE, $FF
+	
+		endWith		; iuSortFrame/iuNSortFrame, IUStrData
+
+		endProc
+
+
+;----------------------------------------------------------	<7>				
+;					
+; PROCEDURE TypeSelectClear(VAR tsr: TypeSelectRecord);
+;
+; clears/initials the tsr record.
+;
+;----------------------------------------------------------					
+TypeSelectClear	PROC	EXPORT
+				move.l	(sp)+,a0		; get return address
+				move.l	(sp)+,a1		; get tsr pointer
+				moveq	#0,d0
+				move.l	d0,TypeSelectRecord.tsrLastKeyTime(a1)	; clear timer
+				move.b	d0,TypeSelectRecord.tsrKeyStrokes(a1)	; clear text
+				jmp		(a0)
+				ENDPROC								
+
+
+
+;----------------------------------------------------------------------				
+;
+; FUNCTION TypeSelectNewKey(theEvent: EventRecord;
+;							VAR tsr: TypeSelectRecord): BOOLEAN;
+;													
+; Call this each time you get a key down event for a type select list.
+; If it returns true then you should change selection to the closest 
+; match in tsr.  It handles timeouts, and delete/clear keys. 
+;
+;----------------------------------------------------------------------				
+TypeSelectNewKey	PROC	EXPORT
+
+kMaxTypeDelay		EQU		60				; if auto repeat is turn off, then value to use
+chClear				EQU		$1B				; clear key on keypad happens to have same char code as ESC
+chDelete			EQU		$08				; aka backspace
+
+StackFrame	RECORD	{A6Link},DECR
+result			DS.W	1
+paramSize   	EQU     *-8         ; bytes of prameters to remove on return
+theEvent		DS.L	1
+tsr				DS.L	1
+ReturnAddr		DS.L	1
+A6Link			DS.L	1
+; locals go here
+				ALIGN
+size 			EQU      *          ; size to link
+			ENDR
+			
+EventRecord	RECORD	0					
+what			DS.W	1				
+message			DS.L	1				
+when			DS.L	1				
+where			DS.W	2			
+modifiers		DS.W	1				
+			ENDR		        
+
+					link	a6,#StackFrame.size
+					movem.l	a3/a4,-(sp)							; save registers
+					move.l	StackFrame.theEvent(a6),a4			; get theEvent
+					move.l	StackFrame.tsr(a6),a3				; get tsr pointer
+					clr.b	StackFrame.result(a6)				; set return to false by default
+					
+	; only do somthing if event is a keydown
+					cmp.w	#keyDwnEvt,EventRecord.what(a4)
+					bne 	@done			; if not really key down, then done
+	; and not a command-key
+					btst	#cmdKey,EventRecord.modifiers(a4)
+					bne.s	@clearTyping			; if command key down, then clear buffer?
+					
+	; delete or clear key means clear buffer
+					move.b	EventRecord.message+3(a4),d0	; get character
+					cmp.b	#chDelete,d0					; is this Delete/Backspace?
+					bne.s	@notDelete
+@clearTyping		move.l	a3,-(sp)
+					bsr.s	TypeSelectClear
+					bra.s	@done
+@notDelete			cmp.b	#chClear,d0					; is this Clear? ### should I check keycode?
+					beq.s	@clearTyping
+					
+	; get max delay since last key stroke
+					move.w	keyThresh,d0		; get threshhold 'til auto-repeat 
+					cmp.w	#kMaxTypeDelay,d0												
+					bls.s	@autoRepeatOn		; if large, then it is turned off		
+					move.w	#kMaxTypeDelay,d0	; so use resonably long delay instead	
+@autoRepeatOn		add.l	d0,d0				; use 2x keythreshold
+
+	; check time since last keystroke
+					move.l	EventRecord.when(a4),d1					; get time of this key stroke
+					sub.l	TypeSelectRecord.tsrLastKeyTime(a3),d1	; get time since last key stroke
+					cmp.l	d0,d1									; see if key strokes close enough together
+					bls.s	@checkScript							; if not reset buffer and start with this key
+					move.l	a3,-(sp)
+					bsr.s	TypeSelectClear
+
+	; check if keyboard script has changed 				
+@checkScript		subq	#4,sp								; space for long
+					move.w	#smKeyScript,-(sp)					; ask for current keyboard script
+					_GetEnvirons								; from script manager
+					move.l	(sp)+,d0							; get long result, script in low word
+
+; always treat Roman keyboard like system script															<29>
+					bne.s	@doneRomanAdjust					;											<29>
+					subq	#4,sp								; space for long							<29>
+					move.w	#smSysScript,-(sp)					; ask for system script						<29>
+					_GetEnvirons								; from script manager						<29>
+					move.l	(sp)+,d0							; get long result, script in low word		<29>
+@doneRomanAdjust												;											<29>
+
+					tst.b	TypeSelectRecord.tsrKeyStrokes(a3)	; will this be first byte in buffer?		<8>
+					bne.s	@compareScript						;											<8>
+					move.w	d0,TypeSelectRecord.tsrScript(a3)	; if so initialize script for this string	<8>
+					bra.s	@addNewKey							;											<8>
+@compareScript		cmp.w	TypeSelectRecord.tsrScript(a3),d0	; has keyboard script changed?
+					beq.s	@addNewKey
+					move.l	a3,-(sp)
+					bsr 	TypeSelectClear
+					
+	; add key stroke to buffer
+@addNewKey			lea		TypeSelectRecord.tsrKeyStrokes(a3),a0
+					cmp.b	#63,(a0)							; check for overflow
+					bge.s	@done
+					addq.b	#1,(a0)								; increment string buffer
+					moveq	#0,d0	
+					move.b	(a0),d0								; get end index
+					add.l	d0,a0								; make into pointer
+					move.b	EventRecord.message+3(a4),(a0)		; put char code into end of buffer
+					
+	; record time of keystroke
+					move.l	EventRecord.when(a4),TypeSelectRecord.tsrLastKeyTime(a3)
+					
+	; return true
+					addq.b	#1,StackFrame.result(a6)			; return boolean true
+					
+@done				movem.l	(sp)+,a3/a4
+					unlk	a6	
+					move.l	(sp)+,a0
+					add		#StackFrame.paramSize,sp
+					jmp		(a0)
+					ENDPROC		
+					
+			
+				
+;----------------------------------------------------------------------				
+;
+; FUNCTION TypeSelectCompare(tsr: TypeSelectRecord; 
+;                            testStringScript: ScriptCode;
+;                            testStringPtr: StringPtr): INTEGER;
+;
+; Used to find closest matching list item.  Does correct international 
+; comparison of the keys strokes stored in tsr against any string.
+; That is, first check for byte to byte equality, if not the same then
+; call MagWPString to compare strings.																<20>
+; Returns -1, 0, 1 if keys strokes are before, same, or after the test string
+;
+;----------------------------------------------------------------------				
+TypeSelectCompare	PROC	EXPORT
+					IMPORT	ScriptOrder, MagWPString, UnLockIt, intScriptCodeToReal, GetScriptItl ;	<20>
+						
+StackFrame	RECORD	{A6Link},DECR
+result				DS.W	1
+paramSize   		EQU     *-8         ; bytes of prameters to remove on return
+tsr					DS.L	1
+testStringScript	DS.W	1			; cached in d3.w
+testStringPtr		DS.L	1			; lea testStringPtr^[1] in a3, length in d4.w
+ReturnAddr			DS.L	1
+A6Link				DS.L	1
+; locals go here
+										; tsr.script cached in d5.w
+										; lea tsr.keyStrokes^[1] in a4, length in d6.w
+				ALIGN
+size 			EQU      *          ; size to link
+			ENDR
+					
+					
+					link	a6,#StackFrame.size
+					movem.l	d3-d6/a2-a4,-(sp)					; save registers					<20>
+					move.w	StackFrame.testStringScript(a6),d3		; get testStringScript
+					move.l	StackFrame.testStringPtr(a6),a3			; get testStringPtr
+					moveq	#0,d4
+					move.b	(a3)+,d4								; a3 = test.StringPtr, d4.w = test.length
+					move.l	StackFrame.tsr(a6),a4					
+					move.w	TypeSelectRecord.tsrScript(a4),d5		; d5.w = tsr.script
+					moveq	#0,d6
+					move.b	TypeSelectRecord.tsrKeyStrokes(a4),d6	; d6.w = tsr.length
+					lea		TypeSelectRecord.tsrKeyStrokes+1(a4),a4	; a4 = tsr.stringPtr
+
+	; first check the scripts, if same check strings
+					cmp.w 	d3,d5								; compare script numbers first
+					beq.s	@testStringsLength					; same script so compare the text
+	; scripts are different so use script order to find overall order
+					subq	#2,sp								; room for result
+					move.w	d5,-(sp)
+					move.w	d3,-(sp)
+					bsr		ScriptOrder							; get order for scripts
+					move.w	(sp)+,d0							; set CC's and we are done
+					bra.s 	@done
+					
+	; check string lengths as short circuit of equality
+@testStringsLength	
+					cmp.b	d4,d6								; are strings the same length?
+					bne.s	@doIntlCompare						; if not check sort order
+					
+	; check for exactly the same bytes
+					move.l	a3,a0
+					move.l	a4,a1
+					move.w	d4,d0
+@nextByte			cmp.b	(a0)+,(a1)+							; compare each byte
+					bne.s	@doIntlCompare						; if one byte wrong then try I.U.
+					subq.w	#1,d0
+					beq.s	@done								; if all bytes same, return 0
+					bra.s	@nextByte
+					
+	; use localizable string comparison, for primary sort order only.								<20>
+@doIntlCompare
+;;					bsr		LockIt							; GetScriptItl will lock if necessary	<20>
+
+	; Use GetItlScript to get itl2 handle from cache, using specified script.						<21>
+
+					with	ExpandMemRec					;										<40>
+					sub.l	#4,sp							; make room for the itl handle.
+					move.w	#2,-(sp)						; push 'which' argument for itl2.
+					move.w	d3,-(sp)						; push ScriptCode						<21>
+					move.w	#-1,-(sp)						; we want system cache					<21>
+					move.l	ExpandMem,a0					; ExpandMem ptr							<40>
+					addq.b	#1,emItlDontUnlockYet(a0)		; say this is internal call				<40>
+					bsr		GetScriptItl					; get itl handle
+					move.l	ExpandMem,a0					; ExpandMem ptr							<40>
+					subq.b	#1,emItlDontUnlockYet(a0)		; end of internal call					<40>
+					move.l	(sp)+,d0						; pop handle into d0.
+					beq.s	@done							; if err, bail (d0=0)					<21>
+
+					subq	#2,sp							; room for result
+					move.l	a4,-(sp)						; aPtr
+					move.l	a3,-(sp)						; bPtr
+					move.w	d6,-(sp)						; aLen
+					move.w	d4,-(sp)						; bLen
+					move.l	d0,-(sp)						; itl2 handle
+
+					move.l	ExpandMem,a0					; ExpandMem ptr							<40>
+					addq.b	#1,emItlDontUnlockYet(a0)		; say this is internal call				<40>
+					bsr		MagWPString						; order comparison
+					move.l	ExpandMem,a0					; ExpandMem ptr							<40>
+					subq.b	#1,emItlDontUnlockYet(a0)		; end of internal call					<40>
+					move.w	(sp)+,d0						;										<40>
+					endwith	;ExpandMemRec					;										<40>
+
+	; return value in d0
+@done				move.w	d0,StackFrame.result(a6)		; return boolean 
+					
+					bsr		UnLockIt						; moved here							<40>
+					movem.l	(sp)+,d3-d6/a2-a4				; restore regs							<20>
+					unlk	a6	
+					move.l	(sp)+,a0
+					add		#StackFrame.paramSize,sp
+					jmp		(a0)
+;
+; set up parameters for compare string call
+; (modified and moved inline, since we only need it once now)										<20>
+					
+					ENDPROC		
+
+
+
+;----------------------------------------------------------------------				
+;
+; FUNCTION TypeSelectFindItem(	tsr: TypeSelectRecord;
+;								listSize: INTEGER;
+;								selectMode: TSCode {INTEGER};
+;								getStringProc: IndexToStringProcPtr; 
+;								yourDataPtr: Ptr): INTEGER;
+;
+; If your list is sorted, you can start at the beginning of the list and 
+; call TypeSelectCompare on each item to you find one that is ≥ and 
+; it is the item to select. 
+;
+; If list is not sorted, you can call TypeSelectFindItem.  It will walk the 
+; entire list and return the correct one to select.  It calls a procedure you 
+; supply to get an item's script and string from its index in the list 
+;
+; If the number of item in the list is unknown, you pass in MAXINT ($7FFF) for
+; listSize and have your getStringProc return false when it is called past the
+; end of the list.
+;
+; selectMode is a parameter to allow the user to alphabetically walk through an
+; unsorted list.  Normally, you would use tsNormalSelectMode for type selecting.
+; If after an item is selected, the user wants to select the next alphabetical
+; item, fill the tsr buffer with the string for the current selected item
+; and call TypeSelectFindSelect with selectMode = tsNextSelectMode.  To get the 
+; previous item use selectMode = tsPreviousSelectMode.
+; 
+;	tsPreviousSelectMode	 largest item < type select buffer	
+;	tsNormalSelectMode		smallest item ≥ type select buffer
+;	tsNextSelectMode		smallest item > type select buffer
+;
+;
+;TYPE
+;   IndexToStringProcPtr = ^FUNCTION(item: INTEGER;
+;									VAR itemsScript: ScriptCode;
+;									VAR itemsStringPtr: StringPtr;
+;									yourDataPtr: Ptr): BOOLEAN;
+;
+;   If an item is not selectable (ex. grayed out items in putfile)
+;  your IndexToStringProcPtr should return NIL for itemsStringPtr.
+;
+;   Selects the item which based on the selectMode.  tsNormalSelectMode is 
+;  the smallest item ≥ type select buffer.  
+;  That is, the exact match, or if the list was sorted, the first 
+;  file after where the type select buffer would be inserted.  
+;
+;   Works by scanning the entire list.  Trying to find the closet match.
+;  It keeps a "best guess", The best guess is changed if another item is 
+;  found which better matches the criteria.  
+;
+;  Uses a routine BndBranch to do bounds checking based on selectMode. 
+;
+;----------------------------------------------------------------------				
+TypeSelectFindItem	PROC	EXPORT
+					IMPORT	LockIt, UnLockIt
+
+StackFrame	RECORD	{A6Link},DECR
+result			DS.W	1
+paramSize   	EQU     *-8         ; bytes of prameters to remove on return
+tsr				DS.L	1			; cached in A4
+listSize		DS.W	1
+selectMode		DS.W	1
+getStringProc	DS.L	1
+yourDataPtr		DS.L	1
+ReturnAddr		DS.L	1
+A6Link			DS.L	1
+; locals go here
+bestGuess		DS		TypeSelectRecord
+firstValidItem	DS.W	1			; for use as guess if wrap-around needed
+lastValidItem	DS.W	1			; for use as guess if wrap-around needed
+anItemScript	DS.W	1			; cached in D5
+anItemStringPtr	DS.L	1			; cached in D4
+									; bestGuess StringPtr in D7
+				ALIGN
+size 			EQU      *          ; size to link
+			ENDR
+			
+			MACRO
+				tstBra	&branchLabel
+				lea		&branchLabel,a1
+				bsr		BndBranch								; <27>
+			ENDM
+
+					link	a6,#StackFrame.size
+					movem.l	a4/d3-d7,-(sp)
+					move.l	StackFrame.tsr(a6),a4
+					move.w	StackFrame.selectMode(a6),d6
+					bsr		LockIt								; lock the package!! we will be calling user code	
+					
+					moveq	#0,d7								; remember, we have no bestGuess
+					move.w	d7,StackFrame.result(a6)			; zero guess index
+					move.w	d7,StackFrame.firstValidItem(a6)	; zero out
+					move.w	d7,StackFrame.lastValidItem(a6)		; zero out 
+					moveq	#1,d3								; start looking at first cell
+		
+@nextCell		; get D3'th item into anItem
+					bsr		GetStringFromIndex
+					beq		@endOfList						; if IndexToString returns false, then done	<40>
+					
+					tst.l	d4								; d4 = StackFrame.anItemStringPtr(a6)	
+					beq.s	@notFound						; if stringPtr is NIL then skip this item
+				
+				; save off first and last know valid items
+					tst.w	StackFrame.firstValidItem(a6)
+					bne.s	@firstWasFound
+					move.w	d3,StackFrame.firstValidItem(a6) ; this is once set once	
+@firstWasFound		move.w	d3,StackFrame.lastValidItem(a6)  ; this keeps getting set
+					
+				; compare anItem with type select buffer
+					with	ExpandMemRec					;									<40>
+					subq	#2,sp							; room for result
+					move.l	a4,-(sp)						; a4 = StackFrame.tsr(a6)
+					move.w	d5,-(sp)						; d5 = StackFrame.anItemScript(a6)
+					move.l	d4,-(sp)						; d4 = StackFrame.anItemStringPtr(a6)
+						; note: there is a bug here in next- and prev-mode.  It should 
+						; be doing a comparsion that includes secondary differences.
+						; Currently TAB in the Finder will skip over names that do not
+						; differ in a linguistically relevant manner (i.e. "abc" "åbc" in English)
+					move.l	ExpandMem,a0					; ExpandMem ptr						<40>
+					addq.b	#1,emItlDontUnlockYet(a0)		; say this is internal call			<40>
+					bsr		TypeSelectCompare
+					move.l	ExpandMem,a0					; ExpandMem ptr						<40>
+					subq.b	#1,emItlDontUnlockYet(a0)		; end of internal call				<40>
+					tstBra	@notFound						; if bounds fails, try next item
+				
+				; have a contender for a better guess
+				; see if this is first contender, then it is bestGuess
+					tst.l	d7								; if last bestGuess does not exist
+					beq.s	@newBest						; then this guess is better!
+									
+				; see if current cell is closer to typeSelect than bestGuess
+				; need to consider secondary differences when differentiating between guesses	<30>
+					lea		StackFrame.bestGuess.tsrKeyStrokes(a6),a0	; a0 is bestguess		<30>
+					moveq	#0,d0										;						<30>
+					move.b	(a0)+,d0									; d0 is bestguess length<30>
+					move.l	d4,a1										; a1 is this item		<30>
+					moveq	#0,d1										;						<30>
+					move.b	(a1)+,d1									; d1 is this item length<30>
+					subq	#2,sp							; room for result			<30>
+					pea		(a0)							; aPtr						<30>
+					pea		(a1)							; bPtr						<30>
+					move.w	d0,-(sp)						; aLen						<30>
+					move.w	d1,-(sp)						; bLen						<30>
+					move.w	StackFrame.bestGuess.tsrScript(a6),-(sp) ; aScript			<30>
+					move.w	d5,-(sp)						; bScript					<30>
+					moveq	#iuScriptDefLang,d0				;							<30>
+					move.w	d0,-(sp)						; aLang						<30>
+					move.w	d0,-(sp)						; bLang						<30>
+					move.l	ExpandMem,a0					; ExpandMem ptr						<40>
+					addq.b	#1,emItlDontUnlockYet(a0)		; say this is internal call			<40>
+					bsr		TextOrder						; compare them				<30>
+					move.l	ExpandMem,a0					; ExpandMem ptr						<40>
+					subq.b	#1,emItlDontUnlockYet(a0)		; end of internal call				<40>
+						; note: if the list contains duplicate names and one of those names is
+						; the best type select match, then TypeSelectFindItem returns
+						; the last list-order of the duplicates.  This maybe somewhat random,
+						; but the API for TypeSelect does not support anyway to differentiate
+						; between the duplicates.  If you want to do something about it, check
+						; for $0000 on the stack at this point.  
+					neg.w	(sp)
+					tstBra	@notFound						; if bounds fails, then bestGuess is
+															; still better than anItem, so try next item
+					endwith	;ExpandMemRec					;									<40>
+										
+@newBest			bsr		NewBestGuess			
+					
+@notFound			addq.w	#1,d3				; next cell index
+					cmp.w	StackFrame.listSize(a6),d3
+					ble.s	@nextCell			; keep going 'til end of list
+
+@endOfList	
+			; see if tsr passed in was empty. if so, choose first or last										<27>
+					tst.b	TypeSelectRecord.tsrKeyStrokes(a4) 	; a4 = StackFrame.tsr(a6)						<27>
+					beq.s	@firstOrLast						;												<27>
+					
+			; looked at 'em all, result has best one
+					tst.w	StackFrame.result(a6)
+					bne.s	@foundIt
+
+@firstOrLast												;													<27>
+			; if result is still zero then none matched
+			; so 	tsNormalSelectMode => select last item
+			;  		tsNextSelectMode => wrap around to first
+			;    	tsPreviousSelectMode => wrap around to last
+					move.w	StackFrame.firstValidItem(a6),d3; assume will want to find first 					<27>
+					beq.s	@foundIt						; handle zero length list							<27>
+					tst.w	d6								; d6 = StackFrame.selectMode(a6)					<27>
+					bgt.s	@startSearch					;													<27><28>
+					moveq	#tsPreviousSelectMode,d6		; force normal to previous in order to get last item<28>
+@findLast			move.w	StackFrame.lastValidItem(a6),d3	; assumption wrong, start with last					<27>
+@startSearch		bsr		GetStringFromIndex				; get D3'th item into anItem						<27>
+					beq.s	@foundIt						; if IndexToString returns false, then end of list  <27>
+					bsr.s	NewBestGuess					; use first/last as initial best guess				<27>	
+			; walk entire list finding the lowest (or highest) alphabetically									<27>				
+					move.w	StackFrame.firstValidItem(a6),d3; start walking list								<27>
+					subq.w	#1,d3							;													<27>
+@nextWrap			addq.w	#1,d3							; next cell index									<27>
+					cmp.w	StackFrame.listSize(a6),d3		;													<27>
+					bgt.s	@foundIt						; stop at end of list								<27>
+					bsr		GetStringFromIndex				; get D3'th item into anItem						<27>
+					beq.s	@foundIt						; if IndexToString returns false, then at end of list<27>
+					tst.l	d4								; d4 = StackFrame.anItemStringPtr(a6)				<27>
+					beq.s	@nextWrap						; if stringPtr is NIL then skip this item			<27>
+			; see if this cell is better than bestGuess															<27>
+			; that is, when trying to find first, it is better if cell is less than bestGuess					<27>
+					subq	#2,sp							; room for result									<27>
+					pea		StackFrame.bestGuess(a6)		;													<27>
+					move.w	d5,-(sp)						; d5 = StackFrame.anItemScript(a6)					<27>
+					move.l	d4,-(sp)						; d4 = StackFrame.anItemStringPtr(a6)				<27>
+					bsr		TypeSelectCompare				;													<27>
+					neg.w	(sp)							; want to branch on opposite conditions				<27>
+					tstBra	@nextWrap						; if bounds fails, try next item					<27>
+					bsr.s	NewBestGuess					; this is better than guess, so use it				<27>		
+					bra.s	@nextWrap						;													<27>	
+
+@foundIt			bsr		UnLockIt						; unlock the package
+					movem.l	(sp)+,a4/d3-d7
+					unlk	a6	
+					move.l	(sp)+,a0
+					add		#StackFrame.paramSize,sp
+					jmp		(a0)
+					
+
+;--------------------------------------
+; 
+; Branch according to selectMode.  
+;
+;	tsPreviousSelectMode	=>   bra if item ≥ type select buffer	
+;	tsNormalSelectMode		=>   bra if item < type select buffer
+;	tsNextSelectMode		=>   bra if item ≤ type select buffer
+;
+;	
+;	in: 4(sp).w = compare's result
+;			 a1 = place to branch on success
+;
+;   if test passes
+;		then pops return address and jumps to a1
+;		else returns
+;
+BndBranch			move.l	(sp)+,a0	; return address
+					move.w	(sp)+,d0	; test result on which to base branch 
+					neg.w	d0
+					cmp.w	d0,d6		; d6 = StackFrame.selectMode(a6)
+					beq.s	@dontBranch
+					tst.w	d6
+					bne.s	@branch
+					tst.w	d0
+					bgt.s	@dontBranch
+@branch				move.l	a1,a0		; force branch
+@dontBranch			jmp		(a0)		; return
+
+
+;--------------------------------------
+;
+; in d3.w = cell index
+;
+NewBestGuess		move.w	d3,StackFrame.result(a6)
+					move.w	StackFrame.anItemScript(a6),StackFrame.bestGuess.tsrScript(a6)
+					move.l	d4,d7										; save off last ptr
+					move.l	d4,a0										; source
+					lea		StackFrame.bestGuess.tsrKeyStrokes(a6),a1	; destination
+					moveq	#0,d0
+					move.b	(a0),d0				; source string length
+					addq	#1,d0
+					moveq	#63,d1
+					cmp.b	d1,d0				; no more then 63 chars long
+					blt.s	@1
+					move.b	d1,d0
+@1					_BlockMove
+					rts
+					
+
+;--------------------------------------
+;
+; in: d3.w = cell index
+;
+GetStringFromIndex	subq	#2,sp									; Boolean result
+					move.w	d3,-(sp)								; item: INTEGER
+					pea		StackFrame.anItemScript(a6)				; VAR itemsScript
+					pea		StackFrame.anItemStringPtr(a6)			; VAR itemsStringPtr
+					move.l	StackFrame.yourDataPtr(a6),-(sp)		; yourDataPtr: Ptr;
+					move.l	StackFrame.getStringProc(a6),a0
+					jsr		(a0)
+					move.l	StackFrame.anItemStringPtr(a6),d4		; d4 = StackFrame.anItemStringPtr(a6)
+					move.w	StackFrame.anItemScript(a6),d5			; d5 = StackFrame.anItemScript(a6)
+					move.b	(sp)+,d0
+					rts
+
+						ENDPROC
+						
+		end ; of file

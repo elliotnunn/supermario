@@ -1,0 +1,95 @@
+;
+;	File:		ParityINIT.a
+;
+;	Contains:	code to put up a dialog if we have a parity troubles (replaces two ParityINITs)
+;				this version depends on the newer INIT loading code
+;
+;	Written by:	Gary Rensberger and Darin Adler
+;
+;	Copyright:	© 1990 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		 <3>	 3/26/91	dba		dty, #84429: deallocate stack after WriteXPram
+;		 <2>	 8/18/90	dba		do a Shut Down instead of a Restart, since Restart just gives
+;									you this dialog again
+;		 <1>	 4/19/90	dba		checked in for the first time
+;				 4/18/90	dba		create from two older ParityINITs; dispose of ourselves when we’re done
+;
+
+		load 'StandardEqu.d'
+		include 'GestaltEqu.a'
+		include 'ShutDownEqu.a'
+
+ParityAlert		equ		-16392					; our alert number
+ErrPGCTest		equ		$8E						; major error code for parity generator
+
+Parity		main	export
+
+            bra.s	@skipHeader
+            DC.L	('INIT')					; resource type
+            DC.W	10							; id
+            DC.W	2							; version
+@skipHeader
+
+			move.l	a0,-(sp)					; save handle to this code (from INIT loader)
+
+; Check for PGC chip present, parity disabled.
+
+			move.l	#gestaltParityAttr,d0
+			_Gestalt
+			tst.w	d0							; did gestalt work?
+			bne		@noDialog					; no, exit
+
+			move.w	a0,d0						; do we have a PGC chip?
+			btst	#gestaltHasParityCapability,d0
+			beq.s	@noDialog					; no, exit
+
+			btst	#gestaltParityEnabled,d0	; is parity enabled?
+			beq.s	@doDialog					; no, put up dialog
+
+; Check for PGC chip present, parity enabled, failed startup diagnostics (probably won’t happen).
+
+			clr.l	-(sp)						; make buffer to read into
+			move.l	sp,a0						; point to buffer
+			move.l	#$000300F9,d0				; setup to read 3 bytes at loc F9
+			_ReadXPRAM							; go read them
+			move.b	(sp)+,d0					; get first byte
+			move.b	(sp)+,d1					; get third byte
+
+			lsr.b	#1,d0						; test non-critical error flag bit
+			bcc.s	@noDialog					; not set, no problem
+
+			cmp.b	#ErrPGCTest,d1				; some error, was it PGC?
+			bne.s	@noDialog					; no, don’t put up alert
+
+			clr.b	-(sp)
+			move.l	sp,a0
+			move.l	#$000100F9,d0				; clear PRAM error flag
+			_WriteXPRAM
+			addq	#2,sp						; deallocate space used for buffer				<3>
+
+; Put up the dialog
+
+@doDialog
+			_InitWindows						; init the window manager
+			_InitMenus							; init the menu manager
+			_TEInit								; init TextEdit
+			clr.l	-(sp)						; no resume proc
+			_InitDialogs
+			subq	#2,sp						; room for function result
+			move.w	#ParityAlert,-(sp)			; push our alert ID
+			clr.l	-(sp)						; no ProcPtr
+			_CautionAlert						; put up the alert
+			cmp.w	#2,(sp)+					; did he hit 'Restart'?
+			bne.s	@done						; no, just continue
+			_SDPowerOff
+@noDialog
+@done
+
+			move.l	(sp)+,a0
+			_DisposHandle						; get rid of this INIT
+
+			rts
+
+			end

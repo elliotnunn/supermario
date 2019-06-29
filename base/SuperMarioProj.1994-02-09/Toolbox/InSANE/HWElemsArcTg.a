@@ -1,0 +1,305 @@
+;
+;	File:		HWElemsArcTg.a
+;
+;	Contains:	HW ATAN() routines
+;
+;	Written by:	Apple Numerics Group, DSG
+;
+;	Copyright:	© 1985-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<SM2>	 2/3/93		CSS		Update from Horror:
+;		<H2>	 9/29/92	BG		Adding Jon Okada's latest fixes.
+;		  <1>	10/24/91	SAM/KSM	Rolled in Regatta file.
+;		
+;	Terror Change History:
+;
+;		 <1>	01/06/91	BG		Added to TERROR/BBS for the time.
+;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;																			  ;;
+;;	File 881ELEMStg.a,														  ;;
+;;	Function arctg(x),														  ;;
+;;	Implementation of tg for ΩSANE.											  ;;
+;;	For machines with MC68881/68882 FPU.									  ;;
+;;																			  ;;
+;;	Copyright Apple Computer, Inc. 1985-7, 1989, 1990, 1992, 1993.			  ;;
+;;																			  ;;
+;;	Written by Ali Sazegari, started on August 11 1989,						  ;;
+;;	Added sections to handle flags correctly, December 14, 1989.			  ;;
+;;	Funny behavior on the input -inf: i can't get these flags to print with	  ;;
+;;	my fortran test program.												  ;;
+;;	A problem was found using the arctg with pascal and c compilers:		  ;;
+;;	the instruction MOVEM.W	A1/A2,-(SP) caused a bus error.  The reason		  ;;
+;;	is that on the restore side ( 3 occurences in this code ), MOVEM.W the	  ;;
+;;	result is sign extended to 32 bits ( akh! ) therefore garbeling both	  ;;
+;;	registers.  MOVEM.W replaced by MOVEM.L, May 21, 1990.					  ;;
+;;	Grouped the A1-A3 save and restore together, May 22, 1990				  ;;
+;;																			  ;;
+;;	N.B. This program is a hog, it uses the following registers:			  ;;
+;;	a0, d0, d1, fp0, fp1, fp2, fp3, fp4 & fp5.					  			  ;;
+;;																			  ;;
+;;	based on Elems881, package code for Macintosh by J. Coonen,				  ;;
+;;	who wrote it from pascal programs by D. Hough, C. McMaster and K. Hanson. ;;
+;;																			  ;;
+;;  Further Modification History:											  ;;
+;;	23 Apr 92	Performance tuning done (better register usage, faster FPU    ;;
+;;				ops used, front-end check for small/huge operands eliminates  ;;
+;;				spurious underflowing.					... JPO				  ;;
+;;																			  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+RAtan
+
+;			MOVEM.L	A1/A2/A3,-(SP)		; a1 = sgn(T), where T is the argument	DELETED <4/23/92, JPO>
+										; a2 is a boolean, cleared if argument
+										; is less than one, set otherwise
+										; use a3 for denormal flag use
+			
+;			MOVEA.L	A0,A3				; keep a copy of the pointer to argument  DELETED <4/23/92, JPO>
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Classification of the argument with a neat trick.						  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			FMOVE.L	FPSR,D0				; what kind of arg? fpsr has the key
+			MOVEQ	#0,D1				; clr sign/size flag					 <4/23/92, JPO>
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Here is the strategy  ( commonly known as the clay scoop ) by C. R. Lewis ;;
+;;	Register D0 has N, Z, I, NaN burried in it.  Mask off unwanted bits to 	  ;;
+;;	get them. Then, left shift NZINaN to have Z at MSB position.  If D0 = 0	  ;;
+;;	then arg is finite.														  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+;			MOVE.L	#ExcMask,D1			; mask it kid					DELETED <4/23/92, JPO>
+;			AND.L	D1,D0				; we now have the meat			DELETED<4/23/92, JPO>
+			ANDI.L	#ExcMask,D0			; isolate FPCC bits				<4/23/92, JPO>
+			LSL.L	#ShiftIt,D0			; N->C, Z->MSB, I->30th & NaN->29th bit
+			
+			BNE.W	StinkyBoys			; zero, infinite or NaN input	<4/23/92, JPO>
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	If arg is negative then set bit 31 of D1								  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+;			BCS.B	@70					; T < 0 ?						DELETED <4/23/92, JPO>
+;			MOVEA.W	#0,A1				; no T > 0, then clear the flag	DELETED <4/23/92, JPO>
+;			BRA.B	@71					;								DELETED <4/23/92, JPO>
+;@70																	label DELETED <4/23/92, JPO>
+;			MOVEA.W	#1,A1				; yes T < 0, then set the flag	DELETED <4/23/92, JPO>
+;@71									;								label DELETED <4/23/92, JPO>
+
+			BCC.B	@smchk				; input > 0 and so is flag D1	<4/23/92, JPO>
+			
+			BSET.L	#31,D1				; input < 0 and so is flag D1	<4/23/92, JPO>
+@smchk:									;								label ADDED <4/23/92, JPO>
+			BFEXTU	(A0){1:15},D0		; |arg| < 2^(-32)?				<4/23/92, JPO>
+			CMPI.W	#$3FDF,D0			;								<4/23/92, JPO>
+			BGE.B	@bigchk				; no, check for big input		<4/23/92, JPO>
+			
+			MOVE.L	#SetInexact,D0		; yes, return arg and INEXACT	<4/23/92, JPO>
+			BFTST	(A0){1:16}			; if denormal, signal UNDERFLOW	<4/23/92, JPO>
+			BNE.B	@done				;								<4/23/92, JPO>
+			OR.L	#SetUFlow,D0		;								<4/23/92, JPO>
+@done:									;								label ADDED <4/23/92, JPO>
+			JMP		(A4)				;								<4/23/92, JPO>
+			
+@bigchk:	CMPI.W	#$407F,D0			; is unbiased exponent > 128?	<4/23/92, JPO>
+			BLE.B	@atando				; no, evaluate atan				<4/23/92, JPO>
+			
+			FMOVE.X	FPKPI2,FP0			; yes, return π/2 with arg sign	<4/23/92, JPO>
+			TST.L	D1					; sign of D1 is sign of arg		<4/23/92, JPO>
+			BPL.B	@bigdone			;								<4/23/92, JPO>
+			
+			FNEG.X	FP0,FP0				; arg < 0.0						<4/23/92, JPO>
+@bigdone:								;								label added <4/23/92, JPO>
+			MOVE.L	#SetInexact,D0		; signal INEXACT				<4/23/92, JPO>
+			JMP		(A4)
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	If arg is a non zero finite number, great!  let's fall through, otherwise ;;
+;;	take the problem cases.													  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	
+;			BNE.W	StinkyBoys			; take care of the bad guys (Z bar set)  DELETED <4/23/92, JPO>
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Go for the main course.  Persian style!									  ;;
+;;	-- throughout this program, we use 'arctg' & 'atan' interchangeably.	  ;;
+;;																			  ;;
+;;	About the argument reduction:  ATAN(T) is evaluated for 0 <= T <= 1 with  ;;
+;;	either a Short or a Long formula depending on the value of T.			  ;;
+;;																			  ;;
+;;	Recall the identities:													  ;;
+;;																			  ;;
+;;	atan(-T)	= -atan(T)													  ;;
+;;	atan(1/T)	=  pi/2 - atan(T)											  ;;
+;;																			  ;;
+;;	If T < 0 then atan(-T) is computed, and the result negated.				  ;;
+;;	If |T| > 1 then atan(1/|T|) is computed and the result subtracted from π/2;;
+;;																			  ;;
+;;	To compute atan of reduced T use Short or Long formula:					  ;;
+;;																			  ;;
+;;	T <= ATnCons ≈ 0.267 then arctg(T) = T - T * P(T*T) / Q(T*T),			  ;;
+;;						 else arctg(T) = T - (A	+  (B*P(B*B)/Q(B*B) + x2fx2)) ;;
+;;																			  ;;
+;;		where	x2 and x2fx2 are constants, about 0.5 and 0.05 and			  ;;
+;;				A = (T - x2)/(1 + (1/(T*x2))),								  ;;
+;;				B = (T - x2)/(1 +	 (T*x2)).								  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+@atando:								;							label ADDED <4/23/92, JPO>
+			FABS.X	FP0,FP0				; set up for comparison
+;			FCMP.W	#1,FP0				;									DELETED <4/23/92, JPO>
+			FCMP.S	#"$3F800000",FP0	; T = |arg| <= 1?					<4/23/92, JPO>
+			FBLE.W	TisLTone			; is T <= 1 ?
+;			MOVEA.W	#1,A2				; not, T > 1, set the flag a2		DELETED <4/23/92, JPO>
+;			FMOVE.W	#1,FP3				; and invert the T so that 1/T < 1	DELETED <4/23/92, JPO>
+			ADDQ.B	#1,D1				; set inversion flag (D1.B)			<4/23/92, JPO>
+			FMOVE.S	#"$3F800000",FP3	; FP3 <- 1.0						<4/23/92, JPO>
+			FDIV.X	FP0,FP3				; fp0 = T, fp3 = 1/T
+			FMOVE.X	FP3,FP0				; fp0 = 1/T, fp3 = 1/T < 1
+			BRA.B	GoDoIt				; now continue with the computation
+
+TisLTone:
+;			MOVEA.W	#0,A2				; yes, T <= 1, clear the flag a2	DELETED <4/23/92, JPO>
+			FMOVE.X	FP0,FP3				; duplicate argument: fp0 = fp3 = T <= 1
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Select short or long form of the formula based on reduced argument versus ;;
+;;	ATnCons, about 0.268.													  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+GoDoIt		FCMP.X	FPKATNCONS,FP0		; start the selection process
+			FBGT.W	LongForm			; do we use the long formula?
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Short formula is selected, form T^2 and evaluate T * ( P(T^2) / Q(T^2) )  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+			FMUL.X	FP0,FP0				; fp0 = T*T, fp3 = T
+			
+			LEA		ATANP,A0			; A0 = coeff table ptr for PolyEval
+			BSR		PolyEval			; fp1 = PolyEval(P, T*T)
+			
+			FMOVE.X	FP1,FP2				; save P(arg)
+			
+			LEA		ATANQ,A0			; A0 = coeff table ptr for PolyEval
+			BSR		PolyEval			; fp1 = PolyEval(Q, T*T)
+			
+			FDIV.X	FP1,FP2				; form fp2 = P(T*T)/Q(T*T)
+			FMUL.X	FP3,FP2				; form fp2 = T * P(T*T)/Q(T*T)
+			
+			FSUB.X	FP2,FP3				; form fp3 = T - T * P(T*T)/Q(T*T)
+			FMOVE.X	FP3,FP0				; get the result in the right place			
+		
+GetOut:
+;			MOVE.W	A2,D1				; activate the boolean flag				DELETED <4/23/92, JPO>
+			TST.B	D1					; test inversion flag					<4/23/92, JPO>
+			BEQ.B	@72					; is T <= 1 ? ( the Z bar bit set )
+			FMOVE.X	FPKPI2,FP1			; get π/2
+			FSUB.X	FP0,FP1				; arctg(1/T) = π/2 - arctg(T)
+			FMOVE.X	FP1,FP0				; put it in the right place old boy!
+			
+@72:
+;			MOVE.W	A1,D1				; activate the zero flag				DELETED <4/23/92, JPO>
+;			BEQ.B	@73					; is T negative? ( the Z bar bit set )	DELETED <4/23/92, JPO>
+;			FMUL.B	#-1,FP0				; T was negative then return -arctg(T)  DELETED <4/23/92, JPO>
+
+			TST.L	D1					; was arg negative?						<4/23/92, JPO>
+			BPL.B	@73					; no									<4/23/92, JPO>
+			FNEG.X	FP0,FP0				; yes, negate result					<4/23/92, JPO>
+		
+@73:
+;			BFEXTU	(A3) {1:16},D0		; get the exponent & 1st mantissa bit	DELETED <4/23/92, JPO>
+;			MOVEM.L	(SP)+,A1/A2/A3		; restore sign, boolean & flag registers  DELETED <4/23/92, JPO>
+;			BEQ.B	@74					; if D0 = 0 then current s = denorm		DELETED <4/23/92, JPO>
+			MOVE.L	#SetInexact,D0		; set the inexact flag
+;			MOVE.B	#ClrUflow ,D0		; and clear the underflow bit			DELETED <4/23/92, JPO>
+			JMP		(A4)
+			
+;@74		MOVE.L	#SetInexact,D0		; set up the inexact flag				DELETED <4/23/92, JPO>
+;			JMP		(A4)				; go to the control routine				DELETED <4/23/92, JPO>
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Long formula is selected, proceed with caution, difficult terrain ahead!  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+			
+LongForm	FMOVEM	FP4/FP5,-(SP)		; ay ya yay! save two more registers!
+			FMUL.X	FPKX2,FP3			; form fp3 = T * x2
+;			FMOVE.W	#1,FP2				; get ready for the inverse				DELETED <4/23/92, JPO>
+			FMOVE.S	#"$3F800000",FP2	; FP2 <- 1.0							<4/23/92, JPO>
+			FDIV.X	FP3,FP2				; fp0 = T, fp2 = 1 / (T*x2), fp3 = T*x2
+;			FADD.W	#1,FP2				; fp2 = 1 + 1 / (T*x2)					DELETED <4/23/92, JPO>
+;			FADD.W	#1,FP3				; fp3 = 1 + ( T*x2 )					DELETED <4/23/92, JPO>
+			FADD.S	#"$3F800000",FP3	; FP3 <- 1.0 + (T*x2)					<4/23/92, JPO>
+			FADD.S	#"$3F800000",FP2	; FP2 <- 1.0 + 1.0/(T*x2)				<4/23/92, JPO>
+			FMOVE.X	FP0,FP1				; copy T, fp0 = fp1 = T
+			FSUB.X	FPKX2,FP1			; form fp1 = T - x2
+			FMOVE.X	FP1,FP4				; copy for the next move, fp4=fp1= T - x2
+			FDIV.X	FP3,FP1				; we have fp1 = B = (T-x2)/(1+(1+(T*x2))
+			FDIV.X	FP2,FP4				; and fp4 = A = (T-x2)/(1 + 1/(T*x2))
+			FMOVE.X	FP1,FP3				; fp0=T, fp1=B, fp2=junk, fp3=B & fp4=A
+			FMUL.X	FP1,FP1				; ok boys, now fp1 = B*B, ready
+			FMOVE.X	FP0,FP2				; hold it, PolyEval needs its arg in fp0
+			FMOVE.X	FP1,FP0				; fp0=fp1= B*B, fp2 = T, fp3 = B & fp4 = A
+			
+			LEA		ATANP,A0			; A0 = coeff table ptr for PolyEval
+			BSR		PolyEval			; fp1 = PolyEval(P, B*B)
+			
+			FMOVE.X	FP1,FP5				; save P(arg)
+			
+			LEA		ATANQ,A0			; A0 = coeff table ptr for PolyEval
+			BSR		PolyEval			; fp1 = PolyEval(Q, B*B)
+			
+			FDIV.X	FP1,FP5				; form fp5 = P(B*B)/Q(B*B)
+			FMUL.X	FP3,FP5				; form fp5 = B * P(B*B)/Q(B*B)
+			FADD.X	FPKX2FX2,FP5		; fp5 = B * P(B*B)/Q(B*B) + x2fx2
+			FADD.X	FP4,FP5				; fp5 = A + ( B * P(B*B)/Q(B*B) + x2fx2)
+			FSUB.X	FP2,FP5				; fp5 = T-(A+( B*P(B*B)/Q(B*B) + x2fx2))
+			FMOVE.X	FP5,FP0				; get it ready to fly out
+;			FMUL.B	#-1,FP0				; restore sign due to algorithm (strange!)	DELETED <4/23/92, JPO>
+			FNEG.X	FP0,FP0				; restore sign due to algorithm				<4/23/92, JPO>
+			
+			FMOVEM	(SP)+,FP4/FP5		; restore what you destroyed
+			BRA.W	GetOut				; get ready to fly out
+			
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;				P	R	O	B	L	E	M	C	A	S	E	S				  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+										
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	Problem cases: NaN, -∞, +∞ and zero.									  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	
+StinkyBoys				
+			
+			BMI.B	ArctgZero			; T = 0 ? ( N bit on the 030 is set )
+			BTST	#29,D0				; is T a NaN? ( bit position 29 )
+;			BEQ.B	ArctgInf			; all right, T = +∞ detected!			DELETED <4/23/92, JPO>
+			BNE.B	ArctgZero			; yes
+	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;	All right boys & girls, at this time it is apparent that the good old arg ;;
+;;	is an infinity or a NaN.												  ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;ArctgZero	MOVEM.L	(SP)+,A1/A2/A3		; restore sign, boolean & flag registers  DELETED <4/23/92, JPO>
+;			MOVEQ	#0,D0				; signal no exceptions					DELETED <4/23/92, JPO>
+;			JMP		(A4)				; return the input NaN or zero			DELETED <4/23/92, JPO>
+			
+;ArctgInf:								;										label DELETED <4/23/92, JPO>
+			FMOVE.X	FPKPI2,FP0			; return an unsigned π/2
+;			MOVE.W	A1,D1				; activate the zero flag				DELETED <4/23/92, JPO>
+;			BEQ.B	@75					; is T negative? ( the Z bar bit set )	DELETED <4/23/92, JPO>
+;			FMUL.B	#-1,FP0				; T was negative then return -π/2		DELETED <4/23/92, JPO>
+;@75		MOVEM.L	(SP)+,A1/A2/A3		; restore sign, boolean & flag registers  DELETED <4/23/92, JPO>
+			TST.W	(A0)				; return -π/2 for -INF input			<4/23/92, JPO>
+			BPL.B	ArctgZero			; return +π/2							<4/23/92, JPO>
+			FNEG.X	FP0,FP0				; return -π/2							<4/23/92, JPO>
+ArctgZero:								;										label ADDED <4/23/92, JPO>
+			MOVEQ	#0,D0				; signal no exceptions
+			JMP		(A4)				; return either π/2 or -π/2

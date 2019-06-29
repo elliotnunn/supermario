@@ -1,0 +1,764 @@
+;
+;	File:		ScriptMgrDispatch.a
+;
+;	Contains:	Script Manager dispatcher and font-to-script mapping routines
+;
+;	Written by:	JDT	Joe Ternasky
+;				PKE	Peter Edberg
+;
+;	Copyright:	© 1986-1992 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;		<19>	 6/10/92	FM		For a 7.1 based ROM we need to include the FindWord and
+;									FindScriptRun glue. Therefore I am removing the forROM
+;									conditionals.
+;		<18>	 5/19/92	PKE		#1030321,<jh>: Add glue for private external access to
+;									NFindScriptRun routine.
+;		<17>	 5/14/92	PKE		#1027061,<ha>: Add private ScriptToRange routine to return
+;									resource ID range for a script.
+;		<16>	 5/14/92	PKE		#1029395,<bbm>: Move glue for using generic FindScriptRun to
+;									Script Mgr dispatcher, so that we only call script's version if
+;									a new-format table does not exist.
+;		<15>	 4/29/92	JSM		(really FM) Get rid of conditionals: don’t use smgrSysVers or
+;									smgrROMVers, delete lots of code which never gets compiled. Keep
+;									NOT forROM conditionals for now until we fix the ROM build, keep
+;									appTweaks conditional until we find out if we really might turn
+;									this off someday.
+;		<14>	 4/29/92	JSM		Load StandardEqu.d, include ScriptPriv.a and IntlUtilsPriv.a,
+;									and add and END statement so we can compile this file
+;									separately.
+;		<13>	12/17/91	PKE		#1018346: When CallInterface jumps to script dispatcher, leave
+;									ScriptCode in upper word of d2. Needed so Roman routines can get
+;									correct script resources for simple script handling.
+;		<12>	12/10/91	PKE		#1017749: When CallInterface jumps to a script system
+;									dispatcher, leave a pointer to that script's ScriptRecord in a0
+;									for use by the script's dispatcher.
+;		<11>	 12/6/91	PKE		#1017161: Expand dispatch table for new private routine
+;									TestLetter.
+;		<10>	 10/8/91	PKE		For Cube-E (and Bruges): Change dispatch mechanism to allow new
+;									long selectors with bit 30 set and ScriptCode passed on stack,
+;									so we can have routines that don't depend on the font of the
+;									port (needed for bug #1013149). Expand dispatch table for new
+;									(currently private) routines RealScript, Font2RealScript,
+;									SCLwrString (needed for #1013149, #1012949). Clean up some
+;									conditionals, remove code that is conditionalized out.
+;		 <9>	 9/26/91	PKE		For Cube-E (and Bruges): In FontScript etc., map smUninterp to
+;									Roman, not to system script (unless IntlScript call and
+;									IntlForce flag is on). Needed for HyperCard!! Clean up a few
+;									conditionals (lots more to do).
+;		 <8>	 1/14/91	PKE		(stb) Expand dispatch table for Kevin’s new private routine
+;									FindCharInSet, needed for Dialog Mgr and Finder.
+;		 <7>	12/10/90	PKE		(VL) Expand dispatch table for new private routine
+;									ReInitScripts, needed for network booting.
+;		 <6>	 7/25/90	PKE		Expand dispatch table for new private routines InitScriptApp and
+;									CleanupScriptApp.
+;		 <5>	 7/11/90	PKE		Expand dispatch table for new internal routine _IsCmdChar.
+;		 <4>	 6/13/90	PKE		Expand dispatch table for new internal routine
+;									_RebuildKeybdMenu.
+;		 <3>	 5/31/90	PKE		Expand dispatch table for new internal routine _SetKbdMenuInfo.
+;		 <2>	 5/29/90	DDG		NEEDED FOR SIXPACK: Changed all the sixpack conditionals from
+;									six-point-oh-seven to six-point-oh-six.
+;		 <1>	 5/23/90	PKE		New today, extracted from parts of ScriptMgrUtil.a and
+;									ScriptMgrExtTail.a, so it can included in both of those with
+;									appropriate conditionals to permit new ROM builds too. The
+;									changes in functionality are: (1) this is now part of ptch 27
+;									for 7.0, although it remains in ptch 4 for 6.x; (2) the table of
+;									offsets used to initialize the dispatch table is moved to
+;									ScriptMgrInit.a so it gets cut back; (3) the special FindWord
+;									handling from ScriptMgrExtTail.a is merged into the basic
+;									dispatcher here; (4) FontScript, IntlScript, and Font2Script
+;									now default to the system script instead of Roman.
+;
+;	Relevant recent comments from ScriptMgrUtil.a below:
+;		<x6>	 5/11/90	PKE		Expand dispatch table for new internal routine _AddScriptFonts.
+;		<x5>	  5/5/90	PKE		Expand dispatch table for new internal routines InitScripts and
+;									InitKeybdMenu.
+;		<x4>	 4/10/90	PKE		Use smgrSysVers, smgrROMVers, and forRom symbols instead of
+;									buildLevel. Deleted conditionalized definition of SysVers.
+;									Started organizing for ROMification of 7.0 extensions. Add
+;									export of FontScript, IntlScript, Font2Script.
+;		<x3>	 3/20/90	EMT		Removed unnecessary ROM85 references and oldMacTweek code.
+;		<x2>	 3/19/90	PKE		Always export BitBucket and BitBucketReg. Use new feature
+;									conditionals smgrUseStdExit and smgrUseDispTablePtr.
+;
+;	  <x2.7>	 9/18/89	PKE		Move KeyScript to ptch 27 so we can make a bug fix in itlk
+;									processing for both old and new ROMs. Change its vector here to
+;									be a dummy and stuff real address in ptch 27.
+;	  <x2.6>	 9/17/89	PKE		For 7.0, move Get/SetEnvirons and Get/SetScript to ptch 27.
+;									Change the vectors for these routines to be dummy vectors here;
+;									ptch 27 will stuff the real addresses.
+;	  <x2.5>	 9/15/89	PKE		Put in dummy vectors for TruncText, TruncString, ReplaceText,
+;									and, yes, NFindWord again (we'll allow a direct call with
+;									explicit specification of the break table, but the normal
+;									FindWord call won't use this vector). Use smLowCall60x instead
+;									of smLowCall for SysVers < $700, due to the fact that we can't
+;									conditionalize ScriptEqu.a (it is part of a dumpfile).
+;	  <x2.4>	  9/5/89	PKE		Delete the NFindWord vector space from the dummy address table
+;									created in 2.3, since we now have a different mechanism for
+;									getting to NFindWord.
+;	  <x2.3>	  9/4/89	PKE		Add dummy addresses for 7.0 routines to utilTable, to force
+;									allocation of space in dispatch table pointed to by
+;									smgrDispTable. The real routine addresses will be filled in
+;									later by SMgrExtTail.a (ptch 27).
+;
+;	Relevant recent comments from ScriptMgrExtTail.a below:
+;	   <x11>	 3/26/90	PKE		Conditionalize so ptch 27 can be used in Sys 6.0.6+ to get
+;									script auto-initialize capability. Use new conditionals
+;									doScriptMgrGestalt, doScriptMgrLwrString2; otherwise just
+;									conditionalize on smgrSysVers (need to improve this later).
+;	  <x1.3>	 9/15/89	PKE		Change NFindWord references to xNFindWord, do install it again
+;									in dispatch table - we'll permit direct calls in addition to
+;									getting to it from the old FindWord selector via the glue. Add
+;									and install framework code for TruncString, TruncText,
+;									ReplaceText. Stuff correct version number in SMgrRecord.
+;	  <x1.2>	  9/5/89	PKE		Add ScriptUtil patch which checks for FindWord call, sets up and
+;									checks tables, and decides between new or old FindWord. Don't
+;									install NFindWord address in trap table anymore. Include
+;									'PackMacs.a'.
+;___________________________________________________________________________________________________
+
+		LOAD	'StandardEqu.d'					; <14>
+		include 'ScriptPriv.a'					; <14>
+		include	'IntlUtilsPriv.a'				; <14>
+
+		proc
+		export	BitBucket, BitBucketReg			; always export			<x2>
+
+		export	xScriptUtil						; _ScriptUtil dispatcher
+
+		export	FontScript, IntlScript, Font2Script					;	<x4>
+		export	RealScript, Font2RealScript							;	<10>
+		export	ScriptToRange										;	<17>
+		export	NFindScriptRun										;	<18>
+
+		import	xFindScriptRun
+	
+; ----------------------------------------------------------------------------
+; Routine:	SMgrUtil(selector);
+; Input:	(sp).l	Which routine to execute.
+; Warning:	This routine is a trap patch.
+;			This routine does not return directly to the caller.
+;
+; Execute the appropriate ScriptUtil routine based on the selector.  If the
+; selector is beyond smSetScript, then the scriptUtil routine of the current
+; font script is called to handle it.
+; Note that the original selectors were a single word that provided an
+; index into a routine table.  The new selectors are long words that include
+; and index and the sizes of the result and arguments.  A mapping is done
+; from the old to new selectors when we are called from an old application,
+; and from the new to the old selectors when we are passing a call to an
+; old script interface system.
+;
+; If this is a FindWord call, then get the tables from itl2 if necessary, and	<1>
+; do validity checking. If everything is ok, jump to the new FindWord, other-
+; wise, use the old FindWord for the appropriate script system.
+; ----------------------------------------------------------------------------
+
+newSelBit		equ	31						; new selector has this set.
+scriptPassedBit	equ	30						; if set, ScriptCode passed on stack	<10>
+
+xScriptUtil									; added new label				<4/27/88ldc>
+		move.l	4(sp),d0					; get the selector.
+
+; Old style of selector, need to set up extra word of parameters on stack.
+; Depending on the selector, push different values.  First coerce selector
+; to be of the new order ala Mr. Ternasky's specifications.
+
+		moveq	#smCurrentScript,d2			; assume font script (as usual)	<10>
+
+	IF appTweaks THEN
+		btst	#newSelBit,d0				; high bit set? don't clr it	<1/4/88med><10>
+		bne.s	@noApp						; yes -> new selector.
+		move.l	(sp)+,a0					; pop return address.
+		swap	d0							; load old selector.
+		lsr.w	#1,d0						; divide by 2 for byte index.
+		move.b	NewSelectTable(d0.w),d0		; lookup new selector.
+		move.w	d0,(sp)						; push new selector.
+		move.w	OldParamTable(d0.w),-(sp)	; push new arguments.
+		move.l	a0,-(sp)					; push return address.
+		bra.s	@donePopScript				; can't have ScriptCode			<10>
+@noApp
+	ENDIF
+
+; Check for ScriptCode passed on stack										<10>
+		bclr	#scriptPassedBit,d0			; ScriptCode on stack? clr bit
+		beq.s	@donePopScript				; if not, skip getting it
+		move.l	(sp)+,a0					; pop return address
+		addq	#4,sp						; discard selector (have in d0)
+		move.w	(sp)+,d2					; pop ScriptCode
+		move.l	d0,-(sp)					; restore selector, bit 30 clear
+		move.l	a0,-(sp)					; restore return address
+@donePopScript
+
+		cmp.w	#smFindWord,d0
+		beq		FindWordGlue
+		cmp.w	#smFindScriptRun,d0			;								<16>
+		beq		FindScriptRunGlue			;								<16>
+	
+; If this selector is intended for the Script Manager itself, then call the
+; appropriate routine through the offset table.
+
+; Use RAM-based disp table												<04/26/89 pke><2>
+
+		with	SMgrRecord
+		GetSMgrCore a0						; set up ptr to SMgrRecord
+		cmp.w	smgrDispHigh(a0),d0			; selector > largest selector?
+		bgt		CallInterface				; yes -> call interface.
+		cmp.w	smgrDispLow(a0),d0			; < least selector?
+		blt		BitBucket					; return zero
+		add.w	d0,d0						; make it an offset to long
+		move.l	smgrDispTable(a0),a0		; get table ptr
+		move.l	0(a0,d0.w),a0				; get vector from table
+		jmp		(a0)						; jump to the routine.
+		endwith	;SMgrRecord
+	
+; ----------------------------------------------------------------------------
+; Table mapping old selector to new selector.  Note that the ParseTable
+; call is not included here as it did not exist in the days of the old
+; selectors.
+
+	IF appTweaks THEN
+NewSelectTable
+		dc.b	16					; CharByte
+		dc.b	18					; CharType
+		dc.b	20					; Pixel2Char
+		dc.b	22					; Char2Pixel
+		dc.b	24					; Translit
+		dc.b	26					; FindWord
+		dc.b	28					; HiliteText
+		dc.b	30					; DrawJust
+		dc.b	32					; MeasureJust
+		dc.b	12					; GetScript
+		dc.b	14					; SetScript
+		dc.b	08					; GetEnvirons
+		dc.b	10					; SetEnvirons
+		dc.b	00					; FontScript
+		dc.b	02					; IntlScript
+		dc.b	04					; KeyScript
+		dc.b	06					; Font2Script
+		align	2
+	ENDIF
+
+; Table of correct function/argument byte counts for new style dispatch.
+; Format is <result bytes><argument bytes>
+; Note:  Order is for new selectors.  The ParseTable call is not included
+; here as it did not exist for the old selectors.
+
+
+; ----------------------------------------------------------------------------
+	IF appTweaks THEN
+OldParamTable
+		dc.w	$0200				; FontScript
+		dc.w	$0200				; IntlScript
+		dc.w	$0002				; KeyScript
+		dc.w	$0202				; Font2Script
+		dc.w	$0402				; GetEnvirons
+		dc.w	$0206				; SetEnvirons
+	
+		dc.w	$0404				; GetScript
+		dc.w	$0208				; SetScript
+		dc.w	$0206				; CharByte
+		dc.w	$0206				; CharType
+		dc.w	$020E				; Pixel2Char
+		dc.w	$020C				; Char2Pixel
+		dc.w	$020E				; Translit
+		dc.w	$0012				; FindWord
+		dc.w	$000E				; HiliteText
+		dc.w	$0008				; DrawJust
+		dc.w	$000C				; MeasureJust
+	ENDIF
+
+; ----------------------------------------------------------------------------
+
+fwRecord	record	{return},decr
+textPtr		ds.l	1					; Text pointer.
+textLength	ds.w	1					; Text length.
+offset		ds.w	1					; First offset.
+leadingEdge	ds.w	1					; LeadingEdge flag.
+breaks		ds.l	1					; Optional tuple table.
+offsets		ds.l	1					; array of offsets.
+selector	ds.l	1					; selector
+return		ds.l	1					; return address.
+			endr
+
+FindWordGlue
+		import	xNFindWord
+		with	SMgrRecord,fwRecord
+
+		move.l	breaks(sp),a0		; get break table argument. Need in
+		move.l	a0,d0				;   A0 later, D0 now for speed
+		beq.s	@getDefaultTable	; if breaks=0, get default table
+		addq	#1,d0				; breaks=-1? Y=> fall thru and get
+		bne.s	@haveTable			;   default table, N=> go check table
+
+@getDefaultTable
+; No longer save/clear IntlForce, call GetIntl, restore IntlForce.				<10>
+; Instead, we just use GetScriptItl (now save & restore ScriptCode)				<10>
+
+		move.w	d2,-(sp)			; save ScriptCode							<10>
+	
+		clr.l	-(sp)				; space for returned handle
+		move.w	#2,-(sp)			; select itl2
+		move.w	d2,-(sp)			; ScriptCode								<10>
+		clr.w	-(sp)				; use app's itl2 if any						<10>
+		_IUGetScriptItl				; may trash a0,a1,d0-d2						<10>
+		move.l	(sp)+,a0			; store itl2 handle
+	
+		move.w	(sp)+,d2			; restore ScriptCode						<10>
+		
+		move.l	a0,d0				; nil handle?
+		beq.s	CallInterface		; bail if so								<1>
+		move.l	(a0),a0				; dereference - get itl2 pointer
+		btst.b	#0,itl2FlagsOffset+1(a0) ; extended itl2 tables?
+		beq.s	CallInterface		; no, bail									<1>
+
+		move.w	wordTableOffset(a0),d0 ; assume word table offset
+		tst.l	breaks(sp)			; which is it really?
+		beq.s	@1					; if word, we're ok
+		move.w	wrapTableOffset(a0),d0 ; else get wrap table offset
+@1		add.w	d0,a0				; get break table pointer
+
+@haveTable
+		tst.b	(a0)				; check break table format
+		bpl.s	CallInterface		; non-negative => old, bail					<1>
+		move.l	a0,breaks(sp)		; save break table pointer
+		jmp		xNFindWord			; we made it! Follow the True Path.
+
+		endwith	;SMgrRecord,fwRecord
+
+
+; ---------------------------------------------------------------------------- <16>
+; Function FindScriptRun (
+;				textPtr: Ptr;
+;				textLen: Longint;
+;				var	 lenUsed: Longint
+;			): Integer;
+;
+; If there is a new-format table in the itl2, this glue jumps to the generic
+; FindScriptRun routine, else it calls the script's version.
+; ----------------------------------------------------------------------------
+		
+FindScriptRunGlue
+		move.w	d2,-(sp)					; save ScriptCode
+
+		subq	#4,sp						; make room for the itl handle.
+		move.w	#2,-(sp)					; push 'which' argument => itl2.
+		move.w	d2,-(sp)					; push ScriptCode
+		move.w	#-1,-(sp)					; push sysFlag as TRUE
+		_IUGetScriptItl						; get itl handle
+		move.l	(sp)+,a1					; pop handle (null if err)
+
+		move.w	(sp)+,d2					; restore ScriptCode
+		move.l	a1,d0						; did we get a handle?
+		beq.s	CallInterface				; bail if none
+		
+		move.l	(a1),a1						; get pointer
+		move.w	findScriptTableOffset(a1),d0 ; get offset to table
+		beq.s	CallInterface				; bail if no table
+		tst.w	findScriptTableLen(a1)		; check table length
+		beq.s	CallInterface				; bail if null
+		add.w	d0,a1						; make pointer to table
+		
+		tst.b	FindScriptTable.flags2(a1)	; new table format?
+		bpl.s	CallInterface				; if not, go handle old format
+
+; here we set up to call C routine. Replace selector on stack
+; with pointer to FindScriptTable, and jump to C routine.
+
+		move.l	a1,4(sp)
+		jmp		xFindScriptRun		
+	
+; glue for NFindScriptRun - discard selector and jump to xFindScriptRun			<18>
+NFindScriptRun
+		move.l	(sp)+,(sp)					; copy return addr over selector
+		jmp		xFindScriptRun		
+		
+
+; ----------------------------------------------------------------------------
+; Find a pointer to the script entry for the font script.  This is a
+; little-known side-effect of the FontScript call.
+;
+; Now d2.w has a ScriptCode, use this as the basis for dispatching.				<10>
+
+CallInterface
+		with	SMgrRecord,ScriptRecord	;										<10>
+		cmp.w	#smSystemScript,d2		; check ScriptCode						<10>
+		blt.s	@useFontScript			; FontScript, go get it					<10>
+
+		movea.l	IntlSpec,a1				; doesn't affect cc						<10>
+		bgt.s	@haveRealScript			;										<10>
+		move.w	smgrSysScript(a1),d2	; get system script						<10>
+@haveRealScript
+		move.w	d2,d1					; copy script code						<13>
+		lsl.w	#2,d1					; convert to long offset.				<10><13>
+		move.l	smgrEntry(a1,d1.w),d1	; script installed?						<10><13>
+		beq.s	@badScript				; no, go handle it						<10>
+		move.l	d1,a0					; load script entry pointer.			<10>
+		tst.b	scriptEnabled(a0)		; script enabled?						<10>
+		bne.s	@haveScriptRecord		; if so, go dispatch
+@badScript
+; Here we just bail and use Roman. I suppose we should really try system		<10>
+; script first, and also map smUninterp. Less important for explicit scripts.
+		move.l	smgrEntry(a1),a0		; get Roman script pointer				<10>
+		moveq	#0,d2					; script code is Roman					<13>
+		bra.s	@haveScriptRecord		; go dispatch							<10>
+
+@useFontScript
+		sub.w	#6,sp					; fake selector and result.
+		bsr.s	FontScript				; Leaves ScriptRecord ptr in a0
+		move.w	(sp)+,d2				; pop result into d2					<13>
+
+; This is intended for a particular script interface system, so jump into
+; it through the appropriate scriptUtil routine vector.
+
+@haveScriptRecord
+		swap	d2						; save script code in d2 hi word		<13>
+		move.l	scriptTrap(a0),a1		; load scriptUtil routine.				<12>
+		jmp		(a1)					; jump to it.							<12>
+		; have real script code in d2 high word, ScriptRecord ptr in a0.		<13>
+		endWith	;SMgrRecord,ScriptRecord
+
+; ----------------------------------------------------------------------------
+; routine	BitBucket
+; input		(sp)	return address
+;			4(sp)	selector
+; function	clean up stack and bail from routine
+; ----------------------------------------------------------------------------
+
+BitBucket
+		move.l	(sp)+,a0				; pop the return address.
+		move.l	(sp)+,d0				; pop the selector value.
+		; drop thru
+
+; ----------------------------------------------------------------------------
+; routine	BitBucketReg
+; input		a0	return address
+;			d0	selector
+; function	clean up stack and bail from routine
+; ----------------------------------------------------------------------------
+
+BitBucketReg
+		swap	d0						; load the lengths.
+		clr.l	d1						; clear a long.
+		move.b	d0,d1					; isolate arguments length.
+		lsr.w	#8,d0					; isolate results length.
+		and.w	#$7F,d0					; strip high bit					<1/4/88med>
+		add.w	d1,sp					; pop the arguments.
+		move.l	sp,a1					; copy the stack pointer.
+		bra.s	@2						; enter loop at bottom.
+@1		clr.b	(a1)+					; clear a byte.
+@2		dbra	d0,@1					; do the next byte.
+		jmp		(a0)					; return to the caller.
+
+; ----------------------------------------------------------------------------
+; function:	FontScript: Integer;
+; output:	(sp).w	Font script code.
+;			a0.l	current script global pointer, for internal use only
+; warning:	This routine follows Pascal register conventions.
+;
+; FontScript returns the script number calculated from the current GrafPort's
+; font and the FontForce flag.
+; ----------------------------------------------------------------------------
+
+FontScript
+		with	smgrRecord				;
+		GetTheFont a0,d0				; load the font.
+		GetSMgrCore a1					; load script manager globals.
+		moveq	#0,d1					; clear intl flag					<11/10/87med>
+		move.b	smgrFontForce(a1),d1	; load fontForce flag.
+		move.l	(sp)+,d2				; pop return address.
+		add.l	#4,sp					; pop selector value.
+		bra.s	CommonMapping			; enter common code.
+		endWith							;
+
+
+; ----------------------------------------------------------------------------
+; function:	IntlScript: Integer;
+; output:	(sp).w	Intl script code.
+; warning:	This routine follows Pascal register conventions.
+;
+; IntlScript returns the script number calculated from the current GrafPort's
+; font, the FontForce flag, and the IntlForce flag.
+; ----------------------------------------------------------------------------
+
+IntlScript
+		with	smgrRecord				;
+		GetTheFont a0,d0				; load the font.
+		GetSMgrCore a1					; load script manager globals.
+		move.b	smgrIntlForce(a1),d1	; load IntlForce flag.
+		ext.w	d1						; set intl flag in top bit			<11/10/87med>
+		ext.l	d1						;									<11/10/87med>
+		or.b	smgrFontForce(a1),d1	; or in FontForce flag.
+		move.l	(sp)+,d2				; pop return address.
+		add.l	#4,sp					; pop selector value.
+		bra.s	CommonMapping			; enter common code.
+		endWith							;
+
+
+; ----------------------------------------------------------------------------
+; function:	Font2Script(fontNumber: Integer): Integer;
+; input:	(sp).w	Font Number.
+; output:	(sp).w	Script code.
+; warning:	This routine follows Pascal register conventions.
+;
+; Font2Script maps a particular font onto a script number.
+; ----------------------------------------------------------------------------
+
+Font2Script
+		with	smgrRecord,scriptRecord		;
+		move.l	(sp)+,d2					; pop return address.
+		add.l	#4,sp						; pop selector value.
+		GetSMgrCore a1						; load script manager globals.
+		moveq	#0,d1						; clear intl flag				<11/10/87med>
+		move.b	smgrFontForce(a1),d1		; load fontForce flag.
+		move.w	(sp)+,d0					; pop font number.
+
+; ----------------------------------------------------------------------------
+; Routine	CommonMapping
+; input		a1.l	Script manager globals pointer.
+;			d0.w	Font number.
+;			d1.b	Force flag(s): ForceFont (or'ed w/ IntlForce if IntlScript call)
+;			d1.l	(Top word is flag for IntlForce if IntlScript call, otherwise 0)
+;			d2.l	Return address.
+;			(sp).w	return location
+; output	a0.l	current script global pointer, for internal use only
+;
+; This is common code for FontScript, IntlScript, and Font2Script.
+; Load the script manager globals pointer, clear both the forced and default
+; flags, and perform substitution for the system and application fonts.
+; ----------------------------------------------------------------------------
+
+CommonMapping
+		clr.w	smgrForced(a1)			; clear forced and default.
+		cmp.w	#1,d0					; fontNumber = 1?
+		bhi.s	@2						; > -> check for intl fonts.
+		blo.s	@1						; < -> use system font.
+		move.w	ApFontID,d0				; = -> use application font.
+		bra.s	@2						; check for intl fonts.
+@1
+		move.w	SysFontFam,d0			; use the system font.
+@2
+; CheckRange
+; We now have an accurate font number.  If this is an international font, we
+; fall into the calculation.  If not, we have to check the force flag.
+
+; removed unused & obsolete tweak for Excel-J							<9>
+
+; we discard d0 if we Force, so go ahead and subtract.					<1/27/88med>
+; This also lets us check range [4000..C000) with one instruction
+		sub.w	#smFondStart,d0			; zero base font number.
+		bmi.s	CheckForce				; check for force.
+
+; CalcScript
+; Holy typography BatMan!  This is an international font and we have to
+; map it to a script code!
+
+		move.w	#9,d1					; load shift count. (leave flag	<11/10/87med>
+		lsr.w	d1,d0					; divide font number by 2^9.
+		addq.w	#1,d0					; bump by one.
+		cmpi.w	#smUninterp,d0			; uninterpreted symbols?		<9>
+		beq.s	DoUninterp				; if so, treat as Roman			<9>
+
+		tst.l	d1						; test intl flag				<11/10/87med>
+		bpl.s	CheckDefault			; chk script entry				<06/05/89 pke><x4>
+
+; intl flag is set, so remap <11/10/87med>
+
+		cmp.w	smgrSysScript(a1),d0	; is it system script?
+		bne.s	SetForced				; no, then mash it
+		bra.s	CheckSys				; continue				<1>
+
+; end intl flag check  <11/10/87med>
+
+; smUninterp font: script code is Roman, ignore fontForce but not intlForce		<9>
+
+DoUninterp								;										<9>
+		swap	d1						; check intlForce only					<9>
+
+; This is a Roman font, so we have to check the force flag.  If the force
+; flag is set, we substitute the system script.
+
+CheckForce
+		move.l	#smRoman,d0				; we have a Roman font. (.l for a moveq) <1/27/88med>
+		tst.b	d1						; force flag?
+		beq.s	RomanPointer			; continue				<1>
+
+SetForced
+		st		smgrForced(a1)			; set the forced flag.
+		move.w	smgrSysScript(a1),d0	; use the system script.
+		bra.s	CheckSys									;	<1>
+
+; Here (in 7.0) we have chosen an international script. Check if it is installed.
+; If not, default to system script.
+
+CheckDefault
+		move.w	d0,d1					; copy script number.
+		lsl.w	#2,d1					; convert to long offset.
+		move.l	smgrEntry(a1,d1.w),d1	; script installed?
+		beq.s	SysScript				; no -> default to system script.
+		move.l	d1,a0					; load script entry pointer.
+		tst.b	scriptEnabled(a0)		; script enabled?
+		bne.s	DoneScript				; yes -> return to the caller.
+
+
+; The script was not installed or was installed but disabled.  Default to
+; system script and set the flags as appropriate.
+
+SysScript
+		move.w	#$00ff,smgrForced(a1)	; two values at once: not forced, but defaulted.
+; the above line is equivalent to the following <06/30/89 pke>
+;		move.b	#$00,smgrForced(a1)		; clear forced.
+;		move.b	#$ff,smgrDefault(a1)	; set defaulted.
+		move.w	smgrSysScript(a1),d0	; use system script
+
+; We have system script. Check that it is installed and enabled. If not, default to
+; Roman!
+
+CheckSys
+		move.w	d0,d1					; copy system script number.
+		lsl.w	#2,d1					; convert to long offset.
+		move.l	smgrEntry(a1,d1.w),d1	; system script installed?
+		beq.s	RomanScript				; no -> default to Roman.
+		move.l	d1,a0					; load script entry pointer.
+		tst.b	scriptEnabled(a0)		; system script enabled?
+		bne.s	DoneScript				; yes -> return to the caller.
+
+; Uh-oh. System script was not installed or was installed but disabled.  Default to
+; Roman script and set the flags as appropriate.
+
+RomanScript
+		move.w	#$00ff,smgrForced(a1)	; two values at once: not forced, but defaulted.
+		move.w	#smRoman,d0				; sorry, you're stuck with it.
+
+; Load Roman pointer info.
+
+RomanPointer
+		move.l	smgrEntry(a1),a0		; for internal use only!
+
+; We can get here through a default, a successful force, or a bona-fide
+; mapping.  Simply return to the caller (with script entry in a0).
+
+DoneScript
+		move.w	d0,(sp)					; store return value.
+		move.l	d2,a1					; load return address.
+		jmp	(a1)						; return to the caller.
+		endWith							;
+	
+; ----------------------------------------------------------------------------
+;	FUNCTION	RealScript: INTEGER;											<10>
+;	FUNCTION	Font2RealScript(fontNumber: INTEGER): INTEGER;					<10>
+;
+;	These are just like FontScript and Font2Script, except that they don't
+;	check if the script is enabled, and they ignore FontForce.
+; ----------------------------------------------------------------------------
+Font2RealScript
+		move.l	(sp)+,a1				; pop and save return address.
+		add.l	#4,sp					; pop selector value.
+		move.w	(sp)+,d1				; get font
+
+		bra.s	RealCommon
+
+RealScript
+		move.l	(sp)+,a1				; pop and save return address.
+		add.l	#4,sp					; pop selector value.
+
+		tst.b	QDExist					; test QDNotThere
+		bne.s	RealSystem				; QD not there, say system script
+		move.l	grafGlobals(a5),d1		; is it there? (sanity check)
+		ble.s	RealSystem				; if not, system script
+		move.l	d1,a0					; load grafGlobals.
+		move.l	thePort(a0),a0			; load thePort.
+		move.w	txFont(a0),d1			; get the font
+RealCommon
+		cmp.w	#1,d1					; fontNumber <= 1?
+		bls.s	RealSystem				; if so, still system script
+		moveq	#smRoman,d0				; now assume Roman
+		sub.w	#smFondStart,d1			; zero base font number.
+		bmi.s	RealDone
+		moveq	#9,d0					; load shift count.
+		lsr.w	d0,d1					; divide font number by 2^9.
+		addq.w	#1,d1					; bump by one.
+		move.w	d1,d0					; put script where we expect it
+RealDone
+; now real script code is in d0
+		move.w	d0,(sp)					; store return value.
+		jmp		(a1)					; return to the caller.
+		
+RealSystem
+		with	SMgrRecord
+		move.l	IntlSpec,a0				; load script manager globals.
+		move.w	smgrSysScript(a0),(sp)	; return system script
+		jmp		(a1)					; return to the caller.
+		endwith	;SMgrRecord
+
+; ----------------------------------------------------------------------------	<17>
+;	FUNCTION ScriptToRange(script: ScriptCode): ScriptRange;
+;
+;	ScriptRange	record	0,increment
+;	min			ds.w	1
+;	max			ds.w	1
+;				endr
+;
+; ----------------------------------------------------------------------------
+strFrame		record	{oldA6},decr
+result			ds.l	1	; result: ScriptRange
+paramStart		equ		*
+script			ds.w	1	; ScriptCode
+selector		ds.l	1
+paramEnd		equ		*
+return 			ds.l	1
+oldA6			ds.l	1
+strLocalSize	equ		*
+strParamSize	equ		paramStart-paramEnd
+				endr
+
+ScriptToRange
+		with	strFrame,SMgrRecord			;
+		link	a6,#strLocalSize			;
+
+		move.w	script(a6),d0				; get scriptcode
+		bpl.s	@gotRealScript
+		addq.w	#1,d0						; want system script?
+		bmi.s	@getFontScript				; if not, must want font script
+		movea.l	IntlSpec,a0					;
+		move.w	smgrSysScript(a0),d0		; get system script
+		bra.s	@gotRealScript
+@getFontScript
+		sub.w	#6,sp						; fake selector and result.
+		bsr.s	FontScript					; Leaves ScriptRecord ptr in a0
+		move.w	(sp)+,d0					; pop result into d0
+@gotRealScript
+
+; Now we have real script code in d0
+		tst.w	d0							; is it Roman?
+		beq.s	@doRoman					; if so, treat it specially
+		subq.w	#1,d0
+		moveq	#9,d1						; load shift count.
+		lsl.w	d1,d0						; multiply by 512.
+		add.w	#smFondStart,d0				; add non-Roman base; now have min
+		move.w	d0,d1						; copy min
+		add.w	#511,d1						; now have max
+		bra.s	@gotMinMax
+@doRoman
+		move.w	#smFondStart-1,d1
+@gotMinMax
+
+; now we have min in d0.w, max in d1.w
+		swap	d0
+		move.w	d1,d0
+		move.l	d0,result(a6)
+
+		unlk	a6
+		move.l	(sp)+,a1					; pop return address
+		add.w	#strParamSize,sp			; remove parameters from stack
+		jmp		(a1)						; return
+		
+		endwith	;strFrame,SMgrRecord
+
+
+; ----------------------------------------------------------------------------
+
+		endproc
+
+		end

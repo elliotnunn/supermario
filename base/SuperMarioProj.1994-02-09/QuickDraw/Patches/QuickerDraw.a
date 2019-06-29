@@ -1,0 +1,6890 @@
+;EASE$$$ READ ONLY COPY of file “QuickerDraw.a”
+; 1.2	CCH 01/16/1989 Merged 6.0.3 final sources into 7.0.
+;•1.1	CCH 11/16/1988 Updated to newest version.
+
+			PRINT		ON
+
+; File QuickLoops.a
+;-----------------------------------------------------------------------------
+;  
+;   High performance Mac II Color QuickDraw Inner Loops (for 8-bit mode)
+;
+;	  written by Andy Hertzfeld  December 22, 1987
+;
+;   This INIT patches out some of the Color QuickDraw inner loop traps 
+;   to improve 8-bit performance by a factor of 2 to 3 (or even more!)
+;
+;   Modification History:
+;
+;        AJH  11-Jan-88   1st Beta release, version .9
+;        AJH  13-Jan-88   made fills work in modes other than 8-bit (.91)
+;        AJH  14-Jan-88   fixed bug in unclipped pattern fill (.92)
+;        AJH  16-Jan-88   fixed seek region bug in mapped copyBits (.93)
+;        AJH  17-Jan-88   fixed scaling rejection bug in mapped copyBits
+;        AJH  18-Jan-88   implemented fast 8 to 1 copyBits; fixed 1-8 seekRgn bug (.94)
+;        AJH  20-Jan-88   region counting for clipped blit
+;        AJH  22-Jan-88   fixed OR mode fill, added $335 for MacDraw Plus
+;        AJH  23-Jan-88   fixed bug when region is a mask (CB1to8 from CopyMask)
+;        AJH  24-Jan-88   broke LogoPict into separate resource; separate 1-bit logo (.95)
+;        AJH  25-Jan-88   region counting for InvertClip
+;        AJH  26-Jan-88   significantly improved oval/rrects when unclipped 
+;        AJH  26-Jan-88   added oval/rrects in OR mode  
+;        AJH  27-Jan-88   OR mode fills (simple and complex patterns) (.96)
+;        AJH  28-Jan-88   INIT wasn't locked bug  (.97)
+;        AJH  28-Jan-88   check if already installed; if so, display logo
+;        AJH  29-Jan-88   removed OR mode complex fills; fixed OR mode simple fills
+;        AJH  29-Jan-88   reject patterns > 8 pixels wide
+;        AJH  29-Jan-88   added oval/rrects with complex patterns   
+;        AJH  30-Jan-88   added arithmetic transfer mode fills for rrects/ovals
+;        AJH  31-Jan-88   added arithmetic transfer mode fills for unclipped rects
+;        AJH  01-Feb-88   added arithmetic transfer mode fills for clipped rects (.98)
+;        AJH  02-Feb-88   added blend mode; fixed arithmetic copyBits bug
+;        AJH  03-Feb-88   removed hilite by invert hack (.985)
+;        AJH  03-Feb-88   further optimized hilite, 1 to 8 copybits
+;        AJH  04-Feb-88   added transparent modes
+;        AJH  04-Feb-88   fixed arithmetic mode bug with type 0 patterns (-$68, not -68!) (.987)
+;	 	 AJH  05-Feb-88   converted to cdev
+;        AJH  07-Feb-88   added configuration code at startup time (.99)
+;        AJH  18-Feb-88   fixed bug in transparent mode fill (LSR instead of ASR)
+;        AJH  18-Feb-88   fixed bug in unclipped, less than 5 wide arithmetic modes
+;        AJH  21-Feb-88   fixed bug in arithmetic mode cache initialization
+;        AJH  21-Feb-88   fixed wrong reg (A4 -> A2) bump bug in oval handler (MacDraw crash) (1.0)
+;        AJH  22-Feb-88   fixed bug in 8-1 copybits (can't assume map is 0 or 1 only)
+;        AJH  23-Feb-88   fixed arithmetic mode cache initialization (add and sub modes) (1.1)
+;
+;---- A New Life at Apple --------------------
+;	
+; PB415	 DAF/BAL	01Mar88		QuickerDraw integrated into system patch files
+; PB427	 BAL		17Mar88		Corrected some edge masking bugs in arithmetic modes.
+;								Return to ROM if arithmetic mode copybits from left to right.
+; PB428	 DAF		18Mar88		Fixed QuickerDraw to be A/UX friendly.
+; PB433	 DAF		22Mar88		Improved dispatches to ROM (saved a couple of bytes and cycles)
+; 		 BAL		25Mar88		Converted to use symbolic stack frame references
+; PB446	 DBG		29Mar88		Fixed up missed JMPs into ROM in QuickerDraw.a, which cause certain
+;								CopyBits cases to crash.
+; PB448  DBG		30Mar88		Fixed erroneous references to HBUMP to be to SRCBUMP
+; PB452	 BAL		01Apr88		Fixed bug in DrawSlab OR mode handler ($381) to preserve fgColor
+; PB471	 BAL		18Apr88		Fixed 1 to 8 bit expansion to first insure CLUT is B/W.
+; PB473	 DAF		19Apr88		Modified PB471 to allow more cases to be accelerated.
+; PB471	 BAL/DVB	13Jun88		Fixed 1 to 8 bit expansion to first insure src = scalebuf
+;								(i.e. dest not before pixmap's baseAddr).
+; PBnnn  d√b		12Jul88		Fixed error in 8 to 1 when white doesn't map to white.
+;
+;--------------------------------------------------------------------------------------------------
+
+
+		
+		MACHINE	MC68020		
+
+; for reference, here are the patched traps
+
+	IF 0 THEN
+
+		InstToolTp	CopyScanLine1,$330
+		InstToolTp	PatClipScanLine,$362
+		InstToolTp	PatFillScanLine,$338
+		InstToolTp	CBClipLine,$35A
+		InstToolTp	InvertClip,$360
+		InstToolTp	InvertHiliteClip,$372
+		InstToolTp	CB1To8Clip,$373
+		InstToolTp	FillClipScanLine,$380	
+		InstToolTp	FillClipOrLine,$381				; Removed typo ` <PB446 DBG>
+		InstToolTp	PatClipVar2,$35E
+		InstToolTp	FillClipXLine,$384
+	
+		InstToolTp	AddOverFillO,$38A
+		InstToolTp	SubOverFillO,$38E
+		InstToolTp	AddPinFillO,$389
+		InstToolTp	SubPinFillO,$38B
+		InstToolTp	AddMaxFillO,$38D
+		InstToolTp	AddMinFillO,$38F
+		InstToolTp	BlendFillO,$388
+		InstToolTp	TransFillO,$38C
+	
+		InstToolTp	AddOverFillR,$368
+		InstToolTp	SubOverFillR,$36C
+		InstToolTp	AddPinFillR,$367
+		InstToolTp	SubPinFillR,$369
+		InstToolTp	AddMaxFillR,$36B
+		InstToolTp	AddMinFillR,$36D
+		InstToolTp	BlendFillR,$366
+		InstToolTp	TransFillR,$36A
+	
+		InstToolTp	AddOverUnClip,$352
+		InstToolTp	SubOverUnClip,$356
+		InstToolTp	AddPinUnClip,$351
+		InstToolTp	SubPinUnClip,$353
+		InstToolTp	AddMaxUnClip,$355
+		InstToolTp	AddMinUnClip,$357
+		InstToolTp	BlendUnClip,$350
+		InstToolTp	TransUnClip,$354
+
+	ENDIF
+		
+;******************************************************************************************
+
+;
+; to make scoping for upcoming equates happier, we force the end of the previous procedure here
+;
+
+QuickerDraw		PROC		EXPORT
+
+
+				EXPORT		CopyScanLine1		
+				EXPORT		PatClipScanLine		
+				EXPORT		PatClipVar2			
+				EXPORT		PatFillScanLine		
+				EXPORT		CBClipLine			
+				EXPORT		InvertClip
+				EXPORT		InvertHiliteClip
+				EXPORT		CB1To8Clip
+				EXPORT		FillClipScanLine
+				EXPORT		FillClipOrLine
+				EXPORT		FillClipXLine
+				EXPORT		AddOverFillO
+				EXPORT		SubOverFillO
+				EXPORT		AddPinFillO
+				EXPORT		SubPinFillO
+				EXPORT		AddMaxFillO
+				EXPORT		AddMinFillO
+				EXPORT		BlendFillO
+				EXPORT		AddOverFillR
+				EXPORT		SubOverFillR
+				EXPORT		AddPinFillR
+				EXPORT		SubPinFillR
+				EXPORT		AddMaxFillR
+				EXPORT		AddMinFillR
+				EXPORT		BlendFillR
+				EXPORT		AddOverUnClip
+				EXPORT		SubOverUnclip
+				EXPORT		AddPinUnclip
+				EXPORT		SubPinUnclip
+				EXPORT		AddMaxUnclip
+				EXPORT		AddMinUnclip
+				EXPORT		BlendUnclip
+				EXPORT		TransFillO
+				EXPORT		TransFillR
+				EXPORT		TransUnClip
+		
+; now patch the inner loop traps; so far we handle:
+
+Old330		EQU		$1B8F8	; bMain0-- copyBits, no clip, copy mode
+
+Old338		EQU		$1BB7A	; bXMain8-- pattern fill, complex pattern, copy mode, no clipping
+
+Old350		EQU		$1BF24	; bAvg-- blend fill, unclipped rects
+Old351		EQU		$1BC6A	; bAddPin-- addPin fill, unclipped rects
+Old352		EQU		$1BBF4	; bAddOver-- addOver fill, unclipped rects (and bitmaps)
+Old353		EQU		$1BD7C	; bSubPin-- subPin fill, unclipped rects
+Old354		EQU		$1C0B0	; bTransparent-- transparent fill, unclipped rects
+Old355		EQU		$1BE18	; bMax-- addMax fill, unclipped rects
+Old356		EQU		$1BD06	; bSubOver-- subOver fill, unclipped rects
+Old357		EQU		$1BE9E	; bMin-- addMin fill, unclipped rects
+
+Old35A		EQU		$1CBF8	; rMASK0-- copyBits, copy mode, region clipped
+
+Old35E		EQU		$1CCCC	; rMASK8-- one-reg region clipped fill
+
+Old360		EQU		$1CCFA	; rMASK10-- invert, region clipped, pattern black
+
+Old362		EQU		$1CD20	; rXMASK8-- pattern fill, region clipped
+
+Old366		EQU		$1CF94	; rAvg-- blend fill, clipped rects
+Old367		EQU		$1CDE8	; rAddPin-- addPin fill, clipped rects
+Old368		EQU		$1CD9C	; rAddOver-- addOver fill, clipped rects  (and bitmaps)
+Old369		EQU		$1CE88	; rSubPin-- subPin fill, clipped rects
+Old36A		EQU		$1D094	; rTransparent-- transparent fill, clipped rects
+Old36B		EQU		$1CEDC	; rMax-- addMax fill, clipped rects
+Old36C		EQU		$1CE3C	; rSubOver-- subOver fill, clipped rects
+Old36D		EQU		$1CF38	; rMin-- addMin fill, clipped rects
+
+Old372		EQU		$1D000	; rHilite-- clipped hilite invert
+Old373		EQU		$227EC	; stMASK0-- 1 to 8 clipped copyBits
+
+Old380		EQU		$1DD7E	; slMASK8-- oval/rrect copy mode scan line handler
+Old381		EQU		$1DD9A	; slMASK9-- oval/rrect OR mode scan line handler
+
+Old384		EQU		$1DDCE	; slXMask8-- oval/rrect complex fill, copy mode
+
+Old388		EQU		$1E1BE	; slAvg-- blend fill, ovals
+Old389		EQU		$1DF50	; slAddPin-- addPin fill, ovals
+Old38A		EQU		$1DEBA	; slAddOver-- addOver fill, ovals
+Old38B		EQU		$1E042	; slSubPin-- subPin fill, ovals
+Old38C		EQU		$1E2CE	; slTransparent-- transparent fill, ovals
+Old38D		EQU		$1E0CE	; slMax-- AddMax fill, ovals
+Old38E		EQU		$1DFDA	; slSubOver-- subOver fill, ovals
+Old38F		EQU		$1E146	; slMin-- AddMin fill, ovals
+
+;******************************************************************************************
+
+		
+;--------------------------------------------------------------
+;
+;  PROCEDURE StretchBits(srcBits,maskBits,dstBits: BitMap;
+;			 srcRect,maskRect,dstRect: Rect;
+;			 mode: INTEGER; pat: Pattern;
+;			 rgnA,rgnB,rgnC:  RgnHandle);
+;
+;  Transfer a rectangle of bits from srcBits to dstBits,
+;  stretching or compressing according to srcRect and dstRect.
+;  The transfer is clipped to the intersection of rgnA, rgnB, and rgnC.
+;  It is also clipped to the specified mask.  If MaskBits is NIL, then
+;  no masking is done.
+;
+;  Restrictions:
+;
+;	  transfer mode 0..7 only.
+;	  if numer <> denom, then src and dst bitmaps do not overlap.
+;
+;
+;  COPYRIGHT APPLE COMPUTER INC.
+;  DESIGNED AND WRITTEN BY BILL ATKINSON
+;
+
+
+;----------------------------------------------------
+;
+;  A6 OFFSETS OF PARAMETERS AFTER LINK:
+;
+PARAMSIZE		EQU 	44					;SIZE OF PARAMETERS
+SRCBITS 		EQU 	PARAMSIZE+8-4		;LONG, ADDR OF BITMAP
+MASKBITS 		EQU 	SRCBITS-4			;LONG, ADDR OF BITMAP
+DSTBITS 		EQU 	MASKBITS-4			;LONG, ADDR OF BITMAP
+SRCRECT 		EQU 	DSTBITS-4			;LONG, ADDR OF RECT
+MASKRECT 		EQU 	SRCRECT-4			;LONG, ADDR OF RECT
+DSTRECT 		EQU 	MASKRECT-4			;LONG, ADDR OF RECT
+MODE			EQU 	DSTRECT-2			;WORD
+PAT 			EQU 	MODE-4				;LONG, ADDR OF PATTERN
+RGNA			EQU 	PAT-4				;LONG, RGNHANDLE
+RGNB			EQU 	RGNA-4				;LONG, RGNHANDLE
+RGNC			EQU 	RGNB-4				;LONG, RGNHANDLE
+multColor		EQU		RGNC-2				;byte, set if source contains nonblack/white colors
+
+;-------------------------------------------------
+;
+;  A6 OFFSETS OF LOCAL VARIABLES AFTER LINK:
+;
+;  STACK FRAME VARS USED BY SEEKMASK (CALLED BY STRETCHBITS, RGNBLT, DRAWARC, DRAWLINE)
+;
+RECTFLAG		EQU 	-2					;WORD
+VERT			EQU		RECTFLAG-2			;WORD
+RGNBUF 			EQU 	VERT-4				;LONG
+BUFLEFT 		EQU 	RGNBUF-2			;WORD
+BUFSIZE			EQU		BUFLEFT-2			;WORD
+EXRTN			EQU		BUFSIZE-4			;LONG
+SEEKMASK		EQU		EXRTN-4				;LONG
+DSTMASKBUF		EQU		SEEKMASK-4			;LONG
+DSTMASKALIGN	EQU		DSTMASKBUF-4		;LONG
+STATEA			EQU 	DSTMASKALIGN-RGNREC	;RGN STATE RECORD
+STATEB			EQU 	STATEA-RGNREC		;RGN STATE RECORD
+STATEC			EQU 	STATEB-RGNREC		;RGN STATE RECORD
+
+;  STACK FRAME VARS USED BY PATEXPAND, COLORMAP, DRAWSLAB
+;  CALLED BY STRETCHBITS, RGNBLT, BITBLT, DRAWARC, DRAWLINE
+
+;													 SET UP FOR BITBLT AND RGNBLT
+EXPAT			EQU		STATEC-4			;LONG				YES
+PATVMASK		EQU		EXPAT-2				;WORD (must follow expat)
+PATHMASK		EQU		PATVMASK-2			;WORD (must follow PATVMASK)
+PATROW			EQU		PATHMASK-2			;WORD (must follow PATHMASK)
+PATHPOS			EQU		PATROW-2			;WORD				YES
+PATVPOS			EQU		PATHPOS-2			;WORD				YES
+LOCMODE			EQU		PATVPOS-2			;WORD				YES
+PIXSRC			EQU		LOCMODE-1			;BYTE				YES
+NEWPAT			EQU		LOCMODE-2			;BYTE				YES
+LOCPAT			EQU		NEWPAT-4			;LONG				YES
+FCOLOR			EQU		LOCPAT-4			;LONG				YES
+BCOLOR			EQU		FCOLOR-4			;LONG				YES
+DSTPIX			EQU		BCOLOR-(PMREC+CTREC+20)	;PIXMAP+COLOR TABLE	   YES
+DSTSHIFT		EQU		DSTPIX-2			;WORD				YES
+
+; these shared stack frame vars are set up and used by the arithmetic drawing modes
+
+weight			EQU		DSTSHIFT-6			;RGB  weight for averaging
+pin				EQU		weight				;RGB  used by max, min
+notWeight		EQU		weight-6			;RGB  complement of weight (for average)
+multiColor		EQU		notWeight-2			;byte	set if source contains nonblack/white colors
+colorTable		EQU		multiColor-4		;long	pointer to color table
+invColor		EQU		colorTable-4		;long	pointer to inverse color table
+invSize			EQU		invColor-2			;word 	resolution of inverse color table
+rtShift			EQU		invSize-2			;Word	used by average how far to shift
+transColor		EQU		rtShift-4			;long	copy of backcolor for transparent
+hilitColor		EQU		transColor-4		;long	hilite color pixels
+
+;  MORE SHARED STACK FRAME VARS (STRETCHBITS, RGNBLT, BITBLT)
+
+SRCPIX			EQU		hilitColor-(PMREC+CTREC+20)	;PIXMAP				YES
+MASKPIX			EQU		SRCPIX-(PMREC+CTREC+20)		;PIXMAP				YES
+SRCROW			EQU 	MASKPIX-4			;LONG				YES
+MASKROW			EQU 	SRCROW-4			;LONG				YES
+DSTROW			EQU 	MASKROW-4			;LONG				YES
+SRCSHIFT		EQU		DSTROW-2			;WORD				YES
+MASKSHIFT		EQU		SRCSHIFT-2			;WORD				YES
+MINRECT 		EQU 	MASKSHIFT-8			;RECT				YES
+INVERT			EQU		MINRECT-4			;LONG				YES
+SAVESTK 		EQU 	INVERT-4			;LONG				YES
+SAVEA5	 		EQU 	SAVESTK-4			;LONG				YES
+
+SRCBUF			EQU 	SAVEA5-4			;LONG
+DSTBUF			EQU 	SRCBUF-4			;LONG
+SCALEBUF		EQU		DSTBUF-4			;LONG
+SRCMASKBUF		EQU		SCALEBUF-4			;LONG
+SRCLONGS		EQU 	SRCMASKBUF-2		;WORD
+SRCMASKLONGS	EQU		SRCLONGS-2			;WORD
+DSTMASKLONGS	EQU		SRCMASKLONGS-2		;WORD
+DSTLONGS		EQU 	DSTMASKLONGS-2		;WORD
+SCALELONGS		EQU		DSTLONGS-2			;WORD
+SRCADDR 		EQU 	SCALELONGS-4		;LONG
+MASKADDR		EQU		SRCADDR-4			;LONG
+DSTADDR 		EQU 	MASKADDR-4			;LONG
+SRCLIMIT		EQU 	DSTADDR-4			;LONG
+NUMER			EQU 	SRCLIMIT-4			;POINT
+DENOM			EQU 	NUMER-4 			;POINT
+MASKNUMER		EQU 	DENOM-4				;POINT
+MASKDENOM		EQU 	MASKNUMER-4 		;POINT
+MODECASE		EQU 	MASKDENOM-4			;LONG
+
+;  STACK FRAME VARS USED BY STRETCHBITS ONLY
+
+STACKFREE		EQU		MODECASE-4			;LONG
+VERROR			EQU 	STACKFREE-2 		;INTEGER
+RATIOCASE		EQU 	VERROR-4			;LONG
+MASKCASE		EQU		RATIOCASE-4			;LONG
+FRACTION		EQU 	MASKCASE-2 			;WORD
+MASKFRACT		EQU		FRACTION-2			;WORD
+SCALECASE		EQU		MASKFRACT-4			;LONG
+SRCSCANS		EQU		SCALECASE-2			;WORD
+SRCPIXCNT		EQU		SRCSCANS-2			;WORD
+SRCALIGN		EQU		SRCPIXCNT-4			;LONG
+DSTALIGN		EQU		SRCALIGN-4			;LONG
+MASKALIGN		EQU		DSTALIGN-4			;LONG
+ScaleTbl		EQU		MASKALIGN-4			;LONG
+CRSRFLAG		EQU		ScaleTbl-2			;WORD
+REALBOUNDS		EQU		CRSRFLAG-4			;LONG
+
+;  STACK FRAME VARS USED BY RGNBLT ONLY
+
+FIRSTV			EQU 	REALBOUNDS-2		;WORD
+LASTV			EQU 	FIRSTV-2			;WORD
+VBUMP			EQU 	LASTV-2 			;WORD, MUST BE ABOVE HBUMP
+HBUMP			EQU 	VBUMP-2 			;WORD
+RGNADDR			EQU 	HBUMP-4				;LONG
+SRCSIZE 		EQU		RGNADDR-2			;WORD
+SAVESTK2		EQU		SRCSIZE-4			;LONG
+
+;  STACK FRAME VARS USED BY BITBLT ONLY
+
+SRCV			EQU 	SAVESTK2-2 			;WORD
+DSTV			EQU 	SRCV-2				;WORD
+SRCBUMP 		EQU 	DSTV-2				;WORD
+HEIGHT			EQU 	SRCBUMP-2			;WORD
+LONGCNT 		EQU 	HEIGHT-2			;WORD
+SRCRECT2		EQU 	LONGCNT-8 			;RECT
+FIRSTMASK		EQU		SRCRECT2-4			;LONG
+
+doneMid			EQU		FIRSTMASK-1			;Byte  two flags used to control loop
+endSwitch		EQU		doneMid-1			;Byte  three-way switch chooses from src, pat, bigpat
+lastMask		EQU		endSwitch-4			;Long  mask for last long blitted on line
+midCount		EQU		lastMask-2			;Word  # of pixels on line less mask longs - 1
+pixInLong		EQU		midCount-2			;Word   > # of pixels in a long - 1
+patPos			EQU		pixInLong-2			;Word  pattern vertical offset
+patOffset		EQU		patPos-4			;Long  pattern horizontal initial offset	
+destPixOffset	EQU		patOffset-2			;Word  destination pixel offset
+pixInLong1		EQU		destPixOffset-2		;Word  same as pixInLong, 1 based (for transparent)
+VARSIZE 		EQU 	pixInLong1			;SIZE OF LOCAL VARIABLES
+
+;-----------------------------------------------------
+; Here's where we handle the case of copyBits copy mode without region clipping ($330)
+
+UseOld330
+		LEARom	Old330,A1		;must use A1 to avoid re-entry
+		JMP	(A1)
+
+CopyScanLine1	
+
+		CMP.W	#8,SRCPIX+PIXELSIZE(A6)		;8 bits/pixel?
+		BNE.S 	UseOld330		;if not, don't handle
+
+		TST.L	D7			;toggling source?
+		BNE.S	UseOld330		;if so, don't handle
+		
+; it's 8 bit mode, so handle it. Calculate the address adjustments in D7 from the
+; bit offset in D6 and mask in D1.  First decode the mask, casing out on the direction
+; in A0
+
+
+		MOVE.L	D1,D3			;get mask
+		MOVEQ	#0,D1			;assume minimum
+		
+		MOVE.W	D6,D0
+		ASR	#3,D0			;turn into byte number
+
+		MOVE.W	A0,D5			;remember direction
+		BPL.S	@0			;if positive, we're cool
+		
+		NOT.L	D3			;invert the mask for other direction
+@0		
+		TST.L	D3
+		BMI.S	Got1stOffset		;if on, we're done
+		
+		ADDQ	#1,D1		
+		LSL.L	#8,D3
+		BMI.S	Got1stOffset		;if on, we're done
+		
+		ADDQ	#1,D1		
+		LSL.L	#8,D3
+		BMI.S	Got1stOffset		;if on, we're done
+
+		ADDQ	#1,D1		
+
+; we got the mask offset in D1 and the byte offset in D0, so compute the bump factors
+
+Got1stOffset	
+		ADD.W	D1,D0			;compute byte offset
+		
+		MOVE.W	D0,D7			;remember offset
+		SWAP	D7
+		MOVE.W	D1,D7			;use mask offset for dest	
+		
+; here's the top of the outer loop where we adjust the addresses by the offsets in D7
+
+SL1Loop
+		ADD.W	D7,A5
+		SWAP	D7
+		ADD.W	D7,A4
+
+; get the byte count and blast the scan line
+
+SL1Blast
+		MOVE.W	MINRECT+RIGHT(A6),D0
+		SUB.W	MINRECT+LEFT(A6),D0		;compute pixel count
+		EXT.L	D0
+		MOVE.L	A4,A0
+		MOVE.L	A5,A1		
+		BSR	BlockMove		;blast those bytes!
+		
+; done with this scan line, so bump to the next scan line and loop until done
+
+		SUB.W	D7,A4			;undo source offset
+		SWAP	D7
+		SUB.W	D7,A5			;undo dest offset
+	
+		MOVEQ	#0,D0
+		MOVE.W	LONGCNT(A6),D0		;get long count
+		ADDQ	#1,D0
+		ASL	#2,D0			;turn into byte count
+	
+		TST.W	D5
+		BPL.S	@0			;if positive, skip
+		
+		NEG.L	D0			;negate it
+@0		
+		ADD.L	D0,A4
+		ADD.L	D0,A5
+		
+		ADD.W	SRCBUMP(A6),A4		;bump source		; <PB448 DBG>
+		ADD.W	A3,A5			;bump destination
+
+		SUBQ.W	#1,HEIGHT(A6)		;decrement scan line count
+		BNE.S	SL1Loop			;if more, go do it
+		
+		RTS
+
+;******************************************************************************************
+
+
+; Here's where we handle the case of 8-bit pattern fill with region clipping  (trap $362)
+; this is used for the more complex patterns that require 2 registers per scan line
+
+; this routine uses "region counting" to keep track of the last scan line's region runs
+; for ultra-fast plotting when the region mask hasn't changed.  This requires a few different
+; loops to keep track of measuring state implicitly, without performance degradation.
+
+UseOld362
+		LEARom	Old362,A1		;must use A1 to avoid re-entry
+		JMP	(A1)
+
+PatClipScanLine	
+
+		CMP.W	#4,D7			;is pattern too complex?
+		BGT.S	UseOld362		;if so, can't handle
+		
+		LEA	PatClipOuter,A0
+		MOVE.L	A0,MODECASE(A6)		;skip initial testing on return
+
+		MOVEQ	#0,D7			;no runs yet
+		SUB.L	A2,A2			;runs not valid
+
+; Handle pattern fill with region clipping.  Fetch the pattern raster into D3 and D4.
+
+PatClipOuter
+		ADD.W	D6,A3
+		SWAP	D6			;bump to next raster
+		
+		MOVE.L	0(A3,D6),D3		;get 1st 4 pixels
+		EOR.W	#4,D6
+		MOVE.L	0(A3,D6),D4		;get next 4 pixels
+		
+		MOVEQ	#-1,D5			;mask for comparing
+		
+; first handle the left edge outside of the inner loop so we don't count it in the runs
+
+		MOVE.L	(A4)+,D1		;fetch region mask
+		MOVE.L	D3,D0			;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		EXG.L	D3,D4
+		SUBQ	#1,D2
+		BMI.S	DonePCV1Line
+
+; if the region runs in D4 are still valid, we can use special code to really plot super
+; fast.
+
+		MOVE.L	A2,D0			;is it valid?
+		BNE	V1PlotRgnRuns		;if so, go super fast
+		
+		ADDQ	#1,A2			;validate it for next time
+		MOVEQ	#0,D7			;zero the run count
+		
+; see what the next region longword is.  Go to three different loops depending on whether
+; the region is all ones, zeros or both
+
+		MOVE.L	(A4)+,D1		;fetch next word of region mask
+		BEQ 	V1FirstZero0		;if zero, go handle
+		
+		CMP.L	D5,D1			;all one's?
+		BNE	V1StartSecondRun	;if not, skip
+		
+		BRA.S	V1FirstOnes1
+		
+; here's the loop that counts and plots the first run of all ones
+
+V1FirstOnes
+		MOVE.L	(A4)+,D1
+			
+		CMP.L	D5,D1			;is it still all ones?
+		BNE 	V1StartSecondRun	;if not, end the run
+V1FirstOnes1	
+		ADDQ.W	#1,D7			;bump the run count
+		
+		MOVE.L	D3,(A5)+
+		EXG.L	D3,D4		
+		
+		DBRA	D2,V1FirstOnes		;loop until we're done
+
+; done with this scan line, so bump to the next
+
+DonePCV1Line
+		MOVE.L	DSTROW(A6),D0
+		ADD.L	D0,DSTADDR(A6)		;bump to next line of destination
+
+; bump pattern index
+
+		MOVE.W	PATHPOS(A6),D6
+		SWAP	D6
+		ADD.W	PATROW(A6),D6
+		AND.W	PATVMASK(A6),D6		;wrap around
+
+; bump line count and see if we're done
+
+		MOVE.W	VERT(A6),D0
+		ADDQ	#1,D0
+		MOVE.W	D0,VERT(A6)
+
+		CMP.W	MINRECT+BOTTOM(A6),D0		;all done?
+		BEQ 	DonePatClip		;if so, use common exit
+
+; create the region mask for the new scan line, and maintain the all one's flag
+
+		CMP.W	STATEB+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	V1NewRgn		;if so, go do it
+		
+		CMP.W	STATEB+THISV(A6),D0		;need to rebuild?
+		BLT.S	V1NewRgn		;if so, go do it
+
+		CMP.W	STATEC+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	V1NewRgn		;if so, go do it
+		
+		CMP.W	STATEC+THISV(A6),D0		;need to rebuild?
+		BLT.S	V1NewRgn		;if so, go do it
+
+		CMP.W	STATEA+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	V1NewRgn		;if so, go do it
+		
+		CMP.W	STATEA+THISV(A6),D0		;need to rebuild?
+		BLT.S	V1NewRgn		;if so, go do it
+							
+		TST.L	DSTMASKBUF(A6)			;can we skip it?
+		BEQ.S	V1SkipRgn		;if so, skip
+V1NewRgn
+		MOVE.L	SEEKMASK(A6),A0
+		JSR	(A0)			;make new region mask		
+
+		SUB.L	A2,A2			;invalidate region counts
+		
+; set up registers and go handle the next line
+
+V1SkipRgn
+		MOVE.L	SRCADDR(A6),A3
+		MOVE.L	RGNBUF(A6),A4
+		MOVE.L	DSTADDR(A6),A5
+		MOVE.W	BUFSIZE(A6),D2
+
+		BRA	PatClipOuter
+
+; here's the loop that counts and plots the first run of all zeros
+
+V1FirstZero
+		MOVE.L	(A4)+,D1
+		BNE.S	V1StartSecondRun
+V1FirstZero0		
+		SUBQ.W	#1,D7			;decrement run count for zeros
+		
+		ADDQ	#4,A5
+		EXG.L	D3,D4
+		DBRA	D2,V1FirstZero
+
+		BRA.S	DonePCV1Line	
+
+; the region mask is heterogenous, so plot the word and start the second run.
+
+V1StartSecondRun	
+		SWAP	D7
+		
+		MOVE.L	D3,D0			;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		EXG.L	D3,D4
+		SUBQ	#1,D2
+		BMI.S	DoneV1SecondRun
+
+; sample the region and case out for the 2nd time
+
+		MOVE.L	(A4)+,D1		;fetch next word of region mask
+		BEQ.S	V1stZero0		;if zero, go handle
+		
+		CMP.L	D5,D1			;all one's?
+		BNE.S	V1StartLastRun		;if not, skip
+	
+		BRA.S	V1stOnes1
+		
+; here's the loop that counts and plots the second run of all ones
+
+V1stOnes
+		MOVE.L	(A4)+,D1
+		
+		CMP.L	D5,D1			;is it still all ones?
+		BNE.S	V1StartLastRun		;if not, end the run
+V1stOnes1	
+		ADDQ.W	#1,D7			;bump the run count
+		
+		MOVE.L	D3,(A5)+
+		EXG.L	D3,D4
+		DBRA	D2,V1stOnes		;loop until we're done
+DoneV1SecondRun
+		SWAP	D7
+		BRA	DonePCV1Line		;all done
+		
+; here's the loop that counts the 2nd run of zeros
+
+V1stZero
+		MOVE.L	(A4)+,D1
+		BNE.S	V1StartLastRun
+V1stZero0		
+		SUBQ.W	#1,D7
+		ADDQ	#4,A5			;bump dest reg
+		EXG.L	D3,D4
+		DBRA	D2,V1stZero		;loop until it changes
+
+		BRA.S	DoneV1SecondRun
+
+; OK, we've accumulated two runs, so finish up the line without counting
+
+V1StartLastRun
+		SWAP	D7
+
+		TST.L	D1	
+		BEQ.S	V1LastZero
+		BRA.S	V1LastLoopA
+V1LastLoop
+		MOVE.L	(A4)+,D1		;get region		
+		BEQ.S	V1LastZero
+V1LastLoopA		
+		CMP.L	D5,D1
+		BNE.S	V1LastHard
+		
+		MOVE.L	D3,(A5)+		;plot it
+		EXG.L	D3,D4
+		DBRA	D2,V1LastLoop
+		
+		BRA	DonePCV1Line
+V1LastZero
+		ADDQ	#4,A5
+		EXG.L	D3,D4
+		DBRA	D2,V1LastLoop
+		BRA	DonePCV1Line
+V1LastHard
+		MOVE.L	D3,D0			;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		EXG.L	D3,D4
+		
+		DBRA	D2,V1LastLoop
+		BRA	DonePCV1Line
+		
+; Here's where we have the ultra fast plotting by interpreting the 2 region runs in D7.
+
+V1PlotRgnRuns
+		TST.W	D7			;which type of run?
+		BPL.S	V1BlastPat1		;if ones, go blast it
+		BEQ 	V1PlotRHard1		;if zero, plot one slowly, then plot 2nd run
+
+; it's negative, so just skip over 4 times the count
+
+		MOVE.W	D7,D0
+		
+		NEG.W	D0			;turn into longword count
+		
+		BTST	#0,D0			;is the run odd?
+		BEQ.S	@0			;if not, skip
+		
+		EXG.L	D3,D4
+@0
+		LSL.W	#2,D0			;times 4
+		ADD.W	D0,A4			;skip over region
+		ADD.W	D0,A5			;skip over destination
+
+		ADD.W	D7,D2			;decrement count
+		BMI	DonePCV1Line		;if done, skip
+		
+; now handle the second run
+
+V1PRRun2
+		LEA	@0,A0			;plot the break longword
+		BRA 	V1PlotHardCommon	
+@0
+		MOVE.L	D7,D0			;which type of run?
+ 		BPL.S	V1BlastPat2		;if ones, go blast it
+		BEQ 	V1PlotRHard2
+
+; it's negative, so we can skip over like above
+		
+		SWAP	D0
+		NEG.W	D0			;turn into longword count
+		
+		BTST	#0,D0			;is the run odd?
+		BEQ.S	@1			;if not, skip
+		
+		EXG.L	D3,D4
+@1		
+		SUB.W	D0,D2			;decrement count	
+		
+		LSL.W	#2,D0			;times 4
+		ADD.W	D0,A4			;skip over region
+		ADD.W	D0,A5			;skip over destination
+
+		TST.W	D2	
+		BMI	DonePCV1Line		;if done, skip
+		
+; we've interpreted both runs, so finish up using common code
+
+		BRA	V1LastLoop
+
+; Handle blasting out the first run
+
+V1BlastPat1
+		MOVE.W	D7,D0			;get the size
+		LEA	V1PRRun2,A0
+		BRA.S	V1BlastPat
+		
+; Blast out the second run
+
+V1BlastPat2
+		SWAP	D0			;use high word for 2nd run
+		LEA	V1LastLoop,A0
+			
+; Here's the unwound loop to blast the # of longwords in D0 out.
+
+V1BlastPat
+		CMP.W	#8,D0			;8 left to do?
+		BLT.S	V1BlastFinishUp
+		
+		MOVE.W	D0,D1
+		LSR	#3,D1
+		SUBQ	#1,D1
+V1BlastLoop
+		MOVE.L	D3,(A5)+
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,(A5)+
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,(A5)+
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,(A5)+
+		MOVE.L	D4,(A5)+	
+		
+		DBRA	D1,V1BlastLoop
+V1BlastFinishUp
+		MOVE.W	D0,D1
+		AND	#7,D1
+		EOR	#7,D1
+		
+		BTST	#0,D1
+		BEQ.S	@0
+		
+		EXG.L	D3,D4
+@0
+		JMP	V1FinishTable(D1.W*2)
+V1FinishTable
+		MOVE.L	D3,(A5)+
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,(A5)+
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,(A5)+
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,(A5)+		;15 total to finish up	
+
+		EXG.L	D3,D4
+
+; all done with plotting so adjust the region pointer and count, then return
+
+@0
+		MOVE.W	D0,D1
+		LSL	#2,D1			;times 4
+		ADD.W	D1,A4			;bump region ptr
+		
+		SUB.W	D0,D2
+		BMI	DonePCV1Line
+V1BlastDone		
+		JMP	(A0)
+
+; handle the heterogenous plots between runs
+
+V1PlotRHard1
+		LEA	V1PRRun2,A0
+		BRA.S	V1PlotHardCommon	
+V1PlotRHard2
+		LEA	V1LastLoop,A0
+V1PlotHardCommon
+		MOVE.L	(A4)+,D1
+		
+		MOVE.L	D3,D0			;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		EXG.L	D3,D4
+		
+		SUBQ	#1,D2			;count it
+		BMI	DonePCV1Line	
+		
+		JMP	(A0)
+		
+;******************************************************************************************
+
+
+; Here's where we handle a case of 8-bit pattern fill with region clipping (trap $35E)
+; where there's only 4 pixel repeating pattern so it fits in a single register.
+
+; this routine uses "region counting" to keep track of the last scan line's region runs
+; for ultra-fast plotting when the region mask hasn't changed.  This requires 5 different
+; loops to keep track of measuring state implicitly, without performance degradation.
+
+; D3 has 2 runs in its two words; negative numbers are runs of zeros, positive numbers ones
+; D4 has the "scan line valid" flag; if it's non-zero, it's valid.
+
+; this routine works for any bits/pixel
+
+UseOld35E
+		LEARom	Old35E,A1		;must use A1 to avoid re-entry	<PB446 DBG>
+		JMP	(A1)
+
+PatClipVar2	
+		
+		LEA	PatClipV2Outer,A0
+		MOVE.L	A0,MODECASE(A6)		;skip initial testing on return
+
+		MOVEQ	#0,D3			;zero run counts
+		MOVEQ	#0,D4			;runs are currently invalid
+		
+; Handle pattern fill with region clipping.  Fetch the pattern raster into D3 and D4.
+
+PatClipV2Outer
+		MOVEQ	#-1,D5			;mask for comparing
+	
+; first handle the left edge outside of the inner loop so we don't count it in the runs
+
+		MOVE.L	(A4)+,D1		;fetch region mask
+		MOVE.L	D6,D0			;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		SUBQ	#1,D2
+		BMI.S	DonePCV2Line
+
+; if the region runs in D4 are still valid, we can use special code to really plot super
+; fast.
+
+		TST.W	D4			;is it valid?
+		BNE	V2PlotRgnRuns		;if so, go super fast
+		
+		MOVEQ	#-1,D4			;validate it for next time
+		MOVEQ	#0,D3			;zero the run count
+		
+; see what the next region longword is.  Go to three different loops depending on whether
+; the region is all ones, zeros or both
+
+		MOVE.L	(A4)+,D1		;fetch next word of region mask
+		BEQ 	V2FirstZero0		;if zero, go handle
+		
+		CMP.L	D5,D1			;all one's?
+		BNE	V2StartSecondRun	;if not, skip
+		
+		BRA.S	V2FirstOnes1
+		
+; here's the loop that counts and plots the first run of all ones
+
+V2FirstOnes
+		MOVE.L	(A4)+,D1
+		
+		CMP.L	D5,D1			;is it still all ones?
+		BNE 	V2StartSecondRun	;if not, end the run
+V2FirstOnes1	
+		ADDQ.W	#1,D3			;bump the run count
+		
+		MOVE.L	D6,(A5)+
+		DBRA	D2,V2FirstOnes		;loop until we're done
+
+; done with this scan line, so bump to the next
+
+DonePCV2Line
+		ADDQ	#1,D7
+		AND.W	#15,D7
+		MOVE.L	([EXPAT,A6],D7.W*4),D6	;bump the pattern
+		
+		MOVE.L	DSTROW(A6),D0
+		ADD.L	D0,DSTADDR(A6)		;bump to next line of destination
+		
+; bump line count and see if we're done
+
+		MOVE.W	VERT(A6),D0
+		ADDQ	#1,D0
+		MOVE.W	D0,VERT(A6)
+
+		CMP.W	MINRECT+BOTTOM(A6),D0		;all done?
+		BEQ 	DonePatClip		;if so, use common exit
+
+; create the region mask for the new scan line, and maintain the all one's flag
+
+		CMP.W	STATEB+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	V2NewRgn		;if so, go do it
+		
+		CMP.W	STATEB+THISV(A6),D0		;need to rebuild?
+		BLT.S	V2NewRgn		;if so, go do it
+
+		CMP.W	STATEC+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	V2NewRgn		;if so, go do it
+		
+		CMP.W	STATEC+THISV(A6),D0		;need to rebuild?
+		BLT.S	V2NewRgn		;if so, go do it
+
+		CMP.W	STATEA+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	V2NewRgn		;if so, go do it
+		
+		CMP.W	STATEA+THISV(A6),D0		;need to rebuild?
+		BLT.S	V2NewRgn		;if so, go do it
+							
+		TST.L	DSTMASKBUF(A6)			;can we skip it?
+		BEQ.S	V2SkipRgn		;if so, skip
+V2NewRgn
+		MOVEQ	#0,D4			;invalidate region counts
+		
+		MOVE.L	SEEKMASK(A6),A0
+		JSR	(A0)			;make new region mask		
+
+; set up registers and go handle the next line
+
+V2SkipRgn
+		MOVE.L	RGNBUF(A6),A4
+		MOVE.L	DSTADDR(A6),A5
+		MOVE.W	BUFSIZE(A6),D2
+
+		BRA	PatClipV2Outer
+
+; here's the loop that counts and plots the first run of all zeros
+
+V2FirstZero
+		MOVE.L	(A4)+,D1
+		BNE.S	V2StartSecondRun
+V2FirstZero0		
+		SUBQ.W	#1,D3			;decrement run count for zeros
+		
+		ADDQ	#4,A5
+		DBRA	D2,V2FirstZero
+
+		BRA.S	DonePCV2Line	
+
+; the region mask is heterogenous, so plot the word and start the second run.
+
+V2StartSecondRun	
+		SWAP	D3
+		
+		MOVE.L	D6,D0			;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		SUBQ	#1,D2
+		BMI.S	DoneSecondRun
+
+; sample the region and case out for the 2nd time
+
+		MOVE.L	(A4)+,D1		;fetch next word of region mask
+		BEQ.S	V2ndZero0		;if zero, go handle
+		
+		CMP.L	D5,D1			;all one's?
+		BNE.S	V2StartLastRun		;if not, skip
+	
+		BRA.S	V2ndOnes1
+		
+; here's the loop that counts and plots the second run of all ones
+
+V2ndOnes
+		MOVE.L	(A4)+,D1
+		
+		CMP.L	D5,D1			;is it still all ones?
+		BNE.S	V2StartLastRun		;if not, end the run
+V2ndOnes1	
+		ADDQ.W	#1,D3			;bump the run count
+		
+		MOVE.L	D6,(A5)+
+		DBRA	D2,V2ndOnes		;loop until we're done
+DoneSecondRun
+		SWAP	D3
+		BRA	DonePCV2Line		;all done
+		
+; here's the loop that counts the 2nd run of zeros
+
+V2ndZero
+		MOVE.L	(A4)+,D1
+		BNE.S	V2StartLastRun
+V2ndZero0		
+		SUBQ.W	#1,D3
+		ADDQ	#4,A5			;bump dest reg
+		DBRA	D2,V2ndZero		;loop until it changes
+
+		BRA.S	DoneSecondRun
+
+; OK, we've accumulated two runs, so finish up the line without counting
+
+V2StartLastRun
+		SWAP	D3
+
+		TST.L	D1	
+		BEQ.S	V2LastZero
+		BRA.S	V2LastLoopA
+V2LastLoop
+		MOVE.L	(A4)+,D1		;get region		
+		BEQ.S	V2LastZero
+V2LastLoopA		
+		CMP.L	D5,D1
+		BNE.S	V2LastHard
+		
+		MOVE.L	D6,(A5)+		;plot it
+		DBRA	D2,V2LastLoop
+		
+		BRA	DonePCV2Line
+V2LastZero
+		ADDQ	#4,A5
+		DBRA	D2,V2LastLoop
+		BRA	DonePCV2Line
+V2LastHard
+		MOVE.L	D6,D0			;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		DBRA	D2,V2LastLoop
+		BRA	DonePCV2Line
+		
+; Here's where we have the ultra fast plotting by interpreting the 2 region runs in D3.
+
+V2PlotRgnRuns
+		TST.W	D3			;which type of run?
+		BPL.S	V2BlastPat1		;if ones, go blast it
+		BEQ 	V2PlotRHard1		;if zero, plot one slowly, then plot 2nd run
+
+; it's negative, so just skip over 4 times the count
+
+		MOVE.W	D3,D0
+		
+		NEG.W	D0			;turn into longword count
+		LSL.W	#2,D0			;times 4
+		ADD.W	D0,A4			;skip over region
+		ADD.W	D0,A5			;skip over destination
+
+		ADD.W	D3,D2			;decrement count
+		BMI	DonePCV2Line		;if done, skip
+		
+; now handle the second run
+
+V2PRRun2
+		LEA	@0,A0			;plot the break longword
+		BRA 	V2PlotHardCommon	
+@0
+		MOVE.L	D3,D0			;which type of run?
+ 		BPL.S	V2BlastPat2		;if ones, go blast it
+		BEQ.S 	V2PlotRHard2
+
+; it's negative, so we can skip over like above
+		
+		SWAP	D0
+		NEG.W	D0			;turn into longword count
+		SUB.W	D0,D2			;decrement count	
+		
+		LSL.W	#2,D0			;times 4
+		ADD.W	D0,A4			;skip over region
+		ADD.W	D0,A5			;skip over destination
+
+		TST.W	D2	
+		BMI	DonePCV2Line		;if done, skip
+		
+; we've interpreted both runs, so finish up using common code
+
+		BRA.S	V2LastLoop
+
+; Handle blasting out the first run
+
+V2BlastPat1
+		MOVE.W	D3,D0			;get the size
+		LEA	V2PRRun2,A0
+		BRA.S	V2BlastPat
+		
+; Blast out the second run
+
+V2BlastPat2
+		SWAP	D0			;use high word for 2nd run
+		LEA	V2LastLoop,A0
+			
+; Here's the unwound loop to blast the # of longwords in D0 out.
+
+V2BlastPat
+		CMP.W	#8,D0			;8 left to do?
+		BLT.S	V2BlastFinishUp
+		
+		MOVE.W	D0,D1
+		LSR	#3,D1
+		SUBQ	#1,D1
+V2BlastLoop
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+	
+		
+		DBRA	D1,V2BlastLoop
+V2BlastFinishUp
+		MOVE.W	D0,D1
+		AND	#7,D1
+		EOR	#7,D1
+		JMP	V2FinishTable(D1.W*2)
+V2FinishTable
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+
+		MOVE.L	D6,(A5)+		;15 total to finish up	
+
+; all done with plotting so adjust the region pointer and count, then return
+
+		MOVE.W	D0,D1
+		LSL	#2,D1			;times 4
+		ADD.W	D1,A4			;bump region ptr
+		
+		SUB.W	D0,D2
+		BMI	DonePCV2Line
+		
+		JMP	(A0)
+
+; handle the heterogenous plots between runs
+
+V2PlotRHard1
+		LEA	V2PRRun2,A0
+		BRA.S	V2PlotHardCommon	
+V2PlotRHard2
+		LEA	V2LastLoop,A0
+V2PlotHardCommon
+		MOVE.L	(A4)+,D1
+		
+		MOVE.L	D6,D0			;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		SUBQ	#1,D2			;count it
+		BMI	DonePCV2Line	
+		
+		JMP	(A0)
+
+;******************************************************************************************
+
+; Here's where we handle the case of 8-bit pattern fill with no clipping  (trap $338)
+; (with complex pattern, copy mode)
+
+UseOld338
+		LEARom	Old338,A1		;must use A1 to avoid re-entry
+		JMP	(A1)
+
+PatFillScanLine	
+
+		CMP.W	#4,D7			;is pattern too complex?
+		BGT.S	UseOld338		;if so, can't handle
+		
+; Handle pattern fill with no clipping.  Fetch the pattern raster into D3 and D4. The
+; basic strategy is to do the edge in the general (masking) way, then blast away for
+; the middle, finally handling the right edge generally.
+
+PatFillOuter
+		MOVE.L	0(A4,D6),D3		;get left pattern
+		EOR.W	#4,D6
+		MOVE.L	0(A4,D6),D4		;get right pattern
+		
+; first special case the left edge before falling into the loop
+
+		MOVE.L	D1,D0			;get left mask
+		AND.L	D3,D0			;use left pattern
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;get dest
+		OR.L	D1,D0			;combine with source
+		MOVE.L	D0,(A5)+		;stuff it
+
+; now blast away for the bulk of it
+
+		MOVE.W	D2,D0
+		BEQ.S	NextPFillLine	
+
+		CMP.W	#4,D2			;near the end?
+		BLE.S	PatFillFinish		;if so, go handle
+		
+		SUBQ	#1,D0			;do last one with mask
+		LSR	#2,D0			;divide by 4 for unwound loop
+		SUBQ	#1,D0			;bias for DBRA
+PatFillInner
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,(A5)+
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,(A5)+		;store 32 pixels worth real fast
+		
+		DBRA	D0,PatFillInner
+		
+; finish up the last few pixels
+		
+PatFillFinish
+		MOVE.L	D4,D0
+		
+		MOVE.W	D2,D1
+		AND	#3,D1
+		JMP	PatFinTable(D1.W*2)
+Finish4
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,(A5)+
+Finish2
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,D0
+		BRA.S	Finish1
+PatFinTable
+		BRA.S	Finish4
+		BRA.S	Finish1
+		BRA.S	Finish2
+		BRA.S	Finish3
+Finish3
+		MOVE.L	D4,(A5)+
+		MOVE.L	D3,(A5)+
+Finish1
+		MOVE.L	D5,D1			;get mask
+		AND.L	D1,D0			;mask pattern in D0
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;get dest
+		OR.L	D1,D0			;combine with source
+		MOVE.L	D0,(A5)+		;stuff it
+NextPFillLine
+		SWAP	D6
+		SUB.W	D6,A4
+
+		ADD.W	PATROW(A6),D6
+		AND.W	PATVMASK(A6),D6		;wrap around
+		ADD.W	D6,A4
+		SWAP	D6
+
+		MOVE.W	PATHPOS(A6),D6
+		ADD.W	A3,A5		
+	
+		MOVE.L	FIRSTMASK(A6),D1
+		MOVE.W	LONGCNT(A6),D2
+		
+		SUBQ.W	#1,HEIGHT(A6)		;decrement scan line count
+		BNE	PatFillOuter
+
+		RTS
+
+
+;******************************************************************************************
+
+		
+; Handle copyBits, copy mode, with region clipping. Use the region clipping technique
+; for fast plotting
+
+UseOld35A
+		LEARom	Old35A,A1				; <PB446 DBG>
+		JMP	(A1)
+		
+CBClipLine	
+
+		CMP.W	#8,SRCPIX+PIXELSIZE(A6)		;8 bits/pixel?
+		BNE.S 	UseOld35A		;if not, don't handle
+
+		TST.L	D7			;toggling source?
+		BNE.S	UseOld35A		;if so, don't handle
+
+		LEA	CBClipCommon,A0
+		MOVE.L	A0,MODECASE(A6)		;skip initial testing on return
+
+		MOVEQ	#0,D4			;count invalid 1st time through
+CBClipCommon		
+		MOVEQ	#-1,D5			;get all ones for comparing
+CBClipOuter		
+		MOVE.W	D6,D0			;get bit index
+		ASR.W	#3,D0			;convert to byte index
+		ADD.W	D0,A3			;factor in the byte offset
+		
+		TST.W	D3			;forwards or backwards?
+		BMI	CBClipNeg		;if backwards, handle specially
+
+; the first set of loops is for the plotting forward case (moving towards the left)
+
+; first handle the left edge outside of the inner loop so we don't count it in the runs
+
+CBClipLoop
+		MOVE.L	(A4)+,D1		;fetch region mask
+		MOVE.L	(A3)+,D0		;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		SUBQ	#1,D2
+		BMI.S	DoneCBCLine
+
+; if the region runs in D4 are still valid, we can use special code to really plot super
+; fast.
+
+		TST.W	D4			;is it valid?
+		BNE	CBCPlotRgnRuns		;if so, go super fast
+		
+		MOVEQ	#-1,D4			;validate it for next time
+		MOVEQ	#0,D7			;zero the run count
+		
+; see what the next region longword is.  Go to three different loops depending on whether
+; the region is all ones, zeros or both
+
+		MOVE.L	(A4)+,D1		;fetch next word of region mask
+		BEQ 	CBCFirstZero0		;if zero, go handle
+		
+		CMP.L	D5,D1			;all one's?
+		BNE	CBCStartSecondRun	;if not, skip
+		
+		BRA.S	CBCFirstOnes1
+		
+; here's the loop that counts and plots the first run of all ones
+
+CBCFirstOnes
+		MOVE.L	(A4)+,D1
+		
+		CMP.L	D5,D1			;is it still all ones?
+		BNE 	CBCStartSecondRun	;if not, end the run
+CBCFirstOnes1	
+		ADDQ.W	#1,D7			;bump the run count
+		
+		MOVE.L	(A3)+,(A5)+
+		DBRA	D2,CBCFirstOnes		;loop until we're done
+
+; all done with the scan line so bump the pointers, generate a new region mask if
+; necessary, and loop until we're done
+
+DoneCBCLine
+		MOVE.L	SRCROW(A6),D0
+		ADD.L	D0,SRCADDR(A6)
+		
+; now bump the output scan line pointer
+
+		MOVE.L	DSTROW(A6),D0
+		ADD.L	D0,DSTADDR(A6)		;bump to next line
+		
+; bump line count and see if we're done
+
+		MOVE.W	VERT(A6),D0
+		ADD.W	VBUMP(A6),D0
+		MOVE.W	D0,VERT(A6)
+
+		CMP.W	LASTV(A6),D0		;all done?
+		BEQ.S	DonePatClip		;if not, skip
+
+; create the region mask for the new scan line, and maintain the all one's flag
+
+		CMP.W	STATEB+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CBCNewRgn		;if so, go do it
+		
+		CMP.W	STATEB+THISV(A6),D0		;need to rebuild?
+		BLT.S	CBCNewRgn		;if so, go do it
+
+		CMP.W	STATEC+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CBCNewRgn		;if so, go do it
+		
+		CMP.W	STATEC+THISV(A6),D0		;need to rebuild?
+		BLT.S	CBCNewRgn		;if so, go do it
+
+		CMP.W	STATEA+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CBCNewRgn		;if so, go do it
+		
+		CMP.W	STATEA+THISV(A6),D0		;need to rebuild?
+		BLT.S	CBCNewRgn		;if so, go do it
+							
+		TST.L	DSTMASKBUF(A6)			;can we skip it?
+		BEQ.S	CBCSkipRgn		;if so, skip
+CBCNewRgn
+		MOVEQ	#0,D4			;invalidate region counts
+		
+		MOVE.L	SEEKMASK(A6),A0
+		JSR	(A0)			;make new region mask		
+
+; set up registers and go handle the next line
+
+CBCSkipRgn
+		MOVE.L	SRCADDR(A6),A3
+		MOVE.L	RGNADDR(A6),A4
+		MOVE.L	DSTADDR(A6),A5
+		MOVE.W	BUFSIZE(A6),D2
+		
+		MOVE.L	MODECASE(A6),A2
+		JMP	(A2)
+		
+; all done so strip stack and return
+
+DonePatClip		
+		MOVE.L	SAVESTK2(A6),A7
+DonePClipRTS		
+		RTS
+
+; here's the loop that counts and plots the first run of all zeros
+
+CBCFirstZero
+		MOVE.L	(A4)+,D1
+		BNE.S	CBCStartSecondRun
+CBCFirstZero0		
+		SUBQ.W	#1,D7			;decrement run count for zeros
+	
+		ADDQ	#4,A3
+		ADDQ	#4,A5
+		DBRA	D2,CBCFirstZero
+
+		BRA.S	DoneCBCLine	
+
+; the region mask is heterogenous, so plot the word and start the second run.
+
+CBCStartSecondRun	
+		SWAP	D7
+		
+		MOVE.L	(A3)+,D0		;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		SUBQ	#1,D2
+		BMI.S	DoneCBCSecondRun
+
+; sample the region and case out for the 2nd time
+
+		MOVE.L	(A4)+,D1		;fetch next word of region mask
+		BEQ.S	CBCndZero0		;if zero, go handle
+		
+		CMP.L	D5,D1			;all one's?
+		BNE.S	CBCStartLastRun	;if not, skip
+	
+		BRA.S	CBCndOnes1
+		
+; here's the loop that counts and plots the second run of all ones
+
+CBCndOnes
+		MOVE.L	(A4)+,D1
+		
+		CMP.L	D5,D1			;is it still all ones?
+		BNE.S	CBCStartLastRun		;if not, end the run
+CBCndOnes1	
+		ADDQ.W	#1,D7			;bump the run count
+		
+		MOVE.L	(A3)+,(A5)+
+		DBRA	D2,CBCndOnes		;loop until we're done
+DoneCBCSecondRun
+		SWAP	D7
+		BRA	DoneCBCLine		;all done
+		
+; here's the loop that counts the 2nd run of zeros
+
+CBCndZero
+		MOVE.L	(A4)+,D1
+		BNE.S	CBCStartLastRun
+CBCndZero0		
+		SUBQ.W	#1,D7
+	
+		ADDQ	#4,A3
+		ADDQ	#4,A5			;bump dest reg
+		DBRA	D2,CBCndZero		;loop until it changes
+
+		BRA.S	DoneCBCSecondRun
+
+; OK, we've accumulated two runs, so finish up the line without counting
+
+CBCStartLastRun
+		SWAP	D7
+
+		TST.L	D1	
+		BEQ.S	CBCLastZero
+		BRA.S	CBCLastLoopA
+CBCLastLoop
+		MOVE.L	(A4)+,D1		;get region		
+		BEQ.S	CBCLastZero
+CBCLastLoopA		
+		CMP.L	D5,D1
+		BNE.S	CBCLastHard
+		
+		MOVE.L	(A3)+,(A5)+		;plot it
+		DBRA	D2,CBCLastLoop
+		
+		BRA	DoneCBCLine
+CBCLastZero
+		ADDQ	#4,A3
+		ADDQ	#4,A5
+		DBRA	D2,CBCLastLoop
+		BRA	DoneCBCLine
+CBCLastHard
+		MOVE.L	(A3)+,D0		;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		DBRA	D2,CBCLastLoop
+		BRA	DoneCBCLine
+		
+; Here's where we have the ultra fast plotting by interpreting the 2 region runs in D7.
+
+CBCPlotRgnRuns
+		TST.W	D7			;which type of run?
+		BPL.S	CBCBlastPat1		;if ones, go blast it
+		BEQ 	CBCPlotRHard1		;if zero, plot one slowly, then plot 2nd run
+
+; it's negative, so just skip over 4 times the count
+
+		MOVE.W	D7,D0
+		
+		NEG.W	D0			;turn into longword count
+		LSL.W	#2,D0			;times 4
+		
+		ADD.W	D0,A3		
+		ADD.W	D0,A4			;skip over region
+		ADD.W	D0,A5			;skip over destination
+
+		ADD.W	D7,D2			;decrement count
+		BMI	DoneCBCLine		;if done, skip
+		
+; now handle the second run
+
+CBCPRRun2
+		LEA	@0,A0			;plot the break longword
+		BRA 	CBCPlotHardCommon	
+@0
+		MOVE.L	D7,D0			;which type of run?
+ 		BPL.S	CBCBlastPat2		;if ones, go blast it
+		BEQ.S 	CBCPlotRHard2
+
+; it's negative, so we can skip over like above
+		
+		SWAP	D0
+		NEG.W	D0			;turn into longword count
+		SUB.W	D0,D2			;decrement count	
+		
+		LSL.W	#2,D0			;times 4
+		
+		ADD.W	D0,A3
+		ADD.W	D0,A4			;skip over region
+		ADD.W	D0,A5			;skip over destination
+
+		TST.W	D2	
+		BMI	DoneCBCLine		;if done, skip
+		
+; we've interpreted both runs, so finish up using common code
+
+		BRA.S	CBCLastLoop
+
+; Handle blasting out the first run
+
+CBCBlastPat1
+		MOVE.W	D7,D0			;get the size
+		LEA	CBCPRRun2,A0
+		BRA.S	CBCBlastPat
+		
+; Blast out the second run
+
+CBCBlastPat2
+		SWAP	D0			;use high word for 2nd run
+		LEA	CBCLastLoop,A0
+			
+; Here's the unwound loop to blast the # of longwords in D0 out.
+
+CBCBlastPat
+		CMP.W	#8,D0			;8 left to do?
+		BLT.S	CBCBlastFinishUp
+		
+		MOVE.W	D0,D1
+		LSR	#3,D1
+		SUBQ	#1,D1
+CBCBlastLoop
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+	
+		
+		DBRA	D1,CBCBlastLoop
+CBCBlastFinishUp
+		MOVE.W	D0,D1
+		AND	#7,D1
+		EOR	#7,D1
+		JMP	CBCFinishTable(D1.W*2)
+CBCFinishTable
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+
+		MOVE.L	(A3)+,(A5)+		;15 total to finish up	
+
+; all done with plotting so adjust the region pointer and count, then return
+
+		MOVE.W	D0,D1
+		LSL	#2,D1			;times 4
+		ADD.W	D1,A4			;bump region ptr
+		
+		SUB.W	D0,D2
+		BMI	DoneCBCLine
+		
+		JMP	(A0)
+
+; handle the heterogenous plots between runs
+
+CBCPlotRHard1
+		LEA	CBCPRRun2,A0
+		BRA.S	CBCPlotHardCommon	
+CBCPlotRHard2
+		LEA	CBCLastLoop,A0
+CBCPlotHardCommon
+		MOVE.L	(A4)+,D1
+		
+		MOVE.L	(A3)+,D0		;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A5),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)+		;deposit it
+
+		SUBQ	#1,D2			;count it
+		BMI	DoneCBCLine	
+		
+		JMP	(A0)
+
+; here's a whole different set of loops for the backwards case
+
+CBClipNeg
+		ADDQ	#4,A3			;ditto for source
+		ADDQ	#4,A4			;bias region ptr
+		ADDQ	#4,A5			;and dest
+CBClipNegLoop
+		MOVE.L	-(A4),D1		;fetch region mask
+		MOVE.L	-(A3),D0		;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	-(A5),D1		;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)			;deposit it
+
+		SUBQ	#1,D2
+		BMI 	DoneCBCLine
+
+; if the region runs in D4 are still valid, we can use special code to really plot super
+; fast.
+
+		TST.W	D4			;is it valid?
+		BNE	CBCNegPlotRgnRuns	;if so, go super fast
+		
+		MOVEQ	#-1,D4			;validate it for next time
+		MOVEQ	#0,D7			;zero the run count
+		
+; see what the next region longword is.  Go to three different loops depending on whether
+; the region is all ones, zeros or both
+
+		MOVE.L	-(A4),D1		;fetch next word of region mask
+		BEQ.S 	CBCNegFirstZero0	;if zero, go handle
+		
+		CMP.L	D5,D1			;all one's?
+		BNE.S	CBCNegStartSecondRun	;if not, skip
+		
+		BRA.S	CBCNegFirstOnes1
+		
+; here's the loop that counts and plots the first run of all ones
+
+CBCNegFirstOnes
+		MOVE.L	-(A4),D1
+		
+		CMP.L	D5,D1			;is it still all ones?
+		BNE.S 	CBCNegStartSecondRun	;if not, end the run
+CBCNegFirstOnes1	
+		ADDQ.W	#1,D7			;bump the run count
+		
+		MOVE.L	-(A3),-(A5)
+		DBRA	D2,CBCNegFirstOnes	;loop until we're done
+
+		BRA	DoneCBCLine
+
+; here's the loop that counts and plots the first run of all zeros
+
+CBCNegFirstZero
+		MOVE.L	-(A4),D1
+		BNE.S	CBCNegStartSecondRun
+CBCNegFirstZero0		
+		SUBQ.W	#1,D7			;decrement run count for zeros
+	
+		SUBQ	#4,A3
+		SUBQ	#4,A5
+		DBRA	D2,CBCNegFirstZero
+
+		BRA	DoneCBCLine	
+
+; the region mask is heterogenous, so plot the word and start the second run.
+
+CBCNegStartSecondRun	
+		SWAP	D7
+		
+		MOVE.L	-(A3),D0		;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	-(A5),D1		;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)			;deposit it
+
+		SUBQ	#1,D2
+		BMI.S	DoneCBCNegSecondRun
+
+; sample the region and case out for the 2nd time
+
+		MOVE.L	-(A4),D1		;fetch next word of region mask
+		BEQ.S	CBCNegndZero0		;if zero, go handle
+		
+		CMP.L	D5,D1			;all one's?
+		BNE.S	CBCNegStartLastRun		;if not, skip
+	
+		BRA.S	CBCNegndOnes1
+		
+; here's the loop that counts and plots the second run of all ones
+
+CBCNegndOnes
+		MOVE.L	-(A4),D1
+		
+		CMP.L	D5,D1			;is it still all ones?
+		BNE.S	CBCNegStartLastRun	;if not, end the run
+CBCNegndOnes1	
+		ADDQ.W	#1,D7			;bump the run count
+		
+		MOVE.L	-(A3),-(A5)
+		DBRA	D2,CBCNegndOnes		;loop until we're done
+DoneCBCNegSecondRun
+		SWAP	D7
+		BRA	DoneCBCLine		;all done
+		
+; here's the loop that counts the 2nd run of zeros
+
+CBCNegndZero
+		MOVE.L	-(A4),D1
+		BNE.S	CBCNegStartLastRun
+CBCNegndZero0		
+		SUBQ.W	#1,D7
+	
+		SUBQ	#4,A3
+		SUBQ	#4,A5			;bump dest reg
+		DBRA	D2,CBCNegndZero		;loop until it changes
+
+		BRA.S	DoneCBCNegSecondRun
+
+; OK, we've accumulated two runs, so finish up the line without counting
+
+CBCNegStartLastRun
+		SWAP	D7
+
+		TST.L	D1	
+		BEQ.S	CBCNegLastZero
+		BRA.S	CBCNegLastLoopA
+CBCNegLastLoop
+		MOVE.L	-(A4),D1		;get region		
+		BEQ.S	CBCNegLastZero
+CBCNegLastLoopA		
+		CMP.L	D5,D1
+		BNE.S	CBCNegLastHard
+		
+		MOVE.L	-(A3),-(A5)		;plot it
+		DBRA	D2,CBCNegLastLoop
+		
+		BRA	DoneCBCLine
+CBCNegLastZero
+		SUBQ	#4,A3
+		SUBQ	#4,A5
+		DBRA	D2,CBCNegLastLoop
+		BRA	DoneCBCLine
+CBCNegLastHard
+		MOVE.L	-(A3),D0		;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	-(A5),D1		;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)			;deposit it
+
+		DBRA	D2,CBCNegLastLoop
+		BRA	DoneCBCLine
+		
+; Here's where we have the ultra fast plotting by interpreting the 2 region runs in D7.
+
+CBCNegPlotRgnRuns
+		TST.W	D7			;which type of run?
+		BPL.S	CBCNegBlastPat1		;if ones, go blast it
+		BEQ 	CBCNegPlotRHard1	;if zero, plot one slowly, then plot 2nd run
+
+; it's negative, so just skip over 4 times the count
+
+		MOVE.W	D7,D0
+		
+		NEG.W	D0			;turn into longword count
+		LSL.W	#2,D0			;times 4
+		
+		SUB.W	D0,A3		
+		SUB.W	D0,A4			;skip over region
+		SUB.W	D0,A5			;skip over destination
+
+		ADD.W	D7,D2			;decrement count
+		BMI	DoneCBCLine		;if done, skip
+		
+; now handle the second run
+
+CBCNegPRRun2
+		LEA	@0,A0			;plot the break longword
+		BRA 	CBCNegPlotHardCommon	
+@0
+		MOVE.L	D7,D0			;which type of run?
+ 		BPL.S	CBCNegBlastPat2		;if ones, go blast it
+		BEQ.S 	CBCNegPlotRHard2
+
+; it's negative, so we can skip over like above
+		
+		SWAP	D0
+		NEG.W	D0			;turn into longword count
+		SUB.W	D0,D2			;decrement count	
+		
+		LSL.W	#2,D0			;times 4
+		
+		SUB.W	D0,A3
+		SUB.W	D0,A4			;skip over region
+		SUB.W	D0,A5			;skip over destination
+
+		TST.W	D2	
+		BMI	DoneCBCLine		;if done, skip
+		
+; we've interpreted both runs, so finish up using common code
+
+		BRA.S	CBCNegLastLoop
+
+; Handle blasting out the first run
+
+CBCNegBlastPat1
+		MOVE.W	D7,D0			;get the size
+		LEA	CBCNegPRRun2,A0
+		BRA.S	CBCNegBlastPat
+		
+; Blast out the second run
+
+CBCNegBlastPat2
+		SWAP	D0			;use high word for 2nd run
+		LEA	CBCNegLastLoop,A0
+			
+; Here's the unwound loop to blast the # of longwords in D0 out.
+
+CBCNegBlastPat
+		CMP.W	#8,D0			;8 left to do?
+		BLT.S	CBCNegBlastFinishUp
+		
+		MOVE.W	D0,D1
+		LSR	#3,D1
+		SUBQ	#1,D1
+CBCNegBlastLoop
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)	
+		
+		DBRA	D1,CBCNegBlastLoop
+CBCNegBlastFinishUp
+		MOVE.W	D0,D1
+		AND	#7,D1
+		EOR	#7,D1
+		JMP	CBCNegFinishTable(D1.W*2)
+CBCNegFinishTable
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)
+		MOVE.L	-(A3),-(A5)		;15 total to finish up	
+
+; all done with plotting so adjust the region pointer and count, then return
+
+		MOVE.W	D0,D1
+		LSL	#2,D1			;times 4
+		SUB.W	D1,A4			;bump region ptr
+		
+		SUB.W	D0,D2
+		BMI	DoneCBCLine
+		
+		JMP	(A0)
+
+; handle the heterogenous plots between runs
+
+CBCNegPlotRHard1
+		LEA	CBCNegPRRun2,A0
+		BRA.S	CBCNegPlotHardCommon	
+CBCNegPlotRHard2
+		LEA	CBCNegLastLoop,A0
+CBCNegPlotHardCommon
+		MOVE.L	-(A4),D1
+		
+		MOVE.L	-(A3),D0		;get  pattern
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	-(A5),D1		;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A5)			;deposit it
+
+		SUBQ	#1,D2			;count it
+		BMI	DoneCBCLine	
+		
+		JMP	(A0)
+
+
+;******************************************************************************************
+		
+; InvertRgn case ($360) -- ie, invert clipped to region.  Use the standard region
+; counting stuff
+
+UseOld360
+		LEARom	Old360,A1
+		JMP	(A1)
+		
+InvertClip	
+GoInvertClip	
+		LEA	Inv1ClipOuter,A0
+		MOVE.L	A0,MODECASE(A6)		;skip initial testing on return
+
+		MOVEQ	#0,D4			;no runs yet
+		SUB.L	A2,A2			;runs not valid
+		
+		MOVEQ	#-1,D5			;mask for comparing
+Inv1ClipOuter
+		
+; first handle the left edge outside of the inner loop so we don't count it in the runs
+
+		MOVE.L	D6,D0
+		AND.L	(A4)+,D0
+		EOR.L	D0,(A5)+
+
+		SUBQ	#1,D2
+		BMI.S	DoneInv1Line
+
+; if the region runs in D4 are still valid, we can use special code to really plot super
+; fast.
+
+		MOVE.L	A2,D0			;is it valid?
+		BNE	Inv1PlotRgnRuns		;if so, go super fast
+		
+		ADDQ	#1,A2			;validate it for next time
+		MOVEQ	#0,D4			;zero the run count
+		
+; see what the next region longword is.  Go to three different loops depending on whether
+; the region is all ones, zeros or both
+
+		MOVE.L	(A4)+,D1		;fetch next word of region mask
+		BEQ 	Inv1FirstZero0		;if zero, go handle
+		
+		CMP.L	D5,D1			;all one's?
+		BNE	Inv1StartSecondRun	;if not, skip
+		
+		BRA.S	Inv1FirstOnes1
+		
+; here's the loop that counts and plots the first run of all ones
+
+Inv1FirstOnes
+		MOVE.L	(A4)+,D1
+			
+		CMP.L	D5,D1			;is it still all ones?
+		BNE 	Inv1StartSecondRun	;if not, end the run
+Inv1FirstOnes1	
+		ADDQ.W	#1,D4			;bump the run count
+		
+		EOR.L	D6,(A5)+
+		
+		DBRA	D2,Inv1FirstOnes	;loop until we're done
+
+; done with this scan line, so bump to the next
+
+DoneInv1Line
+		MOVE.L	DSTROW(A6),D0
+		ADD.L	D0,DSTADDR(A6)		;bump to next line of destination
+
+; bump pattern index
+
+		ADDQ	#1,D7
+		AND.W	#15,D7
+		MOVE.L	([EXPAT,A6],D7.W*4),D6	;bump the pattern
+
+; bump line count and see if we're done
+
+		MOVE.W	VERT(A6),D0
+		ADD.W	VBUMP(A6),D0
+		MOVE.W	D0,VERT(A6)
+
+		CMP.W	LASTV(A6),D0		;all done?
+		BEQ 	DonePatClip		;if so, use common exit
+
+; create the region mask for the new scan line, and maintain the all one's flag
+
+		CMP.W	STATEB+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	Inv1NewRgn		;if so, go do it
+		
+		CMP.W	STATEB+THISV(A6),D0		;need to rebuild?
+		BLT.S	Inv1NewRgn		;if so, go do it
+
+		CMP.W	STATEC+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	Inv1NewRgn		;if so, go do it
+		
+		CMP.W	STATEC+THISV(A6),D0		;need to rebuild?
+		BLT.S	Inv1NewRgn		;if so, go do it
+
+		CMP.W	STATEA+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	Inv1NewRgn		;if so, go do it
+		
+		CMP.W	STATEA+THISV(A6),D0		;need to rebuild?
+		BLT.S	Inv1NewRgn		;if so, go do it
+							
+		TST.L	DSTMASKBUF(A6)			;can we skip it?
+		BEQ.S	Inv1SkipRgn		;if so, skip
+Inv1NewRgn
+		MOVE.L	SEEKMASK(A6),A0
+		JSR	(A0)			;make new region mask		
+
+		SUB.L	A2,A2			;invalidate region counts
+		
+; set up registers and go handle the next line
+
+Inv1SkipRgn
+		MOVE.L	RGNBUF(A6),A4
+		MOVE.L	DSTADDR(A6),A5
+		MOVE.W	BUFSIZE(A6),D2
+
+		BRA	Inv1ClipOuter
+
+; here's the loop that counts and plots the first run of all zeros
+
+Inv1FirstZero
+		MOVE.L	(A4)+,D1
+		BNE.S	Inv1StartSecondRun
+Inv1FirstZero0		
+		SUBQ.W	#1,D4			;decrement run count for zeros
+		
+		ADDQ	#4,A5
+		DBRA	D2,Inv1FirstZero
+
+		BRA.S	DoneInv1Line	
+
+; the region mask is heterogenous, so plot the word and start the second run.
+
+Inv1StartSecondRun	
+		SWAP	D4
+		
+		AND.L	D6,D1			;mask it
+		EOR.L	D1,(A5)+		;deposit it
+
+		SUBQ	#1,D2
+		BMI.S	DoneInv1SecondRun
+
+; sample the region and case out for the 2nd time
+
+		MOVE.L	(A4)+,D1		;fetch next word of region mask
+		BEQ.S	Inv1stZero0		;if zero, go handle
+		
+		CMP.L	D5,D1			;all one's?
+		BNE.S	Inv1StartLastRun	;if not, skip
+	
+		BRA.S	Inv1stOnes1
+		
+; here's the loop that counts and plots the second run of all ones
+
+Inv1stOnes
+		MOVE.L	(A4)+,D1
+		
+		CMP.L	D5,D1			;is it still all ones?
+		BNE.S	Inv1StartLastRun	;if not, end the run
+Inv1stOnes1	
+		ADDQ.W	#1,D4			;bump the run count
+		
+		EOR.L	D6,(A5)+
+		DBRA	D2,Inv1stOnes		;loop until we're done
+DoneInv1SecondRun
+		SWAP	D4
+		BRA	DoneInv1Line		;all done
+		
+; here's the loop that counts the 2nd run of zeros
+
+Inv1stZero
+		MOVE.L	(A4)+,D1
+		BNE.S	Inv1StartLastRun
+Inv1stZero0		
+		SUBQ.W	#1,D4
+		ADDQ	#4,A5			;bump dest reg
+		DBRA	D2,Inv1stZero		;loop until it changes
+
+		BRA.S	DoneInv1SecondRun
+
+; OK, we've accumulated two runs, so finish up the line without counting
+
+Inv1StartLastRun
+		SWAP	D4
+
+		TST.L	D1	
+		BEQ.S	Inv1LastZero
+		BRA.S	Inv1LastLoopA
+Inv1LastLoop
+		MOVE.L	(A4)+,D1		;get region		
+		BEQ.S	Inv1LastZero
+Inv1LastLoopA		
+		CMP.L	D5,D1
+		BNE.S	Inv1LastHard
+		
+		EOR.L	D6,(A5)+		;plot it
+		DBRA	D2,Inv1LastLoop
+		
+		BRA	DoneInv1Line
+Inv1LastZero
+		ADDQ	#4,A5
+		DBRA	D2,Inv1LastLoop
+		BRA	DoneInv1Line
+Inv1LastHard
+		AND.L	D6,D1
+		EOR.L	D1,(A5)+		;deposit it
+
+		DBRA	D2,Inv1LastLoop
+		BRA	DoneInv1Line
+		
+; Here's where we have the ultra fast plotting by interpreting the 2 region runs in D4.
+
+Inv1PlotRgnRuns
+		TST.W	D4			;which type of run?
+		BPL.S	Inv1BlastPat1		;if ones, go blast it
+		BEQ 	Inv1PlotRHard1		;if zero, plot one slowly, then plot 2nd run
+
+; it's negative, so just skip over 4 times the count
+
+		MOVE.W	D4,D0
+		
+		NEG.W	D0			;turn into longword count
+		
+		LSL.W	#2,D0			;times 4
+		ADD.W	D0,A4			;skip over region
+		ADD.W	D0,A5			;skip over destination
+
+		ADD.W	D4,D2			;decrement count
+		BMI	DoneInv1Line		;if done, skip
+		
+; now handle the second run
+
+Inv1PRRun2
+		LEA	@0,A0			;plot the break longword
+		BRA 	Inv1PlotHardCommon	
+@0
+		MOVE.L	D4,D0			;which type of run?
+ 		BPL.S	Inv1BlastPat2		;if ones, go blast it
+		BEQ.S 	Inv1PlotRHard2
+
+; it's negative, so we can skip over like above
+		
+		SWAP	D0
+		NEG.W	D0			;turn into longword count
+		
+		SUB.W	D0,D2			;decrement count	
+		
+		LSL.W	#2,D0			;times 4
+		ADD.W	D0,A4			;skip over region
+		ADD.W	D0,A5			;skip over destination
+
+		TST.W	D2	
+		BMI	DoneInv1Line		;if done, skip
+		
+; we've interpreted both runs, so finish up using common code
+
+		BRA.S	Inv1LastLoop
+
+; Handle blasting out the first run
+
+Inv1BlastPat1
+		MOVE.W	D4,D0			;get the size
+		LEA	Inv1PRRun2,A0
+		BRA.S	Inv1BlastPat
+		
+; Blast out the second run
+
+Inv1BlastPat2
+		SWAP	D0			;use high word for 2nd run
+		LEA	Inv1LastLoop,A0
+			
+; Here's the unwound loop to blast the # of longwords in D0 out.
+
+Inv1BlastPat
+		CMP.W	#8,D0			;8 left to do?
+		BLT.S	Inv1BlastFinishUp
+		
+		MOVE.W	D0,D1
+		LSR	#3,D1
+		SUBQ	#1,D1
+Inv1BlastLoop
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		
+		DBRA	D1,Inv1BlastLoop
+Inv1BlastFinishUp
+		MOVE.W	D0,D1
+		AND	#7,D1
+		EOR	#7,D1
+		
+		JMP	Inv1FinishTable(D1.W*2)
+Inv1FinishTable
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+		EOR.L	D6,(A5)+
+
+; all done with plotting so adjust the region pointer and count, then return
+
+@0
+		MOVE.W	D0,D1
+		LSL	#2,D1			;times 4
+		ADD.W	D1,A4			;bump region ptr
+		
+		SUB.W	D0,D2
+		BMI	DoneInv1Line
+Inv1BlastDone		
+		JMP	(A0)
+
+; handle the heterogenous plots between runs
+
+Inv1PlotRHard1
+		LEA	Inv1PRRun2,A0
+		BRA.S	Inv1PlotHardCommon	
+Inv1PlotRHard2
+		LEA	Inv1LastLoop,A0
+Inv1PlotHardCommon
+		MOVE.L	D6,D1		
+		AND.L	(A4)+,D1		
+		EOR.L	D1,(A5)+		;deposit it
+
+		SUBQ	#1,D2			;count it
+		BMI	DoneInv1Line	
+		
+		JMP	(A0)		
+
+
+;******************************************************************************************
+		
+		
+; InvertHiliteClip ($372) speeds up region clipped hiliting; no more invert hack
+
+UseOld372
+		LEARom	Old372,A1
+		JMP	(A1)
+		
+InvertHiliteClip	
+
+		CMP.W	#8,SRCPIX+PIXELSIZE(A6)	;8 bits/pixel?
+		BNE.S 	UseOld372		;if not, don't handle
+
+		LEA	InvertHiOuter,A0
+		MOVE.L	A0,MODECASE(A6)		;come back here
+		
+; if the background/hilite colors are black and white, we can expedite matters significantly
+
+InvertHiOuter
+		MOVE.L	D4,D7			;get hilite
+		EOR.L	D5,D7			;compute toggle mask
+
+; OK, here's the inner loop.  If the whole longword at the destination is background or
+; hilite color, toggle it with the hilite mask.  Otherwise, we have to process it a
+; byte at a time
+
+InvertHInner
+		MOVE.L	(A4)+,D1		;get the region mask
+		BEQ.S	InvertEmpty		;if empty, skip
+		
+		MOVE.L	(A5),D0			;get the current destination
+		CMP.L	D0,D4			;all hilite?
+		BEQ.S	@0			;if so, it's easy
+
+		CMP.L	D0,D5			;all background?
+		BNE.S	InvertHPixels		;if not, it's harder
+@0
+		AND.L	D7,D1			;mask toggle with region
+		EOR.L	D1,D0			;toggle dest
+		MOVE.L	D0,(A5)+		;stuff it
+NextInvertH
+		DBRA	D2,InvertHInner		;loop till done
+
+; all done with the scan line, so bump the appropriate pointers, and loop until done
+
+BumpNextScanLine
+		MOVE.L	DSTROW(A6),D0
+		ADD.L	D0,DSTADDR(A6)		;bump to next line
+		
+; bump line count and see if we're done
+
+		MOVE.W	VERT(A6),D0
+		ADD.W	VBUMP(A6),D0
+		MOVE.W	D0,VERT(A6)
+
+		CMP.W	LASTV(A6),D0		;all done?
+		BEQ.S	DoneInvertSL		;if not, skip
+
+; create the region mask for the new scan line
+
+		MOVE.L	SEEKMASK(A6),A0
+		JSR	(A0)			;make new region mask		
+
+; set up registers and go handle the next line
+
+		MOVE.L	SRCADDR(A6),A3
+		MOVE.L	RGNADDR(A6),A4
+		MOVE.L	DSTADDR(A6),A5
+		MOVE.W	BUFSIZE(A6),D2
+		
+		MOVE.L	MODECASE(A6),A2
+		JMP	(A2)
+		
+; all done so strip stack and return
+
+DoneInvertSL		
+		MOVE.L	SAVESTK2(A6),A7		
+		RTS
+
+; handle the case of the empty region by simply bumping the output pointer
+
+InvertEmpty
+		ADDQ	#4,A5			;bump ptr
+		DBRA	D2,InvertHInner
+		
+		BRA.S	BumpNextScanLine
+		
+; handle the more difficult case of a non-homogenous line, which we must process a pixel
+; at a time.  Destination value is in D0, region mask in D1.  Repeat in-line for 4 pixels
+
+; try to do a word at a time, if we can
+
+
+InvertHPixels
+		CMP.W	D4,D0
+		BEQ.S	IHBumpWord1
+		
+		CMP.W	D5,D0
+		BEQ.S	IHBumpWord1
+		
+		CMP.B	D4,D0			;same as hilite?
+		BEQ.S	IHBump1			;if so, let it through
+		
+		CMP.B	D5,D0			;same as background
+		BEQ.S	IHBump1			;if so, let it through
+		
+		CLR.B	D1			;don't use this one
+IHBump1
+		ROR.L	#8,D0
+		ROR.L	#8,D1
+		
+		CMP.B	D4,D0			;same as hilite?
+		BEQ.S	IHBump2			;if so, let it through
+		
+		CMP.B	D5,D0			;same as background
+		BEQ.S	IHBump2			;if so, let it through
+		
+		CLR.B	D1			;don't use this one
+IHBump2
+		ROR.L	#8,D0
+		ROR.L	#8,D1
+IHWord2
+		CMP.W	D4,D0
+		BEQ.S	IHBumpWord2
+		
+		CMP.W	D5,D0
+		BEQ.S	IHBumpWord2
+		
+		CMP.B	D4,D0			;same as hilite?
+		BEQ.S	IHBump3			;if so, let it through
+		
+		CMP.B	D5,D0			;same as background
+		BEQ.S	IHBump3			;if so, let it through
+		
+		CLR.B	D1			;don't use this one
+IHBump3
+		ROR.L	#8,D0
+		ROR.L	#8,D1
+		
+		CMP.B	D4,D0			;same as hilite?
+		BEQ.S	IHBump4			;if so, let it through
+		
+		CMP.B	D5,D0			;same as background?
+		BEQ.S	IHBump4			;if so, let it through
+		
+		CLR.B	D1			;don't use this one
+IHBump4
+		ROR.L	#8,D0
+		ROR.L	#8,D1
+
+; OK, now we can plot it
+
+IHPlotIt
+		AND.L	D7,D1			;mask toggle with region
+		EOR.L	D1,D0			;toggle dest
+		MOVE.L	D0,(A5)+		;stuff it
+
+		DBRA	D2,InvertHInner		;loop till done
+		BRA	BumpNextScanLine
+
+; handle word hits
+
+IHBumpWord1
+		SWAP	D0
+		SWAP	D1
+		
+		BRA.S	IHWord2
+		
+IHBumpWord2
+		SWAP	D0
+		SWAP	D1
+		
+		BRA.S	IHPlotIt
+		
+		
+;******************************************************************************************
+		
+
+; CB1To8Clip ($373) is the clipped copyBits loop used in the 1 to 8 expansion blits,
+; common in programs like HyperCard and Servant.  If it's the typical case we can handle
+; (black and white, source 1 bit,dest 8 bits), expand on the fly, right onto the screen,
+; for a pretty big gain.
+
+; it really shouldn't be named CB1to8, as it's the routine used for any scaling or lookup
+; blit.  We also optimize the 8-bit to 8-bit blits that require table lookup, and also
+; handle the 8 to 1 case
+
+UseOld373
+		LEARom	Old373,A1
+		JMP	(A1)
+		
+CB1To8Clip
+		TST.L	D7				;toggle mode?
+		BNE.S	UseOld373		;if so, don't handle
+		
+		MOVE.L	NUMER(A6),D0
+		CMP.L	DENOM(A6),D0		;botRights the same?
+		BNE.S	UseOld373		;if so, don't handle
+		
+		MOVE.L	MASKNUMER(A6),D0
+		CMP.L	MASKDENOM(A6),D0		;how about topLefts?
+		BNE.S	UseOld373		;if so, don't handle
+
+		TST.L	DSTMASKBUF(A6)			;is mask a bitmap?
+		BNE.S	UseOld373		;if so, don't handle!
+	
+		MOVE.W	SRCPIX+PIXELSIZE(A6),D0		;get source bits/pixel
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;destination 1 bits/pixel?
+		BNE 	ChkDst1Bit		;if not, skip		
+		
+		SUBQ	#8,D0
+		BEQ 	CB8to8Clip		;if source is 8 bits, go handle
+		
+		ADDQ	#7,D0			;is it one bit?
+		BNE.S 	UseOld373		;if not, don't handle
+		
+Eight	EQU		$23344			; offset to the expand by eight, non-colormap routine
+
+		CmpRA	Eight,ScaleCase(A6)	; is this doing a 1-8bit stretch?	<PB473 DAF	19Apr88>
+		bne.s	UseOld373		; no, can't handle this one.			<PB471 BAL 18Apr88>
+
+		CMP.L	#-1,FCOLOR(A6)	;foreground = black?	
+		BNE.S	UseOld373
+		
+		TST.L	BCOLOR(A6)		;background = white?
+		BNE.S	UseOld373
+		
+		cmp.l	scalebuf(a6),a3	;has src been advanced (i.e. dest < baseAddr)	<PB501 BAL/DVB 13Jun88>
+		bne.s	UseOld373		;if so, don't handle							<PB501 BAL/DVB 13Jun88>
+
+		MOVE.L	SRCROW(A6),D0
+		SUB.L	D0,SRCADDR(A6)		;back up one line
+		
+		SUBQ	#1,BUFSIZE(A6)		;one less than they say
+		
+; its our case, so handle it.  Pick up the shifted source with a bit-field instruction,
+; then use it to plot 8 longwords, indirecting a nibble at a time through an expansion
+; table.   Special case the edges, so we can really zoom if the middle's region is all ones.
+
+; A2 has the region mask, A4 has the destination; use A3 to hold the source.
+; D7 holds the "OK to zoom" (region all ones) flag
+
+CB1to8Outer
+		MOVE.L	DSTALIGN(A6),D0
+		ASR.L	#3,D0
+		
+		MOVEQ	#15,D3			;D3 has 4 bit mask
+		MOVEQ	#-1,D6			;D6 has -1 for region compare		
+		LEA	Expand1to8,A1
+		
+		MOVE.L	SRCADDR(A6),A3		;get source pointer
+		
+		MOVE.L	SRCALIGN(A6),D5		;get shift count	
+		ADD.L	D0,D5
+		
+; OK, first do the left edge (one nybble worth)
+
+		BFEXTU	(A3){D5:16},D4		;pick up next word of source
+		ADDQ.L	#4,D5			;bump to next nibble
+		ROL.W	#4,D4			;get next nibble
+		
+		MOVE.L	(A2)+,D1		;get region mask
+		
+		MOVE.W	D4,D0			;get low 4 bits
+		AND.W	D3,D0
+		MOVE.L	0(A1,D0.W*4),D0		;get source longword
+		AND.L	D1,D0
+		
+		NOT.L	D1			;flip mask
+		AND.L	(A4),D1
+		OR.L	D1,D0			;combine source and dest
+		MOVE.L	D0,(A4)+		;stuff it
+
+; OK, here's the loop that handles the middle, which is where all the action is		
+
+		MOVE.W	BUFSIZE(A6),D2		;get destination count
+
+		CMP.W	#4,D2			;four or less we can't optimize
+		BLE 	FinishLastFew
+
+; if we have a multiple of 4 left to do, don't do last 4
+
+		MOVE.W	D2,D0
+		AND	#3,D0
+		BNE.S	@1
+		
+		SUBQ	#1,D2
+@1		
+		LSR	#2,D2			;do 4 longwords each iteration
+		SUBQ	#1,D2
+
+		TST.B	D7			;is region all ones?
+		BNE	CB1to8SpLoop0		;if so, we can go super-fast
+		
+		ST	D7			;assume next like is special
+CB1to8Loop
+		BFEXTU	(A3){D5:16},D4		;pick up next word of source
+		ADDQ	#2,A3			;bump it		
+		BEQ	CB1to8AllZeros		;special case all zeros
+CB1to8AltEntry
+		ROL.W	#4,D4			;get high nibble first		
+		
+; OK, expand the low 4 bits in D4 into a longword, then plot it.  Fetch the region mask
+; first, since it may not even be necessary
+
+CB1to8Inner
+		LEA	CB1to8Nib2,A5
+		
+		MOVE.L	(A2)+,D1		;get region mask
+		
+		MOVE.W	D4,D0			;get low 4 bits
+		AND.W	D3,D0
+		MOVE.L	0(A1,D0.W*4),D0		;get source longword
+		
+		CMP.L	D6,D1			;mask all ones?
+		BNE 	CB1to8HardPlot		;if not, plot it the hard way
+		
+		MOVE.L	D0,(A4)+		;plot the longword
+
+; now plot the 2nd nibble
+
+CB1to8Nib2
+		LEA	CB1to8Nib3,A5
+		
+		ROL.W	#4,D4			;get next nybble
+		
+		MOVE.L	(A2)+,D1		;get region mask
+		
+		MOVE.W	D4,D0			;get low 4 bits
+		AND.W	D3,D0
+		MOVE.L	0(A1,D0.W*4),D0		;get source longword
+		
+		CMP.L	D6,D1			;mask all ones?
+		BNE.S  	CB1to8HardPlot	;if not, plot it the hard way
+		
+		MOVE.L	D0,(A4)+		;plot the longword
+
+; now plot the 3rd nibble
+
+CB1to8Nib3
+		LEA	CB1to8Nib4,A5		
+		ROL.W	#4,D4			;get next nybble
+		
+		MOVE.L	(A2)+,D1		;get region mask
+		
+		MOVE.W	D4,D0			;get low 4 bits
+		AND.W	D3,D0
+		MOVE.L	0(A1,D0.W*4),D0	;get source longword
+		
+		CMP.L	D6,D1			;mask all ones?
+		BNE.S	CB1to8HardPlot	;if not, plot it the hard way
+		
+		MOVE.L	D0,(A4)+		;plot the longword
+
+; now plot the last nibble
+
+CB1to8Nib4
+		LEA	CB1to8NibBot,A5
+		
+		ROL.W	#4,D4			;get next nybble
+		
+		MOVE.L	(A2)+,D1		;get region mask
+		
+		MOVE.W	D4,D0			;get low 4 bits
+		AND.W	D3,D0
+		MOVE.L	0(A1,D0.W*4),D0		;get source longword
+		
+		CMP.L	D6,D1			;mask all ones?
+		BNE.S 	CB1to8HardPlot		;if not, plot it the hard way
+		
+		MOVE.L	D0,(A4)+		;plot the longword
+CB1to8NibBot		
+		DBRA	D2,CB1to8Loop		;loop until done		
+
+; clean up the last 0 to 3 nibbles; 4 remaining handled specially
+
+FinishLastFew
+		BFEXTU	(A3){D5:16},D4		;pick up last word of source
+		LEA	BotFin1to8Loop,A5		
+		MOVE.W	BUFSIZE(A6),D2		;get the number left to do
+		BEQ 	CB1to8NextLine		;if zero, we're done
+		
+		AND.W	#3,D2			;0 to 3 only	
+		BNE.S	BotFin1to8Loop
+
+		MOVEQ	#3,D2			;4 to do
+TopFin1to8Loop
+		ROL.W	#4,D4
+
+		MOVE.L	(A2)+,D1		;get region mask
+		
+		MOVE.W	D4,D0			;get low 4 bits
+		AND.W	D3,D0
+		MOVE.L	0(A1,D0.W*4),D0		;get source longword
+		
+		CMP.L	D6,D1			;mask all ones?
+		BNE.S 	CB1to8HPNoInval		;if not, plot it the hard way (no edge)
+		
+		MOVE.L	D0,(A4)+		;plot the longword
+BotFin1to8Loop		
+		DBRA	D2,TopFin1to8Loop
+		BRA.S	CB1to8NextLine
+				
+; handle the case where the region mask is all zeros
+
+CB1to8NoPlot
+		ADDQ.L	#4,A4			;bump dest ptr
+		JMP	(A5)			;advance to next one
+		
+; handle the more difficult case of a heterogenous region mask
+
+CB1to8HardPlot
+		MOVEQ	#0,D7			;not all ones
+CB1to8HPNoInval		
+		TST.L	D1
+		BEQ.S	CB1to8NoPlot
+		
+		AND.L	D1,D0
+		
+		NOT.L	D1			;flip mask
+		AND.L	(A4),D1
+		OR.L	D1,D0			;combine source and dest
+		MOVE.L	D0,(A4)+		;stuff it
+		JMP	(A5)		
+
+; to speed things up, we special case words of all zero and blast 4 long words of zero out as
+; fast as we can, without having to do any lookups.
+
+CB1to8AllZeros
+		MOVE.L	(A2)+,D1		;get region mask
+		BEQ.S	CBZEmpty1		;if all zeros, skip
+		
+		CMP.L	D6,D1			;all ones?
+		BNE.S	CBZBIC1			;if not, skip
+		
+		CLR.L	(A4)+			;plot the zeros
+CBZLong2		
+		MOVE.L	(A2)+,D1		;get region mask
+		BEQ.S	CBZEmpty2		;if all zeros, skip
+		
+		CMP.L	D6,D1			;all ones?
+		BNE.S	CBZBIC2			;if not, skip
+		
+		CLR.L	(A4)+			;plot the zeros
+CBZLong3		
+		MOVE.L	(A2)+,D1		;get region mask
+		BEQ.S	CBZEmpty3		;if all zeros, skip
+		
+		CMP.L	D6,D1			;all ones?
+		BNE.S	CBZBIC3			;if not, skip
+		
+		CLR.L	(A4)+			;plot the zeros
+CBZLong4		
+		MOVE.L	(A2)+,D1		;get region mask
+		BEQ.S	CBZEmpty4		;if all zeros, skip
+		
+		CMP.L	D6,D1			;all ones?
+		BNE.S	CBZBIC4			;if not, skip
+		
+		CLR.L	(A4)+			;plot the zeros
+		BRA.S	CB1to8NibBot	;dive back in		
+CBZEmpty1
+		MOVEQ	#0,D7
+		ADDQ	#4,A4
+		BRA.S	CBZLong2
+CBZEmpty2
+		MOVEQ	#0,D7
+		ADDQ	#4,A4
+		BRA.S	CBZLong3
+CBZEmpty3
+		MOVEQ	#0,D7
+		ADDQ	#4,A4
+		BRA.S	CBZLong4
+CBZEmpty4
+		MOVEQ	#0,D7
+		ADDQ	#4,A4
+		BRA	CB1to8NibBot
+CBZBIC1
+		MOVEQ	#0,D7
+		NOT.L	D1
+		AND.L	D1,(A4)+
+		BRA.S	CBZLong2
+CBZBIC2
+		MOVEQ	#0,D7
+		NOT.L	D1
+		AND.L	D1,(A4)+
+		BRA.S	CBZLong3
+CBZBIC3
+		MOVEQ	#0,D7
+		NOT.L	D1
+		AND.L	D1,(A4)+
+		BRA.S	CBZLong4
+CBZBIC4
+		MOVEQ	#0,D7
+		NOT.L	D1
+		AND.L	D1,(A4)+
+		BRA 	CB1to8NibBot
+		
+		
+; all done with this line, so bump the pointers and loop until done 
+
+CB1to8NextLine		
+		MOVE.L	DSTROW(A6),D0
+		ADD.L	D0,DSTADDR(A6)		;bump to next line of destination
+		
+		MOVE.L	SRCROW(A6),D0
+		ADD.L	D0,SRCADDR(A6)		;bump to next line of source
+		
+; bump line count and see if we're done
+
+		MOVE.W	VERT(A6),D0
+		ADDQ	#1,D0
+		MOVE.W	D0,VERT(A6)
+
+		CMP.W	MINRECT+BOTTOM(A6),D0		;all done?
+		BEQ.S	Done1To8Clip		;if so, skip
+
+; create the region mask for the new scan line, and maintain the all one's flag
+
+		CMP.W	STATEB+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CB1to8NewRgn		;if so, go do it
+		
+		CMP.W	STATEB+THISV(A6),D0		;need to rebuild?
+		BLT.S	CB1to8NewRgn		;if so, go do it
+
+		CMP.W	STATEC+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CB1to8NewRgn		;if so, go do it
+		
+		CMP.W	STATEC+THISV(A6),D0		;need to rebuild?
+		BLT.S	CB1to8NewRgn		;if so, go do it
+
+		CMP.W	STATEA+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CB1to8NewRgn		;if so, go do it
+		
+		CMP.W	STATEA+THISV(A6),D0		;need to rebuild?
+		BGE.S	Skip1to8Rgn		;if not, skip
+CB1to8NewRgn
+		MOVEQ	#0,D7			;invalidate region all ones flag
+		
+		MOVE.L	SEEKMASK(A6),A0
+		JSR	(A0)			;make new region mask		
+
+; set up registers and go handle the next line
+
+Skip1to8Rgn
+		MOVE.L	RGNBUF(A6),A2
+		MOVE.L	DSTADDR(A6),A4
+		
+		BRA	CB1to8Outer		;go process next line
+		
+; all done so strip stack and return
+
+Done1To8Clip		
+		MOVE.L	SAVEA5(A6),A5
+		
+		TST.B	CRSRFLAG(A6)
+		BEQ.S	@0
+		
+		JSR	([$0F4C])				;SHOWCURSOR
+@0
+		BSET	#7,HILITEMODE		;$938
+	
+		MOVE.L	SAVESTK(A6),A7
+		MOVEM.L	(SP)+,D0-D7/A1-A5
+		UNLK	A6
+		RTD	#44
+
+; here's where we go when we've detected that region masking isn't necessary, so we can really
+; blast things 4 longwords at a time
+
+CB1to8SpLoop0
+		MOVE.W	D2,D7			;remember the count
+		
+CB1to8SpLoop
+		BFEXTU	(A3){D5:16},D4		;pick up next word of source
+		ADDQ	#2,A3			;bump it		
+		BEQ.S	CB1to8SpAllZeros	;special case all zeros
+
+		CMP.W	D4,D6			;all ones?
+		BEQ.S	CB1to8SpAllOnes
+		
+		ROL.W	#4,D4			;get first nibble
+		MOVE.W	D4,D0			;get low 4 bits
+		AND.W	D3,D0
+		MOVE.L	0(A1,D0.W*4),(A4)+	;plot expanded longword
+
+		ROL.W	#4,D4			;get next nibble				
+		MOVE.W	D4,D0			;get low 4 bits
+		AND.W	D3,D0
+		MOVE.L	0(A1,D0.W*4),(A4)+	;plot expanded longword
+
+		ROL.W	#4,D4			;get next nibble			
+		MOVE.W	D4,D0			;get low 4 bits
+		AND.W	D3,D0
+		MOVE.L	0(A1,D0.W*4),(A4)+	;plot expanded longword
+
+		ROL.W	#4,D4			;get next nibble				
+		MOVE.W	D4,D0			;get low 4 bits
+		AND.W	D3,D0
+		MOVE.L	0(A1,D0.W*4),(A4)+	;plot expanded longword
+
+BotCB1to8SpLoop
+		DBRA	D2,CB1to8SpLoop
+
+; finish up the special case by adjusting A2 and diving back into common code
+
+Finish1to8Sp
+		ADDQ	#1,D7			;add one for real count
+		LSL.W	#4,D7			;4 longs (16 bytes) per iteration
+		ADD.W	D7,A2			;bump region pointer
+		BRA	FinishLastFew		;finish the last few
+		
+; handle the case when the source word is all zero and there's no region clipping -- we
+; can go as fast as we can.
+
+CB1to8SpAllZeros
+		CLR.L	(A4)+
+		CLR.L	(A4)+
+		CLR.L	(A4)+
+		CLR.L	(A4)+
+		
+		BRA.S	BotCB1to8SpLoop
+
+CB1to8SpAllOnes
+		MOVE.L	D6,(A4)+
+		MOVE.L	D6,(A4)+
+		MOVE.L	D6,(A4)+
+		MOVE.L	D6,(A4)+
+		
+		BRA.S	BotCB1to8SpLoop
+		
+		
+; here is the nybble to longword expansion table
+
+		ALIGN	4
+Expand1To8
+		DC.L	$00000000,$000000FF,$0000FF00,$0000FFFF
+		DC.L	$00FF0000,$00FF00FF,$00FFFF00,$00FFFFFF
+		DC.L	$FF000000,$FF0000FF,$FF00FF00,$FF00FFFF
+		DC.L	$FFFF0000,$FFFF00FF,$FFFFFF00,$FFFFFFFF
+	
+;******************************************************************************************
+
+CB8to81st0
+		ADDQ	#4,A3			;bump source ptr
+		ADDQ	#4,A4			;bump dest ptr
+		BRA 	CB8to8Middle	
+
+
+; Handler for the 8 to 8 copyBits case (with mapping).  The basic strategy is the usual
+; region counting, with the added twist of a single element cache for the longword mapping,
+; using A1 to hold the pre-map and D7 to hold the post-mapped values.
+
+CB8to8Clip
+		TST.L	MASKBITS(A6)			;should we handle it?
+		BNE	UseOld373		;if not, skip
+	
+		MOVE.L	SRCROW(A6),D0
+		SUB.L	D0,SRCADDR(A6)		;back up one line
+
+		SUBQ	#1,BUFSIZE(A6)		;one less than they say
+		MOVEQ	#-1,D6			;D6 has -1 for region compare		
+
+		MOVEQ	#0,D4
+		MOVEQ	#0,D3			;init region counting regs
+		
+		SUB.L	A1,A1
+		SUBQ.L	#1,A1			;all ones for initial
+		MOVEQ	#-1,D7			;map cache values
+CB8to8Outer	
+		MOVE.L	RGNBUF(A6),A2
+		MOVE.L	SRCADDR(A6),A3		;get source pointer
+		MOVE.L	DSTADDR(A6),A4		;get destptr	
+		MOVE.L	SCALETBL(A6),A5		;get mapping table
+
+; offset source pointer according to bit offsets
+
+		MOVE.L	DSTALIGN(A6),D0		;get shift count			
+		ASR.L	#3,D0
+		MOVE.L	SRCALIGN(A6),D1
+		ASR.L	#3,D1
+		ADD.L	D1,D0
+		ADD.L	D0,A3			;offset source ptr
+		
+; OK, first do the left edge
+
+		MOVE.W	BUFSIZE(A6),D2		;get the count
+		
+		MOVEQ	#0,D5
+		
+		MOVE.L	(A2)+,D1		;get region mask	
+		BEQ.S	CB8to81st0		;if zero, handle it
+		
+; fetch the 1st source longword and map it through the table pointed to by A5
+
+		MOVE.L	(A3)+,D0		;get source longword
+		MOVE.L	D0,A1			;remember it
+
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 1st byte
+		ROL.L	#8,D0	
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 2nd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 3rd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 4th byte
+		ROL.L	#8,D0
+	
+		MOVE.L	D0,D7			;remember result of mapping
+		
+; plot it using the region mask
+
+		AND.L	D1,D0		
+		NOT.L	D1			;flip mask
+		AND.L	(A4),D1
+		OR.L	D1,D0			;combine source and dest
+		MOVE.L	D0,(A4)+		;stuff it
+
+		SUBQ	#1,D2
+		BMI.S	CB8to8NextLine
+
+; if the region runs in D4 are still valid, we can use special code to really plot super
+; fast.
+
+CB8to8Middle
+		TST.W	D4			;is it valid?
+		BNE	V8to8PlotRgnRuns	;if so, go super fast
+		
+		MOVEQ	#-1,D4			;validate it for next time
+		MOVEQ	#0,D3			;zero the run count
+		
+; see what the next region longword is.  Go to three different loops depending on whether
+; the region is all ones, zeros or both
+
+		MOVE.L	(A2)+,D1		;fetch next word of region mask
+		BEQ 	V8to8FirstZero0		;if zero, go handle
+		
+		CMP.L	D6,D1			;all one's?
+		BNE	V8to8StartSecondRun	;if not, skip
+		
+		BRA.S	V8to8FirstOnes1
+		
+; here's the loop that counts and plots the first run of all ones
+
+V8to8FirstOnes
+		MOVE.L	(A2)+,D1
+		
+		CMP.L	D6,D1			;is it still all ones?
+		BNE 	V8to8StartSecondRun	;if not, end the run
+V8to8FirstOnes1	
+		ADDQ.W	#1,D3			;bump the run count
+		
+		MOVE.L	(A3)+,D0		;fetch from source
+		CMP.L	D0,A1			;same as before?
+		BNE.S	@0
+		
+		MOVE.L	D7,D0
+		BRA.S	@1
+@0
+		MOVE.L	D0,A1
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 1st byte
+		ROL.L	#8,D0	
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 2nd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 3rd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 4th byte
+		ROL.L	#8,D0
+		MOVE.L	D0,D7
+@1
+		MOVE.L	D0,(A4)+		;store at destination		
+		
+		DBRA	D2,V8to8FirstOnes	;loop until we're done
+
+; OK, all done with this line, so bump the pointers and loop until done
+
+CB8to8NextLine
+		MOVE.L	DSTROW(A6),D0
+		ADD.L	D0,DSTADDR(A6)		;bump to next line of destination
+		
+		MOVE.L	SRCROW(A6),D0
+		ADD.L	D0,SRCADDR(A6)		;bump to next line of source
+		
+; bump line count and see if we're done
+
+		MOVE.W	VERT(A6),D0
+		ADDQ	#1,D0
+		MOVE.W	D0,VERT(A6)
+
+		CMP.W	MINRECT+BOTTOM(A6),D0		;all done?
+		BEQ 	Done1To8Clip		;if so, use common exit
+
+; create the region mask for the new scan line, and maintain the all ones flag
+
+		CMP.W	STATEB+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CB8to8NewRgn		;if so, go do it
+		
+		CMP.W	STATEB+THISV(A6),D0		;need to rebuild?
+		BLT.S	CB8to8NewRgn		;if so, go do it
+
+		CMP.W	STATEC+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CB8to8NewRgn		;if so, go do it
+		
+		CMP.W	STATEC+THISV(A6),D0		;need to rebuild?
+		BLT.S	CB8to8NewRgn		;if so, go do it
+
+		CMP.W	STATEA+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CB8to8NewRgn		;if so, go do it
+		
+		CMP.W	STATEA+THISV(A6),D0		;need to rebuild?
+		BGE 	CB8to8Outer		;if not, skip
+CB8to8NewRgn
+		MOVEQ	#0,D4			;invalidate region all ones flag
+	
+		MOVE.L	A1,-(SP)
+		MOVE.L	SEEKMASK(A6),A0
+		JSR	(A0)			;make new region mask		
+		MOVE.L	(SP)+,A1
+		
+; go handle the next line
+
+		BRA	CB8to8Outer		;go process next line
+
+Fin8to8Zeros
+		ADDQ	#4,A4
+		BRA.S	CB8to8NextLine
+		
+; here's the loop that counts and plots the first run of all zeros
+
+V8to8FirstZero
+		MOVE.L	(A2)+,D1
+		BNE.S	V8to8StartSecondRun
+V8to8FirstZero0		
+		SUBQ.W	#1,D3			;decrement run count for zeros
+		
+		ADDQ	#4,A3
+		ADDQ	#4,A4
+		DBRA	D2,V8to8FirstZero
+
+		BRA.S	CB8to8NextLine	
+
+; the region mask is heterogenous, so plot the word and start the second run.
+
+V8to8StartSecondRun	
+		SWAP	D3
+		
+		MOVE.L	(A3)+,D0		;fetch from source
+		CMP.L	D0,A1			;same as before?
+		BNE.S	@0
+		
+		MOVE.L	D7,D0
+		BRA.S	@1
+@0
+		MOVE.L	D0,A1
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 1st byte
+		ROL.L	#8,D0	
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 2nd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 3rd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 4th byte
+		ROL.L	#8,D0
+		MOVE.L	D0,D7
+@1
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A4),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A4)+		;deposit it
+
+		SUBQ	#1,D2
+		BMI.S	Done8to8SecondRun
+
+; sample the region and case out for the 2nd time
+
+		MOVE.L	(A2)+,D1		;fetch next word of region mask
+		BEQ.S	V8to8Zero0		;if zero, go handle
+		
+		CMP.L	D6,D1			;all one's?
+		BNE.S	V8to8StartLastRun	;if not, skip
+	
+		BRA.S	V8to8Ones1
+		
+; here's the loop that counts and plots the second run of all ones
+
+V8to8Ones
+		MOVE.L	(A2)+,D1
+		
+		CMP.L	D6,D1			;is it still all ones?
+		BNE.S	V8to8StartLastRun	;if not, end the run
+V8to8Ones1	
+		ADDQ.W	#1,D3			;bump the run count
+
+		MOVE.L	(A3)+,D0		;fetch from source
+		CMP.L	D0,A1			;same as before?
+		BNE.S	@0
+		
+		MOVE.L	D7,D0
+		BRA.S	@1
+@0
+		MOVE.L	D0,A1
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 1st byte
+		ROL.L	#8,D0	
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 2nd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 3rd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 4th byte
+		ROL.L	#8,D0
+		MOVE.L	D0,D7
+@1
+		MOVE.L	D0,(A4)+		;store at destination		
+
+		DBRA	D2,V8to8Ones		;loop until we're done
+Done8to8SecondRun
+		SWAP	D3
+		BRA	CB8to8NextLine		;all done
+		
+; here's the loop that counts the 2nd run of zeros
+
+V8to8Zero
+		MOVE.L	(A2)+,D1
+		BNE.S	V8to8StartLastRun
+V8to8Zero0		
+		SUBQ.W	#1,D3
+		
+		ADDQ	#4,A3
+		ADDQ	#4,A4			;bump dest reg
+		
+		DBRA	D2,V8to8Zero		;loop until it changes
+
+		BRA.S	Done8to8SecondRun
+
+; OK, we've accumulated two runs, so finish up the line without counting
+
+V8to8StartLastRun
+		SWAP	D3
+
+		TST.L	D1	
+		BEQ.S	V8to8LastZero
+		BRA.S	V8to8LastLoopA
+V8to8LastLoop
+		MOVE.L	(A2)+,D1		;get region		
+		BEQ.S	V8to8LastZero
+V8to8LastLoopA		
+		CMP.L	D6,D1
+		BNE.S	V8to8LastHard
+		
+		MOVE.L	(A3)+,D0		;fetch from source
+		CMP.L	D0,A1			;same as before?
+		BNE.S	@0
+		
+		MOVE.L	D7,D0
+		BRA.S	@1
+@0
+		MOVE.L	D0,A1
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 1st byte
+		ROL.L	#8,D0	
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 2nd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 3rd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 4th byte
+		ROL.L	#8,D0
+		MOVE.L	D0,D7
+@1
+		MOVE.L	D0,(A4)+		;store at destination		
+		DBRA	D2,V8to8LastLoop
+		
+		BRA	CB8to8NextLine
+V8to8LastZero
+		ADDQ	#4,A4
+		ADDQ	#4,A3
+		DBRA	D2,V8to8LastLoop
+		BRA	CB8to8NextLine
+V8to8LastHard
+		MOVE.L	(A3)+,D0		;fetch from source
+		CMP.L	D0,A1			;same as before?
+		BNE.S	@0
+		
+		MOVE.L	D7,D0
+		BRA.S	@1
+@0
+		MOVE.L	D0,A1
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 1st byte
+		ROL.L	#8,D0	
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 2nd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 3rd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 4th byte
+		ROL.L	#8,D0
+		MOVE.L	D0,D7
+@1
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A4),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A4)+		;deposit it
+
+		DBRA	D2,V8to8LastLoop
+		BRA	CB8to8NextLine
+		
+; Here's where we have the ultra fast plotting by interpreting the 2 region runs in D3.
+
+V8to8PlotRgnRuns
+		TST.W	D3			;which type of run?
+		BPL.S	V8to8BlastPat1		;if ones, go blast it
+		BEQ 	V8to8PlotRHard1		;if zero, plot one slowly, then plot 2nd run
+
+; it's negative, so just skip over 4 times the count
+
+		MOVE.W	D3,D0
+		
+		NEG.W	D0			;turn into longword count
+		LSL.W	#2,D0			;times 4
+		
+		ADD.W	D0,A2			;skip over region
+		ADD.W	D0,A3			;skip over source
+		ADD.W	D0,A4			;skip over destination
+
+		ADD.W	D3,D2			;decrement count
+		BMI	CB8to8NextLine		;if done, skip
+		
+; now handle the second run
+
+V8to8PRRun2
+		LEA	@0,A0			;plot the break longword
+		BRA 	V8to8PlotHardCommon	
+@0
+		MOVE.L	D3,D0			;which type of run?
+ 		BPL.S	V8to8BlastPat2		;if ones, go blast it
+		BEQ.S 	V8to8PlotRHard2
+
+; it's negative, so we can skip over like above
+		
+		SWAP	D0
+		NEG.W	D0			;turn into longword count
+		SUB.W	D0,D2			;decrement count	
+		
+		LSL.W	#2,D0			;times 4
+		
+		ADD.W	D0,A2			;skip over region
+		ADD.W	D0,A3			;skip over source
+		ADD.W	D0,A4			;skip over destination
+
+		TST.W	D2	
+		BMI	CB8to8NextLine		;if done, skip
+		
+; we've interpreted both runs, so finish up using common code
+
+		BRA	V8to8LastLoop
+
+; Handle blasting out the first run
+
+V8to8BlastPat1
+		MOVE.W	D3,D0			;get the size
+		
+		MOVE.W	D0,D1
+		LSL	#2,D1			;times 4
+		ADD.W	D1,A2			;bump region ptr
+		SUB.W	D0,D2
+				
+		LEA	V8to8PRRun2,A0
+		BRA.S	V8to8BlastPatBot
+		
+; Blast out the second run
+
+V8to8BlastPat2
+		SWAP	D0			;use high word for 2nd run
+
+		MOVE.W	D0,D1
+		LSL	#2,D1			;times 4
+		ADD.W	D1,A2			;bump region ptr
+		SUB.W	D0,D2
+		
+		LEA	V8to8LastLoop,A0
+		BRA.S	V8to8BlastPatBot
+V8to8BlastPat
+		MOVE.L	(A3)+,D1		;fetch from source
+		CMP.L	D1,A1			;same as before?
+		BNE.S	@0
+		
+		MOVE.L	D7,D1
+		BRA.S	@1
+@0
+		MOVE.L	D1,A1
+		MOVE.B	D1,D5
+		MOVE.B	1(A5,D5.W*2),D1		;map 1st byte
+		ROL.L	#8,D1	
+		
+		MOVE.B	D1,D5
+		MOVE.B	1(A5,D5.W*2),D1		;map 2nd byte
+		ROL.L	#8,D1
+		
+		MOVE.B	D1,D5
+		MOVE.B	1(A5,D5.W*2),D1		;map 3rd byte
+		ROL.L	#8,D1
+		
+		MOVE.B	D1,D5
+		MOVE.B	1(A5,D5.W*2),D1		;map 4th byte
+		ROL.L	#8,D1
+		MOVE.L	D1,D7
+@1
+		MOVE.L	D1,(A4)+		;store at destination		
+V8to8BlastPatBot		
+		DBRA	D0,V8to8BlastPat
+		
+; all done with plotting run of ones
+
+		TST.W	D2
+		BMI	CB8to8NextLine
+		
+		JMP	(A0)
+		
+; handle the heterogenous plots between runs
+
+V8to8PlotRHard1
+		LEA	V8to8PRRun2,A0
+		BRA.S	V8to8PlotHardCommon	
+V8to8PlotRHard2
+		LEA	V8to8LastLoop,A0
+V8to8PlotHardCommon
+		MOVE.L	(A2)+,D1		;get region mask
+
+		MOVE.L	(A3)+,D0		;fetch from source
+		CMP.L	D0,A1			;same as before?
+		BNE.S	@0
+		
+		MOVE.L	D7,D0
+		BRA.S	@1
+@0
+		MOVE.L	D0,A1
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 1st byte
+		ROL.L	#8,D0	
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 2nd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 3rd byte
+		ROL.L	#8,D0
+		
+		MOVE.B	D0,D5
+		MOVE.B	1(A5,D5.W*2),D0		;map 4th byte
+		ROL.L	#8,D0
+		MOVE.L	D0,D7
+@1
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A4),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A4)+		;deposit it
+
+		SUBQ	#1,D2			;count it
+		BMI	CB8to8NextLine	
+		
+		JMP	(A0)
+
+
+
+;******************************************************************************************
+
+
+; Handler for the 8 to 1 copyBits case (mapped ).  The basic strategy is the usual
+; region counting, with the added twist of a single element cache for the longword mapping,
+; using A1 to hold the pre-map and D7 to hold the post-mapped values.
+
+
+CB8to11st0
+		ADD.W	#32,A3			;bump source ptr
+		ADDQ	#4,A4			;bump dest ptr
+		BRA.S 	CB8to1Middle	
+
+ChkDst1Bit
+		CMP.W	#1,DSTPIX+PIXELSIZE(A6)		;destination 8 bits/pixel?
+		BNE 	UseOld373		;if not, can't handle
+		
+		SUBQ	#8,D0			;source 8 bits/pixel?
+		BNE	UseOld373		;if not, can't handle		
+CB8to1Clip
+		TST.L	MASKBITS(A6)			;should we handle it?
+		BNE	UseOld373		;if not, skip
+	
+		MOVE.L	SRCROW(A6),D0
+		SUB.L	D0,SRCADDR(A6)		;back up one line
+
+		SUBQ	#1,BUFSIZE(A6)		;one less than they say
+		MOVEQ	#-1,D6			;D6 has -1 for region compare		
+
+		MOVEQ	#0,D4
+		MOVEQ	#0,D3			;init region counting regs
+		
+		SUB.L	A1,A1
+		SUBQ.L	#1,A1			;all ones for initial
+		MOVEQ	#-1,D7			;map cache values
+CB8to1Outer	
+		MOVE.L	RGNBUF(A6),A2
+		MOVE.L	SRCADDR(A6),A3		;get source pointer
+		MOVE.L	DSTADDR(A6),A4		;get destptr	
+		MOVE.L	SCALETBL(A6),A5		;get mapping table
+
+; offset source pointer according to bit offsets
+
+		MOVE.L	DSTALIGN(A6),D0		;get shift count			
+		MOVE.L	SRCALIGN(A6),D1
+		ASR.L	#3,D1
+		ADD.L	D1,D0
+		ADD.L	D0,A3			;offset source ptr
+		
+; OK, first do the left edge
+
+		MOVE.W	BUFSIZE(A6),D2		;get the count
+		
+		MOVEQ	#0,D5
+		
+		MOVE.L	(A2)+,D1		;get region mask	
+		BEQ.S	CB8to11st0		;if zero, handle it
+		
+; fetch the 1st source longword and map it through the table pointed to by A5
+
+		BSR	Map8to1
+		
+; plot it using the region mask
+
+		AND.L	D1,D0		
+		NOT.L	D1			;flip mask
+		AND.L	(A4),D1
+		OR.L	D1,D0			;combine source and dest
+		MOVE.L	D0,(A4)+		;stuff it
+
+		SUBQ	#1,D2
+		BMI.S	CB8to1NextLine
+
+; if the region runs in D4 are still valid, we can use special code to really plot super
+; fast.
+
+CB8to1Middle
+		TST.W	D4			;is it valid?
+		BNE	V8to1PlotRgnRuns	;if so, go super fast
+		
+		MOVEQ	#-1,D4			;validate it for next time
+		MOVEQ	#0,D3			;zero the run count
+		
+; see what the next region longword is.  Go to three different loops depending on whether
+; the region is all ones, zeros or both
+
+		MOVE.L	(A2)+,D1		;fetch next word of region mask
+		BEQ.S 	V8to1FirstZero0		;if zero, go handle
+		
+		CMP.L	D6,D1			;all one's?
+		BNE	V8to1StartSecondRun	;if not, skip
+		
+		BRA.S	V8to1FirstOnes1
+		
+; here's the loop that counts and plots the first run of all ones
+
+V8to1FirstOnes
+		MOVE.L	(A2)+,D1
+		
+		CMP.L	D6,D1			;is it still all ones?
+		BNE.S 	V8to1StartSecondRun	;if not, end the run
+V8to1FirstOnes1	
+		ADDQ.W	#1,D3			;bump the run count
+		
+		BSR	Map8to1
+		MOVE.L	D0,(A4)+		;store at destination		
+		
+		DBRA	D2,V8to1FirstOnes	;loop until we're done
+
+; OK, all done with this line, so bump the pointers and loop until done
+
+CB8to1NextLine
+		MOVE.L	DSTROW(A6),D0
+		ADD.L	D0,DSTADDR(A6)		;bump to next line of destination
+		
+		MOVE.L	SRCROW(A6),D0
+		ADD.L	D0,SRCADDR(A6)		;bump to next line of source
+		
+; bump line count and see if we're done
+
+		MOVE.W	VERT(A6),D0
+		ADDQ	#1,D0
+		MOVE.W	D0,VERT(A6)
+
+		CMP.W	MINRECT+BOTTOM(A6),D0	;all done?
+		BEQ 	Done1To8Clip		;if so, use common exit
+
+; create the region mask for the new scan line, and maintain the all ones flag
+
+		CMP.W	STATEB+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CB8to1NewRgn		;if so, go do it
+		
+		CMP.W	STATEB+THISV(A6),D0		;need to rebuild?
+		BLT.S	CB8to1NewRgn		;if so, go do it
+
+		CMP.W	STATEC+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CB8to1NewRgn		;if so, go do it
+		
+		CMP.W	STATEC+THISV(A6),D0		;need to rebuild?
+		BLT.S	CB8to1NewRgn		;if so, go do it
+
+		CMP.W	STATEA+NEXTV(A6),D0		;rebuild the region?
+		BGE.S	CB8to1NewRgn		;if so, go do it
+		
+		CMP.W	STATEA+THISV(A6),D0		;need to rebuild?
+		BGE 	CB8to1Outer		;if so, go do it
+CB8to1NewRgn
+		MOVEQ	#0,D4			;invalidate region all ones flag
+	
+		MOVE.L	A1,-(SP)
+		MOVE.L	SEEKMASK(A6),A0
+		JSR	(A0)			;make new region mask		
+		MOVE.L	(SP)+,A1
+		
+; go handle the next line
+
+		BRA	CB8to1Outer		;go process next line
+
+Fin8to1Zeros
+		ADDQ	#4,A4
+		BRA.S	CB8to1NextLine
+		
+; here's the loop that counts and plots the first run of all zeros
+
+V8to1FirstZero
+		MOVE.L	(A2)+,D1
+		BNE.S	V8to1StartSecondRun
+V8to1FirstZero0		
+		SUBQ.W	#1,D3			;decrement run count for zeros
+		
+		ADD.W	#32,A3
+		ADDQ	#4,A4
+		DBRA	D2,V8to1FirstZero
+
+		BRA.S	CB8to1NextLine	
+
+; the region mask is heterogenous, so plot the word and start the second run.
+
+V8to1StartSecondRun	
+		SWAP	D3
+		
+		BSR	Map8to1
+		
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A4),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A4)+		;deposit it
+
+		SUBQ	#1,D2
+		BMI.S	Done8to1SecondRun
+
+; sample the region and case out for the 2nd time
+
+		MOVE.L	(A2)+,D1		;fetch next word of region mask
+		BEQ.S	V8to1Zero0		;if zero, go handle
+		
+		CMP.L	D6,D1			;all one's?
+		BNE.S	V8to1StartLastRun	;if not, skip
+	
+		BRA.S	V8to1Ones1
+		
+; here's the loop that counts and plots the second run of all ones
+
+V8to1Ones
+		MOVE.L	(A2)+,D1
+		
+		CMP.L	D6,D1			;is it still all ones?
+		BNE.S	V8to1StartLastRun	;if not, end the run
+V8to1Ones1	
+		ADDQ.W	#1,D3			;bump the run count
+		BSR	Map8to1			;fetch and map it
+		MOVE.L	D0,(A4)+		;store at destination		
+
+		DBRA	D2,V8to1Ones		;loop until we're done
+Done8to1SecondRun
+		SWAP	D3
+		BRA	CB8to1NextLine		;all done
+		
+; here's the loop that counts the 2nd run of zeros
+
+V8to1Zero
+		MOVE.L	(A2)+,D1
+		BNE.S	V8to1StartLastRun
+V8to1Zero0		
+		SUBQ.W	#1,D3
+		
+		ADD.W	#32,A3
+		ADDQ	#4,A4			;bump dest reg
+		
+		DBRA	D2,V8to1Zero		;loop until it changes
+
+		BRA.S	Done8to1SecondRun
+
+; OK, we've accumulated two runs, so finish up the line without counting
+
+V8to1StartLastRun
+		SWAP	D3
+
+		TST.L	D1	
+		BEQ.S	V8to1LastZero
+		BRA.S	V8to1LastLoopA
+V8to1LastLoop
+		MOVE.L	(A2)+,D1		;get region		
+		BEQ.S	V8to1LastZero
+V8to1LastLoopA		
+		CMP.L	D6,D1
+		BNE.S	V8to1LastHard
+
+		BSR	Map8to1
+		
+		MOVE.L	D0,(A4)+		;store at destination		
+		DBRA	D2,V8to1LastLoop
+		
+		BRA	CB8to1NextLine
+V8to1LastZero
+		ADDQ	#4,A4
+		ADD.W	#32,A3
+		DBRA	D2,V8to1LastLoop
+		BRA	CB8to1NextLine
+V8to1LastHard
+		BSR	Map8to1
+		
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A4),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A4)+		;deposit it
+
+		DBRA	D2,V8to1LastLoop
+		BRA	CB8to1NextLine
+		
+; Here's where we have the ultra fast plotting by interpreting the 2 region runs in D3.
+
+V8to1PlotRgnRuns
+		TST.W	D3			;which type of run?
+		BPL.S	V8to1BlastPat1		;if ones, go blast it
+		BEQ.S 	V8to1PlotRHard1		;if zero, plot one slowly, then plot 2nd run
+
+; it's negative, so just skip over 4 times the count
+
+		MOVE.W	D3,D0
+		
+		NEG.W	D0			;turn into longword count
+		LSL.W	#2,D0			;times 4
+		
+		ADD.W	D0,A2			;skip over region
+		ADD.W	D0,A4			;skip over destination
+		LSL	#3,D0			;times 8 for source
+		ADD.W	D0,A3			;skip over source
+
+		ADD.W	D3,D2			;decrement count
+		BMI	CB8to1NextLine		;if done, skip
+		
+; now handle the second run
+
+V8to1PRRun2
+		LEA	@0,A0			;plot the break longword
+		BRA.S	V8to1PlotHardCommon	
+@0
+		MOVE.L	D3,D0			;which type of run?
+ 		BPL.S	V8to1BlastPat2		;if ones, go blast it
+		BEQ.S 	V8to1PlotRHard2
+
+; it's negative, so we can skip over like above
+		
+		SWAP	D0
+		NEG.W	D0			;turn into longword count
+		SUB.W	D0,D2			;decrement count	
+		
+		LSL.W	#2,D0			;times 4
+		
+		ADD.W	D0,A2			;skip over region
+		ADD.W	D0,A4			;skip over destination
+		LSL	#3,D0			;times 8 for source
+		ADD.W	D0,A3			;skip over source
+
+		TST.W	D2	
+		BMI	CB8to1NextLine		;if done, skip
+		
+; we've interpreted both runs, so finish up using common code
+
+		BRA.S	V8to1LastLoop
+
+; Handle blasting out the first run
+
+V8to1BlastPat1
+		MOVE.W	D3,D0			;get the size
+		
+		MOVE.W	D0,D1
+		LSL	#2,D1			;times 4
+		ADD.W	D1,A2			;bump region ptr
+		SUB.W	D0,D2
+
+		MOVE.W	D0,D1				
+		LEA	V8to1PRRun2,A0
+		BRA.S	V8to1BlastPatBot
+		
+; Blast out the second run
+
+V8to1BlastPat2
+		SWAP	D0			;use high word for 2nd run
+
+		MOVE.W	D0,D1
+		LSL	#2,D1			;times 4
+		ADD.W	D1,A2			;bump region ptr
+		SUB.W	D0,D2
+	
+		MOVE.W	D0,D1
+		LEA	V8to1LastLoop,A0
+		BRA.S	V8to1BlastPatBot
+V8to1BlastPat
+		BSR.S	Map8to1
+		MOVE.L	D0,(A4)+		;store at destination		
+V8to1BlastPatBot		
+		DBRA	D1,V8to1BlastPat
+		
+; all done with plotting run of ones
+
+		TST.W	D2
+		BMI	CB8to1NextLine
+		
+		JMP	(A0)
+		
+; handle the heterogenous plots between runs
+
+V8to1PlotRHard1
+		LEA	V8to1PRRun2,A0
+		BRA.S	V8to1PlotHardCommon	
+V8to1PlotRHard2
+		LEA	V8to1LastLoop,A0
+V8to1PlotHardCommon
+		MOVE.L	(A2)+,D1		;get region mask
+
+		BSR.S	Map8to1
+		
+		AND.L	D1,D0			;mask it
+		NOT.L	D1			;flip mask
+		AND.L	(A4),D1			;combine with source
+		OR.L	D1,D0			;form dest longword
+		MOVE.L	D0,(A4)+		;deposit it
+
+		SUBQ	#1,D2			;count it
+		BMI	CB8to1NextLine	
+		
+		JMP	(A0)
+
+; Map8to1 is the routine that takes 8 longwords from the source (pointed to by A3)
+; and returns the single longword result in D0.  
+
+Map8to1
+		MOVEQ	#0,D0			;start dest at 0
+		TST.W	(A5)			;check mapping for color 0		<d√b> 12Jul88
+		BEQ.s	@a				;if white->white, ok			<d√b> 12Jul88
+		MOVEQ	#$F,D0			;else, its black				<d√b> 12Jul88
+@a								;								<d√b> 12Jul88
+
+		MOVEQ	#7,D7			;8 longs to process
+		SUB.L	A1,A1			;set last source to 0
+Map8to1Loop
+		MOVE.L	(A3)+,D6		;fetch from source
+		CMP.L	A1,D6			;same as last time?
+		BEQ.S	Map8to1Fast		;if so, we've got the
+	
+		MOVE.L	D6,A1			;remember for next time
+
+		ROL.L	#8,D6			;get next pixel
+		MOVE.B	D6,D5			;get current pixel
+		MOVE.B	1(A5,D5.W*2),D5		;get mapped bit
+		LSR.W	#1,D5			;get bit into carry
+		ROXL.L	#1,D0			;shift it in
+		
+		ROL.L	#8,D6			;get next pixel
+		MOVE.B	D6,D5			;get current pixel
+		MOVE.B	1(A5,D5.W*2),D5		;get mapped bit
+		LSR.W	#1,D5			;get bit into carry
+		ROXL.L	#1,D0			;shift it in	
+		
+		ROL.L	#8,D6			;get next pixel
+		MOVE.B	D6,D5			;get current pixel
+		MOVE.B	1(A5,D5.W*2),D5		;get mapped bit
+		LSR.W	#1,D5			;get bit into carry
+		ROXL.L	#1,D0			;shift it in
+			
+		ROL.L	#8,D6			;get next pixel
+		MOVE.B	D6,D5			;get current pixel
+		MOVE.B	1(A5,D5.W*2),D5		;get mapped bit
+		LSR.W	#1,D5			;get bit into carry
+		ROXL.L	#1,D0			;shift it in
+
+		DBRA	D7,Map8to1Loop
+		
+		MOVEQ	#-1,D6			;restore comparison mask
+		RTS
+
+; handle the case where it was the same as the last one, so we can repeat the
+; high 4 bits
+
+Map8to1Fast
+		MOVE.B	D0,D5
+		AND.W	#15,D5
+		LSL.L	#4,D0
+		OR.B	D5,D0		
+
+		DBRA	D7,Map8to1Loop
+		
+		MOVEQ	#-1,D6
+		RTS
+		
+;******************************************************************************************
+
+; Scan line handler for clipped pattern fill copy mode (called by oval, rrect) -- trap $380
+
+UseOld380
+		TST.W	D2
+
+		LEARom	Old380,A0
+		JMP	(A0)
+
+FillClipScanLine	
+FCSL1							;	<< PB452 BAL>>
+FCSL2
+		AND.L	(A2)+,D3		;use left mask to start with
+
+		SUBQ	#1,D2
+		BMI.S	DoFCLast0		
+
+; special case the left edge
+
+		MOVE.L	D6,D0			;get pattern
+		AND.L	D3,D0			;mask it
+		NOT.L	D3			;flip mask
+		AND.L	(A1),D3			;combine with source
+		OR.L	D3,D0			;form dest longword
+		MOVE.L	D0,(A1)+		;deposit it
+
+		MOVE.L	(A2)+,D3
+		
+		SUBQ	#1,D2
+		BMI.S	DoFCLast0
+
+; see if we're in the unclipped case; if so, use a faster loop
+
+		MOVE.L	SEEKMASK(A6),A0		;get seekRgn address
+		CMP.W	#$4E75,(A0)		;is it a RTS?
+		BEQ.S	DoFCUnclipped		;if so, handle specially
+		
+		BRA.S	FCNotOn1	
+
+; here's the loop -- use standard technique of special casing region masks 
+
+FCLineLoop
+		MOVE.L	(A2)+,D3		;fetch region mask
+		BEQ.S 	FCOff			;if all zero, can optimize
+FCNotOff1
+		CMP.L	MINUSONE,D3		;all ones?			<< PB452 BAL>>
+		BEQ.S 	FCOn			;if so, optimize
+FCNotOn1	
+		MOVE.L	D6,D0			;get pattern
+		AND.L	D3,D0			;mask it
+		NOT.L	D3			;flip mask
+		AND.L	(A1),D3			;combine with source
+		OR.L	D3,D0			;form dest longword
+		MOVE.L	D0,(A1)+		;deposit it
+
+		DBRA	D2,FCLineLoop
+
+; handle the last one, using the mask in D1
+
+DoFCLast
+		MOVE.L	(A2)+,D3
+DoFCLast0
+		AND.L	D1,D3			;use right mask
+		
+		MOVE.L	D6,D0			;get pattern
+		AND.L	D3,D0			;mask it
+		NOT.L	D3			;flip mask
+		AND.L	(A1),D3			;combine with source
+		OR.L	D3,D0			;form dest longword
+		MOVE.L	D0,(A1)+		;deposit it		
+		
+		RTS
+
+; handle the case of an all zero region mask
+
+FCOff
+		ADDQ	#4,A1			;skip over it
+		
+		SUBQ	#1,D2
+		BMI.S	DoFCLast
+		
+FCOffLoop
+		MOVE.L	(A2)+,D3
+		BNE.S	FCNotOff1
+		
+		ADDQ	#4,A1			;skip it
+		
+		DBRA	D2,FCOffLoop
+		BRA.S	DoFCLast
+		
+; handle the case of an all one's region mask
+
+FCOn
+		MOVE.L	D6,(A1)+
+	
+		SUBQ	#1,D2
+		BMI.S	DoFCLast
+FCOnLoop
+		MOVE.L	(A2)+,D3
+		CMP.L	MINUSONE,D3		;		<< PB452 BAL>>
+		BNE.S	FCNotOn1
+		
+		MOVE.L	D6,(A1)+
+		
+		DBRA	D2,FCOnLoop
+		BRA.S	DoFCLast
+		
+; handle the unclipped case with faster unwound code
+
+DoFCUnclipped
+		LEA	0(A2,D2.W*4),A2		;bump region ptr
+	
+		ADDQ	#1,D2			;compute count to do
+		
+		CMP.W	#8,D2
+		BLT.S	FinishFCUnClip
+		
+		MOVE.W	D2,D0
+		LSR	#3,D0			;divide by 8
+		SUBQ	#1,D0			;bias for DBRA
+FCUnClipLoop
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+
+		DBRA	D0,FCUnClipLoop
+		
+; now finish up the last 7 or less
+
+FinishFCUnClip
+		AND	#7,D2
+		EOR	#7,D2	
+		JMP	FinishFCUCTab(D2.W*2)
+FinishFCUCTab
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D6,(A1)+
+
+		BRA.S	DoFCLast
+		
+		
+;******************************************************************************************
+
+; Scan line handler for clipped pattern fill OR mode (called by oval, rrect) -- trap $381
+; similar to above, but in OR mode.  We can only handle if the foreground pattern
+; is all ones; if so, use the copy mode routine to fill.
+
+UseOld381
+		TST.W	D2
+
+		LEARom	Old381,A0
+		JMP	(A0)
+
+FillClipOrLine	
+
+		CMP.L	#-1,D6			;all foreground?
+		BNE.S	UseOld381		;if not, we can't handle
+		
+		MOVE.L	D4,D6			;set up fill pattern
+		BRA	FCSL1			;use common code
+
+
+;******************************************************************************************
+
+; Scan line handler for clipped pattern fill copy mode (called by oval, rrect) 
+; for complex patterns-- trap $384
+
+UseOld384
+		TST.W	D2
+
+		LEARom	Old384,A0
+		JMP	(A0)
+
+FillClipXLine	
+
+		CMP.W	#4,PATHMASK(A6)		;pattern too complex?
+		BGT.S	UseOld384		;if so, don't handle
+		
+		MOVE.L	D7,-(SP)		;save work register
+		
+; keep the pattern in D6 and D7		
+		
+		ADD.W	PATHPOS(A6),D0
+		AND	#4,D0
+
+		MOVE.L	EXPAT(A6),A0
+		ADD.W	PATVPOS(A6),A0
+		
+		MOVE.L	0(A0,D0),D6		;get left pattern
+		EOR.W	#4,D0
+		MOVE.L	0(A0,D0),D7		;get right pattern
+
+; fetch the leftmost region mask	
+		
+		MOVEQ	#-1,D4			;all ones for comparing
+		AND.L	(A2)+,D3		;use left mask to start with
+
+		SUBQ	#1,D2
+		BMI.S	DoFCXLast0		
+
+; special case the left edge
+
+		MOVE.L	D6,D0			;get pattern
+		AND.L	D3,D0			;mask it
+		NOT.L	D3			;flip mask
+		AND.L	(A1),D3			;combine with source
+		OR.L	D3,D0			;form dest longword
+		MOVE.L	D0,(A1)+		;deposit it
+
+		EXG.L	D6,D7
+		
+		MOVE.L	(A2)+,D3
+		
+		SUBQ	#1,D2
+		BMI.S	DoFCXLast0
+
+; see if we're in the unclipped case; if so, use a faster loop
+
+		MOVE.L	SEEKMASK(A6),A0		;get seekRgn address
+		CMP.W	#$4E75,(A0)		;is it a RTS?
+		BEQ.S	DoFCXUnclipped	;if so, handle specially
+		
+		BRA.S	FCXNotOn1	
+
+; here's the loop -- use standard technique of special casing region masks 
+
+FCXLineLoop
+		MOVE.L	(A2)+,D3		;fetch region mask
+		BEQ.S 	FCXOff			;if all zero, can optimize
+FCXNotOff1
+		CMP.L	D4,D3			;all ones?
+		BEQ.S 	FCXOn			;if so, optimize
+FCXNotOn1	
+		MOVE.L	D6,D0			;get pattern
+		AND.L	D3,D0			;mask it
+		NOT.L	D3			;flip mask
+		AND.L	(A1),D3			;combine with source
+		OR.L	D3,D0			;form dest longword
+		MOVE.L	D0,(A1)+		;deposit it
+
+		EXG.L	D6,D7
+		DBRA	D2,FCXLineLoop
+
+; handle the last one, using the mask in D1
+
+DoFCXLast
+		MOVE.L	(A2)+,D3
+DoFCXLast0
+		AND.L	D1,D3			;use right mask
+		
+		MOVE.L	D6,D0			;get pattern
+		AND.L	D3,D0			;mask it
+		NOT.L	D3			;flip mask
+		AND.L	(A1),D3			;combine with source
+		OR.L	D3,D0			;form dest longword
+		MOVE.L	D0,(A1)+		;deposit it		
+
+		MOVE.L	(SP)+,D7		;restore work reg		
+		RTS
+
+; handle the case of an all zero region mask
+
+FCXOff
+		ADDQ	#4,A1			;skip over it
+		
+		SUBQ	#1,D2
+		BMI.S	DoFCXLast
+		
+FCXOffLoop
+		MOVE.L	(A2)+,D3
+		BNE.S	FCXNotOff1
+		
+		ADDQ	#4,A1			;skip it
+		
+		DBRA	D2,FCXOffLoop
+		BRA.S	DoFCXLast
+		
+; handle the case of an all one's region mask
+
+FCXOn
+		MOVE.L	D6,(A1)+
+		EXG.L	D6,D7
+		
+		SUBQ	#1,D2
+		BMI.S	DoFCXLast
+FCXOnLoop
+		MOVE.L	(A2)+,D3
+		CMP.L	D4,D3
+		BNE.S	FCXNotOn1
+		
+		MOVE.L	D6,(A1)+
+		EXG.L	D6,D7
+		
+		DBRA	D2,FCXOnLoop
+		BRA.S	DoFCXLast
+		
+; handle the unclipped case with faster unwound code
+
+DoFCXUnclipped
+		LEA	0(A2,D2.W*4),A2		;bump region ptr
+	
+		ADDQ	#1,D2			;compute count to do
+		
+		CMP.W	#8,D2
+		BLT.S	FinishFCXUnClip
+		
+		MOVE.W	D2,D0
+		LSR	#3,D0			;divide by 8
+		SUBQ	#1,D0			;bias for DBRA
+FCXUnClipLoop
+		MOVE.L	D6,(A1)+
+		MOVE.L	D7,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D7,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D7,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D7,(A1)+
+
+		DBRA	D0,FCXUnClipLoop
+		
+; now finish up the last 7 or less
+
+FinishFCXUnClip
+		AND	#7,D2
+		EOR	#7,D2	
+		
+		BTST	#0,D2
+		BEQ.S	@0
+		
+		EXG.L	D6,D7
+@0	
+		JMP	FinishFCXUCTab(D2.W*2)
+FinishFCXUCTab
+		MOVE.L	D6,(A1)+
+		MOVE.L	D7,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D7,(A1)+
+		MOVE.L	D6,(A1)+
+		MOVE.L	D7,(A1)+
+		MOVE.L	D6,(A1)+
+
+		EXG.L	D6,D7
+		BRA	DoFCXLast
+
+;******************************************************************************************
+		
+;   Arithmetic transfer modes start here...		
+
+;******************************************************************************************
+		
+; Here's where we implement the arithmetic transfer mode fills for ovals/rrects
+; Use a common loop for all the transfer modes, with specialized handlers to do the 
+; pixel arithmetic.
+
+; the first receiver is for AddOver mode for ovals and roundRects
+
+AddOverFillO	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BEQ.S	@0				;if not, skip
+		JMPRom	Old38A			; continue in ROM 					<S433>
+
+; OK, first do the pattern setup
+@0
+		MOVE.L	A0,A3			;set up pattern base
+		LEA	AddOverHandler,A0	;use addOver
+DoArithMode
+		MOVEM.L	D7/A4-A5,-(SP)		;save work regs
+		
+		BSR.S	ArithModeHandler	;invoke the handler
+		
+		MOVEM.L	(SP)+,D7/A4-A5		;restore regs
+		RTS
+
+; here is the general handler for a scan line of arithmetic fills
+
+ArithModeHandler
+		MOVEQ	#0,D6			;init pattern index
+		
+		MOVE.W	PATROW(A6),D4		;get pattern size in bytes
+		SUBQ	#4,D4			;is it a simple one?
+		BLE	ArithSimplePat		;if so, handle faster
+
+; sometimes simple patterns come in as 8 byte ones, so check for that
+
+		MOVE.W	D0,D6
+		ADD.W	PATHPOS(A6),D6
+		
+		SUBQ	#4,D4			;is it 8 long?
+		BNE.S	ArithComplexPat		;if not, skip
+
+; fetch both halves of the pattern and see if they match
+
+		MOVE.W	PATHMASK(A6),D4		;get pattern mask
+		ASR	#3,D4			;turn bit index to byte  index
+		AND.W	D4,D6			;mask it
+
+		MOVE.L	EXPAT(A6),A4
+		ADD.W	PATVPOS(A6),A4		;compute pattern address
+		
+		MOVE.L	0(A4,D6),D4		;get source longword
+		EOR	#4,D6
+		CMP.L	0(A4,D6),D4		;is it really simple?
+		BEQ	ArithSimplePat		;if so, go handle
+
+		EOR	#4,D6			;restore D6
+		
+; set up the pattern variables, since it's a complex pattern
+
+ArithComplexPat
+		MOVE.L	EXPAT(A6),A3
+		ADD.W	PATVPOS(A6),A3		;compute pattern address
+ArithComplex1		
+		MOVE.L	D1,-(SP)		;remember right edge mask
+		
+		MOVEQ	#0,D1
+		MOVEQ	#0,D7			;clear for pixCache
+
+; set up A0 to point to the proper handler, depending on the width of the inverse table
+
+		MOVE.L	A0,A4			;remember handler base
+		
+		MOVE.W	INVSIZE(A6),D4		;get shift count (3,4,5)
+		SUBQ	#3,D4
+		ADD.W	0(A0,D4.W*2),A0		;point to proper handler
+
+; init the single pixel cache, where D1 is last source, D7 is last dest, and D0 is last result
+
+		MOVEQ	#0,D5
+		MOVE.L	COLORTABLE(A6),A5		;get color table ptr	
+		
+		MOVE.B	D1,D5
+		LEA	0(A5,D5.W*8),A4		;point to source color
+		
+		MOVE.B	D7,D5
+		LEA	0(A5,D5.W*8),A5		;point to dest color
+		
+		JSR	(A0)			;map it
+		MOVE.B	([INVCOLOR,A6],D0.W,6),D0	;look up in inverse table
+		
+; test for the single long case
+
+		TST.W	D2
+		BRA 	ArithBot0
+
+; here's the main loop for complex patterns, where we process a longword at a time
+; use a single pixel cache for speed using D0, D1 and D7
+
+ArithRight0
+		AND.L	(SP)+,D3
+ArithLoop0		
+		MOVE.W	PATHMASK(A6),D4		;get pattern mask
+		ASR	#3,D4			;turn bit index to byte  index
+		AND.W	D4,D6			;mask it
+
+		MOVE.L	0(A3,D6),D4		;get source longword
+		ADDQ	#4,D6	
+		
+		MOVE.L	A2,D5			;no clipping?
+		BEQ.S	@0			;if none, skip
+		
+		AND.L	(A2)+,D3		;get region/edge mask in D3
+		BEQ 	ArithMask0
+@0		
+		MOVE.L	(A1),D5			;get dest longword
+
+; map 1st byte
+
+		TST.B	D3
+		BEQ.S	@8			;if mask zero, we can skip
+
+; if same as previous, we can short-circuit the mapping
+
+		CMP.B	D4,D1			;source the same?
+		BNE.S	@9			;if not, skip
+		
+		CMP.B	D5,D7			;dest the same?
+		BNE.S	@9			;if not, skip
+		
+; it's the same, so use it
+
+		MOVE.B	D0,D5			;use last result
+		BRA.S	@8			;skip the mapping
+
+; it's different than the last one, so map it
+
+@9
+		MOVE.B	D4,D1
+		
+		MOVE.L	COLORTABLE(A6),A5	
+		LEA	0(A5,D1.W*8),A4		;point to source color
+		
+		MOVE.B	D5,D7
+		LEA	0(A5,D7.W*8),A5		;point to dest color
+		
+		JSR	(A0)			;map according to Xfer mode
+		MOVE.B	([INVCOLOR,A6],D0.W,6),D5	;look up in inverse table
+		MOVE.B	D5,D0
+@8
+		LSR.L	#8,D3
+		LSR.L	#8,D4
+		ROR.L	#8,D5
+
+; map 2nd byte
+
+		TST.B	D3
+		BEQ.S	@2			;if mask zero, we can skip
+
+; if same as previous, we can short-circuit the mapping
+
+		CMP.B	D4,D1			;source the same?
+		BNE.S	@1			;if not, skip
+		
+		CMP.B	D5,D7			;dest the same?
+		BNE.S	@1			;if not, skip
+		
+; it's the same, so use it
+
+		MOVE.B	D0,D5			;use last result
+		BRA.S	@2			;skip the mapping
+
+; it's different than the last one, so map it
+
+@1
+		MOVE.B	D4,D1
+		MOVE.L	COLORTABLE(A6),A5	
+
+		LEA	0(A5,D1.W*8),A4		;point to source color
+		
+		MOVE.B	D5,D7
+		LEA	0(A5,D7.W*8),A5		;point to dest color
+		
+		JSR	(A0)			;map according to Xfer mode
+		MOVE.B	([INVCOLOR,A6],D0.W,6),D5	;look up in inverse table
+		MOVE.B	D5,D0
+@2
+		LSR.L	#8,D3
+		LSR.L	#8,D4
+		ROR.L	#8,D5
+		
+; map 3rd byte
+
+		TST.B	D3
+		BEQ.S	@4			;if mask zero, we can skip
+
+; if same as previous, we can short-circuit the mapping
+
+		CMP.B	D4,D1			;source the same?
+		BNE.S	@3			;if not, skip
+		
+		CMP.B	D5,D7			;dest the same?
+		BNE.S	@3			;if not, skip
+		
+; it's the same, so use it
+
+		MOVE.B	D0,D5			;use last result
+		BRA.S	@4			;skip the mapping
+
+; it's different than the last one, so map it
+
+@3
+		MOVE.B	D4,D1
+
+		MOVE.L	COLORTABLE(A6),A5			
+		LEA	0(A5,D1.W*8),A4		;point to source color
+		
+		MOVE.B	D5,D7
+		LEA	0(A5,D7.W*8),A5		;point to dest color
+		
+		JSR	(A0)			;map according to Xfer mode
+		MOVE.B	([INVCOLOR,A6],D0.W,6),D5	;look up in inverse table
+		MOVE.B	D5,D0
+@4
+		LSR.L	#8,D3
+		LSR.L	#8,D4
+		ROR.L	#8,D5
+		
+; map final byte
+
+		TST.B	D3
+		BEQ.S	@6			;if mask zero, we can skip
+
+; if same as previous, we can short-circuit the mapping
+
+		CMP.B	D4,D1			;source the same?
+		BNE.S	@5			;if not, skip
+		
+		CMP.B	D5,D7			;dest the same?
+		BNE.S	@5			;if not, skip
+		
+; it's the same, so use it
+
+		MOVE.B	D0,D5			;use last result
+		BRA.S	@6			;skip the mapping
+
+; it's different than the last one, so map it
+
+@5
+		MOVE.B	D4,D1
+		
+		MOVE.L	COLORTABLE(A6),A5	
+		LEA	0(A5,D1.W*8),A4		;point to source color
+		
+		MOVE.B	D5,D7
+		LEA	0(A5,D7.W*8),A5		;point to dest color
+		
+		JSR	(A0)			;map according to Xfer mode
+		MOVE.B	([INVCOLOR,A6],D0.W,6),D5	;look up in inverse table
+		MOVE.B	D5,D0
+@6
+		ROR.L	#8,D5
+		
+; it's all mapped, so store the result
+		
+		MOVE.L	D5,(A1)+		;store the destination
+ArithBotCommon		
+		MOVEQ	#-1,D3			;set up the mask for the middle
+		SUBQ	#1,D2
+ArithBot0		
+		BGT 	ArithLoop0
+		BEQ 	ArithRight0
+
+; all done with this scan line
+
+		RTS
+		
+; handle a region of all zeros
+
+ArithMask0
+		ADDQ	#4,A1			;skip over destination
+		BRA.S	ArithBotCommon
+		
+; the pattern is simpler (it fits in a register), so use a separate loop to make things 
+;faster.  Use a longword cache instead of the single pixel caches.
+
+ArithSimplePat
+		MOVE.L	D1,-(SP)		;save right edge mask
+		
+		MOVEQ	#0,D7			;clear for pixIndexing
+					
+		MOVE.L	(A3),D4			;keep pattern in D4
+		MOVE.L	COLORTABLE(A6),A3		;use A3 for color table ptr
+
+; set up A0 to point to the proper handler, depending on the width of the inverse table
+
+		MOVE.L	A0,A4			;remember handler base
+		
+		MOVE.W	INVSIZE(A6),D0		;get shift count (3,4,5)
+		SUBQ	#3,D0
+		ADD.W	0(A0,D0.W*2),A0		;point to proper handler
+
+; init the longword pattern cache by mapping the four pixels in D4
+
+		MOVEQ	#3,D5
+		MOVE.L	D4,D6			;init lastDest
+		BRA.S	CacheILoop0		;skip cache check 1st time
+		
+; if the next pixel in D4 is the same as the previous (in D7), take a shortcut
+
+CacheInitLoop
+		CMP.B	D4,D7			;does it match?
+		BNE.S	CacheILoop0		;if not, must do the hard way
+		
+		MOVE.B	D0,D1			;use last result
+		
+		ROL.L	#8,D1
+		ROL.L	#8,D4
+		
+		DBRA	D5,CacheInitLoop
+		BRA.S	CacheIDone
+		
+; it's not the same, so do it the hard way
+
+CacheILoop0
+		MOVE.B	D4,D7
+		LEA	0(A3,D7.W*8),A4		;point to source color
+		MOVE.L	A4,A5			;source and dest are same
+		
+		JSR	(A0)			;map next pixel
+		MOVE.B	([INVCOLOR,A6],D0.W,6),D1	;look up in inverse table
+
+		MOVE.L	D1,D0			;remember last result
+		ROL.L	#8,D1	
+		ROL.L	#8,D4
+
+		DBRA	D5,CacheInitLoop
+
+; OK, here's the start of the main loop; first, see if there's only one long to do
+
+CacheIDone
+		TST.W	D2
+		BNE.S 	ArithLoop1
+		
+; here's the main loop for simple patterns, where we process a longword at a time
+; We use a longword cache in D6
+
+ArithRight1
+		AND.L	(SP)+,D3
+ArithLoop1
+		MOVE.L	A2,D5			;no clipping?
+		BEQ.S	@0			;if none, skip
+		
+		AND.L	(A2)+,D3		;get mask in D4
+		BEQ 	ArithMask1
+@0		
+		MOVE.L	(A1),D5			;get dest longword
+
+		CMP.L	#-1,D3			;mask all ones?
+		BNE.S	ArithMapIt1A		;if not, can't use cache
+		
+		CMP.L	D5,D6			;same as last time?
+		BNE.S	ArithMapIt1		;if not, skip
+
+; the long was the same as last time, so we can skip the mapping.  Better make sure
+; the mask was the same, too
+
+		MOVE.L	D1,D5			;use last result
+		BRA	ArithStoreIt		;skip the mapping
+
+; it was different, so we have to map it the hard way
+
+ArithMapIt1
+		MOVE.L	D5,D6			;remember for next time
+ArithMapIt1A		
+		TST.B	D3
+		BEQ.S	@0			;if mask zero, we can skip
+		
+		MOVE.B	D4,D7
+		LEA	0(A3,D7.W*8),A4		;point to source color
+		
+		MOVE.B	D5,D7
+		LEA	0(A3,D7.W*8),A5		;point to dest color
+		
+		JSR	(A0)			;map according to Xfer mode
+		MOVE.B	([INVCOLOR,A6],D0.W,6),D5	;look up in inverse table
+@0
+		ROR.L	#8,D3
+		ROR.L	#8,D4
+		ROR.L	#8,D5
+
+; map 2nd byte
+
+		TST.B	D3
+		BEQ.S	@2			;if mask zero, we can skip
+
+		MOVE.B	D4,D7
+		LEA	0(A3,D7.W*8),A4		;point to source color
+		
+		MOVE.B	D5,D7
+		LEA	0(A3,D7.W*8),A5		;point to dest color
+			
+		JSR	(A0)			;map according to Xfer mode
+		MOVE.B	([INVCOLOR,A6],D0.W,6),D5	;look up in inverse table
+@2
+		ROR.L	#8,D3
+		ROR.L	#8,D4
+		ROR.L	#8,D5
+		
+; map 3rd byte
+
+		TST.B	D3
+		BEQ.S	@4			;if mask zero, we can skip
+
+; map it
+		MOVE.B	D4,D7
+		LEA	0(A3,D7.W*8),A4		;point to source color
+		
+		MOVE.B	D5,D7
+		LEA	0(A3,D7.W*8),A5		;point to dest color
+				
+		JSR	(A0)			;map according to Xfer mode	
+		MOVE.B	([INVCOLOR,A6],D0.W,6),D5	;look up in inverse table
+@4
+		ROR.L	#8,D3
+		ROR.L	#8,D4
+		ROR.L	#8,D5
+		
+; map final byte
+
+		TST.B	D3
+		BEQ.S	@6			;if mask zero, we can skip
+
+; it's different than the last one, so map it
+
+		MOVE.B	D4,D7
+		LEA	0(A3,D7.W*8),A4		;point to source color
+		
+		MOVE.B	D5,D7
+		LEA	0(A3,D7.W*8),A5		;point to dest color
+		
+		JSR	(A0)			;map according to Xfer mode
+		MOVE.B	([INVCOLOR,A6],D0.W,6),D5	;look up in inverse table
+@6
+		ROR.L	#8,D4
+		ROR.L	#8,D5
+		
+; it's all mapped, so store the result
+
+ArithStoreIt	
+		MOVE.L	D5,(A1)+		;store the destination
+		ADDQ.L	#1,D3			;was mask all ones?
+		BNE.S	ArithCom1		;if not, skip
+		
+		MOVE.L	D5,D1			;remember last result
+ArithCom1		
+		MOVEQ	#-1,D3			;set up the mask for the middle
+		SUBQ	#1,D2
+ArithBot1		
+		BGT 	ArithLoop1
+		BEQ		ArithRight1
+
+; all done with this scan line
+
+		RTS
+
+; handle a region of all zeros
+
+ArithMask1
+		ADDQ	#4,A1			;skip over destination
+		BRA.S	ArithCom1
+
+; Here is the handler for the AddOver mode.  A4 points to the source RGBColor, while
+; A5 points to the destination.  Return the index in D0 (to be looked up in the
+; inverse table). First there is a case table for using a static shift count
+
+AddOverHandler
+		DC.W	AddOver3-AddOverHandler
+		DC.W	AddOver4-AddOverHandler
+		DC.W	AddOver5-AddOverHandler	
+
+AddOver3		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0		;red
+		ADD.W	(A5)+,D0
+		LSL.L	#3,D0
+				
+		MOVE.W	(A4)+,D0		;green
+		ADD.W	(A5)+,D0
+		LSL.L	#3,D0
+				
+		MOVE.W	(A4),D0			;blue
+		ADD.W	(A5),D0
+		LSL.L	#3,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+AddOver4		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0		;red
+		ADD.W	(A5)+,D0
+		LSL.L	#4,D0
+				
+		MOVE.W	(A4)+,D0		;green
+		ADD.W	(A5)+,D0
+		LSL.L	#4,D0
+				
+		MOVE.W	(A4),D0			;blue
+		ADD.W	(A5),D0
+		LSL.L	#4,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+AddOver5		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0		;red
+		ADD.W	(A5)+,D0
+		LSL.L	#5,D0
+				
+		MOVE.W	(A4)+,D0		;green
+		ADD.W	(A5)+,D0
+		LSL.L	#5,D0
+				
+		MOVE.W	(A4),D0			;blue
+		ADD.W	(A5),D0
+		LSL.L	#5,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+		
+;*************************************************************************************
+
+
+; Here is the receiver for the SubOver arithmetic fill mode, for ovals and roundRects.
+; It uses mainly common code with the other oval handlers
+
+
+SubOverFillO	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BEQ.S	@0				;if not, skip			<S433>
+		
+		JMPRom	Old38E			;						<S433>
+
+; OK, first do the pattern setup
+
+@0		MOVE.L	A0,A3			;set up pattern base
+		LEA	SubOverHandler,A0	;use subOver
+		BRA	DoArithMode
+		
+; Here is the handler for the SubOver mode.  A4 points to the source RGBColor, while
+; A5 points to the destination.  Return the index in D0 (to be looked up in the
+; inverse table). First there is a case table for using a static shift count
+
+SubOverHandler
+		DC.W	SubOver3-SubOverHandler
+		DC.W	SubOver4-SubOverHandler
+		DC.W	SubOver5-SubOverHandler	
+
+SubOver3		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		LSL.L	#3,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		LSL.L	#3,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		LSL.L	#3,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+SubOver4		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		LSL.L	#4,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		LSL.L	#4,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		LSL.L	#4,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+SubOver5		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		LSL.L	#5,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		LSL.L	#5,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		LSL.L	#5,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+
+;*************************************************************************************
+
+; Here is the receiver for the AddPin arithmetic fill mode, for ovals and roundRects.
+; It uses mainly common code with the other oval handlers
+
+AddPinFillO	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BEQ.S	@0				;if not, skip			<S433>
+		
+		JMPRom	Old389			;						<S433>
+
+; set up handlers and use common code
+
+@0		MOVE.L	A0,A3			;set up pattern base
+		LEA	AddPinHandler,A0	;use addPin
+		BRA	DoArithMode
+
+
+; Here is the handler for the AddPin mode.  A4 points to the source RGBColor, while
+; A5 points to the destination.  Return the index in D0 (to be looked up in the
+; inverse table). First there is a case table for using a static shift count
+
+AddPinHandler
+		DC.W	AddPin3-AddPinHandler
+		DC.W	AddPin4-AddPinHandler
+		DC.W	AddPin5-AddPinHandler	
+
+AddPin3		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0		;red
+		ADD.W	(A5)+,D0
+		BCS.S	@0
+		
+		CMP.W	WEIGHT+BLUE(A6),D0
+		BLS.S	@1
+@0
+		MOVE.W	WEIGHT+BLUE(A6),D0
+@1
+		LSL.L	#3,D0
+				
+		MOVE.W	(A4)+,D0		;green
+		ADD.W	(A5)+,D0
+		BCS.S	@2
+		
+		CMP.W	WEIGHT+GREEN(A6),D0
+		BLS.S	@3
+@2
+		MOVE.W	WEIGHT+GREEN(A6),D0
+@3	
+		LSL.L	#3,D0
+				
+		MOVE.W	(A4),D0			;blue
+		ADD.W	(A5),D0
+		BCS.S	@4
+		
+		CMP.W	WEIGHT+RED(A6),D0
+		BLS.S	@5
+@4
+		MOVE.W	WEIGHT+RED(A6),D0
+@5	
+		LSL.L	#3,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+AddPin4		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0		;red
+		ADD.W	(A5)+,D0
+		BCS.S	@0
+		
+		CMP.W	WEIGHT+BLUE(A6),D0
+		BLS.S	@1
+@0
+		MOVE.W	WEIGHT+BLUE(A6),D0
+@1
+		LSL.L	#4,D0
+				
+		MOVE.W	(A4)+,D0		;green
+		ADD.W	(A5)+,D0
+		BCS.S	@2
+		
+		CMP.W	WEIGHT+GREEN(A6),D0
+		BLS.S	@3
+@2
+		MOVE.W	WEIGHT+GREEN(A6),D0
+@3	
+		LSL.L	#4,D0
+				
+		MOVE.W	(A4),D0			;blue
+		ADD.W	(A5),D0
+		BCS.S	@4
+		
+		CMP.W	WEIGHT+RED(A6),D0
+		BLS.S	@5
+@4
+		MOVE.W	WEIGHT+RED(A6),D0
+@5	
+		LSL.L	#4,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+AddPin5		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0		;red
+		ADD.W	(A5)+,D0
+		BCS.S	@0
+		
+		CMP.W	WEIGHT+BLUE(A6),D0
+		BLS.S	@1
+@0
+		MOVE.W	WEIGHT+BLUE(A6),D0
+@1
+		LSL.L	#5,D0
+				
+		MOVE.W	(A4)+,D0		;green
+		ADD.W	(A5)+,D0
+		BCS.S	@2
+		
+		CMP.W	WEIGHT+GREEN(A6),D0
+		BLS.S	@3
+@2
+		MOVE.W	WEIGHT+GREEN(A6),D0
+@3	
+		LSL.L	#5,D0
+				
+		MOVE.W	(A4),D0			;blue
+		ADD.W	(A5),D0
+		BCS.S	@4
+		
+		CMP.W	WEIGHT+RED(A6),D0
+		BLS.S	@5
+@4
+		MOVE.W	WEIGHT+RED(A6),D0
+@5	
+		LSL.L	#5,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+;*************************************************************************************
+
+; Here is the receiver for the SubPin arithmetic fill mode, for ovals and roundRects.
+; It uses mainly common code with the other oval handlers
+
+SubPinFillO	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BEQ.S	@0		;if not, skip			<S433>
+		
+		JMPRom	Old38B			;						<S433>
+
+; set up handlers and use common code
+
+@0		MOVE.L	A0,A3			;set up pattern base
+		LEA	SubPinHandler,A0	;use SubPin
+		BRA	DoArithMode
+
+
+; Here is the handler for the SubPin mode.  A4 points to the source RGBColor, while
+; A5 points to the destination.  Return the index in D0 (to be looked up in the
+; inverse table). First there is a case table for using a static shift count
+
+SubPinHandler
+		DC.W	SubPin3-SubPinHandler
+		DC.W	SubPin4-SubPinHandler
+		DC.W	SubPin5-SubPinHandler	
+
+SubPin3		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		BCS.S	@0
+		
+		CMP.W	WEIGHT+BLUE(A6),D0
+		BCC.S	@1
+@0
+		MOVE.W	WEIGHT+BLUE(A6),D0
+@1
+		LSL.L	#3,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		BCS.S	@2
+		
+		CMP.W	WEIGHT+GREEN(A6),D0
+		BCC.S	@3
+@2
+		MOVE.W	WEIGHT+GREEN(A6),D0
+@3	
+		LSL.L	#3,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		BCS.S	@4
+		
+		CMP.W	WEIGHT+RED(A6),D0
+		BCC.S	@5
+@4
+		MOVE.W	WEIGHT+RED(A6),D0
+@5	
+		LSL.L	#3,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+SubPin4		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		BCS.S	@0
+		
+		CMP.W	WEIGHT+BLUE(A6),D0
+		BCC.S	@1
+@0
+		MOVE.W	WEIGHT+BLUE(A6),D0
+@1
+		LSL.L	#4,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		BCS.S	@2
+		
+		CMP.W	WEIGHT+GREEN(A6),D0
+		BCC.S	@3
+@2
+		MOVE.W	WEIGHT+GREEN(A6),D0
+@3	
+		LSL.L	#4,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		BCS.S	@4
+		
+		CMP.W	WEIGHT+RED(A6),D0
+		BCC.S	@5
+@4
+		MOVE.W	WEIGHT+RED(A6),D0
+@5	
+		LSL.L	#4,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+SubPin5		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		BCS.S	@0
+		
+		CMP.W	WEIGHT+BLUE(A6),D0
+		BCC.S	@1
+@0
+		MOVE.W	WEIGHT+BLUE(A6),D0
+@1
+		LSL.L	#5,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		BCS.S	@2
+		
+		CMP.W	WEIGHT+GREEN(A6),D0
+		BCC.S	@3
+@2
+		MOVE.W	WEIGHT+GREEN(A6),D0
+@3	
+		LSL.L	#5,D0
+				
+		MOVE.W	(A5)+,D0		;red
+		SUB.W	(A4)+,D0
+		BCS.S	@4
+		
+		CMP.W	WEIGHT+RED(A6),D0
+		BCC.S	@5
+@4
+		MOVE.W	WEIGHT+RED(A6),D0
+@5	
+		LSL.L	#5,D0
+				
+		SWAP	D0			;return inverse table index
+		RTS
+
+;*************************************************************************************
+
+
+; Here is the receiver for the AddMax arithmetic fill mode, for ovals and roundRects.
+; It uses mainly common code with the other oval handlers
+
+AddMaxFillO	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BEQ.S	@0				;if not, skip			<S433>
+
+		JMPRom	Old38D			;						<S433>
+		
+; OK, first do the pattern setup
+
+@0		MOVE.L	A0,A3			;set up pattern base
+		LEA	AddMaxHandler,A0	;use AddMax
+		BRA	DoArithMode
+		
+; Here is the handler for the AddMax mode.  A4 points to the source RGBColor, while
+; A5 points to the destination.  Return the index in D0 (to be looked up in the
+; inverse table). First there is a case table for using a static shift count
+
+AddMaxHandler
+		DC.W	AddMax3-AddMaxHandler
+		DC.W	AddMax4-AddMaxHandler
+		DC.W	AddMax5-AddMaxHandler	
+
+AddMax3		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BCC.S	@0
+		MOVE.W	(A5),D0
+@0
+		ADDQ	#2,A5
+		LSL.L	#3,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BCC.S	@1
+		MOVE.W	(A5),D0
+@1
+		ADDQ	#2,A5
+		LSL.L	#3,D0
+				
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BCC.S	@2
+		MOVE.W	(A5),D0
+@2		
+		ADDQ	#2,A5
+		LSL.L	#3,D0						
+
+		SWAP	D0			;return inverse table index
+		RTS
+
+AddMax4		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BCC.S	@0
+		MOVE.W	(A5),D0
+@0
+		ADDQ	#2,A5
+		LSL.L	#4,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BCC.S	@1
+		MOVE.W	(A5),D0
+@1
+		ADDQ	#2,A5
+		LSL.L	#4,D0
+				
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BCC.S	@2
+		MOVE.W	(A5),D0
+@2		
+		ADDQ	#2,A5
+		LSL.L	#4,D0						
+
+		SWAP	D0			;return inverse table index
+		RTS
+
+AddMax5		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BCC.S	@0
+		MOVE.W	(A5),D0
+@0
+		ADDQ	#2,A5
+		LSL.L	#5,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BCC.S	@1
+		MOVE.W	(A5),D0
+@1
+		ADDQ	#2,A5
+		LSL.L	#5,D0
+				
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BCC.S	@2
+		MOVE.W	(A5),D0
+@2		
+		ADDQ	#2,A5
+		LSL.L	#5,D0						
+
+		SWAP	D0			;return inverse table index
+		RTS
+
+
+;*************************************************************************************
+
+
+; Here is the receiver for the AddMin arithmetic fill mode, for ovals and roundRects.
+; It uses mainly common code with the other oval handlers
+
+
+AddMinFillO	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BEQ.S	@0				;if not, skip		<S433>
+		
+		JMPRom	Old38F			;					<S433>
+
+; OK, first do the pattern setup
+
+@0		MOVE.L	A0,A3			;set up pattern base
+		LEA	AddMinHandler,A0	;use addMin
+		BRA	DoArithMode
+		
+; Here is the handler for the AddMin mode.  A4 points to the source RGBColor, while
+; A5 points to the destination.  Return the index in D0 (to be looked up in the
+; inverse table). First there is a case table for using a static shift count
+
+AddMinHandler
+		DC.W	AddMin3-AddMinHandler
+		DC.W	AddMin4-AddMinHandler
+		DC.W	AddMin5-AddMinHandler	
+
+AddMin3		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BLS.S	@0
+		MOVE.W	(A5),D0
+@0
+		ADDQ	#2,A5
+		LSL.L	#3,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BLS.S	@1
+		MOVE.W	(A5),D0
+@1
+		ADDQ	#2,A5
+		LSL.L	#3,D0		
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BLS.S	@2
+		MOVE.W	(A5),D0
+@2		
+		ADDQ	#2,A5
+		LSL.L	#3,D0						
+
+		SWAP	D0			;return inverse table index
+		RTS
+
+AddMin4		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BLS.S	@0
+		MOVE.W	(A5),D0
+@0
+		ADDQ	#2,A5
+		LSL.L	#4,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BLS.S	@1
+		MOVE.W	(A5),D0
+@1
+		ADDQ	#2,A5
+		LSL.L	#4,D0
+				
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BLS.S	@2
+		MOVE.W	(A5),D0
+@2		
+		ADDQ	#2,A5
+		LSL.L	#4,D0						
+
+		SWAP	D0			;return inverse table index
+		RTS
+
+AddMin5		
+		MOVEQ	#0,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BLS.S	@0
+		MOVE.W	(A5),D0
+@0
+		ADDQ	#2,A5
+		LSL.L	#5,D0
+		
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BLS.S	@1
+		MOVE.W	(A5),D0
+@1
+		ADDQ	#2,A5
+		LSL.L	#5,D0
+			
+		MOVE.W	(A4)+,D0
+		CMP.W	(A5),D0
+		BLS.S	@2
+		MOVE.W	(A5),D0
+@2		
+		ADDQ	#2,A5
+		LSL.L	#5,D0						
+
+		SWAP	D0			;return inverse table index
+		RTS
+
+
+;*************************************************************************************
+
+
+; Here is the receiver for the blend arithmetic fill mode, for ovals and roundRects.
+; It uses mainly common code with the other oval handlers
+
+
+BlendFillO	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BEQ.S	@0				;if not, skip				<S433>
+
+		JMPRom	Old388			;							<S433>
+
+; OK, first do the pattern setup
+
+@0		MOVE.L	A0,A3			;set up pattern base
+		LEA	BlendHandler,A0		;use blend
+		BRA	DoArithMode
+		
+; Here is the handler for the Blend mode.  A4 points to the source RGBColor, while
+; A5 points to the destination.  Return the index in D0 (to be looked up in the
+; inverse table). First there is a case table for using a static shift count
+
+BlendHandler
+		DC.W	Blend3-BlendHandler
+		DC.W	Blend4-BlendHandler
+		DC.W	Blend5-BlendHandler	
+
+Blend3
+		MOVEM.L	D1-D3,-(SP)
+		
+		MOVEQ	#3,D2			;set up shift count
+		BRA.S	BlendCommon
+Blend4
+		MOVEM.L	D1-D3,-(SP)
+		MOVEQ	#4,D2
+BlendCommon
+		MOVEQ	#0,D0			;clear accum reg
+
+; do red
+
+		MOVE.W	(A4)+,D1
+		MULU	WEIGHT+BLUE(A6),D1
+		
+		MOVE.W	(A5)+,D3
+		MULU	NOTWEIGHT+BLUE(A6),D3
+		
+		ADD.L	D1,D3
+		SWAP	D3
+		MOVE.W	D3,D0
+		ASL.L	D2,D0
+
+; do green
+
+		MOVE.W	(A4)+,D1
+		MULU	WEIGHT+GREEN(A6),D1
+		
+		MOVE.W	(A5)+,D3
+		MULU	NOTWEIGHT+GREEN(A6),D3
+		
+		ADD.L	D1,D3
+		SWAP	D3
+		MOVE.W	D3,D0
+		ASL.L	D2,D0
+
+; do blue
+
+		MOVE.W	(A4)+,D1
+		MULU	WEIGHT+RED(A6),D1
+		
+		MOVE.W	(A5)+,D3
+		MULU	NOTWEIGHT+RED(A6),D3
+		
+		ADD.L	D1,D3
+		SWAP	D3
+		MOVE.W	D3,D0
+		ASL.L	D2,D0
+
+		SWAP	D0
+		
+		MOVEM.L	(SP)+,D1-D3
+		RTS
+Blend5
+		MOVEM.L	D1-D3,-(SP)
+		MOVEQ	#5,D2
+		BRA.S	BlendCommon
+		
+		
+;******************************************************************************************
+		
+; Now we start on the arithmetic fills for clipped rectangles.  Use the common
+; scan line handler for ovals/rrects to save code.
+
+; First we handle AddOver mode
+
+UseOld368
+		JMPROM	Old368			;						<S433>
+				
+AddOverFillR	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld368		;if not, skip
+		tst.l	d3				;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld368		;if so, skip   			<PB427	 BAL>
+
+		LEA	AddOverHandler,A0	;set up the handler
+ArithFillCommon
+		MOVE.L	A0,-(SP)		;remember handler address
+		
+; set up the registers and invoke the common scan-line handler
+
+		MOVE.L	A4,A2			;set up region pointer
+		ASR	#3,D6			;bit index to byte index
+		MOVE.L	A5,A1			;set up destination
+ArithFillLoop		
+		MOVEQ	#-1,D1
+		MOVEQ	#-1,D3			;edge masks all ones (edges in region)
+
+		MOVE.W	BUFSIZE(A6),D2		;set up the count
+		ADDQ	#4,D2			;make one based			<PB427	 BAL>
+		LSR.W	#2,D2
+		SUBQ	#1,D2			;make zero based		<PB427	 BAL>
+		
+		MOVE.L	(SP),A0			;get handler address
+
+; call the appropriate handle, depending on whether the pattern is simple or complex		
+	
+		CMP.W	#8,PATROW(A6)		;is pattern real complex?
+		BGT.S	@0			;if so, go handle it
+
+		TST.B	SRCV(A6)		;test pattern mode
+		BMI.S	@0			;treat bitmap as complex
+		
+		MOVE.L	0(A3,D6),D0		;get left pattern
+		EOR	#4,D6
+		CMP.L	0(A3,D6),D0		;left same as right?
+		BEQ.S	@1			;if so, it's simple
+
+		EOR	#4,D6			;restore D6
+@0		
+		BSR	ArithComplex1		;invoke scan-line handler for complex pats		
+		BRA.S	@2
+@1
+		EOR	#4,D6
+		BSR	ArithSimplePat
+		
+; bump pointers to next time, and loop until done
+
+@2
+		MOVE.L	HEIGHT(A6),D6		;get pattern index
+		ASR.L	#3,D6			;bit index to byte index
+
+		MOVE.W	DSTV(A6),D0
+		
+		TST.B	SRCV(A6)		;test pattern mode
+		BEQ.S	AFPat1			;if zero, handle
+		BMI.S	AFBitMap1		;if <0, go handle bitmap
+
+; handle bumping the pattern pointers
+
+		MOVE.L	SRCADDR(A6),A3		;set up pattern pointer
+		SUB.W	D0,A3
+		ADD.W	PATROW(A6),D0
+		AND.W	PATVMASK(A6),D0
+		MOVE.W	D0,DSTV(A6)
+		ADD.W	D0,A3
+		
+		BRA.S	AFSetPatPtr
+
+; handle second type of pattern
+
+AFPat1
+		ADDQ	#1,D0
+		AND	#15,D0
+		LEA	([EXPAT,A6],D0.W*4),A3
+		
+		MOVE.W	D0,HEIGHT(A6)
+AFSetPatPtr		
+		MOVE.L	A3,SRCADDR(A6)
+		
+; bump to the next scan line
+
+ArithFillNextLine
+		MOVE.L	DSTROW(A6),D0
+		ADD.L	D0,DSTADDR(A6)
+
+		MOVE.W	VERT(A6),D0
+		ADD.W	VBUMP(A6),D0
+		MOVE.W	D0,VERT(A6)
+		
+		CMP.W	LASTV(A6),D0
+		BNE.S	@0
+
+; all done, so strip stack and return
+
+		MOVE.L	SAVESTK2(A6),A7
+		RTS
+
+; set up registers and loop for the next line
+
+@0
+		MOVE.L	SEEKMASK(A6),A0
+		JSR	(A0)			;seek new region
+		
+		MOVE.L	SRCADDR(A6),A3		;set up pattern pointer
+		MOVE.L	DSTADDR(A6),A1		;set up dest ptr
+		MOVE.L	RGNADDR(A6),A2		;set up region ptr
+	
+		BRA	ArithFillLoop
+
+; handle bumping the source if it's a bitmap
+
+AFBitMap1
+		MOVE.L	SRCROW(A6),D0
+		ADD.L	D0,SRCADDR(A6)
+		
+		BRA.S	ArithFillNextLine
+		
+;******************************************************************************************
+		
+; Handle SubOver clipped rectangle fill
+
+UseOld36C
+		JMPRom	Old36C			;						<PB433>
+		
+SubOverFillR	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld36C		;if not, skip
+		tst.l	d3				;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld36c		;if so, skip   			<PB427	 BAL>
+
+		LEA	SubOverHandler,A0	;set up the handler
+		BRA	ArithFillCommon		;use comon code
+		
+		
+;******************************************************************************************
+		
+; Handle AddPin clipped rectangle fill
+
+UseOld367
+		JMPRom	Old367			;						<PB433>
+		
+AddPinFillR	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld367		;if not, skip
+		tst.l	d3				;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld367		;if so, skip   			<PB427	 BAL>
+
+		LEA	AddPinHandler,A0	;set up the handler
+		BRA	ArithFillCommon		;use comon code
+		
+		
+;******************************************************************************************
+		
+; Handle SubPin clipped rectangle fill
+
+UseOld369
+		JMPRom	Old369			;						<PB433>
+		
+SubPinFillR	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld369		;if not, skip
+		tst.l	d3				;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld369		;if so, skip   			<PB427	 BAL>
+
+		LEA	SubPinHandler,A0	;set up the handler
+		BRA	ArithFillCommon		;use comon code
+		
+		
+;******************************************************************************************
+		
+; Handle AddMax clipped rectangle fill
+
+UseOld36B
+		JMPRom	Old36B			;						<PB433>
+		
+AddMaxFillR	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld36B		;if not, skip
+		tst.l	d3				;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld36B		;if so, skip   			<PB427	 BAL>
+
+		LEA	AddMaxHandler,A0	;set up the handler
+		BRA	ArithFillCommon		;use comon code
+		
+		
+;******************************************************************************************
+		
+; Handle AddMin clipped rectangle fill
+
+UseOld36D
+		JMPRom	Old36D			;						<PB433>
+		
+AddMinFillR	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld36D		;if not, skip
+		tst.l	d3				;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld36D		;if so, skip   			<PB427	 BAL>
+
+		LEA	AddMinHandler,A0	;set up the handler
+		BRA	ArithFillCommon		;use comon code
+		
+		
+;******************************************************************************************
+		
+; Handle Blend clipped rectangle fill
+
+UseOld366
+		JMPRom	Old366			;						<PB433>
+		
+BlendFillR	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld366		;if not, skip
+		tst.l	d3				;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld366		;if s0, skip   			<PB427	 BAL>
+
+		LEA	BlendHandler,A0		;set up the handler
+		BRA	ArithFillCommon		;use comon code
+		
+
+;******************************************************************************************
+		
+; Now we start on the arithmetic fills for unclipped rectangles.  Use the common
+; scan line handler for ovals/rrects to save code.
+
+; First we handle AddOver mode, unclipped
+
+UseOld352
+		JMPRom	Old352			;						<PB433>
+		
+AddOverUnClip	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld352		;if not, skip
+		tst.l	(sp)			;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld352		;if so, skip   			<PB427	 BAL>
+
+		LEA	AddOverHandler,A0	;set up the handler
+ArithUCCommon
+		MOVE.L	A0,-(SP)		;remember handler address
+		
+; set up the registers and invoke the common scan-line handler
+
+		SUB.L	A2,A2			;no region pointer
+		ASR	#3,D6			;bit index to byte index
+		MOVE.L	A4,A3			;set up pattern pointer
+		MOVE.L	A5,A1			;set up destination
+ArithUCLoop		
+		MOVE.L	FIRSTMASK(A6),D3		;set up left edge
+		MOVE.L	LASTMASK(A6),D1		;set up right edge
+
+; compute the count from the three pieces: left, mid and right
+
+		MOVE.W	LONGCNT(A6),D2		;get left count
+		BPL.S	@3			;if positive, we're cool
+		
+		MOVEQ	#0,D2			;only one word
+		BRA.S	@4
+@3		
+		ADD.W	MIDCOUNT(A6),D2		;add in the middle
+		ADD.W	PIXINLONG(A6),D2		;add in the right
+		ADDQ.W	#2,D2			;add for count bias
+		LSR.W	#2,D2			;bytes -> longs
+@4		
+		MOVE.L	(SP),A0			;get handler address
+
+; call the appropriate handle, depending on whether the pattern is simple or complex		
+	
+		CMP.W	#8,PATROW(A6)		;is pattern real complex?
+		BGT.S	@0			;if so, go handle it
+
+		TST.B	ENDSWITCH(A6)		;test pattern mode
+		BMI.S	@0			;if bitmap, it's complex
+		
+		MOVE.L	0(A3,D6),D0		;get left pattern
+		EOR	#4,D6
+		CMP.L	0(A3,D6),D0		;left same as right?
+		BEQ.S	@1			;if so, it's simple
+
+		EOR	#4,D6			;restore D6
+@0		
+		MOVE.L	A1,-(SP)
+		BSR	ArithComplex1		;invoke scan-line handler for complex pats		
+		MOVE.L	(SP)+,A1
+		
+		BRA.S	@2
+@1
+		EOR	#4,D6
+		
+		MOVEM.L	A1/A3,-(SP)	
+		BSR	ArithSimplePat
+		MOVEM.L	(SP)+,A1/A3
+		
+; bump pointers to next time, and loop until done
+
+@2
+		TST.B	ENDSWITCH(A6)		;test pattern mode
+		BEQ.S	AFUCPat1		;if zero, handle
+		BMI.S	AFUCBitMap1		;if <0, go handle bitmap
+
+; handle bumping the pattern pointers
+
+		MOVE.W	PATPOS(A6),D0
+		SUB.W	D0,A3
+		ADD.W	PATROW(A6),D0
+		AND.W	PATVMASK(A6),D0
+		MOVE.W	D0,PATPOS(A6)
+		ADD.W	D0,A3
+		
+		BRA.S	ArithUCNextLine
+
+; handle second type of pattern
+
+AFUCPat1
+		MOVE.W	PATPOS(A6),D0
+		ADDQ	#1,D0
+		AND	#15,D0
+		LEA	([EXPAT,A6],D0.W*4),A3
+		
+		MOVE.W	D0,PATPOS(A6)
+
+; bump to the next scan line
+
+ArithUCNextLine
+		MOVE.L	PATOFFSET(A6),D6
+		ASR.L	#3,D6			;bits to bytes		
+ArithUCNL2
+		ADD.W	DSTROW+2(A6),A1		;bump destination
+		
+		SUBQ.W	#1,HEIGHT(A6)
+		BNE	ArithUCLoop
+		
+		ADDQ	#8,SP
+		RTS
+
+; handle unclipped blits source setup
+
+AFUCBitMap1
+		ADD.W	D6,A3
+		ADD.W	SRCBUMP(A6),A3		;bump to next line <PB448 DBG>
+		MOVEQ	#0,D6
+		BRA.S	ArithUCNL2
+		
+		
+;******************************************************************************************
+		
+; Handle SubOver unclipped rectangle fill
+
+UseOld356
+		JMPRom	Old356			;						<PB433>
+		
+SubOverUnclip	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld356		;if not, skip
+		tst.l	(sp)			;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld356		;if so, skip   			<PB427	 BAL>
+
+		LEA	SubOverHandler,A0	;set up the handler
+		BRA	ArithUCCommon		;use comon code
+		
+		
+;******************************************************************************************
+		
+; Handle AddPin unclipped rectangle fill
+
+UseOld351
+		JMPRom	Old351			;						<PB433>
+		
+AddPinUnclip	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld351		;if not, skip
+		tst.l	(sp)			;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld351		;if so, skip   			<PB427	 BAL>
+
+		LEA	AddPinHandler,A0	;set up the handler
+		BRA	ArithUCCommon		;use comon code
+		
+		
+;******************************************************************************************
+		
+; Handle SubPin unclipped rectangle fill
+
+UseOld353
+		JMPRom	Old353			;						<PB433>
+		
+SubPinUnclip	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld353		;if not, skip
+		tst.l	(sp)			;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld353		;if so, skip   			<PB427	 BAL>
+
+		LEA	SubPinHandler,A0	;set up the handler
+		BRA	ArithUCCommon		;use comon code
+		
+		
+;******************************************************************************************
+		
+; Handle AddMax unclipped rectangle fill
+
+UseOld355
+		JMPRom	Old355			;						<PB433>
+		
+AddMaxUnclip	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld355		;if not, skip
+		tst.l	(sp)			;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld355		;if so, skip   			<PB427	 BAL>
+
+		LEA	AddMaxHandler,A0	;set up the handler
+		BRA	ArithUCCommon		;use comon code
+		
+		
+;******************************************************************************************
+		
+; Handle AddMin unclipped rectangle fill
+
+UseOld357
+		JMPRom	Old357			;						<PB433>
+		
+AddMinUnclip	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld357		;if not, skip
+		tst.l	(sp)			;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld357		;if so, skip   			<PB427	 BAL>
+
+		LEA	AddMinHandler,A0	;set up the handler
+		BRA	ArithUCCommon		;use comon code
+
+		
+;******************************************************************************************
+		
+; Handle Blend unclipped rectangle fill
+
+UseOld350
+		JMPRom	Old350			;						<PB433>
+		
+BlendUnclip	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld350		;if not, skip
+		tst.l	(sp)			;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld350		;if so, skip   			<PB427	 BAL>
+
+		LEA	BlendHandler,A0		;set up the handler
+		BRA	ArithUCCommon		;use comon code
+
+		
+;******************************************************************************************
+
+;  Here's where we handle transparent mode.  The basic strategy is to create a mask from
+;  the pattern (for one and two long patterns) so we don't have to keep examining it
+;  pixel by pixel.  (If the mask is all ones, fall into the standard fills). 
+		
+; the first one is for transparent mode for ovals and roundRects
+
+TransFillO	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BEQ.S	@0				;if not, skip
+
+		JMPRom	Old38C			;
+		
+@0		CMP.W	#4,PATROW(A6)		;is it a simple pattern?
+		BGT.S	TransComplexPat		;if not, inspect it closer
+
+; it's a simple pattern, so make a mask according to the see-through color
+
+TransSimple1
+		MOVE.L	(A0),D6			;fetch the pattern
+		MOVEQ	#-1,D4			;mask is initially all ones
+		MOVE.B	TRANSCOLOR(A6),D5		;get color to compare with
+		
+		CMP.B	D6,D5
+		BNE.S	@0
+		
+		CLR.B	D4
+@0
+		ROR.L	#8,D4
+		ROR.L	#8,D6
+		
+		CMP.B	D6,D5
+		BNE.S	@1
+		
+		CLR.B	D4
+@1
+		ROR.L	#8,D4
+		ROR.L	#8,D6
+		
+		CMP.B	D6,D5
+		BNE.S	@2
+		
+		CLR.B	D4
+@2
+		ROR.L	#8,D4
+		ROR.L	#8,D6
+		
+		CMP.B	D6,D5
+		BNE.S	@3
+		
+		CLR.B	D4
+@3
+		ROR.L	#8,D4
+		ROR.L	#8,D6
+			
+; if the mask is all ones, plot it quickly using the standard fill routine
+
+		MOVE.L	A2,D0			;if no clipping
+		BEQ.S	@4			;skip optimization (things not set up)
+		
+		CMP.L	#-1,D4			;is mask all ones?
+		BEQ	FCSL2			;use standard pattern fill
+
+; OK, mask is in D4, A2 points to the region, pattern in D6 and A1 is the destination.  
+; use the straightforward loop, since region optimizations aren't worth it since we
+; always have to read the destination.
+
+@4
+		TST.W	D2			;only one long?
+		BNE.S	TransSimpleLoop		;if not, skip
+TSL0
+		AND.L	D1,D3			;combine edges for last one
+TransSimpleLoop
+		MOVE.L	A2,D0
+		BEQ.S	@0
+		
+		AND.L	(A2)+,D3		;pick up the region mask
+@0		
+		AND.L	D4,D3			;punch out transparent part
+		
+		MOVE.L	D6,D0
+		AND.L	D3,D0
+		
+		NOT.L	D3
+		AND.L	(A1),D3
+		OR.L	D0,D3
+		MOVE.L	D3,(A1)+
+		
+		MOVEQ	#-1,D3
+		
+		SUBQ.W	#1,D2			;decrement counter
+		BGT.S	TransSimpleLoop		;loop until done
+		BEQ.S	TSL0
+		
+		RTS
+
+; see if the complex pattern is really a simple one, if so, we can speed things up
+
+TransComplexPat
+		MOVE.W	D0,D6
+		ADD.W	PATHPOS(A6),D6
+		
+		MOVE.W	PATHMASK(A6),D4		;get pattern mask
+		ASR	#3,D4			;turn bit index to byte  index
+		AND.W	D4,D6			;mask it
+
+		MOVE.L	EXPAT(A6),A3
+		ADD.W	PATVPOS(A6),A3		;compute pattern address
+
+		CMP.W	#8,PATROW(A6)		;is it a double pattern?
+		BGT.S	TransComplex1		;if not, must be complex
+		
+		MOVE.L	0(A3,D6),D4		;get source longword
+		EOR	#4,D6
+		CMP.L	0(A3,D6),D4		;is it really simple?
+		BEQ	TransSimple1		;if so, go handle
+
+		EOR	#4,D6			;restore D6
+TransComplex1
+		MOVE.L	D7,-(SP)
+		MOVE.L	TRANSCOLOR(A6),D5		;get color to compare with
+		
+		TST.W	D2
+		BNE.S	TCPatLoop
+		
+; it's complex, so plot it ourselves.  First fetch the pattern.
+
+TCPLoop0
+		AND.L	D1,D3
+TCPatLoop
+		MOVE.W	PATHMASK(A6),D4		;get pattern mask
+		ASR	#3,D4			;turn bit index to byte  index
+		AND.W	D4,D6			;mask it
+
+		MOVE.L	0(A3,D6),D7		;get source longword
+		ADDQ	#4,D6	
+
+		CMP.L	D7,D5			;all transparent?
+		BEQ.S	TCPSkip
+		
+; now create a mask for it
+
+		MOVEQ	#-1,D4			;mask is initially all ones
+		
+		CMP.B	D7,D5
+		BNE.S	@0
+		
+		CLR.B	D4
+@0
+		ROR.L	#8,D4
+		ROR.L	#8,D7
+		
+		CMP.B	D7,D5
+		BNE.S	@1
+		
+		CLR.B	D4
+@1
+		ROR.L	#8,D4
+		ROR.L	#8,D7
+		
+		CMP.B	D7,D5
+		BNE.S	@2
+		
+		CLR.B	D4
+@2
+		ROR.L	#8,D4
+		ROR.L	#8,D7
+		
+		CMP.B	D7,D5
+		BNE.S	@3
+		
+		CLR.B	D4
+@3
+		ROR.L	#8,D4
+		ROR.L	#8,D7
+			
+; now we can finally plot it
+
+		MOVE.L	A2,D0
+		BEQ.S	@8
+		
+		AND.L	(A2)+,D3		;pick up the region mask
+@8		
+		AND.L	D4,D3			;punch out transparent part
+		
+		MOVE.L	D7,D0
+		AND.L	D3,D0
+		
+		NOT.L	D3
+		AND.L	(A1),D3
+		OR.L	D0,D3
+		MOVE.L	D3,(A1)+
+		
+; loop until done
+
+NextTCP		
+		MOVEQ	#-1,D3
+		
+		SUBQ.W	#1,D2			;decrement counter
+		BGT.S	TCPatLoop		;loop until done
+		BEQ.S	TCPLoop0
+		
+		MOVE.L	(SP)+,D7
+		RTS
+
+TCPSkip
+		MOVE.L	A2,D0
+		BEQ.S	@0
+		
+		ADDQ.L	#4,A2
+@0		
+		ADDQ	#4,A1
+		
+		BRA.S	NextTCP
+
+		
+;******************************************************************************************
+
+; Here's where we handle the clipped transparent mode rectangle fill
+		
+UseOld36A
+		JMPRom	Old36A			;						<PB433>
+		
+		
+TransFillR	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld36A		;if not, skip
+		tst.l	d3				;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld36A		;if s0, skip   			<PB427	 BAL>
+		
+; set up the registers and invoke the common scan-line handler
+
+		MOVE.L	A4,A2			;set up region pointer
+		ASR	#3,D6			;bit index to byte index
+		MOVE.L	A5,A1			;set up destination
+TransFillLoop		
+		MOVEQ	#-1,D1
+		MOVEQ	#-1,D3			;edge masks all ones (edges in region)
+
+		MOVE.W	BUFSIZE(A6),D2		;set up the count
+		ADDQ	#4,D2			;make one based			<PB427	 BAL>
+		LSR.W	#2,D2
+		SUBQ	#1,D2			;make zero based		<PB427	 BAL>
+		
+; call the appropriate handle, depending on whether the pattern is simple or complex		
+	
+		CMP.W	#8,PATROW(A6)		;is pattern real complex?
+		BGT.S	@0			;if so, go handle it
+
+		TST.B	SRCV(A6)		;test pattern mode
+		BMI.S	@0			;treat bitmap as complex
+		
+		MOVE.L	0(A3,D6),D0		;get left pattern
+		EOR	#4,D6
+		CMP.L	0(A3,D6),D0		;left same as right?
+		BEQ.S	@1			;if so, it's simple
+
+		EOR	#4,D6			;restore D6
+@0		
+		BSR	TransComplex1		;invoke scan-line handler for complex pats		
+		BRA.S	@2
+@1
+		EOR	#4,D6
+		MOVE.L	A3,A0
+		BSR	TransSimple1
+		
+; bump pointers to next time, and loop until done
+
+@2
+		MOVE.W	DSTV(A6),D0
+		
+		TST.B	SRCV(A6)		;test pattern mode
+		BEQ.S	TransPat1		;if zero, handle
+		BMI.S	TransBitMap1	;if <0, go handle bitmap
+
+		MOVE.L	HEIGHT(A6),D6		;get pattern index
+		ASR.L	#3,D6			;bit index to byte index
+
+; handle bumping the pattern pointers
+
+		MOVE.L	SRCADDR(A6),A3		;set up pattern pointer
+		SUB.W	D0,A3
+		ADD.W	PATROW(A6),D0
+		AND.W	PATVMASK(A6),D0
+		MOVE.W	D0,DSTV(A6)
+		ADD.W	D0,A3
+		
+		BRA.S	TransSetPatPtr
+
+; handle second type of pattern
+
+TransPat1
+		MOVE.L	HEIGHT(A6),D6		;get pattern index
+		ASR.L	#3,D6			;bit index to byte index
+
+		ADDQ	#1,D0
+		AND	#15,D0
+		LEA	([EXPAT,A6],D0.W*4),A3
+		
+		MOVE.W	D0,HEIGHT(A6)
+TransSetPatPtr		
+		MOVE.L	A3,SRCADDR(A6)
+		
+; bump to the next scan line
+
+TransFillNextLine
+		MOVE.L	DSTROW(A6),D0
+		ADD.L	D0,DSTADDR(A6)
+
+		MOVE.W	VERT(A6),D0
+		ADD.W	VBUMP(A6),D0
+		MOVE.W	D0,VERT(A6)
+		
+		CMP.W	LASTV(A6),D0
+		BNE.S	@0
+
+; all done, so strip stack and return
+
+		MOVE.L	SAVESTK2(A6),A7
+		RTS
+
+; set up registers and loop for the next line
+
+@0
+		MOVE.L	SEEKMASK(A6),A0
+		JSR	(A0)			;seek new region
+		
+		MOVE.L	SRCADDR(A6),A3		;set up pattern pointer
+		MOVE.L	DSTADDR(A6),A1		;set up dest ptr
+		MOVE.L	RGNADDR(A6),A2		;set up region ptr
+	
+		BRA	TransFillLoop
+
+; handle bumping the source if it's a bitmap
+
+TransBitMap1
+		MOVE.L	SRCROW(A6),D0
+									;<PB427	 BAL>
+		ADD.L	D0,SRCADDR(A6)
+		
+		MOVE.l	HEIGHT(A6),D6	
+		asr.l	#3,d6				;make byte offset <PB427	 BAL>
+		BRA.S	TransFillNextLine
+		
+
+;******************************************************************************************
+				
+
+UseOld354
+		JMPRom	Old354			;						<PB433>
+
+		
+TransUnClip	
+
+		CMP.W	#8,DSTPIX+PIXELSIZE(A6)		;is it 8 bit mode?
+		BNE.S	UseOld354		;if not, skip
+		tst.l	(sp)			;right to left? 		<PB427	 BAL>
+		bmi.s	UseOld354		;if so, skip   			<PB427	 BAL>
+		
+; set up the registers and invoke the common scan-line handler
+
+		SUB.L	A2,A2			;no region pointer
+		ASR	#3,D6			;bit index to byte index
+		MOVE.L	A4,A3			;set up pattern pointer
+		MOVE.L	A5,A1			;set up destination
+TransUCLoop		
+		MOVE.L	FIRSTMASK(A6),D3		;set up left edge
+		MOVE.L	LASTMASK(A6),D1		;set up right edge
+
+; compute the count from the three pieces: left, mid and right
+
+		MOVE.W	LONGCNT(A6),D2		;get left count
+		BPL.S	@3			;if positive, we're cool
+		
+		MOVEQ	#0,D2			;only one word
+		BRA.S	@4
+@3
+		ADD.W	MIDCOUNT(A6),D2		;add in the middle
+		ADD.W	PIXINLONG(A6),D2		;add in the right
+		ADDQ.W	#2,D2			;add for count bias
+		LSR.W	#2,D2			;bytes -> longs
+
+; call the appropriate handle, depending on whether the pattern is simple or complex		
+
+@4	
+		CMP.W	#8,PATROW(A6)		;is pattern real complex?
+		BGT.S	@0			;if so, go handle it
+
+		TST.B	ENDSWITCH(A6)		;test pattern mode
+		BMI.S	@0			;if bitmap, handle as complex
+		
+		MOVE.L	0(A3,D6),D0		;get left pattern
+		EOR	#4,D6
+		CMP.L	0(A3,D6),D0		;left same as right?
+		BEQ.S	@1			;if so, it's simple
+
+		EOR	#4,D6			;restore D6
+@0		
+		MOVE.L	A1,-(SP)
+		BSR	TransComplex1		;invoke scan-line handler for complex pats		
+		MOVE.L	(SP)+,A1
+		
+		BRA.S	@2
+@1
+		EOR	#4,D6
+		
+		MOVEM.L	A1/A3,-(SP)	
+		MOVE.L	A3,A0
+		BSR	TransSimple1
+		MOVEM.L	(SP)+,A1/A3
+		
+; bump pointers to next time, and loop until done
+
+@2
+		TST.B	ENDSWITCH(A6)		;test pattern mode
+		BEQ.S	TransUCPat1		;if zero, handle
+		BMI.S	TransUCBitMap1		;if <0, go handle bitmap
+
+; handle bumping the pattern pointers
+
+		MOVE.W	PATPOS(A6),D0
+		SUB.W	D0,A3
+		ADD.W	PATROW(A6),D0
+		AND.W	PATVMASK(A6),D0
+		MOVE.W	D0,PATPOS(A6)
+		ADD.W	D0,A3
+		
+		BRA.S	TransUCNextLine
+
+; handle second type of pattern
+
+TransUCPat1
+		MOVE.W	PATPOS(A6),D0
+		ADDQ	#1,D0
+		AND	#15,D0
+		LEA	([EXPAT,A6],D0.W*4),A3
+		
+		MOVE.W	D0,PATPOS(A6)
+
+; bump to the next scan line
+
+TransUCNextLine
+		MOVE.L	PATOFFSET(A6),D6
+		ASR.L	#3,D6			;bits to bytes		
+TransUCNL2
+		ADD.W	DSTROW+2(A6),A1		;bump destination
+		
+		SUBQ.W	#1,HEIGHT(A6)
+		BNE	TransUCLoop
+		
+		ADDQ	#4,SP
+		RTS
+
+; handle unclipped blits source setup
+
+TransUCBitMap1
+		ADD.W	D6,A3
+		ADD.W	SRCBUMP(A6),A3		;bump to next line <PB448 DBG>
+		MOVEQ	#0,D6
+		BRA.S	TransUCNL2
+		
+;******************************************************************************************
+
+;   End of arithmetic transfer modes!
+		
+;******************************************************************************************
+						
+; Special BlockMove subroutine optimized for this situation.  The source is in A0 
+; and dest in A1, with byte count in D0.  Note things are already pre-bumped for
+; the MoveRight case.  Note that we  assume that no move is bigger than 32KBytes, 
+; to save a little speed (no scanline is that big!)
+
+BlockMove
+		
+		TST.W	D5			;test direction
+		BMI	MoveRight		;if right, skip
+		
+; for small moves, all this casing out is a losing battle, so dive in quickly
+
+		CMP.W	#32,D0			;is it really small?
+		BLT.S	FinishUpLeft		;if so, finish up last few
+
+; make sure the destination is always longword aligned by moving up to 3 bytes
+
+		MOVE.W	A1,D1			;get destination
+		AND.W	#3,D1			;low two bits only
+		BEQ.S	MediumLeft		;if 0, skip
+		
+		JMP	LeftAlign(D1.W*4)
+LeftAlign
+		NOP
+		NOP
+		
+		MOVE.B	(A0)+,(A1)+
+		SUBQ	#1,D0
+
+		MOVE.B	(A0)+,(A1)+
+		SUBQ	#1,D0
+		
+		MOVE.B	(A0)+,(A1)+
+		SUBQ	#1,D0
+								
+; we've got a medium-sized block to move (at least 32), so handle it with an unwound MOVE.L loop
+
+MediumLeft
+		MOVE.W	D0,D1
+		LSR.W	#5,D1			;divide by 32
+		BRA.S	@2
+		
+@1
+		MOVE.L	(A0)+,(A1)+		;move 32 bytes
+		MOVE.L	(A0)+,(A1)+
+		MOVE.L	(A0)+,(A1)+
+		MOVE.L	(A0)+,(A1)+
+		MOVE.L	(A0)+,(A1)+		
+		MOVE.L	(A0)+,(A1)+
+		MOVE.L	(A0)+,(A1)+
+		MOVE.L	(A0)+,(A1)+
+@2
+		DBRA	D1,@1			;move it
+
+; now we have 31 or less bytes left to move		
+
+		AND	#31,D0
+FinishUpLeft
+		MOVE.W	LOffsetTable(D0.W*2),D0
+		JMP	LastLeft(D0)
+LastLeft		
+ 
+Left1F
+		MOVE.L	(A0)+,(A1)+
+Left1B
+		MOVE.L	(A0)+,(A1)+
+Left17
+		MOVE.L	(A0)+,(A1)+
+Left13
+		MOVE.L	(A0)+,(A1)+
+LeftF
+		MOVE.L	(A0)+,(A1)+		;move next 32 (64 total)
+LeftB		
+		MOVE.L	(A0)+,(A1)+
+Left7		
+		MOVE.L	(A0)+,(A1)+
+Left3		
+		MOVE.W	(A0)+,(A1)+
+Left1		
+		MOVE.B	(A0)+,(A1)+
+Left0
+
+DoneBlockMove		
+		RTS
+Left1E
+		MOVE.L	(A0)+,(A1)+
+Left1A
+		MOVE.L	(A0)+,(A1)+
+Left16
+		MOVE.L	(A0)+,(A1)+
+Left12
+		MOVE.L	(A0)+,(A1)+
+LeftE
+		MOVE.L	(A0)+,(A1)+
+LeftA		
+		MOVE.L	(A0)+,(A1)+
+Left6
+		MOVE.L	(A0)+,(A1)+
+Left2
+		MOVE.W	(A0)+,(A1)+
+
+		RTS		
+
+Left1C
+		MOVE.L	(A0)+,(A1)+
+Left18		
+		MOVE.L	(A0)+,(A1)+
+Left14
+		MOVE.L	(A0)+,(A1)+
+Left10
+		MOVE.L	(A0)+,(A1)+
+LeftC
+		MOVE.L	(A0)+,(A1)+
+Left8
+		MOVE.L	(A0)+,(A1)+
+Left4
+		MOVE.L	(A0)+,(A1)+		
+		RTS
+Left1D
+		MOVE.L	(A0)+,(A1)+
+Left19
+		MOVE.L	(A0)+,(A1)+
+Left15
+		MOVE.L	(A0)+,(A1)+
+Left11
+		MOVE.L	(A0)+,(A1)+
+LeftD
+		MOVE.L	(A0)+,(A1)+
+Left9
+		MOVE.L	(A0)+,(A1)+
+Left5
+		MOVE.L	(A0)+,(A1)+
+		MOVE.B	(A0)+,(A1)+		
+		RTS
+
+LOffsetTable
+		DC.W	Left0-LastLeft
+		DC.W	Left1-LastLeft
+		DC.W	Left2-LastLeft
+		DC.W	Left3-LastLeft
+		DC.W	Left4-LastLeft
+		DC.W	Left5-LastLeft
+		DC.W	Left6-LastLeft
+		DC.W	Left7-LastLeft
+		DC.W	Left8-LastLeft
+		DC.W	Left9-LastLeft
+		DC.W	LeftA-LastLeft
+		DC.W	LeftB-LastLeft
+		DC.W	LeftC-LastLeft
+		DC.W	LeftD-LastLeft
+		DC.W	LeftE-LastLeft
+		DC.W	LeftF-LastLeft
+		DC.W	Left10-LastLeft
+		DC.W	Left11-LastLeft
+		DC.W	Left12-LastLeft
+		DC.W	Left13-LastLeft
+		DC.W	Left14-LastLeft
+		DC.W	Left15-LastLeft
+		DC.W	Left16-LastLeft
+		DC.W	Left17-LastLeft
+		DC.W	Left18-LastLeft
+		DC.W	Left19-LastLeft
+		DC.W	Left1A-LastLeft
+		DC.W	Left1B-LastLeft
+		DC.W	Left1C-LastLeft
+		DC.W	Left1D-LastLeft
+		DC.W	Left1E-LastLeft
+		DC.W	Left1F-LastLeft
+		
+
+; Handle the case of moving to the right
+
+MoveRight
+		CMP.W	#32,D0			;is it really small?
+		BLT.S 	FinishUpRight		;if so, finish up last few
+
+; make sure the destination is always longword aligned by moving up to 3 bytes
+
+		MOVE.W	A1,D1			;get destination
+		AND.W	#3,D1			;low two bits only
+		
+		EOR.W	#3,D1			;flip sense		
+		JMP	RightAlign(D1.W*4)
+RightAlign
+		MOVE.B	-(A0),-(A1)
+		SUBQ	#1,D0
+
+		MOVE.B	-(A0),-(A1)
+		SUBQ	#1,D0
+		
+		MOVE.B	-(A0),-(A1)
+		SUBQ	#1,D0
+								
+; we've got a medium-sized block to move (at least 32), so handle it with an unwound MOVE.L loop
+
+MediumRight
+		MOVE.W	D0,D1
+		LSR.W	#5,D1			;divide by 32
+		BRA.S	@2
+@1
+		MOVE.L	-(A0),-(A1)		;move 32 bytes
+		MOVE.L	-(A0),-(A1)
+		MOVE.L	-(A0),-(A1)
+		MOVE.L	-(A0),-(A1)
+		MOVE.L	-(A0),-(A1)
+		MOVE.L	-(A0),-(A1)
+		MOVE.L	-(A0),-(A1)
+		MOVE.L	-(A0),-(A1)
+@2		
+		DBRA	D1,@1			;move the bulk of it
+		
+; now we have 31 or less bytes left to move		
+
+		AND	#31,D0
+FinishUpRight
+		MOVE.W	ROffsetTable(D0.W*2),D0
+;+++		JMP	LastRight(D0)	
+		JMP		(QGLastRight,PC,D0)		; this is a hack - this JMP must be immediately before the table
+QGLastRight		
+
+Right1F
+		MOVE.L	-(A0),-(A1)
+Right1B
+		MOVE.L	-(A0),-(A1)
+Right17
+		MOVE.L	-(A0),-(A1)
+Right13
+		MOVE.L	-(A0),-(A1)
+RightF
+		MOVE.L	-(A0),-(A1)		;move next 32 (64 total)
+RightB		
+		MOVE.L	-(A0),-(A1)
+Right7		
+		MOVE.L	-(A0),-(A1)
+Right3		
+		MOVE.W	-(A0),-(A1)
+Right1		
+		MOVE.B	-(A0),-(A1)
+Right0
+		RTS
+Right1E
+		MOVE.L	-(A0),-(A1)
+Right1A
+		MOVE.L	-(A0),-(A1)
+Right16
+		MOVE.L	-(A0),-(A1)
+Right12
+		MOVE.L	-(A0),-(A1)
+RightE
+		MOVE.L	-(A0),-(A1)
+RightA		
+		MOVE.L	-(A0),-(A1)
+Right6
+		MOVE.L	-(A0),-(A1)
+Right2
+		MOVE.W	-(A0),-(A1)
+
+		RTS		
+
+Right1C
+		MOVE.L	-(A0),-(A1)
+Right18		
+		MOVE.L	-(A0),-(A1)
+Right14
+		MOVE.L	-(A0),-(A1)
+Right10
+		MOVE.L	-(A0),-(A1)
+RightC
+		MOVE.L	-(A0),-(A1)
+Right8
+		MOVE.L	-(A0),-(A1)
+Right4
+		MOVE.L	-(A0),-(A1)
+		
+		RTS
+Right1D
+		MOVE.L	-(A0),-(A1)
+Right19
+		MOVE.L	-(A0),-(A1)
+Right15
+		MOVE.L	-(A0),-(A1)
+Right11
+		MOVE.L	-(A0),-(A1)
+RightD
+		MOVE.L	-(A0),-(A1)
+Right9
+		MOVE.L	-(A0),-(A1)
+Right5
+		MOVE.L	-(A0),-(A1)
+		MOVE.B	-(A0),-(A1)		
+		
+		RTS
+
+ROffsetTable
+		DC.W	Right0-QGLastRight
+		DC.W	Right1-QGLastRight
+		DC.W	Right2-QGLastRight
+		DC.W	Right3-QGLastRight
+		DC.W	Right4-QGLastRight
+		DC.W	Right5-QGLastRight
+		DC.W	Right6-QGLastRight
+		DC.W	Right7-QGLastRight
+		DC.W	Right8-QGLastRight
+		DC.W	Right9-QGLastRight
+		DC.W	RightA-QGLastRight
+		DC.W	RightB-QGLastRight
+		DC.W	RightC-QGLastRight
+		DC.W	RightD-QGLastRight
+		DC.W	RightE-QGLastRight
+		DC.W	RightF-QGLastRight
+		DC.W	Right10-QGLastRight
+		DC.W	Right11-QGLastRight
+		DC.W	Right12-QGLastRight
+		DC.W	Right13-QGLastRight
+		DC.W	Right14-QGLastRight
+		DC.W	Right15-QGLastRight
+		DC.W	Right16-QGLastRight
+		DC.W	Right17-QGLastRight
+		DC.W	Right18-QGLastRight
+		DC.W	Right19-QGLastRight
+		DC.W	Right1A-QGLastRight
+		DC.W	Right1B-QGLastRight
+		DC.W	Right1C-QGLastRight
+		DC.W	Right1D-QGLastRight
+		DC.W	Right1E-QGLastRight
+		DC.W	Right1F-QGLastRight
+
+EndQPatches
+
+
+		PRINT	OFF

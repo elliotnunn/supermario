@@ -1,0 +1,1524 @@
+;__________________________________________________________________________________________________
+;	File:		GDevice.a
+;
+;	Contains:	QuickDraw routines that manage GDevices
+;
+;	Written by:	Various Authors
+;
+;	Copyright:	© 1981-1993 by Apple Computer, Inc., all rights reserved.
+;
+;	Change History (most recent first):
+;
+;	   <SM5>	10-19-93	jmp		Changed NewGDevice so it more intelligently handles mono-only
+;									devices.
+;	   <SM4>	  4/8/93	IH		Add some comments on Display Manager assumptions about
+;									InitGDevice to InitGDevice header.
+;	   <SM3>	  2/4/93	CSS		Update from Horror:
+;		<H2>	 7/10/92	SWC		Made a change to GetDevPixMap to fix a problem with fixed
+;									devices. It was generating a new ctSeed unconditionally, which
+;									caused problems with the IconUtilities package since the Palette
+;									Manager would say that the tolerance between the device's and
+;									system CLUTs wasn't close enough to draw a multi-bit icon.
+;	   <SM2>	 6/11/92	stb		<sm 6/9/92>stb Synched with QDciPatchROM.a, added comments to
+;									DisposGDevice and InitGDevice.
+;		 <8>	 7/24/90	gbm		get rid of stupid branch
+;		 <7>	 2/20/90	BAL		When disposing the LastTxGDevice, reset it to the MainDevice.
+;		 <6>	  2/1/90	DAF		Add AllocCrsr before ShowCursor in CheckDevices (called from
+;									InitGraf). Changed ShieldCursor to HideCursor in InitGDevice.
+;									This is consistent with the CheckDevicesINIT.a.
+;		 <5>	 1/29/90	DVB		Dont walk nonexistant portlist
+;		 <4>	 1/17/90	DVB		Touch-up to InitGDevice
+;		 <3>	 1/12/90	DVB		More InitGDevice
+;		 <2>	  1/8/90	DVB		Make InitGDevice safer and smarter about changing baseAddr's
+;	   <2.6>	 9/25/89	BAL		Defered InitGDevices paletteMgr notify until after the GDRect is
+;									valid.
+;	  <•2.5>	 7/14/89	BAL		For Aurora: Final CQD
+;	   <2.4>	 7/13/89	DAF		FOR AURORA BUILD - Two fixes: 1) corrected startup gamma tables
+;									from scrn resource in CheckDevices; 2) rewrote fixed device
+;									color table handling in GetDevPixMap (fixes E-Machines Big
+;									Picture)
+;	   <2.3>	  7/6/89	GGD		Changed the JSR OPENPIXMAP to a BSR.L so that it can reach when
+;									alignment is turned on.
+;	   <2.2>	 6/30/89	BAL		Changed source to use mainScreen instead of mainScrn
+;	   <2.1>	 6/12/89	BAL		Altered InitGDevice to not request grayscale versions for 1 and
+;									2 bit modes.
+;	   <2.0>	 6/10/89	CEL		Moved Private.a QuickDraw Equates into proper QuickDraw private
+;									file (colorequ.a), got rid of QuickDraw nFiles dependencies and
+;									fixed up necessary files…
+;	   <1.9>	 5/30/89	DAF		Fixed gdpMap rect offsets when then scrn resource is bad
+;	  <•1.8>	 5/29/89	BAL		Blasting in 32-Bit QuickDraw version 1.0 Final
+;	  <•1.7>	 4/12/89	BAL		Blasting in 32-Bit QuickDraw 1.0B1
+;				  4/5/89	DAF		Added more validity checking of scrn resource in CheckDevices
+;									(compares scrnRects,too). If scrn resource is invalid, then
+;									offset all inactive screens from (0,0) to help out people who
+;									forget to check scrnActive.
+;				  4/3/89	DAF		Updated InitGDevice to set driver luminence mapping even if
+;									pixel depth doesn't change.
+;				 3/26/89	DAF		Added linear gamma support from scrn resource; reordered
+;									CheckDevices; integrated CheckGray into CheckDevices; updated
+;									SetGray/getCTable support to the new world; plugged InitGDevice
+;									into Palette Manager; corrected fixed CLUT support in
+;									GetDevPixmap.
+;				12/11/88	BAL		Altered getDevPixMap to set high bit of pmVersion for 32 bit
+;									base addresses.
+;	  <C887>	  9/9/87	GWN		32-bit mode fix for Slot manager. Use DCE to get device base.
+;				 5/27/87	EHB		Roll patch into CheckDevices to make sure color/gray is set.
+;	  <C741>	  2/2/87	JTC		Change to new, word-length <cat><id><sw><hw> constants.
+;	  <C742>	  2/2/87	GWN		Changed read of video parameters.
+;	  <C720>	 1/29/87	GWN		Cleared spExtDev field where neccessary.
+;	  <C100>	  8/1/86	DAF		InitGDevice to handle uninitialized theGDevice.
+;				 7/29/86	DAF		Modified for color manager
+;				  5/8/86	EHB		New Today
+;
+;	To Do:
+;__________________________________________________________________________________________________
+
+;EASE$$$ READ ONLY COPY of file “gdevice.a”
+; 2.6	BAL 09/25/1989 Defered InitGDevices paletteMgr notify until after the GDRect is valid.
+;•2.5	BAL 07/14/1989 For Aurora: Final CQD
+; 2.4	DAF 07/13/1989 FOR AURORA BUILD - Two fixes: 1) corrected startup gamma
+;		tables from scrn resource in CheckDevices; 2) rewrote fixed device
+;		color table handling in GetDevPixMap (fixes E-Machines Big Picture)
+; 2.3	GGD 07/06/1989  Changed the JSR OPENPIXMAP to a BSR.L so that it can reach when alignment
+;		is turned on.
+; 2.2	BAL 06/30/1989 Changed source to use mainScreen instead of mainScrn
+; 2.1	BAL 06/12/1989 Altered InitGDevice to not request grayscale versions for 1 and 2 bit modes.
+; 2.0	CEL 06/10/1989 Moved Private.a QuickDraw Equates into proper QuickDraw
+;		private file (colorequ.a), got rid of QuickDraw nFiles dependencies
+;		and fixed up necessary files…
+; 1.9	DAF 05/30/1989 Fixed gdpMap rect offsets when then scrn resource is bad
+;•1.8	BAL 05/29/1989 Blasting in 32-Bit QuickDraw version 1.0 Final
+;•1.7	BAL 04/12/1989 Blasting in 32-Bit QuickDraw 1.0B1
+; File GDevice.a
+;
+; Copyright Apple Computer, Inc.  1981-1986
+; All Rights Reserved
+;
+;
+
+		BLANKS	ON
+		STRING	ASIS
+
+		MACHINE	MC68020
+
+;------------------------------------------------------
+;
+;  QuickDraw Routines to maintain the current grafDevice.
+;
+
+; MODIFICATION HISTORY
+;
+;  8May86  EHB	New Today
+; 29Jul86  DAF	Modified for color manager
+; <C100/01Aug86> DAF InitGDevice to handle uninitialized theGDevice.
+; <C720/29Jan87> GWN Cleared spExtDev field where neccessary.
+; <C741/02Feb87> JTC Change to new, word-length <cat><id><sw><hw> constants.
+; <C742/02Feb87> GWN Changed read of video parameters.
+; <C887 09Sep87> GWN 32-bit mode fix for Slot manager. Use DCE to get device base.
+;
+;----------------------------  Macintosh II ROMs  -----------------------------
+;
+; 	27May87	EHB Roll patch into CheckDevices to make sure color/gray is set.
+;
+;----------------------------  32-bit QuickDraw  ------------------------------
+;
+; 	11Dec88	BAL Altered getDevPixMap to set high bit of pmVersion for 32 bit base addresses.
+;	26Mar89	DAF	Added linear gamma support from scrn resource; reordered CheckDevices;
+;				integrated CheckGray into CheckDevices; updated SetGray/getCTable support
+;				to the new world; plugged InitGDevice into Palette Manager; corrected
+;				fixed CLUT support in GetDevPixmap.
+;	3Apr89	DAF	Updated InitGDevice to set driver luminence mapping even if pixel depth
+;				doesn't change.
+;	5Apr89	DAF	Added more validity checking of scrn resource in CheckDevices (compares
+;				scrnRects,too).  If scrn resource is invalid, then offset all inactive
+;				screens from (0,0) to help out people who forget to check scrnActive.
+
+
+NewGDevice 	PROC  	EXPORT
+			IMPORT 	INITGDEVICE,OPENPIXMAP,SetGDevice,DisposGDHandles
+;-------------------------------------------------------------
+;
+;  FUNCTION NewGDevice (refNum: INTEGER; mode: LONGINT) : GDHandle;
+;
+;  	Allocate a new GDevice and all its handles, then call InitGDevice
+;	to initialize it for the specified device in the specified mode.
+;   The grafDevice and its pixMap are always locked down.
+;
+;   If a memory request is unsuccessful, then a NIL handle is returned
+;
+;	NOTE:  Assumes that the driver has already been opened (it has a
+; 	REFNUM and a DCE).
+;
+PARAMSIZE	EQU 	6						; total bytes of parameters
+RESULT		EQU 	PARAMSIZE+8 			; LONG, GrafDevice
+REFNUM		EQU 	RESULT-2				; WORD, Driver reference number
+MODE		EQU 	REFNUM-4				; LONG, Mode for video card
+
+		LINK	A6,#0						; no locals
+		MOVEM.L	A2/A3,-(SP)					; preserve work registers
+		CLR.L	RESULT(A6)					; indicate failure
+
+		MOVE.L	theZone,-(SP)				; save the current heap zone
+		MOVE.L	sysZone,theZone				; and get the system heap
+
+		MOVEQ	#GDRec,D0					; get size of graf device record
+		_RESRVMEM							; reserve space for it down low
+		BNE		NOMEM						; => couldn't get it
+		MOVEQ	#GDRec,D0					; get size of graf device record
+		_NEWHANDLE	,CLEAR					; allocate the handle
+		_HLOCK								; and lock it
+		MOVE.L	A0,A2						; A2 = graf device handle
+		MOVE.L	(A2),A3						; A3 = graf device pointer
+
+		MOVEQ	#2,D0						; initial size of inverse table
+		_NEWHANDLE ,CLEAR					; get a handle for the inverse table
+											; allocated in system heap
+		BNE		NOMEM						; => couldn't get it
+		MOVE.L	A0,GDITable(A3)				; save handle to inverse table
+
+		MOVEQ	#2,D0						; initial size of expanded cursor data
+		_NEWHANDLE ,CLEAR					; get a handle for expanded cursor data
+											; allocated in system heap
+		BNE.S	NOMEM						; => couldn't get it
+		MOVE.L	A0,GDCCXDATA(A3)			; save handle to expanded cursor data
+
+		MOVEQ	#2,D0						; initial size of expanded cursor mask
+		_NEWHANDLE ,CLEAR					; get a handle for the expanded cursor mask
+											; allocated in system heap
+		BNE.S	NOMEM						; => couldn't get it
+		MOVE.L	A0,GDCCXMASK(A3)			; save handle to expanded cursor mask
+
+		MOVEQ	#CCSaveRec,D0				; get size needed by openPixMap
+		_ResrvMem							; reserve space down low
+		BNE.S	NOMEM						; => couldn't get it
+		CLR.L	-(SP)						; make room for function result
+		BSR.L	OPENPIXMAP					; get an uninitialize pixMap in sysHeap	<2.3>
+		MOVE.L	(SP),GDPMap(A3)				; save pixel Map
+		MOVE.L	(SP)+,A0					; get handle to pixMap
+		_HLock								; and lock it down
+
+		MOVE.L	MODE(A6),D0					; get the mode							<C710>
+		CMP.L	#-1,D0						; if mode = -1, then don't init			<C769>
+		beq.s	Done						; => go home							<C769>
+
+		CMP.W	#OneBitMode,D0				; is it one bit per pixel?
+		BEQ.S	@Mono						; => yes, default to black and white
+		Bsr		TestForGray					; is it monochrome only?
+		Bne.s	@Mono						; => yes, leave GDevice mono
+		BSET	#GDDevType,GDFlags+1(A3)	; else default to color
+
+@Mono	MOVE.W	REFNUM(A6),-(SP)			; pass device to initialize
+		MOVE.L	MODE(A6),-(SP)				; pass mode to initialize
+		MOVE.L	A2,-(SP)					; and pass gDevice handle
+		_InitGDevice						; initialize the device port
+
+DONE	MOVE.L	(SP)+,theZone				; restore the zone
+		MOVE.L	A2,RESULT(A6)				; return graf device handle
+		MOVEM.L	(SP)+,A2/A3					; restore work register
+		UNLINK	PARAMSIZE,'NEWGDEVI'
+
+NOMEM	MOVE.L	A2,-(SP)					; push grafDevice
+		JSR		DisposGDHandles				; and dispose of its handles
+		BRA.S	DONE						; => and return
+
+;
+;	Ever since the first Edition of Cards & Drivers, the video driver call SetGray has been
+;	documented.  This routine takes a byte (0=color, non-zero=gray), and tells the video
+;	driver to put itself into luminence mapping mode (gray) or not.  This call has been
+;	defined as “optional,” so some video drivers may exclude it.  Nevertheless, by using
+;	this call we can make a fairly intelligent guess as to whether to leave a multibit
+;	GDevice mono or not.  Indeed, if we attempt to call SetGray(0), and we get back a non-zero,
+;	value, then we should leave the GDevice mono.  All Apple video drivers have done this with
+;	their monochrome-only displays.
+;
+		
+		With	VDPageInfo
+TestForGray
+@SaveEm	Reg		A0-A1/D0					; 	
+		Movem.l	@SaveEm,-(Sp)				; Borrow a few registers for a while.
+		Suba.w	#ioQElSize,Sp				; Allocate an I/O param block on the stack.
+		Movea.l	Sp,A0						; Point to it.
+		Subq	#4,Sp						; Allocate a CS param block on the stack.
+		Movea.l	Sp,A1						; Point to it.
+		Clr.b	csMode(A1)					; Say that we want mapping off.
+											; Set up for the Control call:
+		Move.w	RefNum(A6),ioRefNum(A0)		;	ioRefNum, 
+		Move.w	#cscSetGray,csCode(A0)		;	csCode,
+		Move.l	A1,csParam(A0)				;	csParam.
+		_Control ,Immed						; SetGray.
+		Bne.s	@Error						; If failed, then just leave.
+		Tst.b	csMode(A1)					; Otherwise, see if we got back what we set.
+		Bra.s	@Done						;
+
+@Error	Moveq	#0,D0						; Just set up to leave things alone.
+@Done	Adda.w	#ioQElSize+4,Sp				; Restore the stack space we used.
+		Movem.l	(Sp)+,@SaveEm				; Restore the regs we borrowed.		
+		Rts									; Vamoose.
+		Endwith
+
+DisposGDevice 	PROC	EXPORT
+				EXPORT	DisposGDHandles
+;-------------------------------------------------------------
+;
+;  PROCEDURE DisposGDevice (GDH: GDHandle);
+;
+;  disposes of the gDevice record and its handles
+;
+		MOVE.L	(SP)+,A1					; get return address
+		MOVE.L	(SP),-(SP)					; push the grafDevice
+		BSR.S	DisposGDHandles				; and dispose of its handles
+
+; as seen in QDciPatchROM.a													<sm 6/9/92>stb
+		MOVE.L	(SP)+,A0					; get the grafDevice
+		cmp.l	LastTxGDevice,A0			; are we disposing it?	<BAL 20Feb90>
+		bne.s	@noProb						; no, continue			<BAL 20Feb90>
+		move.l	MainDevice,LastTxGDevice	; yes, reset it.		<BAL 20Feb90>
+@noProb										;						<BAL 20Feb90>
+
+		_DisposHandle						; dispose of it
+
+		JMP		(A1)						; and exit
+
+
+DisposGDHandles
+
+		MOVE.L	A1,-(SP)					; save A1
+		MOVE.L	8(SP),A1					; get handle to GDevice
+		MOVE.L  (A1),A1						; point to GDevice
+		MOVE.L	GDPMap(A1),-(SP)			; push pixMap handle
+		MOVE.L	GDITable(A1),D0				; get inverse table
+		BEQ.S	@0							; => none
+		MOVE.L	D0,A0						; else get it
+		_DisposHandle						; and dispose it
+@0		MOVE.L	GDCCXData(A1),D0			; get cursor data
+		BEQ.S	@1							; => none
+		MOVE.L	D0,A0						; else get it
+		_DisposHandle						; and dispose it
+@1		MOVE.L	GDCCXMask(A1),D0			; get cursor mask
+		BEQ.S	@2							; => none
+		MOVE.L	D0,A0						; else get it
+		_DisposHandle						; and dispose it
+@2		MOVE.L	(SP)+,D0					; get pixMap handle
+		BEQ.S	@3							; => it's not there
+		MOVE.L	D0,-(SP)					; else push it again
+		_DisposPixMap						; and dispose of the pixMap
+@3		MOVE.L	(SP)+,A1					; restore A1
+		MOVE.L	(SP)+,(SP)					; strip parameter
+		RTS									; and return
+
+; as seen in QDciPatchROM.a verbatim										<sm 6/9/92>stb
+
+InitGDevice PROC  EXPORT
+
+			WITH		VDPageInfo			;<1.1>
+
+			IMPORT OneBitData,GetDevPixMap
+;-------------------------------------------------------------
+;
+;	PROCEDURE InitGDevice (refNum: INTEGER; mode: LONGINT; GDH: GDHandle);
+;
+;	Initialize the specified device to the specified mode.  The GDevice
+;	data is placed into the provided handle.
+;
+;   If mode = -1 then the driver is not called.  It is assumed that the pixmap
+;   has been set up before InitGDevice is called.
+;
+;	Now has support for GDevices with baseAddrs that change across depths
+;	(Trident card) in a MultiFinder-friendly way.
+;
+; CAUTION: this routine is used during ROM boot; various Macintosh functions
+; may not yet be available! <dvb - found out the hard way>
+;
+; CAUTION:  Display Manager counts on the way some of the flags are used.  Do
+;	not change without testing the resolution flipping in display manager.  
+;
+;	Are there patch implications (especially for the mainScreen flag) that
+;	mean I should handle this in a different way?  Are there patches that count
+;	on these flags?  Here are the flags Display Manager changes:
+;
+;	ramInit -- Display Manager clears ramInit bit so rect will be fetched from the video card.
+;	gdMode -- Display Manager clears.  When switching to a different resolution the enabled 
+;			functional sResource has changed, however the spID is frequently the same for the
+;			same depth.  By clearing gdMode, we know that InitGDevice will not bail because
+;			it thinks the modes are the same.
+;	mainScreen -- Display Manager clears mainScreen bit because it does not want InitGDevice to
+;			mess with the ports.  Display Manager has more things to do to the ports (at a higher
+;			level) than it would be appropriate to do here.  Some day we may roll in here, but
+;			for now I clear this bit to make sure InitGDevice does not try to fix ports.
+;
+IGDVars		RECORD	{A6Link},DECREMENT
+result		DS.B	0						; no result
+REFNUM		DS.B	2
+MODE		DS.B	4						; LONG, mode for video card
+GDH			DS.B	4						; LONG, handle to devPort
+return		DS.B	4						; the return address
+A6Link		DS.B	4						; our link
+
+IOPBlk		DS.B	IOVQElSize				; [64] parameter blk for I/O calls
+VidParms	DS.B	12						; [12] size of mode params
+GDHState	DS.B	2						; [word] lock state of GDH
+GDPState	DS.B	2						; [word] lock state of GDP
+SaveDevice	DS.B	4						; [long] saved device handle
+
+oldBaseAddr	DS.B	4						; old base address, for later comparison
+oldPort		DS.B	4						; thePort, before we got here
+oldColor	DS.B	8						; a colorSpec used to reinstantiate fg/bk
+
+VARSIZE		DS.B	0						; size of locals
+			ENDR
+
+		WITH	IGDVars
+
+		LINK	A6,#VARSIZE					; allocate stack frame
+		MOVEM.L	D3/A2-A4,-(SP)				; save off work registers
+
+		MOVE.L	GDH(A6),A0					; get the gDevice handle
+		_HGetState							; get the current lock state
+		MOVE	D0,GDHState(A6)				; save the state
+		_HLOCK								; and lock down the gDevice
+		MOVE.L	(A0),A2						; get pointer to gDevice record
+		MOVE.L	GDPMap(A2),A0				; get handle to pixMap
+		MOVE.L	(A0),A1						 ; A1->pixmap
+		MOVE.L	baseAddr(A1),oldBaseAddr(A6) ; save the base address, for later portfixing
+		_HGetState							 ; get the current lock state of the pixmap
+		MOVE	D0,GDPState(A6)				; save the state
+		_HLOCK								; lock it down
+		MOVE.L	(A0),A3						; keep pointer in A3
+		MOVE.L	theGDevice,SaveDevice(A6)	; save theGDevice
+
+		TST.B	QDExist						; qd around?
+		BNE.S	@noShield					; no, don't shield cursor
+		BTST	#screenDevice,gdFlags(A2)		; is it screen (check hi byte with #>8)
+		BEQ.S	@noShield
+;+++		PEA		gdRect(A2)
+;+++		CLR.L	-(SP)						; in global coörds
+;+++		_ShieldCursor
+		_HideCursor							; changed to Hide from Shield to fix
+											;   problems when cursor is on the move
+											;   during InitGDevice
+@noShield
+
+; initialize the GDevice's mode and refnum
+
+		MOVE	REFNUM(A6),GDRefNum(A2) 	; set up RefNum
+		MOVE.L	MODE(A6),D0					; get the mode
+		CMP.L	MinusOne,D0					; is the mode -1?
+		BEQ		ModeOK						; if so, then don't call the driver
+
+; set up the driver parameter block in case we need to use it
+
+		LEA		IOPBlk(A6),A0				; point to parameter block
+		CLR.L	ioCompletion(A0)			; no completion routine
+		CLR.W	ioVRefNum(A0)				; no volRefNum
+		MOVE	RefNum(A6),ioRefNum(A0)		; set device's refnum
+		LEA		VidParms(A6),A1				; point to params for GetMode
+		MOVE.L	A1,csParam(A0)				; point to param list
+
+		CMP.L	GDMode(A2),D0				; has the mode changed?
+		BEQ		GrayOrColor					; => no, so don't set depth
+		MOVE.L	D0,GDMode(A2)				; set up mode
+
+; setup the gDevice fields for the new screen depth
+
+		CLR		GDCCDepth(A2)				; invalidate cursor depth			<C837>
+
+		MOVEM.L	A0/A1,-(SP)					; save these regs
+		MOVE	REFNUM(A6),-(SP)			; push refnum
+		MOVE.L	MODE(A6),-(SP)				; push mode
+		MOVE.L	GDPMap(A2),-(SP)			; pixMap handle
+		PEA		GDType(A2)					; point to device type
+		JSR		GetDevPixMap				; read in pixMap from device
+		MOVEM.L	(SP)+,A0/A1					; restore them
+
+; first, set the mode (A0 points to IOPB, A1 to control parameter block)
+
+		MOVE	#2,csCode(A0)				; csc_GetMode
+
+		MOVE.L	mode(A6),D0					; get the mode
+		MOVE	D0,csMode(A1)				; set desired mode
+		CLR		csPage(A1)					; set page 1
+		CLR.L	csData(A1)					; no additional data
+
+		_Control ,IMMED						; SetMode(Mode,Page,Data);
+
+; then gray the screen
+
+		MOVE    #5,csCode(A0)               ; csc_GrayPage
+		_Control ,IMMED                     ; paint current page gray
+
+; set the device to color or monochrome, according to GDFlags
+
+GrayOrColor
+		MOVE	GDFlags(A2),D0				; get flags word
+		NOT		D0							; flip all bits
+		AND		#1,D0						; clear all but low bit
+		MOVE.B	D0,csMode(A1)				; csMode = color/gray scale
+		MOVE	#6,csCode(A0)				; csc_SetGray
+		_Control ,IMMED                     ; set color or monochrome
+
+; if the device has a color table, set the device's color table
+
+		CMP		#ClutType,GDType(A2)		; is there a lookup table?
+		BNE.S	NoTbl						; =>no, don't set one
+
+		MOVE.L	pmTable(A3),A0				; get handle to color table
+		_HLock								; lock down the color table
+
+;+++		LEA		VidParms(A6),A1				; point to params for SetEntries
+		MOVE.L	(A0),A0						; get ctabPtr							<DAF>
+		CLR.W	csStart(A1)					; start at zero, use sequence mode		<DAF>
+		MOVE.W	ctSize(A0),csCount(A1)		; for the length of the table			<DAF>
+		LEA		ctTable(A0),A0				; get pointer to colorspecs				<DAF>
+		MOVE.L	A0,csTable(A1)				; color table pointer is first param	<DAF>
+
+		LEA		IOPBlk(A6),A0				; point to parameter block
+		MOVE.W	#3,csCode(A0)				; csc_SetEntries
+		MOVE.L	A1,csParam(A0)				; move addr of parms into block
+
+		_Control ,IMMED						; SetEntries(ColorTable);
+
+		MOVE.L	pmTable(A3),A0				; get handle to color table
+		_HUnlock							; unlock the color table
+NoTbl
+
+; if CLUT or fixed color table, build inverse table
+
+		CMP		#DirectType,GDType(A2)		; should there be an inverse table?
+		BEQ.S	ModeOK						; =>no inverse table
+
+		MOVE.L	pmTable(A3),-(SP)			; push color table handle
+		MOVE.L	GDITable(A2),-(SP)			; push inverse table handle
+		MOVEQ	#4,D0						; make 4-4-4 inverse tables
+		MOVE	D0,GDResPref(A2)			; save in GDevice
+		MOVE	D0,-(SP)					; and push res
+		_MakeITable							; and generate table
+
+;  If this device has not been initialized from the system file, then copy the
+;  bounds from the pixMap to the GDRect.  Otherwise copy the GDRect to the Bounds.
+
+ModeOK
+		LEA		BOUNDS(A3),A0				; point to pixmap.bounds				<C837>
+		LEA		GDRECT(A2),A1				; point to device's global rect
+		MOVE	GDFlags(A2),D0				; get the flags word
+		BTST	#RAMInit,D0					; initialized from RAM?
+		BEQ.S	BndsOK						; => no, copy pixMap.bounds to GDRect
+		EXG		A0,A1						; else copy GDRect to pixMap.bounds
+BndsOK	MOVE.L	(A0)+,(A1)+					; copy topLeft
+		MOVE.L	(A0)+,(A1)+					; copy botRight
+
+; <dvb 3Jan89>
+; if we're about the main device, then fix all those
+; potentially errant ports.
+;
+		TST.B	QDExist						; (Unless QuickDraw don't exist)
+		BNE		@noQD
+		MOVE.L	portList,D1					; or if portlist = 0 or -1
+		BEQ		@noQD
+		ADDQ.L	#1,D1
+		BEQ		@noQD
+
+		BTST	#mainScreen,D0				; is it the main scrn? (flags already in D0)
+		BEQ		@notMain
+
+		PEA		oldPort(A6)					; Save the current port
+		_GetPort
+		MOVE.L	mainDevice,theGDevice		; and set to the screen
+
+		MOVE.L	PortList,A4					; A4 = handle to list of ALL ports
+		MOVE.L	(A4),A4						; A4->list of all ports
+		MOVE	(A4),D3					; D3 = number of ports that exist
+		BRA.S	@portWalkEnd
+
+@portWalkLoop
+		MOVE.L	PortList,A4
+		MOVE.L	(A4),A4
+		MOVE.L	2(A4,D3.W*4),A4					; A4 = this port
+		MOVE.L	A4,-(SP)						; Set to each port in the port list
+		_SetPort
+
+		MOVE.L	oldBaseAddr(A6),D1				; D1 = the scrnbase of ports to change
+		BTST	#7,portVersion(A4)				; high bit set?
+		BEQ.S	@oldPort
+		MOVE.L	portPixMap(A4),A4				; A4 = handle to the port's pixmap
+		MOVE.L	(A4),A4							; A4->port's pixmap
+		CMP.L	baseAddr(A4),D1					; same as the screen's?
+		BNE.S	@portWalkEnd				 	; no, skip this port
+
+		MOVE.L	baseAddr(A3),baseAddr(A4)		; replace a bunch of fields
+		MOVE	rowBytes(A3),rowBytes(A4)
+		MOVE.L	pixelType(A3),pixelType(A4)		; (gets pixelSize, too)
+		MOVE.L	cmpCount(A3),cmpCount(A4)		; (gets cmpSize, too)
+		MOVE.L	planeBytes(A3),planeBytes(A4)
+
+		PEA		oldColor(A6)					; placeholder for reinstantiating colors
+		MOVE.L	(SP),-(SP)
+		MOVE.L	(SP),-(SP)
+		MOVE.L	(SP),-(SP)
+		_SaveFore								; Save and restore the foreground color
+		_RestoreFore							; (Allowing for pmFore)
+		_SaveBack								; And the same for the background
+		_RestoreBack
+ 		BRA.S	@portWalkEnd
+
+@oldPort
+		CMP.L	portBits+baseAddr(A4),D1		; same base on old port?
+		BNE.S	@portWalkEnd
+		MOVE.L	baseAddr(A3),portBits+baseAddr(A4)
+		MOVE	rowBytes(A3),D1
+		AND		#nurbMask,D1					; handle NURBs here
+		MOVE	D1,portBits+rowBytes(A4)
+
+@portWalkEnd
+		DBRA	D3,@portWalkLoop
+		MOVE.L	oldPort(A6),-(SP)				; restore the pre-existing port
+		_SetPort
+
+		MOVE.L	oldBaseAddr(A6),D1
+		CMP.L	scrnBase,D1						; fix scrnBase too, if neede
+		BNE.S	@notMain
+		MOVE.L	baseAddr(A3),scrnBase
+
+@notMain
+		_AllocCursor
+		_ShowCursor
+@noQD
+
+;
+; notify the Palette Manager that the mode has changed
+;
+											; <2.6> moved after GDRect has been adjusted <2.6>
+		CMP.L	#-1,PMgrHandle				; has the Palette Mgr been initialized?
+		BEQ.S	@noPMgr						; nope, so skip this
+		MOVE.L	GDH(A6),-(SP)				; push the device handle
+		_RestoreDeviceClut					; call the Palette Manager Unhook device vector
+@noPMgr
+
+		MOVE.L	SaveDevice(A6),theGDevice	; restore theGDevice
+		MOVE.L	GDPMap(A2),A0				; get pixMap handle
+		MOVE	GDPState(A6),D0				; get the lock state
+		_HSetState							; restore prior state
+		MOVE.L	GDH(A6),A0					; get the gDevice handle
+		MOVE	GDHState(A6),D0				; get the lock state
+		_HSetState							; restore prior state
+
+		MOVEM.L	(SP)+,D3/A2-A4					; restore work registers
+		UNLINK	result-return-4,'INITGDEV'
+
+
+GetDevPixMap	PROC	EXPORT
+				IMPORT	CopyHandle, GetCTSeed, RSetHSize
+;----------------------------------------------------------------
+;
+; PROCEDURE	GetDevPixMap(refNum: INTEGER; mode: LONGINT; PMH: PixMapHandle;VAR DevType:INTEGER);
+;
+; Calls the slot Manager to fill out the pixMap with info from the specified
+; mode of the specified device.  The device need not be configured to that
+; mode.
+;
+; GetDevPixMap is called by InitGDevice.
+;
+;----------------------------------------------------------------
+
+PARAMSIZE	EQU 	14						; total bytes of parameters
+REFNUM		EQU 	PARAMSIZE+8-2			; WORD, Driver reference number
+MODE		EQU 	REFNUM-4				; LONG, Mode for video card
+PMH			EQU 	MODE-4 					; LONG, PixMap Handle
+DEVTYPE		EQU		PMH-4					; LONG, VAR DevType
+
+MYBLOCK		EQU		-spBlock.SPBLOCKSIZE	; allocate room for parameter block	<Cxxx>
+PMHState	EQU		MyBlock-2				; save pixMap lockState
+VARSIZE		EQU		PMHState				; size of locals
+
+	WITH	spBlock,vpBlock					;<C742>
+
+			LINK	A6,#VARSIZE					; allocate stack frame
+			MOVEM.L	D3-D5/A2-A4,-(SP)			; preserve work registers
+
+; lock down the pixMap and get pointer in A2
+
+			MOVE.L	PMH(A6),A0					; get handle to pixMap
+			_HGetState							; get the current state
+			MOVE	D0,PMHState(A6)				; save current state
+			_HLock								; lock it down
+			MOVE.L	(A0),A2						; get pointer in A2
+
+; look in the unit table for the specified device
+
+			MOVE	REFNUM(A6),D0				; get the refNum
+			NOT		D0							; refNum -> unitnum
+			ASL		#2,D0						; get offset in unitTable
+			MOVE.L	UTableBase,A1				; get the base of the unit table
+			MOVE.L	(A1,D0),A3					; A3 = handle to the DCE
+			MOVE.L	(A3),A1						; get pointer to the DCE
+
+; get the resource list for the specified device
+
+			LEA		MYBLOCK(A6),A0				; point to parameter block
+			MOVE.B	dCtlSlot(A1),spSlot(A0)		; get slot number
+			MOVE.B	dCtlSlotID(A1),spID(A0)		; get ID
+			MOVE.B	dCtlExtDev(A1),spExtDev(A0)	; External Device ID
+			_sRsrcInfo							; get a pointer to the sResource list. <Cxxx>
+			BNE		BadSlot						; => something wrong
+
+; BaseAddr := dctlDevBase + MBaseOffset(Added later)								<C887 09Sep87 GWN>
+	      	MOVE.L	dCtlDevBase(A1),D3			; Get the 24-bit base address.		<C887 09Sep87 GWN>
+
+			MOVE.L	MODE(A6),D0					; get the mode
+			MOVE.B	D0,spId(A0)					; pass the requested mode
+			_sFindStruct						; get pointer to list for that mode
+			BNE		BadSlot						; => something wrong
+			MOVE.L	spsPointer(A0),A4			; A4 = pointer to list for that mode
+
+
+; get devType
+
+			MOVE	#CLUTType,D4				; assume device type = CLUT
+			MOVE.B	#mDevType,spId(A0)			; device type
+			_sReadWord							; go read it
+			BNE.S	@CLUT						; => if none, assume CLUT
+			MOVE	spResult+2(A0),D4			; get device type
+@CLUT		MOVE.L	DEVTYPE(A6),A1				; get pointer to device type
+			MOVE	D4,(A1)						; return device type
+
+; get video parameter sBlock and save values as needed									<C742>
+
+			MOVE.B	#mVidParams,spId(A0)		; get the parameters					<C742>
+			_sGetBlock							; (in sBlock form)						<C742>
+			BNE		BadSlot						; => something wrong
+			MOVE.L	spResult(A0),A1				; save the pointer to the block			<C742>
+
+			ADD.L	vpBaseOffset(A1),D3			; calculate baseAddr
+			MOVE.L	D3,(A2)+					; save baseAddr
+
+
+; get rowbytes, bounds, and version.
+
+			MOVE.W	vpRowBytes(A1),D0			; Number of bytes between scan lines.	<C742>
+			OR		#PMFlag,D0					; set pixMap flag
+			MOVE	D0,(A2)+					; save rowbytes
+
+			MOVE.L	vpBounds(A1),(A2)+			; read into our bounds					<C742>
+			MOVE.L	vpBounds+4(A1),(A2)+		; rect is eight bytes					<C742>
+
+			MOVE.W	vpVersion(A1),(A2)+			; pixMap version number					<C742>
+
+		if ADDRMODEFLAG then					;										<BAL 11Dec88>
+
+			tst.w	vpVersion(a1)				; is it standard?						<BAL 11Dec88>
+			bne.s	@useTheirs					; no, leave it alone					<BAL 11Dec88>
+			move.w	#fAddr32clean,-2(a2)		; yes, set 32 bit addressing flag		<BAL 11Dec88>
+@useTheirs
+
+		endif
+
+; clear packType, packSize fields
+
+			CLR		(A2)+						; packType := 0
+			CLR.L	(A2)+						; packSize := 0
+
+
+; get hRes, vRes, pixelType, pixelSize, cmpType, cmpSize and planebytes.
+
+			MOVE.L	vpHRes(A1),(A2)+			; horizontal resolution					<C742>
+			MOVE.L	vpVRes(A1),(A2)+			; vertical resolution					<C742>
+
+			MOVE.W	vpPixelType(A1),(A2)+		; the pixel type						<C742>
+			MOVE.W	vpPixelSize(A1),D5			; D5 = pixel size						<C742>
+			MOVE.W	D5,(A2)+					; the pixel size						<C742>
+
+			MOVE.W	vpCmpCount(A1),(A2)+		; the component count					<C742>
+			MOVE.W	vpCmpSize(A1),(A2)+			; the component size					<C742>
+
+			MOVE.L	vpPlaneBytes(A1),(A2)+		; offset from one plane to another		<C742>
+
+
+; dispose of the sBlock																	<C742>
+			MOVE.L	A1,spsPointer(A0)			;										<C742>
+			_sDisposePtr						;										<C742>
+			MOVE.L	A4,spsPointer(A0)			; restore pointer to list				<C742>
+
+; use DevType to initialize the color table
+
+			CMP		#FixedType,D4				; is it fixed?
+			BEQ.S	GetFromSlot					; =>yes, get from card
+			CMP		#CLUTType,D4				; is it color lookup?
+			BNE.S	DirectCLUT					; =>no, must be direct; get unique seed	<BAL 07Jul88>
+
+; Load in the color table and copy it to our handle.
+
+GetClut		CLR.L	-(SP)						; make room for function result
+			MOVE	D5,-(SP)					; push resource ID
+			_GetCTable							; load in the color table resource
+			MOVE.L	(SP)+,D0					; did we get one?						<C769>
+			BEQ		TableOK						; => no, just punt						<BAL 04Sep88>
+			MOVE.L	D0,-(SP)					; push new handle for dispose			<C1/9>
+			MOVE.L	D0,-(SP)					; push source handle					<C1/9>
+			MOVE.L	(A2),-(SP)					; push destination handle				<C1/9>
+			_CopyHandle							; copy table into our handle			<C1/9>
+			_DisposCTable						; and dispose of new color table		<C1/9>
+			BRA.S	TableOK						; => and continue
+
+;
+; Read the color table from the ROM.  This code is a little different than it's ancestor.	<2.3>
+;	Rather than expecting a cSpecArray, this expects that mTable points to a color table
+;	image (including header).  It's not bad to change this since there was a bug that
+;	prevented it from working at all before (spSize had been read as a word, rather than
+;	long, so it would never make the correct calculation).  Get the fixed color table as
+;	a pointer, put in a new ctSeed, then make the pointer into a handle.
+;
+
+GetFromSlot	MOVE.B	#mTable,spID(A0)			; the fixed table							<2.3>
+			_SReadPBSize						; find the table and get it's size			<2.3>
+			BNE.S	GetClut						; => something wrong, use default table		<2.3>
+
+			SUB.L	#4,spSize(A0)				; adjust for slot block header				<2.3>
+			MOVE.L	spSize(A0),D0				; get size of table							<2.3>
+			MOVE.L	(A2),A0						; get existing color table handle			<2.3>
+			_SetHandleSize						; set it to the new size					<2.3>
+
+			MOVE.L	(A0),A1						; deref handle								<2.3>
+
+			LEA		MYBLOCK(A6),A0				; point to parameter block
+			MOVE.L	A1,spResult(A0)				; put handle in destination					<2.3>
+			_sReadStruct						; read the table from the ROM				<2.3>
+
+;••• <SM3> CSS rollin patch GetDevPixMapPatch from horror
+			MOVE.L	ctSeed(A1),D0				; get the current seed						<H2>
+			BEQ.S	@GetNewSeed					; -> it's zero, so generate a new one		<H2>
+			CMPI.L	#minSeed,D0					; is it a resource ID?						<H2>
+			BLE.S	@UseOriginalSeed			; -> yes, assume we know what we're doing	<H2>
+@GetNewSeed	SUBQ	#4,SP						; make room for function result				<2.3>
+			_rGetCTSeed							; get a new, unique ctable seed				<2.3>
+			MOVE.L	(SP)+,ctSeed(A1)			; put in the new seed						<2.3>
+@UseOriginalSeed
+												;   transindex/ctflags set below			<2.3>
+;••• <SM3> CSS end rollin GetDevPixMapPatch from Horror
+
+			MOVE.L	A4,spsPointer(A0)			; Restore the pointer to mode list.			<C742>
+			bra.s	TableOK
+
+DirectCLUT										; Set up fake CLUT for direct devices 	<BAL 07Jul88>
+			MOVE.L	PMH(A6),A0					; get handle to pixMap
+			move.l	(a0),a0						; get pixMap ptr
+			move	cmpSize(a0),d0				;
+			mulu	cmpCount(a0),d0				; compute seed value
+			move.l	pmTable(A0),a0				; get clut handle
+			move.l	(a0),a0						; clut ptr
+			move.l	d0,(a0)						; set up seed
+
+
+TableOK		move.l	(a2),a0						; get pmTable			<BAL 29Mar89>
+			move.l	(a0),a0						; get ptr to clut		<BAL 29Mar89>
+			move.w	#$8000,TransIndex(a0)		; set Device clut flag	<BAL 29Mar89>
+			ADDQ	#4,A2						; skip over table
+			CLR.L	(A2)+						; clear pmReserved
+
+; Error, bad video card.
+
+BadSlot
+DONE		MOVE.L	PMH(A6),A0					; get handle to pixMap
+			MOVE	PMHState(A6),D0				; get prior state
+			_HSetState							; restore lock state
+
+GOHOME		MOVEM.L	(SP)+,D3-D5/A2-A4			; restore work registers
+			UNLINK	PARAMSIZE,'GETDEVPI'
+
+
+GoBadSlot	ADDQ	#4,SP						; strip pointer off stack
+			BRA.S	BadSlot						; and return with error
+
+	ENDWITH
+
+
+CheckDevices	PROC	EXPORT
+
+				WITH		VDPageInfo			;<1.1>
+
+				IMPORT	CopyHandle
+;----------------------------------------------------------
+;
+;  PROCEDURE CheckDevices;
+;
+;  Look at the device list to see if it needs to be initialized.  If so, read
+;  in the resource of type 'scrn'.  If it is found, configure the devices as
+;  described in that resource.  The format of the 'scrn' resource is:
+;
+;  [count]					; [word] number of devices in resource
+;  FOR I := 1 TO COUNT DO
+;	 [sResource Type]		; [word] spDrvrH of device n
+;	 [slot]					; [word] slot number of device n
+;	 [dCtlDevBase]			; [long] the dCtlDevBase of device n
+;	 [mode]					; [word] the sRsrcID for the desired mode
+;	 [flagMask]				; [word] masks off all bits used in flags
+;	 [flags]				; [word] indicates the state of the device
+;							;		 	bit 0 = 0 if monochrome; 1 if color
+;							;			bit 11 = 1 if this device is main screen
+;							;			bit 15 = 1 if the screen is active
+;	 [colorTable]			; [word] resource id of desired color table (-1=none)
+;	 [gammaTable]			; [word] resource id of gamma table (-1=none)
+;	 [global Rect]			; [rect] global rectangle for this device
+;	 [CtlCount]				; [word] number of control calls following
+;	 FOR J := 1 TO CtlCount DO
+;		[csCode]			; [word] control code for this call
+;		[length]			; [word] number of bytes in the param blk
+;		[param blk]			; [length] data to be passed in control call
+;	 END;
+;  END;
+;
+;  CheckDevices is called by InitGraf.
+
+
+PARAMSIZE	EQU		0
+
+IOPBlk		EQU		-IOVQElSize				; [64] parameter blk for I/O calls
+SlotParms   EQU     IOPBlk-spBlock.SPBlockSize  ; parameter block for slot manager calls <Cxxx>
+VidParms	EQU		SlotParms-12			; [12] size of mode params
+StartList	EQU		VidParms-4				; [long] pointer to start of resource
+VARSIZE		EQU		StartList				; size of locals
+
+
+			LINK	A6,#VARSIZE				; allocate local stack frame
+			MOVEM.L	D6-D7/A2-A4,-(SP)		; save work registers
+
+; check to see if the device list needs to be initialized
+
+			MOVE.L	DeviceList,A0			; get handle to device list
+			MOVE.L	(A0),A0					; point to head of device list
+			MOVE	GDFlags(A0),D0			; get the flags word
+			BTST	#AllInit,D0				; test initialize flag?
+			BNE		GoHome					; => devices already initialized
+
+; test the scrnInval lo-mem to make sure the screen resource is valid.
+
+			TST.B	scrnInval				; if this byte is cleared, then invalid
+			BEQ		GoHome					;
+
+; try to load in the resource.  If none, then exit
+
+			CLR.L	-(SP)					; make room for function result
+			MOVE.L	#'scrn',-(SP)			; push desired resource type
+			CLR		-(SP)					; resource ID = 0
+			_GetResource					; get the resource
+			MOVE.L	(SP)+,D0				; get the resource handle
+			BEQ		GoHome					; => none, don't configure
+
+; lock down the handle, and point at the data
+
+			MOVE.L	DeviceList,A0			; get handle to device list
+			MOVE.L	(A0),A0					; point to head of device list
+			BSET	#AllInit,GDFlags(A0)	; say list has been initialized
+
+			MOVE.L	D0,-(SP)				; save resource for ReleaseResource
+			MOVE.L	D0,A0					; get the resource
+			_HLock							; lock it down
+			MOVE.L	(A0),A4					; A4 = resource pointer
+
+; validate the 'scrn' resource.  There must be a descriptor for every screen device.
+; I assume that there are no duplicate entries and that screens don't overlap.
+; In addition the devices in the 'scrn' resource must be in slot order.
+
+			MOVE.L	A4,StartList(A6)		; save pointer to start of list
+			MOVE	(A4)+,D7				; get the number of screens in resource
+
+	WITH	spBlock,vpBlock
+
+			LEA		SlotParms(A6),A0				; get pointer to parameter block
+			MOVE.L	#((CatDisplay << 16) ++ TypVideo),spCategory(A0)	;<C741>
+											; set category ID, type		<C741>
+			MOVE.W	#DrSwApple,spDrvrSw(A0)	; set software, hardware ID	<C741>
+			MOVE.B	#$01,spTBMask(A0)		; ignore spDrvrH
+			MOVE.B	#0,spSlot(A0)			; start with desired slot
+			MOVE.B	#0,spID(A0)				; start with first ID
+			CLR.B	spExtDev(A0)			;<C720>
+NxtDev		LEA		SlotParms(A6),A0		; get pointer to parameter block
+			_sNextTypesRsrc					; get next video device
+			BEQ.S	GotDev					; => there is one
+
+; there are no more screens, are there more resources?
+
+			TST		D7						; there should have been one per device
+			BEQ 	GoodRsrc				; => there was, go initialize them
+			BRA.S	BadScrn					;
+
+; scan through scrn resource for this device
+
+GotDev		MOVE	(A4)+,D0				; get type
+			CMP		spDrvrHw(A0),D0			; does it match?
+			BNE.S	badScrn					; => nope, bad screen resource
+			MOVE	(A4)+,D0				; get slot
+			CMP.B	spSlot(A0),D0			; does it match?
+			BNE.S	badScrn					; => nope, bad screen resource
+
+; get the DCE entry for the device and check dCtlDevBase
+; if no match look for more devices in same slot
+
+SlotOK		MOVE	spRefNum(A0),D0			; get the refNum
+			NOT		D0						; refNum -> unitnum
+			ASL		#2,D0					; get offset in unitTable
+			MOVE.L	UTableBase,A1			; get the base of the unit table
+			MOVE.L	(A1,D0),A3				; A3 = handle to the DCE
+			MOVE.L	(A3),A1					; get pointer to the DCE
+			MOVE.L	dCtlDevBase(A1),D0		; get dCtlDevBase
+			CMP.L	(A4)+,D0				; do they match?
+			BNE.S	badScrn					; => nope, bad screen resource
+
+; to be completely compulsive about it, make sure there's a grafDevice for it
+
+			MOVE.L	DeviceList,A3			; A3 = first grafdevice in list
+			MOVE	spRefNum(A0),D1			; get refnum
+@NxtGD		MOVE.L	(A3),A1					; get pointer to device
+			CMP		GDRefNum(A1),D1			; does refnum match?
+			BEQ.S	RectCheck				; => yes, this device matches!
+			MOVE.L	GDNextGD(A1),D0			; get handle of next device
+			MOVE.L	D0,A3					; get in A3
+			BNE.S	@NxtGD					; => check all grafDevices
+			BRA.S	badScrn					; => no such grafDevice, bad 'scrn'
+
+;
+; compare the size of the remembered screen rect to the size of this gDevice's
+;	gdRect.  At this point, the GDRects are still topleft=(0,0) from InitGDevice
+; 	so we can just check 'scrn' rect against botRight.
+
+RectCheck
+			ADD		#10,A4					; skip to global rect in scrn
+			MOVE.W	bottom(A4),D0			; get bottom
+			SUB.W	top(A4),D0				; = height
+			CMP.W	GDRect+bottom(A1),D0	; is it equal?
+			BNE.S	badScrn					; nope, we're out
+			MOVE.W	right(A4),D0			; get right
+			SUB.W	left(A4),D0				; = width
+			CMP.W	GDRect+right(A1),D0		; is it equal?
+			BNE.S	badScrn					; nope, we're out
+
+; this device matches!  go check next one
+
+SkipData	ADD		#8,A4					; skip to control field
+			MOVE	(A4)+,D0				; get number of control calls
+			BRA.S	SkipCtl					; skip control call
+SkipNxt		MOVE.L	(A4)+,D1				; get control code, size of params
+			ADD		D1,A4					; add size of params to skip block
+SkipCtl		DBRA	D0,SkipNxt				; => skip next control
+
+			SUBQ	#1,D7					; decrement device count
+			BMI.S	badScrn					; => oops, bad screen resource
+			BRA		NxtDev					; => check next device
+
+BadScrn
+;	If the screen resource is bad, then let's walk down the device list and offset
+;	the invalid screens' GDRects so that they don't all pile up at (0,0).  Let's keep
+;	is simple- I just put them all edge to edge, top edge at 0 (unchanged) and to the
+;	right of the previous guys.  Offset the GDPMap's rect also.
+
+			MOVE.L	DeviceList,A0			; get the head of the list (the boot screen)
+			MOVE.L	(A0),A0					; hndl->ptr
+			MOVE.W	GDRect+right(A0),D1		; get the boot screen's right edge (if the scrn
+											;   is invalid, then this is the real right edge)
+@Loop		MOVE.L	GDNextGD(A0),D0			; get handle to next screen
+			BEQ 	Done					; if NIL, then we're out of here
+			MOVE.L	D0,A0					; get this device
+			MOVE.L	(A0),A0					; hndl->ptr
+			ADD.W	D1,GDRect+left(A0)		; offset the left edge (normally zero)
+			ADD.W	D1,GDRect+right(A0)		; offset the right edge
+			MOVE.L	gdPMap(A0),A1			; get the GDPMap handle
+			MOVE.L	(A1),A1					; get the gdPMap pointer
+			ADD.W	D1,pmBounds+left(A1)	; offset the left edge (normally zero)
+			ADD.W	D1,pmBounds+right(A1)	; offset the right edge
+
+			MOVE.W	GDRect+right(A0),D1		; get the new right edge for the next device
+			BRA.S	@Loop					; for each screen
+
+GoodRsrc	_HideCursor						; cursor must be hidden here
+			MOVE.B	#1,CRSRBUSY 			; MARK CHANGE IN PROGRESS
+			MOVE.L	CRSRDEVICE,A0			; GET HANDLE TO CURSOR DEVICE
+			MOVE.L	(A0),A0					; POINT TO CURSOR DEVICE
+			MOVE.L	GDRECT+TOPLEFT(A0),D0	; GET SCREEN TOPLEFT
+			SUB		D0,MOUSE+H				; CONVERT MOUSE TO SCREEN LOCAL
+			SWAP	D0						; GET SCREEN TOP
+			SUB		D0,MOUSE+V				; CONVERT MOUSE TO SCREEN LOCAL
+			MOVE.L	MOUSE,MTEMP				; copy to mouse temp
+			MOVE.L	MOUSE,RAWMOUSE			; and to raw coordinates
+
+; configure each entry in the scrn resource
+
+			MOVE.L	StartList(A6),A4		; save pointer to start of list
+			MOVE	(A4)+,D7				; get the number of screens in resource
+			SUBQ	#1,D7					; make it 0 based
+
+DoNxt		LEA		SlotParms(A6),A0		; get pointer to parameter block
+			MOVE.L	#((CatDisplay << 16) ++ TypVideo),spCategory(A0)	;<C741>
+											; set category ID, type		<C741>
+			MOVE.W	#DrSwApple,spDrvrSw(A0)	;							<C741>
+											; set software, (invalid) hardware ID	<C741>
+			MOVE	(A4)+,spDrvrHw(A0)		; set driver hardware ID
+			MOVE.B	#$00,spTBMask(A0)		; all fields valid
+			MOVE	(A4)+,D0				; get slot
+			MOVE.B	D0,spSlot(A0)			; does it match?
+			MOVE.B	#0,spID(A0)				; start with first ID
+			CLR.B	spExtDev(A0)			;<C720>
+			_sNextTypesRsrc					; get next video device
+			BNE 	BadScrn					; => this should never be taken
+
+; we found a device that matches the given description!  Find its GDevice and configure it
+
+			MOVE	spRefNum(A0),D1			; D1 = refnum
+
+			MOVE.L	DeviceList,A3			; A3 = first grafdevice in list
+@NxtGD		MOVE.L	(A3),A0					; get pointer to device
+			CMP		GDRefNum(A0),D1			; does refnum match?
+			BEQ.S	@GotGD					; => yes, got the grafDevice
+			MOVE.L	GDNextGD(A0),D0			; get handle of next device
+			MOVE.L	D0,A3					; get in A0
+			BNE.S	@NxtGD					; => check all grafDevices
+			BRA 	BadScrn					; => this should never be taken
+
+@GotGD		MOVE.L	(A4)+,D0				; discard dCtlDevBase
+
+; set up the GDFlags word before calling InitGDevice
+
+@0			MOVE.L	(A3),A1					; point at the grafDevice
+			MOVE	GDFlags(A1),D0			; get the flags word
+			AND		2(A4),D0				; turn off the bits that are used
+			OR		4(A4),D0				; turn on new bits
+			BSET	#RAMInit,D0				; say we've initialized it
+			BSET	#ScreenDevice,D0		; and flag it as a screen device
+			MOVE	D0,GDFlags(A1)			; set the flags word
+
+; if main device, set up low-memory handles
+
+ChkMain		MOVE	GDFlags(A1),D0			; get the flags word
+			BTST	#mainScreen,D0			; is it the main scrn?			<2.2>
+			BEQ.S	@InitGD					; => no, go init device
+
+			MOVE.L	A3,MainDevice			; set up as main screen device
+			MOVE.L	A3,TheGDevice			; set up as default destination device
+			MOVE.L	A3,SrcDevice			; set up as default source device
+											; allocCursor called by initgraf to init cursor
+			MOVE.L	(A3),A0					; point to gDevice
+			MOVE.L	gdPMap(A0),A0			; get pixMap handle
+			MOVE.L	(A0),A0					; point to pixMap
+			MOVE.L	baseAddr(A0),D0			; get base address
+			MOVE.L	D0,scrnBase				; and set up screen base
+
+			LEA		SlotParms(A6),A0		; point at slot manager block again (it's still positioned from above)
+			MOVE	(A4),D0					; get the requested mode
+;+++			MOVE.B	D0,spID(A0)				; put in block						<BAL 06Apr89>
+			MOVE.B	#128,spId(A0)			; pass the default mode (assumed to be 1-bit mode)
+			_sFindStruct					; point to this mode information
+
+			MOVE.B	#mVidParams,spID(A0)	; now get the device pixmap
+			_sGetBlock						; on the system heap (I guess this is OK)
+			MOVE.L	spResult(A0),A1			; get the result pointer
+			MOVE.w	vpRowBytes(A1),screenRow ; get the screen row bytes (WORD)	<BAL 31Mar89>
+
+; set up the lo-mem for screen resolution too.  It's only WORD/WORD rather then FIXED/FIXED
+			MOVE.W	vpHRes(A1),ScrHRes		; Take the high word of vpHRes
+			MOVE.W	vpVRes(A1),ScrVRes		; Take the high word of vpVRes
+
+			MOVE.L	A1,spsPointer(A0)		; now, release the sBlock
+			_sDisposePtr					;
+
+@InitGD
+			MOVE	D1,-(SP)				; push refnum
+			MOVE	(A4)+,-(SP)				; push mode
+			CLR		-(SP)					; which should be long
+			MOVE.L	A3,-(SP)				; push grafDevice
+			_InitGDevice					; configure the grafDevice
+			ADDQ	#4,A4					; mask and flags already used
+
+;
+; if there is a gamma table resource id, get the gamma correction table and call the driver
+;	We need to do this before the color table to make sure it takes effect right away.
+;
+
+			MOVE	2(A4),D0				; get the gamma table resource id
+			CMP		#-1,D0					; is it -1?
+			BEQ.S	ChkTbl					; => yes, no table
+
+;
+; if the gamma table resource id = -2, then request linear gamma from the driver
+;
+
+			CMP		#-2,D0					; is it -2?
+			BNE.S	@GetFromSys				; nope, so load the system resource
+
+			LEA		VidParms(A6),A1			; point to parameter block
+			CLR.L	csGTable(A1)			; pass NIL to tell new drivers to set linear
+			BSR.S	GammaControl			; call a common routine to set gamma
+			BRA.S	ChkTbl				;
+
+;
+; load the gamma resource from the system and set it
+;
+
+@GetFromSys
+			CLR.L	-(SP)					; make room for function result
+			MOVE.L	#'gama',-(SP)			; push gamma table rsrc type
+			MOVE	D0,-(SP)				; else push resource id
+			_GetResource					; try to read in gamma table
+			MOVE.L	(SP)+,D0				; get the result
+			BEQ.S	ChkTbl					; => couldn't find it, use default
+			MOVE.L	D0,-(SP)				; save a copy for later
+			MOVE.L	D0,A0					; setup for HLock
+			_HLock							;
+			LEA		VidParms(A6),A1			; point to params for SetGamma
+			MOVE.L	(A0),csGTable(A1)		; gamma table pointer is only param
+			BSR.S	GammaControl			; call a common routine
+			MOVE.L	(SP),A0					; get the resource handle back
+			_HUnlock						; free it
+			_ReleaseResource				; and release it (fixing the stack)
+			BRA.S	ChkTbl					; continue on
+
+;
+; here's an imbedded utility.  I know I burn 2 bytes always BSRing around it, but I
+;	would burn two with a word branch if the utility were outside.  This routine sets
+;	up the iopb and csParam block for a SetGamma control call.  It expects the csGTable
+;	field to be set up, the csParam block pointer in A1, and the gdevice pointer in A3.
+;
+
+GammaControl
+			LEA		IOPBlk(A6),A0			; point to parameter block
+			MOVE.L	A1,csParam(A0)			; move addr of parms into block
+			MOVE.W	#4,csCode(A0)			; csc_SetGamma
+			CLR.L	ioCompletion(A0)		; no completion routine
+			CLR.W	ioVRefNum(A0)			; no volRefNum
+			MOVE.L	(A3),A1					; point to gdevice
+			MOVE	GDRefNum(A1),ioRefNum(A0)	; set device's refnum
+			_Control ,IMMED					; SetGamma(GammaTable)
+											;   if error here (likely if -2 were passed to
+											;	and old driver) then just use default table
+			RTS								; and back
+
+;
+; Previously, if there was a color table resource id, this part loaded that table.  Now,
+;	it checks the state of the gdDevType bit.  If it is monochrome (=0), then this routine
+;	substitutes pixelSize+32 for the resID.  If it is color (=1) and 2- or 4-bit mode, then
+;	pixelSize+64 is substituted to yield a modified color table that includes the highlight
+;	color.
+;
+; If we EVER have a gamma ID <> -1 (not default), then be sure to set the color table	<2.3>
+;	to flush this gamma into the CLUT hardware.
+;
+; The pointer to the gDevice is still in A1.
+;
+
+ChkTbl
+			MOVE.L	(A3),A1					; point to the gDevice again
+			MOVE.L	gdPMap(A1),A0			; get pixmap
+			MOVE.L	(A0),A0					; get pixmap ptr
+			MOVE.W	pmPixelSize(A0),D0		; get depth
+
+			CMP		#DirectType,gdType(A1)	; is it a direct device?
+			BEQ 	SetGRect				; if so, then do nothing
+
+			BTST	#gdDevType,gdFlags+1(A1)	; is it color or monochrome mode?
+			BNE.S	@ClrMode				; if set, then this is color
+			cmp.w	#2,d0					; 1 or 2 bit/pixel?						<2.1>
+			ble.s	@regClr					; don't do anything funky				<2.1>
+@MonoMode
+			ADD		#32,D0					; add 32 to pixelsize in all modes for linear gray
+			BRA.S	@GetClut				;
+@ClrMode
+			MOVE.W	D0,D1					; copy the depth
+			AND		#9,D1					; is it 1- or 8-bit mode?
+			BNE.S	@regClr					; if so, then do regular behavior
+@is2or4
+			ADD		#64,D0					; for 2- or 4-bit, add 64 to pixel depth (gives color+highlight)
+			BRA.S	@GetClut				;
+
+@regClr
+			MOVE	(A4),D1					; get the color table resource id
+			CMP		#-1,D1					; is it -1?
+			BNE 	@GetClut				; if not, then set the CLUT				<2.3>
+			CMP		#-1,2(A4)				; if CLUTid=-1, and gammaID<>-1, then set CLUT to flush <2.3>
+			BEQ.S	SetGRect				; if both are default, then continue	<2.3>
+
+@GetClut	CLR.L	-(SP)					; make room for function result
+			MOVE	D0,-(SP)				; else push resource id
+			_GetCTable						; get a color table
+			MOVE.L	(SP)+,D0				; get the result
+			BEQ.S	SetGRect				; => couldn't find it, use default
+
+			MOVE.L	(A3),A0					; point at the grafDevice
+			MOVE.L	GDPMap(A0),A0			; get handle to its pixmap
+			MOVE.L	(A0),A0					; point at the pixmap
+			MOVE.L	pmTable(A0),-(SP)		; push our color table for set entries  <C1/9>
+			MOVE.L	D0,-(SP)				; push new table handle for dispose		<C1/9>
+			MOVE.L	D0,-(SP)				; push source color table				<C1/9>
+			MOVE.L	pmTable(A0),-(SP)		; push destination color table			<C1/9>
+			_CopyHandle						; copy new table into our handle		<C1/9>
+			_DisposCTable					; and dispose new handle				<C1/9>
+
+; now call the driver to set this color table (handle on stack)
+
+			MOVE.L	(SP),A0					; get handle to color table
+			_HLock							; lock down the color table
+			LEA		VidParms(A6),A1			; point to params for SetEntries
+			MOVE.L	(A0),A0					; get ctabPtr							<DAF>
+			CLR.W	csStart(A1)				; start at zero, use sequence mode		<DAF>
+			MOVE.W	ctSize(A0),csCount(A1)	; for the length of the table			<DAF>
+			LEA		ctTable(A0),A0			; get pointer to colorspecs				<DAF>
+			MOVE.L	A0,csTable(A1)			; color table pointer is first param	<DAF>
+			LEA		IOPBlk(A6),A0			; point to parameter block
+			MOVE.L	A1,csParam(A0)			; move addr of parms into block
+			MOVE.W	#3,csCode(A0)			; csc_SetEntries
+			CLR.L	ioCompletion(A0)		; no completion routine
+			CLR.W	ioVRefNum(A0)			; no volRefNum
+			MOVE.L	(A3),A1					; point to gdevice
+			MOVE	GDRefNum(A1),ioRefNum(A0)	; set device's refnum
+			_Control ,IMMED					; SetEntries(ColorTable);
+			MOVE.L	(SP),A0					; get handle to color table
+			_HUnLock						; unlock the color table
+
+; finally, generate an inverse table for the table (handle on stack)
+
+											; color table handle on stack
+			MOVE.L	(A3),A1					; point at the grafDevice
+			MOVE.L	GDITable(A1),-(SP)		; push inverse table handle
+			MOVEQ	#4,D0					; make 4-4-4 inverse tables
+			MOVE	D0,GDResPref(A1)		; save in GDevice
+			MOVE	D0,-(SP)				; and push res
+			_MakeITable						; and generate inverse table
+
+; use the specified rectangle to determine the device's global coordinates
+
+SetGRect
+			ADDA	#4,A4					; skip the CLUT and gamma resID's
+			MOVE.L	(A3),A0					; point to the grafDevice
+			MOVE.L	GDPMap(A0),A1			; get handle to pixMap
+			MOVE.L	(A1),A1					; get pointer to pixMap
+			ADDQ	#Bounds,A1				; point to pixMap.bounds
+			LEA		GDRect(A0),A0			; point to its rectangle
+			MOVE.L	(A4)+,D0				; get topLeft for mouse offset
+			MOVE.L	D0,(A1)+				; copy topLeft to pixMap.bounds
+			MOVE.L	D0,(A0)+				; copy topLeft to GDRect
+			MOVE.L	(A4),(A1)				; copy botRight to pixMap.bounds
+			MOVE.L	(A4)+,(A0)+				; copy botRight to GDRect
+
+; parse and execute the additional control commands
+
+			MOVE	(A4)+,D6				; get number of control calls
+			BRA.S	ChkNxtCtl				; => jump into end of dbra loop
+DoCtl		LEA		IOPBlk(A6),A0			; point to parameter block
+			LEA		4(A4),A1				; point to call parameters
+			MOVE.L	A1,csParam(A0)			; move addr of parms into block
+			MOVE.W	(A4)+,csCode(A0)		; set control code
+			CLR.L	ioCompletion(A0)		; no completion routine
+			CLR.W	ioVRefNum(A0)			; no volRefNum
+			MOVE.L	(A3),A1					; point to gdevice
+			MOVE	GDRefNum(A1),ioRefNum(A0)	; set device's refnum
+			_Control ,IMMED					; and issue the control call
+
+			MOVE	(A4)+,D0				; get size of param block
+			ADD		D0,A4					; skip param block
+ChkNxtCtl	DBRA	D6,DoCtl				; loop for all control calls
+
+ChkNxt		DBRA	D7,DoNxt				; loop for all screens in resource
+
+; NOW UPDATE THE MOUSE TO THE COORDINATE SYSTEM OF ITS SCREEN AND DISPLAY IT
+
+			MOVE.L	CRSRDEVICE,A0			; GET HANDLE TO CURSOR DEVICE
+			MOVE.L	(A0),A0					; POINT TO CURSOR DEVICE
+			MOVE.L	GDRECT+TOPLEFT(A0),D0	; GET SCREEN TOPLEFT
+			ADD		D0,MOUSE+H				; CONVERT MOUSE TO GLOBAL
+			SWAP	D0						; GET SCREEN TOP
+			ADD		D0,MOUSE+V				; CONVERT MOUSE TO GLOBAL
+			MOVE.L	MOUSE,MTEMP				; copy to mouse temp
+			MOVE.L	MOUSE,RAWMOUSE			; and to raw coordinates
+			CLR.B	CRSRBUSY				; end of change
+			_AllocCursor					; make sure cache structures are OK			<5+>
+			_ShowCursor						; now redisplay cursor
+
+DONE		_ReleaseResource				; all done with the resource
+
+GoHome		MOVEM.L	(SP)+,D6-D7/A2-A4		; restore work registers
+			UNLINK	PARAMSIZE,'CHECKDEV'
+
+	ENDWITH
+
+;-------------------------------------------------------------
+;
+;  ROUTINES FOR ACCESSING THE DEVICE LIST
+;
+
+
+GetGDevice	PROC	EXPORT
+;----------------------------------------------------------
+;
+;  FUNCTION GetGDevice: GDHandle;
+;
+;  Return the handle to the current device
+;
+		MOVE.L	(SP)+,A0					; get return address
+		MOVE.L	theGDevice,(SP)				; return device handle
+		JMP		(A0)						; and return
+
+
+
+SetGDevice	PROC	EXPORT
+;----------------------------------------------------------
+;
+;  PROCEDURE SetGDevice (GDH: GDHandle);
+;
+;  Set the device specifed in GDH to be the current device
+;
+;  This routine needs to close the current video device if
+;  there is one, then it should open the new one.  It should
+;  also call the device to let it set up anything it might
+;  need to set up (e.g. change the bottleneck procs).
+;
+		MOVE.L	(SP)+,A0					; get the return address
+		MOVE.L	(SP)+,theGDevice			; set the specified handle
+		JMP		(A0)						; and return
+
+
+
+GETDEVICELIST	PROC	EXPORT
+;-------------------------------------------------------------
+;
+;  FUNCTION GETDEVICELIST: GDHandle;
+;
+;  RETURNS A HANDLE TO THE FIRST ELEMENT IN THE DEVICE LIST
+;
+			MOVE.L	(SP)+,A0					; GET RETURN ADDRESS
+			MOVE.L	DeviceList,(SP)				; RETURN DEVICE LIST
+			JMP		(A0)						; AND RETURN
+
+
+
+GETMAINDEVICE	PROC	EXPORT
+;-------------------------------------------------------------
+;
+;  FUNCTION GETMAINDEVICE: GDHandle;
+;
+;  RETURNS A HANDLE TO THE MAIN SCREEN DEVICE
+;
+			MOVE.L	(SP)+,A0					; GET RETURN ADDRESS
+			MOVE.L	MainDevice,(SP)				; RETURN DEVICE LIST
+			JMP		(A0)						; AND RETURN
+
+
+
+GETNEXTDEVICE	PROC	EXPORT
+;-------------------------------------------------------------
+;
+;  FUNCTION GETNEXTDEVICE(GDH: GDHandle): GDHandle;
+;
+;  RETURNS A HANDLE TO THE NEXT SCREEN DEVICE
+;  IF THERE IS NO NEXT DEVICE, RETURNS NIL
+;
+			MOVE.L	(SP)+,A0					; GET RETURN ADDRESS
+			MOVE.L	(SP)+,A1					; GET GDH
+			MOVE.L	(A1),A1						; POINT TO DEVICE
+			MOVE.L	GDNextGD(A1),(SP)			; RETURN NEXT DEVICE
+			JMP		(A0)						; AND RETURN
+
+
+TestDeviceAttribute	PROC	EXPORT
+;-------------------------------------------------------------
+;
+;  FUNCTION TestDeviceAttribute(GDH: GDHandle; attribute: INTEGER): BOOLEAN;
+;
+;  Tests the specified attribute, returns TRUE if attribute is true
+;
+			MOVE.L	(SP)+,A1					; GET RETURN ADDRESS
+			MOVE	(SP)+,D0					; GET ATTRIBUTE
+			MOVE.L	(SP)+,A0					; GET GDH
+			CLR.B	(SP)						; ASSUME FALSE
+			MOVE.L	(A0),A0						; POINT TO DEVICE
+			MOVE	GDFlags(A0),D1				; GET FLAGS WORD
+			BTST	D0,D1						; TEST ATTRIBUTE
+			BEQ.S	IsFalse						; => ATTRIBUTE NOT SET
+			ADD.B	#1,(SP)						; ELSE RETURN TRUE
+IsFalse		JMP		(A1)						; AND RETURN
+
+
+
+SetDeviceAttribute	PROC	EXPORT
+;-------------------------------------------------------------
+;
+;  PROCEDURE SetDeviceAttribute(GDH: GDHandle; attribute: INTEGER; state: Boolean);
+;
+;  Sets the specified attribute to true or false
+;
+			MOVE.L	(SP)+,A1					; GET RETURN ADDRESS
+			MOVE.B	(SP)+,D0					; GET BOOLEAN
+			MOVE	(SP)+,D1					; GET ATTRIBUTE
+			MOVE.L	(SP)+,A0					; GET GDH
+			MOVE.L	(A0),A0						; POINT TO DEVICE
+			MOVE	GDFLAGS(A0),D2				; GET FLAGS WORD
+			TST.B	D0							; TEST BOOLEAN
+			BNE.S	SetIt						; =>SET FLAG
+			BCLR	D1,D2						; CLEAR ATTRIBUTE
+			BRA.S	SDAShare					; RETURN VALUE AND RETURN
+SetIt		BSET	D1,D2						; SET ATTRIBUTE
+SDAShare	MOVE	D2,GDFLAGS(A0)				; RETURN IT
+			JMP		(A1)						; AND RETURN
+
+
+GETMAXDEVICE	PROC	EXPORT
+;-------------------------------------------------------------
+;
+;  FUNCTION GETMAXDEVICE(r: Rect): GDHandle;
+;
+;  RETURNS A HANDLE TO THE DEEPEST SCREEN DEVICE
+;  THAT INTERSECTS THE SPECIFIED GLOBAL RECTANGLE.
+;
+PARAMSIZE	EQU 	4							; TOTAL BYTES OF PARAMETERS
+RESULT		EQU 	PARAMSIZE+8 				; LONG, GRAFDEVICE
+RECT		EQU 	PARAMSIZE+8-4 				; LONG, ADDR OF GLOBAL RECTANGLE
+
+DSTRECT		EQU		-8							; RECT, VAR FOR SECTRECT
+VARSIZE		EQU		DSTRECT						; SIZE OF LOCALS
+
+			LINK	A6,#VARSIZE					; ALLOCATE STACK FRAME
+			MOVEM.L	D3/A3,-(SP)					; SAVE WORK REGISTERS
+			CLR.L	RESULT(A6)					; ASSUME NO INTERSECTION
+			MOVEQ	#0,D3						; MAX DEPTH = 0
+			MOVE.L	DEVICELIST,A3				; GET FIRST ELEMENT IN DEVICE LIST
+
+NEXTGD		MOVE.L	(A3),A0						; POINT TO DEVICE
+			TST		GDFLAGS(A0)					; IS IT ACTIVE?
+			BPL.S	SKIPGD						; =>NO, SKIP IT
+
+			CLR.B	-(SP)						; MAKE ROOM FOR BOOLEAN RESULT
+			MOVE.L	RECT(A6),-(SP)				; PUSH SPECIFIED RECTANGLE
+			PEA		GDRECT(A0)					; PUSH DEVICE'S RECTANGLE
+			PEA		DSTRECT(A6)					; PUSH DESTINATION RECT (IGNORED)
+			_SECTRECT							; IS THE RECT IN THE DEVICE
+			TST.B	(SP)+						; TEST RESULT
+			BEQ.S	SKIPGD						; => NO INTERSECTION
+
+			MOVE.L	(A3),A0						; POINT TO DEVICE
+			MOVE.L	GDPMAP(A0),A0				; GET PIXMAP
+			MOVE.L	(A0),A0						; POINT TO PIXMAP
+			MOVE	PIXELSIZE(A0),D0			; GET PIXEL DEPTH
+			CMP		D3,D0						; COMPARE TO SAVED DEPTH
+			BLE.S	SKIPGD						; => NO BIG DEAL
+			MOVE	D0,D3						; ELSE UPDATE MAX DEPTH
+			MOVE.L	A3,RESULT(A6)				; AND RETURN RESULT
+
+SKIPGD		MOVE.L	(A3),A0						; GET DEVICE
+			MOVE.L	GDNEXTGD(A0),D0				; GET NEXT DEVICE
+			MOVE.L	D0,A3						; SAVE IT
+			BNE.S	NEXTGD
+
+			MOVEM.L	(SP)+,D3/A3					; RESTORE WORK REGISTERS
+			UNLINK	PARAMSIZE,'GETMAXDE'		; STRIP PARAMS AND RETURN
+
+
+
+GETDEVPIX	PROC	EXPORT
+;-------------------------------------------------------------
+;
+;  UTILITY GetDevPix;
+;
+;  Returns a pointer to theGDevice's pixMap in A0
+;
+			MOVE.L	theGDevice,A0				; GET A HANDLE TO THE GRAFDEVICE
+			MOVE.L	(A0),A0						; GET A POINTER TO THE GRAFDEVICE
+			MOVE.L	GDPMAP(A0),A0				; GET HANDLE TO THE DEVICE'S PIXMAP
+SHARE		MOVE.L	(A0),A0						; GET PIXMAP POINTER
+			RTS
+
+
+
