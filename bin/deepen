@@ -23,8 +23,6 @@ parser.add_argument('patchset', metavar='PATCHSET', action='store', type=lambda 
 parser.add_argument('worktree', metavar='WORKTREE', action='store', type=lambda x: folder('worktree', x), help='Destination worktree (assumed in ../worktree/)')
 group = parser.add_mutually_exclusive_group()
 group.add_argument('--base', metavar='SRC', action='store', default='SuperMarioProj.1994-02-09', type=lambda x: folder('base', x), help='Base source tree (default=SuperMarioProj.1994-02-09, assumed in ../base/)')
-group.add_argument('--base-commit', metavar='REV', action='store', help='Base commit')
-parser.add_argument('--branch', metavar='BRANCH', action='store', default='master', help='Destination branch')
 
 args = parser.parse_args()
 
@@ -34,45 +32,37 @@ assert not path.exists(path.join(args.patchset, '.git')) # protect against argum
 
 
 horst = ['-c', 'user.name=Horst Beepmanh', '-c', 'user.email=<>']
+def git(*gitargs):
+    run(['git', *horst, *gitargs], cwd=args.worktree, check=True)
 
 
-makedirs(args.worktree, exist_ok=True)
-run(['git', 'init'], cwd=args.worktree, check=True)
-run(['git', 'checkout', '--orphan', args.branch], cwd=args.worktree, check=True)
-
-# This cleans the working directory, because the manpage's suggestion `git rm -rf .` does not work
-run(['git', 'reset'], cwd=args.worktree, check=True)
-for do_delete in listdir(args.worktree):
-    if do_delete != '.git':
-        do_delete = path.join(args.worktree, do_delete)
-        try:
-            rmtree(do_delete)
-        except NotADirectoryError:
-            remove(do_delete)
-
-if args.base_commit is not None:
-    run(['git', 'reset', '--hard', args.base_commit], cwd=args.worktree, check=True)
-else:
-    for walk_base, walk_dirs, walk_files in walk(args.base):
-        walk_dirs[:] = [x for x in walk_dirs if not x.startswith('.')]
-        walk_files[:] = [x for x in walk_files if not x.startswith('.')]
-
-        other_dir = path.join(args.worktree, path.relpath(walk_base, args.base))
-
-        makedirs(other_dir, exist_ok=True)
-
-        for this_file in walk_files:
-            copy(path.join(walk_base, this_file), other_dir)
-
-    run(['git', 'add', '.'], cwd=args.worktree, check=True)
-    run(['git', *horst, 'commit', '-m', path.basename(args.base)], cwd=args.worktree, check=True)
+try:
+    rmtree(args.worktree)
+except FileNotFoundError:
+    pass
+makedirs(args.worktree)
 
 with open(path.join(args.worktree, '.gitignore'), 'a') as f:
-    f.write('Build*\n')
-run(['git', 'add', '.gitignore'], cwd=args.worktree, check=True)
-run(['git', *horst, 'commit', '-m', 'auto-gitignore (do not rebase)'], cwd=args.worktree, check=True)
+    f.write('.*\n*.dmg\nBuild*/\n')
 
-run(['git', 'tag', args.branch+'-patchset-base'], cwd=args.worktree, check=True)
+git('init')
+git('add', '-f', '.gitignore')
+git('commit', '-m', 'Useful non-source things')
+
+for walk_base, walk_dirs, walk_files in walk(args.base):
+    walk_dirs[:] = [x for x in walk_dirs if not x.startswith('.')]
+    walk_files[:] = [x for x in walk_files if not x.startswith('.')]
+
+    other_dir = path.join(args.worktree, path.relpath(walk_base, args.base))
+
+    makedirs(other_dir, exist_ok=True)
+
+    for this_file in walk_files:
+        copy(path.join(walk_base, this_file), other_dir)
+
+git('add', '.')
+git('commit', '-m', path.basename(args.base))
+git('tag', 'patchset-base')
 
 patchfiles = [path.join(args.patchset, x) for x in sorted(listdir(args.patchset)) if path.splitext(x)[1].lower() == '.patch']
-run(['git', *horst, 'am', *patchfiles], cwd=args.worktree, check=True)
+git('am', *patchfiles)
