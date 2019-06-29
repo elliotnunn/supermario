@@ -1,0 +1,1133 @@
+		PRINT	Push,NoObj
+		TITLE	'ProgStrucMacs - Program Structure Macro Statements'
+		
+*******************************************************************************
+*                                                                             *
+*                                ProgStrucMacs                                *
+*                                                                             *
+*                        Program Structure Statements                         *
+*                                                                             *
+*                                Ira L. Ruben                                 *
+*                                  09/15/86                                   *
+*                                                                             *
+*                  Copyright Apple Computer, Inc. 1986-1989                   *
+*                             All rights reserved.                            *
+*                                                                             *
+*       ---------------------------------------------------------------       *
+*                                                                             *
+* External macros in this set are:                                            *
+*                                                                             *
+*   • Procedure - Parse a procedure declaration                               *
+*   • Function  - Parse a function declaration                                *
+*   • Var       - Declare local variables on the stack                        *
+*   • Begin     - Procedure primary entry point                               *
+*   • Enter     - Procedure secondary entry point                             *
+*   • Return    - Procedure and function exit                                 *
+*   • Call      - procedure, function, or trap call                           *
+*                                                                             *
+* Internal macros in this set are:                                            *
+*                                                                             *
+*   • ScanArgs# - Parse a proc name and its argument list                     *
+*   • Dcl1Var#  - Process local variable declaration or formal param          *
+*                                                                             *
+* Thanks to Steve Brecher of Software Supply whose original set of macros     *
+* provided many ideas and syntax used here.                                   *
+*                                                                             *
+*******************************************************************************
+
+
+		TITLE	'ScanArgs# - Parse a proc name and its argument list'
+		
+		MACRO
+		ScanArgs#	&ArgList
+.*
+.******************************************************************************
+.* ScanArgs# - Parse a proc name and its argument list       (internal macro) *
+.*                                                                            *
+.* Input:  &ArgList = <modname> ['('arg1,...argN')'] [':'<result>]            *
+.*		 &Areg = 'A' ==> we must have CALL.A (An)[(arglist...)]		   *								   *
+.*                                                                            *
+.* Output: &ModName#   = <modname>                                     (SETC) *
+.*         &NbrOfArgs# = number of arguments                           (SETA) *
+.*         &Args#      = array of arguments; &Args#[i] = i'th arg      (SETC) *
+.*         &FInfo#     = <result>                                      (SETC) *
+.******************************************************************************
+.*
+		GBLC		&ModName#			; <modname>
+		GBLC		&FInfo#			; <result>
+		GBLC		&Args#[50]		; argument list
+		GBLA		&NbrOfArgs#		; number of args in argument list
+		GBLC		&Areg			; "A" ==> call (An)[(arglist...)] case
+.*
+		LCLC		&S,&F[2]
+		LCLA		&i,&j
+.*
+	&S: SETC &Trim(&ArgList)			; Ignore leading/trailing blanks
+	&i: SETA &Pos('(', &S)			; Find left-most "(", if any
+	IF &Areg = 'A' THEN				; But if we are doing a CALL.A (An)...
+	  &j:	SETA &Pos('(', &S[&i+1:255]); ...find 2nd "("
+	  IF &j ≠ 0 THEN				; If there is one, we got arg list
+	    &i:	SETA &i + &j			; Adjust to point at 2nd "("
+	  ELSE						; If there isn't an arg list...
+	    &i:	SETA 0				; Set index accordingly
+	  ENDIF
+	ENDIF
+	IF &i = 0 THEN					; If no args...
+	  &NbrOfArgs#: SETA 0			; ...say so!
+	  &i:          SETA &List(&S, '&F', ':')
+	  &ModName#:   SETC &Trim(&F[1])	; Set &ModName# to stuff before any ":"
+	  &FInfo#:     SETC	&Trim(&F[2])	; &FInfo# is everything to right of ":"
+	ELSE							; If there are args, set up globals
+	  &ModName#:   SETC &Trim(&ArgList[1:&i-1])
+	  &NbrOfArgs#: SETA &List(&ArgList[&i+1:255], '&Args#')
+	  &i:          SETA &List(&Args#[&NbrOfArgs#], '&F', ')')
+	  &Args#[&NbrOfArgs#]: SETC &Trim(&F[1])
+	  &FInfo#:  	SETC &SubStr(&Trim(&F[2]), 2, 255)
+	ENDIF
+.*
+.*&i	seta	0
+.*	writeln
+.*	writeln	&ModName#
+.*	while &i < &NbrOfArgs# do
+.*	  &i: seta &i+1
+.*	  writeln &i, ': "', &Args#[&i], '"'
+.*	endw
+.*	writeln	'"', &FInfo#, '"'
+.*	print	pop
+		ENDM
+
+
+		TITLE	'Dcl1Var# - Process local variable decl. or formal param'
+		
+		MACRO
+		Dcl1Var#	&Opnd,&Align:A=0
+.*
+.******************************************************************************
+.* Dcl1Var# - Process local variable decl. or formal param   (internal macro) *
+.*                                                                            *
+.* Input:  &Opnd  = <id>[':' <size>] [ '[' <dim> ']']                         *
+.*         &Align = 1 ==> Align to word boundary and round size up to even    *
+.*                  0 ==> no alignment and no rounding                        *
+.*                                                                            *
+.* Output: None.                                                              *
+.*                                                                            *
+.* Code:   If <size> is a template name:      DS.W      <size>                *
+.*         If <size> is B, W, L, S, D, X, P:  DS.<size> <dim>         Note 1  *
+.*         If <size> anything else:           DS.B      <dim>*<size>  Note 2  *
+.*                                                                            *
+.*         Note 1: If <size>=B and &Align=1, then <size> forced to W          *
+.*         Note 2: If &Align=1, then <size> rounded to next word if odd       *
+.******************************************************************************
+.*
+		LCLC		&Var,&Size,&UCSize,&A[2]
+		LCLA		&VarLen,&i,&j,&Dim
+.*
+	&Var:    SETC &Trim(&Opnd)		; Assume there is anly an <id> 
+	&VarLen: SETA &Len(&Opnd)		; To be sure we look at last char
+.*
+.* Process '[' <dim> ']'
+.*
+	IF &Var[&VarLen] ≠ ']' THEN		; Have "]" indicating we have <dim> ?
+	  &Dim: SETA 1					; No, the <dim> defaults to 1
+	ELSE							; If we have a <dim>...
+	  &i: SETA -&ScanEQ('[', &Var, -&VarLen) ; Find "[" preceding the <dim>
+	  IF &i = &VarLen THEN			; Did we find it ? (we better!)
+	    AERROR '"[" missing.'		
+	    &Dim: SETA 1				; No, default to 1
+	    &Var: SETA &Var[1:&VarLen-1]	; Remove the invalid <dim> from the <id>
+	  ELSE
+	    &j:   SETA &VarLen-&i		; If we have a valid <dim>
+	    &Dim: SETA &Eval(&Var[&j+1:&i]); Extract it
+	    &Var: SETC &Trim(&Var[1:&j-1]) ; Remove it from the <id>
+	  ENDIF
+	ENDIF
+.*
+.* Process ':' <size>
+.*
+	&i:      SETA &List(&Var, '&A', ':')		; Split <size> off the <id>
+	&Var:    SETC &Trim(&A[1])				; Put <id> in &Var
+	&Size:   SETC &Default(&Trim(&A[2]), 'W')	; Put <size> in &Size
+	&UCSize: SETC &UC(&Size)					; Need upper case copy to test
+.*
+.* Put it all together -- generate appropriate DC statement
+.*
+	IF &Type(&Size) = 'TEMPLATE' THEN
+	  IF &Dim ≠ 1 THEN
+	    AERROR 'Dimension must be 1 for template types'
+	  ENDIF
+&Var      DS.W      &Size
+	ELSEIF (&UCSize = 'W') OR (&Align AND (&UCSize = 'B')) THEN
+&Var      DS.W      &Dim
+	ELSEIF (&Len(&UCSize) = 1) AND (&Pos(&UCSize, 'BLSDXP') > 0) THEN
+&Var      DS.&Size  &Dim
+	ELSE
+	  &i: SETA &Ord(&Eval(&Size))
+	  IF &Align THEN
+&Var      DS.B      &Dim*(&i+(&i**1))
+	  ELSE
+&Var      DS.B      &Dim*&i
+	  ENDIF
+	ENDIF
+.*
+		ENDM
+
+
+		TITLE	'Procedure - Parse a procedure declaration'
+		
+		MACRO
+&Scope	Procedure	&ArgList,&C,&Link==,&Main==N
+.*
+.******************************************************************************
+.* Procedure - Parse a procedure declaration                                  *
+.*                                                                            *
+.* Input:  &ArgList = <modname> ['('formal1,...formalN')'] [':'<result>]      *
+.*         <result> = B | W | L | S | D | X | P | <id>                        *
+.*         &Scope   = 'ENTRY'  ==> procedure local to file                    *
+.*                    'EXPORT' ==> procedure global to file                   *
+.*                    'LOCAL'  ==> procedure local to current procedure       *
+.*                    <null>   ==> same as ENTRY                              *
+.*         &C       = 'C' ==> a C routine, reverse args on the stack          *
+.*         &Link    = 'Y'     ==> generate LINK A6                            *
+.*                    'DEBUG' ==> generate LINK A6 and MacsBug symbol         *
+.*                    <null>  ==> generate LINK A6 if LinkAll or Debug is 1   *
+.*         &Main    = 'Y'     ==> main program                                *
+.*                    not 'Y' ==> not main program                            *
+.*                                                                            *
+.*         Globals: LinkAll ≠ 0 ==> always generate LINKs                     *
+.*                          = 0 ==> LINK's subject to &Link param             *
+.*                  Debug   ≠ 0 ==> always generate LINKs and MacsBug symbol  *
+.*                          = 0 ==> LINKs/MacsBug symbol subject to &Link     *
+.*                                                                            *
+.* Output: &StFrame#  = name of current stack frame (SF#xxxx)          (SETC) *
+.*         &DbgName#  = name to generate for MacsBug or <null>         (SETC) *
+.*         &FSz#      = function result size or <null>                 (SETC) *
+.*         &Link#     = 1 ==> generate LINK; 0 ==> no LINK             (SETA) *
+.*         &HaveDcls# = 1 ==> have local variables; 0 ==> no locals    (SETA) *
+.*         &C#        = 1 ==> C function; 0 ==> Pascal routine         (SETA) *
+.*                                                                            *
+.* Code: * The following is generated by Procedure (HERE IN THIS MACRO)       *
+.*       <modname> [PROC         &Scope]         ; PROC may be FUNC | MAIN    *
+.*       SF#xxxx    RECORD      {FramePtr},Decr  ; Local stack frame          *
+.*      [<modname>  DS.<result> 0]               ; Only if function           *
+.*       <formal1>  DS.<size>   <amount>         ; See Dcl1Var# for details   *
+.*                  - - -                                                     *
+.*       <formalN>  DS.<size>   <amount>         ; Reverse order if C funct   *
+.*       RetAddr    DS.L        1                ; Return address             *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Var                                  *
+.*       LinkA6     DS.L        1                ; LINK field before locals   *
+.*       FramePtr   EQU         *                ; A6 will point here         *
+.*       <Var1>     DS.<size>   <amount>         ; See Dcl1Var# for details   *
+.*                  - - -                                                     *
+.*       <VarN>     DS.<size>   <amount>         ; One DS for each Var arg    *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Begin                                *
+.*      [LinkA6     DS.L        1]               ; If required and no locals  *
+.*      [FramePtr   EQU         *]               ; A6 or A7 will point here   *
+.*       LocalSize  DS.W        0                ; Byte size of local vars    *
+.*                  ENDR                         ; End of local stack frame   *
+.*                  WITH       [<with>,]SF#xxxx  ; Cover templates, stk frame *
+.*                 [LINK        A6,#LocalSize]   ; If LINK is required        *
+.*       FP         SET         A6 or A7         ; A6 if LINK generated       *
+.*                 [MOVE[M].L   &Save,-(A7)]     ; If regs to save            *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Enter                                *
+.*                  BRA.S       %L%xxxx          ; Branch around Enter code   *
+.*       Lbl                                     ; 2ndary entry point label   *
+.*                 [WITH        <with>]          ; Cover additional templates *
+.*                 [LINK        A6,#LocalSize]   ; If LINK is required        *
+.*                 [MOVE[M].L   &Save,-(A7)]     ; If regs to save            *
+.*       %L%xxxx                                 ; The branch-around label    *
+.*       -------------------------------------------------------------------- *
+.*       * Body of procedure goes here                                        *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Return                               *
+.*                 [MOVE[M].L   (A7)+,<reg-list>]; Restore regs if any saved  *
+.*                 [UNLK        A6]              ; Only if LINK was done      *
+.*                 [MOVEA.L     (A7)+,A0     ]   ; If not C and have args...  *
+.*                 [ADD.W       #<ArgSize>,A7]   ; ...pop off arg list        *
+.*                 [MOVE.<size> <id>,(A7)]       ; If result for function     *
+.*                 [JMP         (A0)]            ; If not C and have args     *
+.*                 [RTS             ]            ; If C or no args            *
+.*                 [DC.B        '<modname>']     ; MacsBug symbol (asis str)  *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLC		&ModName#			; <modname>
+		GBLC		&FInfo#			; function <result>
+		GBLC		&Args#[50]		; argument list
+		GBLA		&NbrOfArgs#		; number of args in argument list
+		GBLC		&StFrame#			; name of current stack frame
+		GBLC		&DbgName#			; name to generate for MacsBug
+		GBLC		&FSz#			; function result size
+		GBLA		&Link#			; 1 ==> generate LINK
+		GBLA		&HaveDcls#		; 1 ==> have local variables
+		GBLA		&C#				; 1 ==> C function
+		GBLC		&Areg			; "A" ==> call (An)[(arglist...)] case
+.*
+		LCLA		&Func,&Arg
+		LCLC		&LinkOpt
+		LCLC		&DbgTemp
+.*
+.* LinkAll is a user setable global controlling LINK generation
+.*
+	IF &Type('LinkAll') = 'UNDEFINED' THEN ; Initialize LinkAll if required
+	  PRINT Push,Off
+	  LinkAll: SET 0
+	  PRINT Pop
+	ENDIF
+.*
+.* Debug is a user settable global controlling MacsBug symbol generation
+.*
+	IF &Type('Debug') = 'UNDEFINED' THEN ; Initialize Debug if required
+	  PRINT Push,Off
+	  Debug: SET 0
+	  PRINT Pop
+	ENDIF
+.*
+.* Break up &ArgList into its components
+.*
+	&Areg: SETC ''					; Set switch for normal arglist
+	ScanArgs#	&ArgList				; Set &ModName#, &Args#, &FInfo#
+	&Func: SETA &Len(&FInfo#)		; &Func ≠ 0 if function
+	&C#:   SETA &UC(&C)='C'			; Remember if we have a C function
+.*
+  	IF &NbrOfArgs# = 1 THEN			; Correct for the case F()
+    	  IF &Args#[1] = '' THEN			; One arg but it's null...
+	    &NbrOfArgs#: SETA 0			; ...treat as if there are no arguments
+    	  ENDIF
+  	ENDIF
+.*
+.* Generate module header and its corresponding scope
+.*
+	IF &UC(&Scope) = 'LOCAL' THEN
+          ALIGN
+	  IF &ModName# ≠ '' THEN
+&ModName#:
+	  ENDIF
+	ELSEIF &UC(&Main[1:1]) = 'Y' THEN
+&ModName# MAIN      &Scope
+	ELSEIF &Func THEN
+&ModName# FUNC      &Scope
+	ELSE
+&ModName# PROC      &Scope
+	ENDIF
+.*
+.* Start the proc's local stack frame
+.*
+	&StFrame#: SETC &Concat('SF#', &SysNdx)
+.*
+&StFrame# RECORD    {FramePtr},Decr
+.*
+.* If function, then generate stack fram label for function result. The label is
+.* the module name if function result is one of the standard sizes.  If it is not
+.* a standard size, it is assumed to be an <id> and that <id> is used as the
+.* function result label.
+.*
+	IF &Func THEN
+	  IF (&Func = 1) AND (&Pos(&UC(&FInfo#), 'BWLSDXP') > 0) THEN
+	    &FSz#: SETC &UC(&FInfo#)
+&ModName# DS.&FSz#  0
+	  ELSE
+	    &FSz#: SETC 'W'
+&FInfo#   DS.W		0
+	  ENDIF
+	ELSE
+	  &FSz#: SETC ''
+	ENDIF
+.*
+.* Declare all the formals in the local stack frame.  The formals are declared
+.* in the reverse order if we have a C function.
+.*
+	IF &C# THEN					; C ?
+	  &Arg: SETA &NbrOfArgs#			; Yes
+	  WHILE &Arg > 0 DO				; Declare formals in reverse order
+	    Dcl1Var# &Args#[&Arg],1
+	    &Arg: SETA &Arg-1
+	  ENDW
+	ELSE							; Pascal
+	  WHILE &Arg < &NbrOfArgs# DO		; Declare formals in the "normal" way
+	    &Arg: SETA &Arg+1
+	    Dcl1Var# &Args#[&Arg],1	  
+	  ENDW
+	ENDIF
+.*
+.* The return address always follows the formal list
+.*
+RetAddr   DS.L      1
+.*
+.* Process the &Link parameter: indicates if LINK must be generated and whether
+.* MacsBug symbol will be generated.
+.*
+	&Link#:   SETA 0				; Assume LINK will not be needed
+	&LinkOpt: SETC &UC(&Link)
+	IF Debug THEN					; If Debug ≠ 0 then...
+	  &LinkOpt: SETC 'DEBUG'			; ...we will gen LINK and MacsBug symbol
+	ELSEIF LinkAll THEN				; If LinkAll ≠ 0 then...
+	  IF &LinkOpt ≠ 'DEBUG' THEN		; ...if user didn't specify DEBUG for &Link
+	    &LinkOpt: SETC 'Y'			; indicate we need the LINK
+	  ENDIF
+	ENDIF
+	IF &LinkOpt ≠ '' THEN			; Any &Link or global control setting ?
+	  &Link#: SETA 1				; Yes, set switch to gen LINK later
+	  IF (&LinkOpt ≠ 'DEBUG') OR (&ModName# = '') THEN
+	    &DbgName#: SETC ''			; If no MacsBug symbol, set global <null>
+	  ELSE						; If MacsBug symbol, set it to gen later
+	    &DbgTemp: SETC	&ModName#		; Generate new type symbols
+	    IF &Len(&ModName#) < 32 THEN	; If module name < 32 chars
+		 IF &Len(&ModName#) // 2 = 0 THEN ; Add space if even so that...
+		   &DbgTemp: SETC &Concat(&ModName#,' ') ; string length plus length byte...
+	      ENDIF					; will align to word boundary
+	      &DbgName#: SETC &Concat(&Chr($80 + &Len(&ModName#)), &DbgTemp)
+	    ELSE						; Length is greater than 32 characters
+		 IF &Len(&ModName#) // 2 = 1 THEN ; Add space if length is odd
+		   &DbgTemp: SETC &Concat(&ModName#,' ')
+		 ENDIF
+		 &DbgName#: SETC &Concat(&Chr($80), &Chr(&Len(&ModName#)), &DbgTemp)
+	    ENDIF
+	  ENDIF
+	ENDIF
+.*
+.* That's all for now -- we have no local declarations at this point...yet!
+.*
+	&HaveDcls#: SETA 0
+.*
+		PRINT	Pop
+		ENDM
+
+
+		TITLE	'Function - Parse a function declaration'
+		
+		MACRO
+&Scope	Function	&ArgList,&C,&Link==,&Main==N
+.*
+.******************************************************************************
+.* Function - Parse a function declaration (see Procedure for details)        *
+.******************************************************************************
+.*                                                                            *
+		PRINT	Push,NoMDir,NoMCall
+.*
+&Scope	Procedure	&ArgList,&C,Link=&Link,Main=&Main
+.*
+		PRINT	Pop
+		ENDM
+
+
+		TITLE	'Var - Declare local variables on the stack'
+		
+		MACRO
+		Var
+.*
+.******************************************************************************
+.* Var - Declare local variables on the stack                                 *
+.*                                                                            *
+.* Call:   <var-id>  Var   <id>[':' <size>] [ '[' <dim> ']']   (See Dcl1Var#) *
+.*                                                                            *
+.* Input:  &HaveDcls# = 1 ==> have local variables; 0 ==> no locals    (SETA) *
+.*                                                                            *
+.* Output: &Link#     = 1 ==> generate LINK; 0 ==> no LINK             (SETA) *
+.*         &HaveDcls# = 1 ==> have local variables; 0 ==> no locals    (SETA) *
+.*                                                                            *
+.* Code: * The following is generated by Procedure                            *
+.*       <modname> [PROC         &Scope]         ; PROC may be FUNC | MAIN    *
+.*       SF#xxxx    RECORD      {FramePtr},Decr  ; Local stack frame          *
+.*      [<modname>  DS.<result> 0]               ; Only if function           *
+.*       <formal1>  DS.<size>   <amount>         ; See Dcl1Var# for details   *
+.*                  - - -                                                     *
+.*       <formalN>  DS.<size>   <amount>         ; Reverse order if C funct   *
+.*       RetAddr    DS.L        1                ; Return address             *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Var (HERE IN THIS MACRO)             *
+.*       LinkA6     DS.L        1                ; LINK field before locals   *
+.*       FramePtr   EQU         *                ; A6 will point here         *
+.*       <Var1>     DS.<size>   <amount>         ; See Dcl1Var# for details   *
+.*                  - - -                                                     *
+.*       <VarN>     DS.<size>   <amount>         ; One DS for each Var arg    *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Begin                                *
+.*      [LinkA6     DS.L        1]               ; If required and no locals  *
+.*      [FramePtr   EQU         *]               ; A6 or A7 will point here   *
+.*       LocalSize  DS.W        0                ; Byte size of local vars    *
+.*                  ENDR                         ; End of local stack frame   *
+.*                  WITH       [<with>,]SF#xxxx  ; Cover templates, stk frame *
+.*                 [LINK        A6,#LocalSize]   ; If LINK is required        *
+.*       FP         SET         A6 or A7         ; A6 if LINK generated       *
+.*                 [MOVE[M].L   &Save,-(A7)]     ; If regs to save            *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Enter                                *
+.*                  BRA.S       %L%xxxx          ; Branch around Enter code   *
+.*       Lbl                                     ; 2ndary entry point label   *
+.*                 [WITH        <with>]          ; Cover additional templates *
+.*                 [LINK        A6,#LocalSize]   ; If LINK is required        *
+.*                 [MOVE[M].L   &Save,-(A7)]     ; If regs to save            *
+.*       %L%xxxx                                 ; The branch-around label    *
+.*       -------------------------------------------------------------------- *
+.*       * Body of procedure goes here                                        *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Return                               *
+.*                 [MOVE[M].L   (A7)+,<reg-list>]; Restore regs if any saved  *
+.*                 [UNLK        A6]              ; Only if LINK was done      *
+.*                 [MOVEA.L     (A7)+,A0     ]   ; If not C and have args...  *
+.*                 [ADD.W       #<ArgSize>,A7]   ; ...pop off arg list        *
+.*                 [MOVE.<size> <id>,(A7)]       ; If result for function     *
+.*                 [JMP         (A0)]            ; If not C and have args     *
+.*                 [RTS             ]            ; If C or no args            *
+.*                 [DC.B        '<modname>']     ; MacsBug symbol (asis str)  *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&Link#			; 1 ==> generate LINK
+		GBLA		&HaveDcls#		; 1 ==> have local variables
+.*
+		LCLA		&i,&N
+.*
+	IF NOT &HaveDcls# THEN			; Is this the first local declaration ?
+	  &HaveDcls#: SETA 1			; Yes, indicate we have locals
+LinkA6    DS.L      1
+FramePtr  EQU       *
+	ENDIF
+.*
+.* Declare each variable on the &SysLst argument list using Dcl1Var#.  Thus the
+.* syntax for local variables is identical to proc formals except that here the
+.* word alignment is not required.
+.*
+	&N: SETA &Nbr(&SysLst)
+	WHILE &i < &N DO				; Around and around we go...
+	  &i: SETA &i+1
+	  Dcl1Var# &SysLst[&i],0
+	ENDW
+.*
+	&Link#: SETA 1					; Now we will require a LINK
+.*
+		PRINT	Pop
+		ENDM
+
+		
+		TITLE	'Begin - Procedure primary entry point'
+		
+		MACRO
+		Begin	&Prelude,&Save==,&With==
+.*
+.******************************************************************************
+.* Begin - Procedure primary entry point                                      *
+.*                                                                            *
+.* Input:  &Prelude   = not <null> ==> override generation of LINK            *
+.*         &Save      = a register list of regs to save across this procedure *
+.*         &With      = a sublist of additional templates to cover with WITH  *
+.*                                                                            *
+.*         &StFrame#  = name of current stack frame (SF#xxxx)          (SETC) *
+.*         &Link#     = 1 ==> generate LINK; 0 ==> no LINK             (SETA) *
+.*         &HaveDcls# = 1 ==> have local variables; 0 ==> no locals    (SETA) *
+.*                                                                            *
+.* Output: &Link#     = 1 ==> generate LINK; 0 ==> no LINK             (SETA) *
+.*         &SaveRegs# = Regs saved and to be restored                  (SETC) *
+.*         &ArgSize#  = nbr of bytes of stack space for formals        (SETA) *
+.*                                                                            *
+.* Code: * The following is generated by Procedure                            *
+.*       <modname> [PROC         &Scope]         ; PROC may be FUNC | MAIN    *
+.*       SF#xxxx    RECORD      {FramePtr},Decr  ; Local stack frame          *
+.*      [<modname>  DS.<result> 0]               ; Only if function           *
+.*       <formal1>  DS.<size>   <amount>         ; See Dcl1Var# for details   *
+.*                  - - -                                                     *
+.*       <formalN>  DS.<size>   <amount>         ; Reverse order if C funct   *
+.*       RetAddr    DS.L        1                ; Return address             *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Var                                  *
+.*       LinkA6     DS.L        1                ; LINK field before locals   *
+.*       FramePtr   EQU         *                ; A6 will point here         *
+.*       <Var1>     DS.<size>   <amount>         ; See Dcl1Var# for details   *
+.*                  - - -                                                     *
+.*       <VarN>     DS.<size>   <amount>         ; One DS for each Var arg    *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Begin (HERE IN THIS MACRO)           *
+.*      [LinkA6     DS.L        1]               ; If required and no locals  *
+.*      [FramePtr   EQU         *]               ; A6 or A7 will point here   *
+.*       LocalSize  DS.W        0                ; Byte size of local vars    *
+.*                  ENDR                         ; End of local stack frame   *
+.*                  WITH       [<with>,]SF#xxxx  ; Cover templates, stk frame *
+.*                 [LINK        A6,#LocalSize]   ; If LINK is required        *
+.*       FP         SET         A6 or A7         ; A6 if LINK generated       *
+.*                 [MOVE[M].L   &Save,-(A7)]     ; If regs to save            *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Enter                                *
+.*                  BRA.S       %L%xxxx          ; Branch around Enter code   *
+.*       Lbl                                     ; 2ndary entry point label   *
+.*                 [WITH        <with>]          ; Cover additional templates *
+.*                 [LINK        A6,#LocalSize]   ; If LINK is required        *
+.*                 [MOVE[M].L   &Save,-(A7)]     ; If regs to save            *
+.*       %L%xxxx                                 ; The branch-around label    *
+.*       -------------------------------------------------------------------- *
+.*       * Body of procedure goes here                                        *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Return                               *
+.*                 [MOVE[M].L   (A7)+,<reg-list>]; Restore regs if any saved  *
+.*                 [UNLK        A6]              ; Only if LINK was done      *
+.*                 [MOVEA.L     (A7)+,A0     ]   ; If not C and have args...  *
+.*                 [ADD.W       #<ArgSize>,A7]   ; ...pop off arg list        *
+.*                 [MOVE.<size> <id>,(A7)]       ; If result for function     *
+.*                 [JMP         (A0)]            ; If not C and have args     *
+.*                 [RTS             ]            ; If C or no args            *
+.*                 [DC.B        '<modname>']     ; MacsBug symbol (asis str)  *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLC		&FInfo#			; function <result>
+		GBLC		&StFrame#			; name of current stack frame
+		GBLC		&SaveRegs#		; Regs saved and to be restored
+		GBLA		&NbrOfArgs#		; number of args in argument list
+		GBLA		&Link#			; 1 ==> generate LINK
+		GBLA		&HaveDcls#		; 1 ==> have local variables
+		GBLA		&ArgSize#			; nbr of bytes of stack space for formals
+.*
+.* If we don't already think we need a LINK, we still may need it if, at this
+.* point, we have to save registers and we are in a function or there are formal
+.* parameters.
+.*
+	IF &Link# OR (((&FInfo#≠'') OR (&NbrOfArgs# ≠ 0)) AND (&Save≠'')) THEN
+	  &Link#: SETA 1				; Link is required
+	  IF NOT &HaveDcls# THEN			; Gen field for LINK address if no locals
+LinkA6    DS.L      1
+	  ENDIF
+	ENDIF
+.*
+.* If there we no locals, we haven't generated the FramePtr yet.  So we do it now.
+.*
+	IF NOT &HaveDcls# THEN
+FramePtr  EQU       *
+	ENDIF
+.*
+.* That's all for the stack frame. We generate LocalSize to be used in potential
+.* LINK instruction.
+.*
+LocalSize DS.W      0
+          ENDR
+.*
+.* Generate a WITH to cover the local stack frame and any additional templates
+.* the user specified in the &With parameter.  This may be a sublist or a single
+.* name.
+.*
+	IF &With ≠ '' THEN
+	  IF &With[1:1] = '(' THEN
+          WITH      &With[2:&Len(&With)-2],&StFrame#
+	  ELSE
+          WITH      &With,&StFrame#
+	  ENDIF
+	ELSE
+          WITH      &StFrame#
+	ENDIF
+.*
+.* It's time for the LINK.  It is generated if &Link is 1.  &Link became 1 under
+.* the following conditions:
+.*   1. Either the globals LinkAll or Debug are set non-zero.
+.*   2. The &Link Procedure parameter is set to DEBUG or non-null
+.*   3. There are local variables (Var's)
+.*   4. There are registers to save (&Save), and
+.*      • we are processing a function, or
+.*      • there are formal (and, of course, actual) parameters
+.* Given all this, the user can still suppress the LINK by setting &Prelude to
+.* non-null.
+.*
+	IF &Link# THEN
+	  IF &Prelude = '' THEN
+          LINK      A6,#LocalSize
+	  ENDIF
+FP        SET       A6
+	ELSE
+FP        SET       A7
+	ENDIF
+.*
+.* Compute the size of the argument list to be able to pop the stack with Return.
+.* Also, save registers if required.
+.*
+	&ArgSize#:  SETA &Eval(&StFrame#)-RetAddr-4
+	&SaveRegs#: SETC &Save
+	IF &Save ≠ '' THEN
+	  IF &Substr(&Type(&Save), 1, 3) = 'REG' THEN
+          MOVE.L    &Save,-(A7)
+	  ELSE
+          MOVEM.L   &Save,-(A7)
+	  ENDIF
+	ENDIF
+.*
+		PRINT	Pop
+		ENDM
+
+		
+		TITLE	'Enter - Procedure secondary entry point'
+		
+		MACRO
+&Lbl		Enter	&Prelude,&With==
+.*
+.******************************************************************************
+.* Enter - Procedure secondary entry point                                    *
+.*                                                                            *
+.* Input:  &Prelude   = not <null> ==> override generation of LINK            *
+.*         &With      = a sublist of additional templates to cover with WITH  *
+.*                                                                            *
+.*         &Link#     = 1 ==> generate LINK; 0 ==> no LINK             (SETA) *
+.*         &SaveRegs# = Regs saved and to be restored                  (SETC) *
+.*                                                                            *
+.* Output: None.                                                              *
+.*                                                                            *
+.* Code: * The following is generated by Procedure                            *
+.*       <modname> [PROC         &Scope]         ; PROC may be FUNC | MAIN    *
+.*       SF#xxxx    RECORD      {FramePtr},Decr  ; Local stack frame          *
+.*      [<modname>  DS.<result> 0]               ; Only if function           *
+.*       <formal1>  DS.<size>   <amount>         ; See Dcl1Var# for details   *
+.*                  - - -                                                     *
+.*       <formalN>  DS.<size>   <amount>         ; Reverse order if C funct   *
+.*       RetAddr    DS.L        1                ; Return address             *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Var                                  *
+.*       LinkA6     DS.L        1                ; LINK field before locals   *
+.*       FramePtr   EQU         *                ; A6 will point here         *
+.*       <Var1>     DS.<size>   <amount>         ; See Dcl1Var# for details   *
+.*                  - - -                                                     *
+.*       <VarN>     DS.<size>   <amount>         ; One DS for each Var arg    *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Begin                                *
+.*      [LinkA6     DS.L        1]               ; If required and no locals  *
+.*      [FramePtr   EQU         *]               ; A6 or A7 will point here   *
+.*       LocalSize  DS.W        0                ; Byte size of local vars    *
+.*                  ENDR                         ; End of local stack frame   *
+.*                  WITH       [<with>,]SF#xxxx  ; Cover templates, stk frame *
+.*                 [LINK        A6,#LocalSize]   ; If LINK is required        *
+.*       FP         SET         A6 or A7         ; A6 if LINK generated       *
+.*                 [MOVE[M].L   &Save,-(A7)]     ; If regs to save            *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Enter (HERE IN THIS MACRO)           *
+.*                  BRA.S       %L%xxxx          ; Branch around Enter code   *
+.*       Lbl                                     ; 2ndary entry point label   *
+.*                 [WITH        <with>]          ; Cover additional templates *
+.*                 [LINK        A6,#LocalSize]   ; If LINK is required        *
+.*                 [MOVE[M].L   &Save,-(A7)]     ; If regs to save            *
+.*       %L%xxxx                                 ; The branch-around label    *
+.*       -------------------------------------------------------------------- *
+.*       * Body of procedure goes here                                        *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Return                               *
+.*                 [MOVE[M].L   (A7)+,<reg-list>]; Restore regs if any saved  *
+.*                 [UNLK        A6]              ; Only if LINK was done      *
+.*                 [MOVEA.L     (A7)+,A0     ]   ; If not C and have args...  *
+.*                 [ADD.W       #<ArgSize>,A7]   ; ...pop off arg list        *
+.*                 [MOVE.<size> <id>,(A7)]       ; If result for function     *
+.*                 [JMP         (A0)]            ; If not C and have args     *
+.*                 [RTS             ]            ; If C or no args            *
+.*                 [DC.B        '<modname>']     ; MacsBug symbol (asis str)  *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLC		&SaveRegs#		; Regs saved and to be restored
+		GBLA		&Link#			; 1 ==> generate LINK
+.*
+.* Generate a branch around the Enter code
+.*
+          BRA.S     %L%&SysNdx
+&Lbl ;
+.*
+.* Generate a WITH to cover any additional templates  the user specified in the
+.* &With parameter.  This may be a sublist or a single name.
+.*
+	IF &With ≠ '' THEN
+	  IF &With[1:1] = '(' THEN
+          WITH      &With[2:&Len(&With)-2]
+	  ELSE
+          WITH      &With
+	  ENDIF
+	ENDIF
+.*
+.* It's time for another LINK.  It is generated if &Link is 1.  &Link became 1
+.* under the following conditions:
+.*   1. Either the globals LinkAll or Debug are set non-zero.
+.*   2. The &Link Procedure parameter is set to DEBUG or non-null
+.*   3. There are local variables (Var's)
+.*   4. There are registers to save (&Save), and
+.*      • we are processing a function, or
+.*      • there are formal (and, of course, actual) parameters
+.* Given all this, the user can still suppress the LINK by setting &Prelude to
+.* non-null.
+.*
+	IF &Link# THEN
+	  IF &Prelude = '' THEN
+          LINK      A6,#LocalSize
+	  ENDIF
+	ENDIF
+.*
+.* Save registers if required.
+.*
+	IF &SaveRegs# ≠ '' THEN
+	  IF &Substr(&Type(&SaveRegs#), 1, 3) = 'REG' THEN
+          MOVE.L    &SaveRegs#,-(A7)
+	  ELSE
+          MOVEM.L   &SaveRegs#,-(A7)
+	  ENDIF
+	ENDIF
+.*
+.*
+.* The Enter branch-around label follows all the Enter code to allow code before
+.* the Enter to jump over the Enter.
+.*
+%L%&SysNdx
+.*
+		PRINT	Pop
+		ENDM
+
+
+		TITLE	'Return - Procedure and function exit'
+		
+		MACRO
+		Return	&Result
+.*
+.******************************************************************************
+.* Return - Procedure and function exit                                       *
+.*                                                                            *
+.* Input:  &Result    = [ <ea> [':' <size> ]                                  *
+.*         <size>     = B | W | L | S | D | X | P                             *
+.*                                                                            *
+.*         &SaveRegs# = Regs saved and to be restored                  (SETC) *
+.*         &DbgName#  = name to generate for MacsBug or <null>         (SETC) *
+.*         &FSz#      = function result size or <null>                 (SETC) *
+.*         &Link#     = 1 ==> generate LINK; 0 ==> no LINK             (SETA) *
+.*         &ArgSize#  = nbr of bytes of stack space for formals        (SETA) *
+.*         &C#        = 1 ==> C function; 0 ==> Pascal routine         (SETA) *
+.*                                                                            *
+.* Code: * The following is generated by Procedure                            *
+.*       <modname> [PROC         &Scope]         ; PROC may be FUNC | MAIN    *
+.*       SF#xxxx    RECORD      {FramePtr},Decr  ; Local stack frame          *
+.*      [<modname>  DS.<result> 0]               ; Only if function           *
+.*       <formal1>  DS.<size>   <amount>         ; See Dcl1Var# for details   *
+.*                  - - -                                                     *
+.*       <formalN>  DS.<size>   <amount>         ; Reverse order if C funct   *
+.*       RetAddr    DS.L        1                ; Return address             *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Var                                  *
+.*       LinkA6     DS.L        1                ; LINK field before locals   *
+.*       FramePtr   EQU         *                ; A6 will point here         *
+.*       <Var1>     DS.<size>   <amount>         ; See Dcl1Var# for details   *
+.*                  - - -                                                     *
+.*       <VarN>     DS.<size>   <amount>         ; One DS for each Var arg    *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Begin                                *
+.*      [LinkA6     DS.L        1]               ; If required and no locals  *
+.*      [FramePtr   EQU         *]               ; A6 or A7 will point here   *
+.*       LocalSize  DS.W        0                ; Byte size of local vars    *
+.*                  ENDR                         ; End of local stack frame   *
+.*                  WITH       [<with>,]SF#xxxx  ; Cover templates, stk frame *
+.*                 [LINK        A6,#LocalSize]   ; If LINK is required        *
+.*       FP         SET         A6 or A7         ; A6 if LINK generated       *
+.*                 [MOVE[M].L   <reg-list>,-(A7)]; If regs to save            *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Enter                                *
+.*                  BRA.S       %L%xxxx          ; Branch around Enter code   *
+.*       Lbl                                     ; 2ndary entry point label   *
+.*                 [WITH        <with>]          ; Cover additional templates *
+.*                 [LINK        A6,#LocalSize]   ; If LINK is required        *
+.*                 [MOVE[M].L   &Save,-(A7)]     ; If regs to save            *
+.*       %L%xxxx                                 ; The branch-around label    *
+.*       -------------------------------------------------------------------- *
+.*       * Body of procedure goes here                                        *
+.*       -------------------------------------------------------------------- *
+.*       * The following is generated by Return (HERE IN THIS MACRO)          *
+.*                 [MOVE[M].L   (A7)+,<reg-list>]; Restore regs if any saved  *
+.*                 [UNLK        A6]              ; Only if LINK was done      *
+.*                 [MOVEA.L     (A7)+,A0     ]   ; If not C and have args...  *
+.*                 [ADD.W       #<ArgSize>,A7]   ; ...pop off arg list        *
+.*                 [MOVE.<size> <ea>,(A7)]       ; If result for function     *
+.*                 [JMP         (A0)]            ; If not C and have args     *
+.*                 [RTS             ]            ; If C or no args            *
+.*                 [DC.B        '<modname>']     ; MacsBug symbol (asis str)  *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLC		&SaveRegs#		; Regs saved and to be restored
+		GBLC		&DbgName#			; name to generate for MacsBug
+		GBLC		&FSz#			; function result size
+		GBLA		&Link#			; 1 ==> generate LINK
+		GBLA		&ArgSize#			; nbr of bytes of stack space for formals
+		GBLA		&C#				; 1 ==> C function
+.*
+		LCLC		&S,&Rslt[2]
+		LCLA		&i
+.*
+.* Gen code to restore any save registers
+.*
+	IF &SaveRegs# ≠ '' THEN
+	  IF &Substr(&Type(&SaveRegs#), 1, 3) = 'REG' THEN
+          MOVE.L    (A7)+,&SaveRegs#
+	  ELSE
+          MOVEM.L   (A7)+,&SaveRegs#
+	  ENDIF
+	ENDIF
+.*
+.* If we generated the LINK, it's time for the UNLK
+.*
+	IF &Link# THEN
+          UNLK      A6
+	ENDIF
+.*
+.* Generate procedure return to caller: if we are doing a C function, just do an
+.* RTS, since it's the caller's responsibility to pop the args off the stack.  If
+.* we are generating a Pascal routine, then again we only need an RTS if there
+.* were no arguments.  If there were, we pop the arguments off the stack by
+.* adding the arg size to A7.  The assembler will optimize the ADD appropriately.
+.* Once the arguments are popped we can set the function result using &Result.
+.* If no result and one long arg, use MOVE.L (A7)+,(A7) followed by an RTS.
+.*
+	IF &C# THEN					; Just RTS if C function
+         	RTS
+	ELSEIF (&Result = '') AND (&ArgSize# = 4) THEN ;special Pascal case...
+		MOVE.L	(A7)+,(A7)
+		RTS
+	ELSE							; If Pascal...
+	  IF &ArgSize# > 8 THEN			; Pop stack if there are args
+          MOVEA.L   (A7)+,A0
+          LEA       &ArgSize#(A7),A7
+	  ELSEIF &ArgSize# THEN
+          MOVEA.L   (A7)+,A0
+          ADD.W     #&ArgSize#,A7
+	  ELSEIF &Result ≠ '' THEN
+          MOVEA.L   (A7)+,A0
+	  ENDIF
+	  IF &Result ≠ '' THEN			; Returning a result to a function ?
+	    IF &FSz# = '' THEN			; Yes, we better be in a function!
+	      AERROR 'Attempt to return a function result in a procedure'
+	    ELSE						; So far, so good
+		 &i: SETA &List(&Result, '&Rslt', ':')		; Split &Result
+		 &S: SETC &Default(&UC(&Trim(&Rslt[2])), &FSz#)	; Use size override if any
+		 IF &Pos(&S, 'BWL') THEN		; B | W | L ==> assume normal MOVE
+          MOVE.&S   &Trim(&Rslt[1]),(A7)
+		 ELSE					; S | D | X | P ==> floating point
+          FMOVE.&S   &Trim(&Rslt[1]),(A7)
+		 ENDIF
+	    ENDIF
+	  ENDIF
+	  IF &ArgSize# OR (&Result ≠ '') THEN
+          JMP       (A0)
+	  ELSE
+          RTS
+	  ENDIF
+	ENDIF
+.*
+.* If we need to generate the MacsBug symbol, now is the time!  Be careful to
+.* make sure of the Assembler's STRING setting, since the MacsBug symbol must
+.* be an ASIS string.
+.*
+	IF &DbgName# ≠ '' THEN			; &DbgName# indicates we have a symbol
+	  &S: SETC &Setting('STRING')		; Preserve STRING status
+	  IF &S ≠ 'ASIS' THEN			; Only change it if not already ASIS
+          STRING    ASIS
+          DC.B      '&DbgName#'
+          STRING    &S
+	  ELSE
+          DC.B      '&DbgName#'
+	  ENDIF
+	  DC.W		0				; Fake literal size
+	ENDIF
+.*
+		PRINT	Pop
+		ENDM
+
+
+		TITLE	'Call - procedure, function, or trap call'
+		
+		MACRO
+		Call.&Ext	&CallSpec,&Result
+.*
+.******************************************************************************
+.* Call - procedure, function, or trap call                                   *
+.*                                                                            *
+.* Input:  &Ext      = S | B | W | L | * | A| <null>                          *
+.*         &CallSpec = <modname>[':'<size>] ['('arg1,...argN')'] |            *
+.*				   (An)['('arg1,...argN')'] if "A" Ext				   *
+.*         &Result   = PASS | {<id> | CC | POP} [':' <size>] |                *
+.*                     (PASS,{<id> | CC} [':' <size>])                        *
+.*                                                                            *
+.*         <size>    = B | W | L                                              *
+.*         <arg-i>   = <null> | NIL | TRUE | FALSE |                          *
+.*                     <ea> [':' {<size> | <reg> | A } ]                      *
+.*                                                                            *
+.*         Global:  AutoImport ≠ 0 ==> Gen IMPORT for undefined modname       *
+.*                             = 0 ==> Do not gen IMPORT                      *
+.*                                                                            *
+.* Code: [SUBQ.W    #2|4,A7    ]       ; If function call                     *
+.*                                                                            *
+.*       [PEA       <arg>      ]       ; If arg:A                             *
+.*       [MOVEQ     <arg>,<reg>]       ; If <arg>:<reg>                       *
+.*       [MOVE.L    <reg>,-(A7)]       ;  "   "     "                         *
+.*       [MOVE.<sz> <arg>,-(A7)]       ; If <arg>:<sz>                        *
+.*                                                                            *
+.*       [JSR       <modname>  ]       ; If calling code module or import     *
+.*       [BSR.<sz>  <modname>  ]       ; If explicit size and not <sz>='*'    *
+.*       [<modname>            ]       ; If OPWORD, macro, or "_undefined"    *
+.*                                                                            *
+.*       [TST.<sz>  (A7)+      ]       ; If result = CC:<sz>                  *
+.*       [ADDQ.W    #2|4,A7    ]       ; If result = POP:<sz>                 *
+.*       [MOVE.<sz> (A7)+,Rslt ]       ; If result = <rslt>:<sz>              *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLC		&ModName#			; <modname>
+		GBLC		&Args#[50]		; argument list
+		GBLA		&NbrOfArgs#		; number of args in argument list
+		GBLC		&FInfo#			; Function type if parameterless funct
+		GBLC		&Areg			; "A" ==> call (An)[(arglist...)] case
+.*
+		LCLA		&i,&Arg
+		LCLC		&A[2],&Sz,&Param,&T,&Rslt,&RsltSz
+.*
+.* AutoImport is a user settable global controlling automatic IMPORT generation
+.*
+	IF &Type('AutoImport') = 'UNDEFINED' THEN ; Initialize AutoImport if required
+	  PRINT Push,Off
+	  AutoImport: SET 0
+	  PRINT Pop
+	ENDIF
+.*
+.* Split up the call statement into the globals
+.*
+	&Areg: SETC &UC(&Ext)			; Set sw to "A" for (An)[(arglist...)] case
+	ScanArgs# &CallSpec				; Set &ModName#, &Args#, &NbrOfArgs#
+.*
+.* See if we are calling function as indicated by a size on the <modname>. If
+.* we are, split off the size from the <modname>, and set &RsltSz with the size
+.* to pop off the stack after the call (unless overridden by the &Result param).
+.* Reserve space now for the function result.
+.*
+	IF &NbrOfArgs# = 0 THEN
+	  &RsltSz: SETC &Default(&UC(&FInfo#), 'W')
+	  IF &FInfo# ≠ '' THEN
+	    IF &RsltSz = 'L' THEN
+          SUBQ.W    #4,A7
+	    ELSE
+          SUBQ.W    #2,A7
+	    ENDIF
+	  ENDIF
+	ELSE
+	  &i:	   SETA &List(&ModName#, '&A', ':')
+	  &ModName#: SETC &Trim(&A[1])
+	  &RsltSz:   SETC &Default(&UC(&Trim(&A[2])), 'W')
+	  IF &i = 2 THEN
+	    IF &RsltSz = 'L' THEN
+          SUBQ.W    #4,A7
+	    ELSE
+          SUBQ.W    #2,A7
+	    ENDIF
+	  ENDIF
+	ENDIF
+.*
+.* Push each argument on the stack.
+.*
+	WHILE &Arg < &NbrOfArgs# DO			; Loop through all of 'em
+	  &Arg:   SETA &Arg+1
+	  &A[2]:  SETC ''
+	  &i:     SETA &List(&Args#[&Arg], '&A', ':'); Split arg to get its size
+	  &Param: SETC &Trim(&A[1])			; Here's the arg
+	  IF &Param ≠ '' THEN				; I hope, it could be null
+	    &Sz: SETC &Default(&UC(&Trim(&A[2])), 'W'); Get arg size
+	    IF &Sz = 'A' THEN				; Should we push address ?
+          PEA       &Param
+	    ELSEIF &SubStr(&Type(&Sz), 1, 3) = 'REG' THEN ; Pushing a reg value ?
+          MOVEQ     &Param,&Sz
+          MOVE.L    &Sz,-(A7)
+	    ELSE
+	    	 IF &A[2] = '' THEN
+		   &T: SETC &UC(&Param)
+	        IF &T = 'NIL' THEN			; Pushing NIL ?
+          CLR.L     -(A7)
+	        ELSEIF &T = 'TRUE' THEN		; Pushing TRUE ?
+          ST        -(A7)
+		   ELSEIF &T = 'FALSE' THEN		; Pushing FALSE ?
+          CLR.B     -(A7)
+	        ELSE						; Pushing a simple <ea>
+          MOVE.&Sz  &Param,-(A7)
+		   ENDIF
+		 ELSE						; Pushing a simple <ea>
+          MOVE.&Sz  &Param,-(A7)
+		 ENDIF
+	    ENDIF
+	  ENDIF
+	ENDW
+.*
+.* Call the procedure or trap. If the size is "*" or we are calling a import, or
+.* we are calling another module, do a JSR.  If we are calling an OPWORD, macro,
+.* or some undefined name that begins with an underscore, use the name as the
+.* call.  In all other cases we BSR to the called routine.
+.*
+	&Sz: SETC &UC(&Ext)
+	IF &Sz = 'A' THEN
+		JSR		&ModName#
+	ELSEIF (&Sz ≠ '*') AND (&Sz ≠ '') THEN
+          BSR.&Sz   &ModName#
+	ELSE
+	  &T: SETC &SubStr(&Type(&ModName#), 1, 11)
+	  IF &Sz = '*' THEN
+          JSR       &ModName#
+	  ELSEIF (&T = 'OPWORD') OR (&T = 'MACRO') OR ((&T='UNDEFINED') AND (&ModName#[1] = '_')) THEN
+          &ModName#
+	  ELSEIF (&T='CODE MODULE') OR (&T='CODE IMPORT') OR (&T='UNDEFINED') THEN
+	    IF AutoImport AND (&T = 'UNDEFINED') THEN
+	 	Import	&ModName#
+	    ENDIF
+          JSR       &ModName#
+	  ELSE
+          BSR       &ModName#
+	  ENDIF
+	ENDIF
+.*
+.* If there is an explicit &Result override, we use it to determine what to do
+.* with function's returned value.  Above, the function invocation possibly
+.* was specified as part of a size attribute on the modname.  That size could
+.* be overridden here with a size attribute on the result.  Whichever way we get
+.* it it is used to pop the function result off the stack (if PASS isn't used).
+.*
+	&Rslt: SETC &Default(&Result, 'PASS'); Default result to PASS
+	IF &UC(&Rslt) ≠ 'PASS' THEN	; Should we pop the stack ?
+	  &i: SETA &Nbr(&Result)		; Maybe...see how &Result is specified
+	  IF (&i>0) AND (&UC(&Result[1]) = 'PASS') THEN ; Copy result -- do not pop!
+	    &Rslt:   SETC &Result[2]	; 
+	    &A[2]:   SETC ''
+	    &i:      SETA &List(&Rslt, '&A', ':') ; Split the result
+	    &Rslt:   SETC &UC(&Trim(&A[1]))
+	    &RsltSz: SETC &Default(&UC(&Trim(&A[2])), &RsltSz)
+	    IF &Rslt = 'CC' THEN		; Use result as condition code ?
+          TST.&RsltSz (A7)
+	    ELSEIF &Rslt = 'POP' THEN	; Simply pop the stack ?
+	      AERROR 'Cannot PASS and POP at the same time!'
+	    ELSE					; Copy stack into result
+          MOVE.&RsltSz (A7),&A[1]
+	    ENDIF
+	  ELSE					; Pop result off the stack
+	    &A[2]:   SETC ''			
+	    &i:      SETA &List(&Rslt, '&A', ':') ; Split the result
+	    &Rslt:   SETC &UC(&Trim(&A[1]))
+	    &RsltSz: SETC &Default(&UC(&Trim(&A[2])), &RsltSz)
+	    IF &Rslt = 'CC' THEN		; Use result as condition code ?
+           TST.&RsltSz (A7)+
+	    ELSEIF &Rslt = 'POP' THEN	; Simply pop the stack ?
+		 IF &RsltSz = 'L' THEN
+          ADDQ.W    #4,A7
+		 ELSE
+          ADDQ.W    #2,A7
+		 ENDIF
+	    ELSE					; Pop stack into result
+          MOVE.&RsltSz (A7)+,&A[1]
+	    ENDIF
+	  ENDIF
+	ENDIF
+.*
+		PRINT	Pop
+		ENDM
+
+		
+		TITLE	'Dump file "ProgStrucMacs.d"'
+		
+********************************************************************************
+		DUMP		'ProgStrucMacs.d'
+********************************************************************************
+		END		

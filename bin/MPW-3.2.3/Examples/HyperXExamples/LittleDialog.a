@@ -1,0 +1,317 @@
+*	LittleDialog.a
+*
+*	© 1988 by Apple Computer, Inc.
+*	All Rights Reserved
+*
+*	LittleDialog -- a Hypercard XCMD that displays a modal dialog. This example uses
+*	callbacks to HyperCard provided by the HyperXLib.o library, introduced with MPW 3.0.
+*	The library provides a consistent set of routines to call HyperCard internal routines
+*	from any language. This is the first public demonstration of its use.
+*
+*	
+*	Form: LittleDialog DisplayText
+*	
+*	Example: LittleDialog "Display this very long text string that wouldn't fit in Answer."
+*
+*
+*	To compile and link this file using MPW assembler, select the following
+*	lines (must be uncommented and moved to another worksheet) and press ENTER:
+*	
+*	make LittleDialog.a
+*	
+*	or:
+*	
+*	Asm LittleDialog.a
+*	Link -w -rt XCMD=10002 ∂
+*		-m ENTRYPOINT ∂
+*		-sg LittleDialog ∂
+*		LittleDialog.a.o ∂
+*		"{Libraries}HyperXLib.o" ∂
+*		"{Libraries}Interface.o" ∂
+*		-o "HyperXExample Stack"
+*	Rez LittleDialog.r -o "HyperXExample Stack" -append
+*
+
+			CASE	OBJ
+			INCLUDE	'Traps.a'
+			INCLUDE	'QuickEqu.a'
+			INCLUDE	'ToolEqu.a'
+			INCLUDE	'HyperXCmd.a'
+		
+		
+;			PROCEDURE EntryPoint(paramPtr: XCmdPtr);
+ENTRYPOINT	MAIN	EXPORT		; build script uses ENTRYPOINT as main segment name.
+
+dialogID	EQU		10002
+iDefOKRing	EQU		okButton+1		; user item number for default button circle.
+gap			EQU		-4
+
+; Local storage will be on A6 stack frame, which always counts backwards,
+;	so values negative.
+
+LOCALS		EQU		0
+myDialogPtr	EQU		LOCALS-4	 		;DialogPtr
+savePort	EQU		myDialogPtr-4		;GrafPtr
+itemHit		EQU		savePort-2			;INTEGER
+tempType	EQU		itemHit-2			;INTEGER
+tempHandle	EQU		tempType-4			;Handle
+ctlRect		EQU		tempHandle-8		;Rect
+displayStr	EQU		ctlRect-256			;Str255
+
+LOCALSIZE	EQU		displayStr
+
+			IMPORT	DrawOKDefault
+			IMPORT	PASTOZERO
+			IMPORT	ZEROTOPAS
+			IMPORT	SENDHCMESSAGE
+	
+			WITH	XCmdBlock
+			STRING	ASIS
+	
+		; Set up the stack frame for local variables.
+		
+		LINK	A6,#LOCALSIZE
+		MOVEM.L	A3/A4,-(SP)
+		
+		; Get pointer to XCmdBlock
+		
+		MOVE.L	8(A6),A4			; get paramPtr
+		CLR.L	returnValue(A4)		; initialize return to empty
+	
+	
+		; The heart and soul of the XFCN goes here.
+;		PROCEDURE LittleDialog(paramPtr: XCmdPtr);
+
+		; Save the current port; good defensive programming practice.
+		;	NOTE: this port will always be the card window's grafport.
+		
+		PEA		savePort(A6)
+		_GetPort
+		
+		; It is always a good idea to check for the correct number of parameters.
+		; Another nice idea is to return the proper syntax of the call if it has
+		;	been called improperly.
+		
+		MOVE.W	paramCount(A4),D0
+		CMP.W	#1,D0				; only XFCN parameter is input string
+		BNE		ErrAbort1
+
+		; This routine will use DLOG and DITL resources that must be available.
+		;	Since XCMDs may be moved by ResEdit without knowledge of those resources,
+		;	we must check for their availability. To suggest that our DLOG, DITL, and
+		;	XCMD all belong together, we have numbered them all the same: 10002.
+		
+		CLR.L	-(SP)
+		MOVE.L	#'DLOG',-(SP)
+		MOVE.W	#dialogID,-(SP)
+		_GetResource
+		MOVE.L	(SP)+,D0
+		BEQ		ErrAbort2
+
+		CLR.L	-(SP)
+		MOVE.L	#'DITL',-(SP)
+		MOVE.W	#dialogID,-(SP)
+		_GetResource
+		MOVE.L	(SP)+,D0
+		BEQ		ErrAbort2
+
+		; Use a HyperCard callback routine to convert the null-terminated input 
+		;	string to a Str255 and transfer a copy to displayStr
+		
+		MOVE.L	A4,-(SP)			; paramPtr
+		MOVE.L	params(A4),A0		; paramPtr^.params[1]
+		MOVE.L	(A0),-(SP)			; Dereference handle to be a ptr.
+		PEA		displayStr(A6)		; Str255 VAR address
+		JSR		ZEROTOPAS			; Convert input string to Str255.
+		
+		PEA		displayStr(A6)		; Now contains Str255 we wish displayed.
+		PEA		NullStr
+		PEA		NullStr
+		PEA		NullStr
+		_ParamText
+
+		CLR.L	-(SP)
+		MOVE.W	#dialogID,-(SP)
+		CLR.L	-(SP)
+		MOVE.L	#-1,-(SP)
+		_GetNewDialog				; Get pointer to our dialog.
+		MOVE.L	(SP)+,D0
+		BEQ		ErrAbort3
+		MOVE.L	D0,A3
+
+		; Move our default-OK-button userItem to around the OK button, and set its
+		;	item handle to be a pointer to our other drawing procedure.
+
+		MOVE.L	A3,-(SP)			; myDialogPtr
+		MOVE.W	#okButton,-(SP)		; theItem
+		PEA		tempType(A6)
+		PEA		tempHandle(A6)
+		PEA		ctlRect(A6)
+		_GetDItem					; Get rect of OK button.
+
+		PEA		ctlRect(A6)
+;		MOVE.W	#gap,-(SP)			; dh
+;		MOVE.W	#gap,-(SP)			; dv
+		MOVE.L	#$FFFCFFFC,-(SP)
+		_InsetRect					; Make a larger rect surrounding the OK button.
+
+		; Set the same old type, our procptr, and the new box.
+		
+		MOVE.L	A3,-(SP)			; myDialogPtr
+		MOVE.W	#iDefOKRing,-(SP)	; the userItem number
+		MOVE.W	#userItem+itemDisable,-(SP)	;itemType
+		PEA		DrawOKDefault		; ProcPtr to draw user item.
+		PEA		ctlRect(A6)
+		_SetDItem					; Get rect of OK button.
+
+		; Make the dialog window visible.
+		
+		MOVE.L	A3,-(SP)
+		_ShowWindow
+			
+		; Set the cursor to the arrow for use with the dialog box.
+			
+		_InitCursor
+		
+		; Make the modal dialog handle events.
+		
+		MOVE.L	#$0000FFFF,D0		; $FFFF = everyEvent; $0000 = stopMask
+		_FlushEvents				; Flush all events to be safe.
+
+StayModal
+		CLR.L	-(SP)				; No filter proc.
+		PEA		itemHit(A6)
+		_ModalDialog
+		MOVEQ	#okButton,D0
+		CMP.W	itemHit(A6),D0
+		BNE.S	StayModal
+
+		; Get rid of dialog and dialog handle.
+
+		MOVE.L	A3,-(SP)
+		_DisposDialog
+
+		; Let HyperCard set the cursor to a known state, so the next "idle"
+		;	message after the dialog goes away will reset it to the correct
+		;	cursor. (HyperCard doesn't know we did an InitCursor.
+			
+		MOVE.L	A4,-(SP)			; paramPtr
+		PEA		HCCrsrMsg			; Null terminated string.
+		JSR		SENDHCMESSAGE
+
+Done
+		PEA		savePort(A6)		; Restore the port.
+		_SetPort
+									; Return to HyperCard.
+		MOVEM.L	(SP)+,A3/A4
+		UNLK	A6
+		MOVE.L	(SP)+,A0			; return address
+		ADDQ.L	#4,SP				; clean off input parameter
+		JMP		(A0)
+
+		; Error messages are loaded into A0 and then passed to the
+		; ErrAbort procedure to be returned to HyperCard.
+
+ErrAbort1
+		LEA		ParamErrStr,A0
+		BRA.S	ErrAbort
+ErrAbort2
+		LEA		RsrcErrStr,A0
+		BRA.S	ErrAbort
+ErrAbort3
+		LEA		MemErrStr,A0
+;		BRA.S	ErrAbort
+
+ErrAbort
+		; PasToZero converts a pascal string to a null-terminated one AND
+		; stores it away for us. Giving us a handle to pass back to HyperCard.
+
+		CLR.L	-(SP)				; Room for handle returned
+		MOVE.L	A4,-(SP)			; paramPtr
+		MOVE.L	A0,-(SP)			; enter with errMsg in A0
+		JSR		PASTOZERO			; call routine in Interface.o
+		MOVE.L	(SP)+,returnValue(A4)
+		BRA.S	Done
+
+			ENDWITH					; XCmdBlock
+
+
+			STRING	PASCAL
+		
+ParamErrStr
+		DC.B	'Correct usage is: "LittleDialog fieldName"'
+RsrcErrStr
+		DC.B	'XCMD requires resources: DLOG 10002 & DITL 10002.'
+MemErrStr
+		DC.B	'Not enough memory for dialog.'
+NullStr
+		DC.B	''
+
+			STRING	C
+		
+HCCrsrMsg
+		DC.B	'set cursor to 4'	; 4 = the watch cursor
+
+			ENDMAIN
+
+
+
+;PROCEDURE DrawOKDefault(theDialog: DialogPtr; theItem: INTEGER);
+DrawOKDefault	PROC	ENTRY
+
+paramSize	EQU		6			; pointer & integer
+curveRad	EQU		16
+
+; Local storage will be on A6 stack frame, this example uses a RECORD w/
+; DECR to get offsets negative.
+
+StackFrame	RECORD	0,DECR		; build a stack frame record
+savePen		DS.B	psRec		; PenState
+tempType	DS.W	1			; INTEGER
+tempHandle 	DS.L	1			; Handle
+tempRect	DS.W	4			; Rect
+localSize	EQU 	*
+			ENDR
+
+			WITH	StackFrame
+		
+		LINK	A6,#localSize		; allocate our local stack frame
+
+		PEA		savePen(A6)
+		_GetPenState				; Save the old pen state.
+		
+		; Draw an outline around our default button.
+		
+		MOVE.L	10(A6),-(SP)		; theDialog
+		MOVE.W	8(A6),-(SP)			; theItem
+		PEA		tempType(A6)
+		PEA		tempHandle(A6)
+		PEA		tempRect(A6)
+		_GetDItem					; Get user item rect
+
+;		MOVE.W	#$0003,-(SP)		; width
+;		MOVE.W	#$0003,-(SP)		; height
+		MOVE.L	#$00030003,-(SP)
+		_PenSize					; Make the pen fatter.
+		
+		PEA		tempRect(A6)
+;		MOVE.W	#curveRad,-(SP)		; ovalWidth
+;		MOVE.W	#curveRad,-(SP)		; ovalHeight
+		MOVE.L	#$00100010,-(SP)
+		_FrameRoundRect
+
+		PEA		savePen(A6)
+		_SetPenState				; Restore the old pen state.
+
+		; Exit the procedure.
+
+		UNLK	A6					; destroy the link
+		MOVEA.L	(SP)+,A0			; pull off the return address
+		ADDQ.L	#paramSize,SP		; strip all of the caller's parameters
+		JMP	(A0)					; return to the caller
+
+			ENDWITH					; StackFrame
+			ENDP
+
+
+			END

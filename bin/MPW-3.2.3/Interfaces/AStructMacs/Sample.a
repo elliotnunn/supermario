@@ -1,0 +1,451 @@
+				TITLE			'Sample - A small sample application using Structured Macros'
+				
+* File Sample.a using structured program macros
+* Copyright Apple Computer, Inc. 1985, 1986, 1987, 1988, 1989, 1990
+* All rights reserved.
+
+* Sample -- A small sample application written in MPW Assembler.  It displays
+* single, fixed-size window in which the user can enter and edit text.
+
+* This is a translation of the Sample.a program in the Inside Macintosh
+* documentaion.  Some changes were made to illustrate some of the features of
+* the MPW Assembler, but most comments and the order of the code is the same as
+* the Pascal example.
+
+* Note, this code assumes that the DEGUG switch available to the structured
+* macros is OFF (the preset case), since DoCommand pops its return and
+* parameter directly off the stack and doesn't know that with DEBUG set a
+* LINK on A6 is generated!
+
+* The PRINT directive turns off listing (if a listing is being generated using
+* -l command line option) of the standard include files.  The INCLUDEs bring in
+* the equate and trap definitions needed by Sample.  We could use the LOAD/DUMP
+* facilities on these includes if we intended to assemble this program over and
+* over again, but that would confuse the example here.
+
+				PRINT			OFF
+				INCLUDE 	'Traps.a'
+				INCLUDE 	'ToolEqu.a'
+				INCLUDE 	'QuickEqu.a'
+				INCLUDE 	'SysEqu.a'
+				LOAD			'ProgStrucMacs.d'
+				LOAD			'FlowCtlMacs.d'
+				PRINT			ON,NOGEN
+
+
+				TITLE			'Global Declarations for Sample'
+
+*************
+* Constants *
+*************
+
+appleID 			EQU 			128 		; Resource IDs/menu IDs for Apple,
+fileID				EQU 			129 		; 	File, and Edit menus
+editID				EQU 			130
+
+menuCount			EQU 			3				; Total number of menus
+
+windowID			EQU 			128 		; Resource ID for application'w window
+
+undoCommand 	EQU 			1				; Menu item numbers identifying
+cutCommand		EQU 			3				; commands in Edit menu
+copyCommand 	EQU 			4
+pasteCommand	EQU 			5
+clearCommand	EQU 			6
+
+aboutMeDLOG 	EQU 			128 		; Resource ID for the "about" dialog
+
+authorItem		EQU 			2				; "About sample" dialog item numbers
+languageItem	EQU 			3
+
+
+*********
+* Types *
+*********
+
+* To illustrate how the template type feature works the following templates are
+* declared and used instead of the simple offsets defined in the equate files.
+* By using these, the Assember source appromixates very closely the Pascal
+* source for referencing the corresponding information.  Perhaps someday we will
+* have a set of "equate" files that define types just like Pascal USES units do!
+
+Point					RECORD		0				; Point = RECORD CASE INTEGER OF
+v							DS.W			1				;  		    	1: (v: INTEGER;
+h							DS.W			1				;			    			h: INTEGER);
+							ORG 			v				;		    		2: (vh: ARRAY[1..2] OF INTEGER)
+vh						DS.L			1
+							ENDR							;					END;
+
+Rect					RECORD		0				; Rect  = RECORD CASE INTEGER OF
+top 					DS.W			1				;		    		1: (top:	INTEGER;
+left					DS.W			1				;			    			left:   INTEGER;
+bottom				DS.W			1				;			    			bottom: INTEGER;
+right					DS.W			1				;			    			right:  INTEGER);
+							ORG 			top			;
+topLeft 			DS.L			Point		;		    		2: (topLeft:  Point;
+botRight			DS.L			Point		;		    		3: (botRight: Point)
+							ENDR							;		  		END;
+
+BitMap				RECORD		0				;  BitMap = RECORD
+baseAddr			DS.L			1				;		      		baseAddr: QDPtr;
+rowBytes			DS.W			1				;		      		rowBytes: INTEGER;
+bounds				DS.L			Rect		;		      			bounds:	Rect
+							ENDR							;		    		END;
+
+EventRecord 	RECORD		0				; EventRecord = RECORD
+what					DS.W			1				;		          		what:      INTEGER;
+message 			DS.L			1				;		          		message:	 LONGINT;
+when					DS.L			1				;		          		when:      LONGINT;
+where					DS.L			Point		;		          		where:		 Point;
+modifiers			DS.W			1				;		          		modifiers: INTEGER
+							ENDR							;		        		END;
+
+				EJECT
+
+***********************
+* QuickDraw's Globals *
+***********************
+
+* The following data module is used to define the QuickDraw global data area.
+*				-----------
+
+QuickDraw			RECORD		,DECREMENT
+thePort 			DS.L			1
+white					DS.B			8
+black					DS.B			8
+gray					DS.B			8
+ltGray				DS.B			8
+dkGray				DS.B			8
+arrow					DS.B			cursRec
+screenBits		DS.B			BitMap
+randSeed			DS.L			1
+							ORG 			-grafSize
+							ENDR
+
+
+**************************
+* Global Data for Sample *
+**************************
+
+* This is the global data used by Sample.  Both these and the QuickDraw data
+* above are referenced through a WITH statetment at the beginning of the procs
+* that use this data. Since the Assembler knows when it is referencing data
+* in a data module (since they must be declared before they are accessed),
+* and since such data can only be accessed based on A5, there is no need to
+* explicitly specify A5 in any code which references the data (unless indexing
+* is used).  Thus, in this program we have omitted all A5 references when
+* referencing the data.
+
+GlobalData		RECORD
+appleMenuH		DS.L			1							; Handle to the Apple menu
+fileMenuH			DS.L			1							; Handle to the File menu
+editMenuH			DS.L			1							; Handle to the Edit menu
+dragRect			DS.L			Rect					; Drag limits
+txRect				DS.L			Rect					; TextEdit's limits
+doneFlag			DS.B			1							; True if Quit command processed
+myEvent 			DS.L			EventRecord 	; Current event info
+wRecord 			DS.B			windowSize		; The application window record
+myWindow			DS.L			1							; Ptr to the application window
+whichWindow 	DS.L			1							; Current event's window
+textH					DS.L			1							; TextEdit's text handle
+mousePt 			DS.L			Point					; Used to get current mouse point
+iBeamHdl			DS.L			1							; Handle to the iBeam cursor
+							ENDR
+
+
+				TITLE			'SetupMenus - Set up menus and menu bar'
+
+******************************************
+* SetUpMenus - Set up menus and menu bar *
+******************************************
+
+* This is a code module used only during initialization.  Note, just as in the
+* Pascal version, this is a distinct code module.  Also, since SetUpMenus is
+* only called during initialization, there is no need to keep it loaded.  So
+* we will place SetUpMenus in its own segment (called "Initialize") and unload
+* it after SetUpMenus returns.
+
+	SEG  'Init'												; This illustrates segmenting!
+  PROCEDURE SetUpMenus
+			
+		BEGIN With=GlobalData
+			Call _GetRMenu:L(#appleID),(Pass,appleMenuH); Read Apple menu from rsrc file
+			Call _InsertMenu((A7):L, #0)	; Install Apple menu in menu bar
+			Call _AddResMenu(, #'DRVR':L)	; Add DA names to Apple menu
+			
+			Call _GetRMenu:L(#fileID),(Pass,fileMenuH); Read File menu from rsrc file
+			Call _InsertMenu(, #0)				; Install File menu in menu bar
+			
+			Call _GetRMenu:L(#editID),(Pass,editMenuH); Read Edit menu from rsrc file
+			Call _InsertMenu(, #0)				; Install Edit menu in menu bar
+			
+			Call _DrawMenuBar							; Draw the menu bar
+			Return												; Exit
+		ENDP
+
+
+				TITLE			'ShowAboutMeDialog - Display the "About"...'
+
+**********************************************
+* ShowAboutMeDialog - Display the "About"... *
+**********************************************
+
+* This procedure is called from DoCommand when item #1 is selected from the
+* apple menu list.	It sets up a dialog box indicating the author and language
+* of this sample program.  The box remains until the user clicks the mouse on
+* the continue button.
+
+	SEG 															; Undo SEG done above
+	PROCEDURE ShowAboutMeDialog
+			    
+		VAR savePort: L,			  			\	; Port at the time of call
+				itemType: W,			  			\	; Returned by _GetDItem (not used)
+				itemHdl:  L,							\	; Handle to the item
+				itemRect: Rect,			  		\	; Returned by _GetDItem (not used)
+				itemHit:  W				    			; Part code
+				
+		BEGIN Save=A3
+		  theDialog: EQU A3							; Dialog pointer
+*
+* 		Start here: create  current grafPort, and allocate space for the dialog box
+*
+			Call _GetPort(savePort(FP):A)	; Remember the current grafPort
+			Call _GetNewDialog:A(#aboutMeDLOG, NIL, -1:A)	;Create a new dialog
+			MOVE.L	(A7),theDialog				; theDialog holds ptr to dialog info
+			Call _SetPort									; Set the current grafPort
+*
+* 		Fill in the dialog box with the proper author and language
+*
+			Call _GetDItem(theDialog:L, #authorItem, itemType(FP):A, itemHdl(FP):A, \
+						   			 itemRect(FP):A); Get dialog's author item info
+			Call _SetIText(itemHdl(FP):L, #'Nebur L. Ari':A); Update the author item
+			
+			Call _GetDItem(theDialog:L, #languageItem, itemType(FP):A, itemHdl(FP):A, \
+						   			 itemRect(FP):A); Get dialog's language info
+			Call _SetIText(itemHdl(FP):L, #'Assembler':A); Update the language item
+*
+* 		Wait for user to click the continue button
+*
+			REPEAT#	
+				Call _ModalDialog(NIL, itemHit(FP):A)	; Wait for the click...
+			UNTIL#.S itemHit(FP) EQ #okButton
+*
+* 		User is now satisfied -- let's get out of here!
+*
+			Call _CloseDialog(theDialog:L); Close the dialog box
+			Call _SetPort(savePort(FP):L)	; Put original grafPort back
+			Return
+		ENDP
+
+
+				TITLE			'DoCommand - Execute a menu command'
+
+***********************************************************************
+* DoCommand - Execute command specified by the result of a MenuSelect *
+***********************************************************************
+
+* This is another code module which takes as a parameter the MenuSelect return
+* value.  It is next to the top of the stack just before the return address.
+
+	PROCEDURE DoCommand;
+	
+		BEGIN With=GlobalData
+			return:  EQU A6								; The return address will be in A6
+			mResult: EQU D3								; mResult will be kept in D3
+			theItem: EQU mResult 					; LoWord(mResult) is mResult treated as a word
+
+* 		The following defines some local data known only to this proc.
+
+			DATA													; Switch into local data section
+			name: DS.B	256 							; Desk accessory name string
+			CODE													; Switch back to code section
+
+			MOVEA.L	(A7)+,return					; Pop return into A6
+			MOVE.L	(A7)+,mResult					; Pop mResult parameter
+			
+			MOVE.L	mResult,D0						; Case on menu ID in
+			SWAP		D0										;	high-order word of mResult
+
+			Switch#	D0
+				Case#.S appleID							; Apple menu processing
+					Call _GetItem(appleMenuH:L, theItem, name:A); Get DA name
+					IF# theItem EQ #1 THEN.S
+						Call ShowAboutMeDialog
+					ELSE#.S
+						Call _OpenDeskAcc:W(name:A),Pop
+					ENDIF#
+					Call _SetPort(myWindow:L); Restore app window as grafPort
+					Leave#.S								;  Exit
+
+				Case#.S fileID						; File menu processing
+					ST doneFlag							; Set flag to Quit (caller tests)
+					Leave#.S								; Exit
+
+				Case#.S editID						; Edit menu processing
+					MOVE theItem,D1					; if DA window is the active window
+					SUBQ #1,D1							; SystemEdit requires item adjustment
+					Call _SysEdit:B(D1),CC	; Call Desk Mgr to handle editing command
+																	; if DA window is the active window
+					IF# EQ THEN.S						; App window is active window
+						Switch# theItem				; Case on menu item (command) number
+							Case#.S cutCommand; Call TextEdit to handle command
+								Call _TECut(textH:L)
+								Leave#.S
+							Case#.S copyCommand
+								Call _TECopy(textH:L)
+								Leave#.S
+							Case#.S pasteCommand
+								Call _TEPaste(textH:L)
+								Leave#.S
+							Case#.S clearCommand
+								Call _TEDelete(textH:L)
+						EndS#								; of item case
+					ENDIF#
+			EndS#											; of editID case
+				
+			Call _HiliteMenu(#0)			; Unhighlight menu item
+			JMP (return)							; Exit
+		ENDP
+
+ 				TITLE			'Sample - Main Program'
+
+***********************************************
+* Sample Main Program - Execution starts here *
+***********************************************
+
+* This is another code module.	It is declared as the main code module which
+* means execution will start here.
+
+	PROCEDURE Sample,Main=Y
+		
+		BEGIN With=(QuickDraw,GlobalData)	;  Cover our data areas
+*
+* 		Initialization
+*
+			Call _InitGraf(thePort:A)	; Initialize QuickDraw
+			Call _InitFonts						; Initialize Font Manager
+			MOVE.L	#$0000FFFF,D0			; Discard any previous events
+			Call _FlushEvents					; FlushEvents(EventEvent, 0);
+			Call _InitWindows					; Initialize Window Manager
+			Call _InitMenus						; Initialize Menu Manager
+			Call _TEInit 							; Initialize TextEdit
+			Call _InitDialogs(NIL)		; Initialize Dialog Manager
+			Call _InitCursor 					; Make cursor an arrow
+			
+			Call _GetCursor:L(#iBeamCursor),iBeamHdl; Get the iBeam cursor handle to
+																							; use in the main ctl loop when
+																							; cursor is in the window
+
+			Call SetUpMenus						; Set up menus and menu bar
+			Call _UnLoadSeg(SetUpMenus:A)	; Unload the SetUpMenus segment since we
+																		; will never call it again
+			
+			WITH	screenBits.bounds			
+			MOVE   	right,D0					; Call QuickDraw to set dragging
+			SUBQ  	#4,D0							; boundaries; ensure at least
+			MOVE  	bottom,D1					; 4 by 4 pixels will remain visible
+			SUBQ  	#4,D1
+			Call _SetRect(dragRect:A, #4, #24, D0, D1)
+			ENDWITH
+			
+			CLR.B		doneFlag					; Flag to detect Quit command
+			
+			Call _GetNewWindow:L(#windowID, wRecord:A, #-1:L),(Pass,myWindow); Put up app window
+			Call _SetPort()						; Set current grafPort to this window
+			MOVE.L	thePort,A0				; Rectangle for text in window
+			MOVE.L	portRect+topLeft(A0),txRect.topLeft
+			MOVE.L	portRect+botRight(A0),txRect.botRight
+			Call _InSetRect(txRect:A, #4, #0)				; Bring it in 4 pixels from left/right edges
+			Call _TENew:L(txRect:A, txRect:A),textH	; Prepare for receiving text
+
+				EJECT
+*
+* 		Main Event Loop
+*
+			REPEAT# 
+				Call _SystemTask 					; Perform periodic actions defined for DAs
+
+				Call _FrontWindow:L,D0		; Get ptr to the front window
+				IF# D0 EQ.L myWindow THEN.S	; Front window is my mindow
+					Call _GetMouse(mousePt:A); Is mouse pointing in my window ?
+					MOVEA.L	 myWindow,A0
+					Call _PtInRect:B(mousePt:L, portRect(A0):A),CC
+					IF# NE THEN.S						; Yes, use the iBeam cursor
+						MOVE.L	iBeamHdl,A0
+						MOVE.L	(A0),-(A7)
+					ELSE#.S									; No, use the arrow cursor
+						PEA 	arrow
+					ENDIF#
+					Call _SetCursor					; Set cursor to arrow or iBeam
+					Call _TEIdle(textH:L)		; Make vertical bar blink
+				ENDIF#
+
+				Call _GetNextEvent:B(#everyEvent, myEvent:A),CC; ToolBox Event Mgr
+				IF# NE THEN
+					Switch# myEvent.what,JmpTbl=Y,ChkRng=Y; Case on event type
+						Case# mButDwnEvt			; Mouse down event processing
+							Call _FindWindow:W(myEvent.where:L, whichWindow:A),D0
+							Switch# D0					; Process according to where
+								Case#.S inMenuBar	; Menu bar: process command
+									Call _MenuSelect:L(myEvent.where:L)
+									Call DoCommand	; DoCommand(MenuSelect(myEvent.where));
+									Leave#.S
+								
+								Case#.S inSysWindow	; Desk accessory window
+									Call _SystemClick(myEvent:A, whichWindow:L)
+									Leave#.S
+									
+								Case#.S inDrag		; Title bar
+									Call _DragWindow(whichWindow:L, myEvent.where:L, dragRect:A)
+									Leave#.S
+									
+								Case#.S inContent	; Body of application window
+									Call _FrontWindow:L,D0 				; Which is in front?
+									IF# D0 NE.L whichWindow THEN.S	; Not us!
+										Call _SelectWindow(whichWindow:L)
+									ELSE#.S												; If we are in front...
+										Call _GlobalToLocal(myEvent.where:A)
+										MOVE.L	myEvent.where,-(A7)   
+										MOVE		myEvent.modifiers,D0
+										BTST		#shiftKey,D0
+										SNE 		-(A7)								; Indicate if shift key is down
+										Call _TEClick(,,textH:L)
+									ENDIF#
+							EndS#
+							Leave#
+						
+						Case# keyDwnEvt,autoKeyEvt	; Key down and Auto key event processing
+							BTST		#CmdKey,myEvent.modifiers
+							IF# NE THEN.S				; If cmd key down, call Menu Mgr to learn which
+								Call _MenuKey:L(myEvent.message+2)
+								Call DoCommand		; Process the command key
+							ELSE#.S							; If not a command key...
+								Call _TEKey(myEvent.message+2, textH:L); ...pass char to TE
+							ENDIF#
+							Leave#.S
+						
+						Case# activateEvt			; Activate/deactivate event processing
+							MOVE		myEvent.modifiers,D0; App window status changed
+							BTST		#activeFlag,D0			; Is app window becoming active ?
+							IF# NE THEN.S								; Yes
+								Call _TEActivate(textH:L)	; Call TE to highlight selection and
+								Call _DisableItem(editMenuH:L, #undoCommand); disable UnDo
+							ELSE#.S											; App window is becoming inactive
+								Call _TEDeactivate(textH:L); Unhighlight selection and
+								Call _EnableItem(editMenuH:L, #undoCommand); enable UnDo
+							ENDIF#
+							Leave#.S
+							
+						Case# updatEvt				; Update event processing
+							Call _BeginUpDate(myEvent.message:L)		; Window needs updating
+							MOVEA.L	thePort,A3											; We need thePort^.portRect
+							Call _EraseRect(portRect(A3):A)					; Call QD to erase text area
+							Call _TEUpdate(portRect(A3):A, textH:L)	; Call TE to update the text
+							Call _EndUpDate(myEvent.message:L)			; End update
+					ENDS#
+				ENDIF#
+					
+				TST.B	doneFlag
+			UNTIL# NE
+			Return
+		END 																; of Sample

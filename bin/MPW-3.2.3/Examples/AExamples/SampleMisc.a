@@ -1,0 +1,899 @@
+*
+*	Apple Macintosh Developer Technical Support
+*
+*	MultiFinder-Aware Simple Sample Application
+*
+*	Sample
+*
+*	SampleMisc.a	-	Assembler Source
+*
+*	Copyright © Apple Computer, Inc. 1989-1990
+*	All rights reserved.
+*
+*	Versions:	
+*		1.00			08/88
+*		1.01			11/88
+*		1.02			04/89	MPW 3.1
+*		1.03			02/90	MPW 3.2
+*
+*	Components:
+*		Sample.a		Feb. 1, 1990
+*		Sample.inc1.a	Feb. 1, 1990
+*		SampleMisc.a	Feb. 1, 1990
+*		Sample.r		Feb. 1, 1990
+*		Sample.h		Feb. 1, 1990
+*		Sample.make		Feb. 1, 1990
+*
+*	Sample is an example application that demonstrates how to
+*	initialize the commonly used toolbox managers, operate 
+*	successfully under MultiFinder, handle desk accessories, 
+*	and create, grow, and zoom windows.
+*
+*	It does not by any means demonstrate all the techniques 
+*	you need for a large application. In particular, Sample 
+*	does not cover exception handling, multiple windows/documents, 
+*	sophisticated memory management, printing, or undo. All of 
+*	these are vital parts of a normal full-sized application.
+*
+*	This application is an example of the form of a Macintosh 
+*	application; it is NOT a template. It is NOT intended to be 
+*	used as a foundation for the next world-class, best-selling, 
+*	600K application. A stick figure drawing of the human body may 
+*	be a good example of the form for a painting, but that does not 
+*	mean it should be used as the basis for the next Mona Lisa.
+*
+*	We recommend that you review this program or TESample before 
+*	beginning a new application.
+
+* ================================================
+* -------------- INCLUDES SECTION ----------------
+* ================================================
+
+	PRINT	PUSH,OFF			; don't print any of this stuff
+
+	INCLUDE	'ToolEqu.a'
+	INCLUDE	'Traps.a'
+	INCLUDE	'PackMacs.a'
+	INCLUDE	'QuickEqu.a'
+	INCLUDE	'SysEqu.a'
+	INCLUDE	'Sample.inc1.a'			; all our macros and data templates
+
+	PRINT	POP				; restore the PRINT options
+
+
+* ================================================
+* -----------  DATA STORAGE USAGE  ---------------
+* ================================================
+* Here we will IMPORT the data that is being from the
+* DATA STORAGE ALLOCATION section of ASample.a.  By IMPORTing them
+* at this point, they will be accessible by this entire source file.
+* The symbol is IMPORTed and associated with the original template
+* as defined in the ASample.inc1.a file.  This allows us to use
+* the identifiers in the template.
+
+		IMPORT	QD:QDGlobals
+		IMPORT	G:AppGlobals
+
+
+* ================================================
+* FUNCTION TrapAvailable(tNumber: INTEGER): BOOLEAN;
+* ================================================
+* Check to see if a given trap is implemented. This is only used by the
+* Initialize routine in this program, so we put it in the Initialize segment.
+* The recommended approach to see if a trap is implemented is to see if
+* the address of the trap routine is the same as the address of the
+* Unimplemented trap. Needs to be called after call to _SysEnvirons so that it can
+* check if a ToolTrap is out of range of a pre-Mac II ROM.  This routine
+* assumes we're running on 128k ROMs. It also requires the entire trap
+* word so that it knows if it is a ToolTrap or an OSTrap.
+
+		SEG	'Initialize'		; case sensitive
+TrapAvailable	FUNC	EXPORT			; any source file can use this routine
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+Result		DS.W	1			; function's result returned to caller
+ParamBegin	EQU	*			; start parameters after this point
+tNumber		DS.W	1			; the trap number passed by caller
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+TrapAddress	DS.L	1			; local copy of trap address
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		MOVE.W	#False,Result(A6)	; initialize function's result
+
+		MOVE.W	tNumber(A6),D0		; get trap word into D0
+		BTST	#ToolTrapBit,D0		; test if number is Tool trap
+		BEQ.S	GetOSTrap		; off means a new OS trap number
+		
+		MOVE.W	G.Mac.machineType,D1	; get the machine type we're running
+		CMPI.W	#envMachUnknown,D1	; are we on a future machine?
+		BEQ.S	GetToolTrap		; yes, go ahead and test for a new Tool trap
+		
+		CMPI.W	#envMacII,D1		; are we on a Mac II or better?
+		BGE.S	GetToolTrap		; yes, go ahead and test for a new Tool trap
+
+* ------------- TEST FOR EXCEEDING TRAP TABLE -------------
+* At this point we know we're on a Mac 512E, Plus, or SE and need to
+* test the trap number for being in the range of < $0200
+
+		AND.W	#$03FF,D0		; mask off the ToolTrap bits
+		CMPI.W	#$01FF,D0		; is this trap in our trap table?
+		BLE.S	GetToolTrap		; yes, go ahead and test for a new Tool trap
+		BRA.S	Exit			; no, then this trap cannot be present
+		
+* ------------- TEST FOR NEW TOOL TRAP -------------
+
+GetToolTrap	_GetTrapAddress ,NewTool	; NewTool trap macro, trap is in D0
+		MOVE.L	A0,TrapAddress(A6)	; save a copy of the trap address
+		BRA.S	TestUnimp		; test against Unimplemented trap
+		
+* ------------- TEST FOR NEW OS TRAP -------------
+
+GetOSTrap	_GetTrapAddress ,NewOS		; NewOS trap macro, trap is in D0
+		MOVE.L	A0,TrapAddress(A6)	; save a copy of the trap address
+TestUnimp	MOVE.W	#Unimplemented,D0	; get address of Unimplemented trap
+		_GetTrapAddress
+		CMPA.L	TrapAddress(A6),A0	; see if trap is implemented
+		BEQ.S	Exit			; nope, they're the same
+		MOVE.W	#True,Result(A6)	; yes, we've got the trap
+
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	TrapAval		; this name will appear in the debugger
+		ENDF
+
+* ================================================
+* FUNCTION GoGetRect(rectID: INTEGER; VAR theRect: Rect) : BOOLEAN;
+* ================================================
+* This utility loads the global rectangles that are used by the window
+* drawing routines. It shows how the resource manager can be used to hold
+* values in a convenient manner. These values are then easily altered without
+* having to re-compile the source code. GoGetRect will return a BOOLEAN that
+* indicates if it was successful in getting the rectangle.
+
+* A0 is being used for resource handle.
+
+		SEG	'Initialize'		; case sensitive
+GoGetRect	FUNC	EXPORT			; any source file can use this routine
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+Result		DS.W	1			; function's result returned to caller
+ParamBegin	EQU	*			; start parameters after this point
+RectID		DS.W	1			; resource ID of rect passed by caller
+TheRect		DS.L	1			; the rect's pointer passed by caller
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		MOVE.W	#False,Result(A6)	; initialize function's result
+
+		CLR.L	-(SP)			; create space for result
+		MOVE.L	#'RECT',-(SP)
+		MOVE.W	RectID(A6),-(SP)	; get the stop light's rect
+		_GetResource
+		MOVEA.L	(SP)+,A0		; handle to RECT resource in A0
+		CMPA.L	#NIL,A0			; test for NIL handle
+		BEQ.S	Exit			; didn't get resource, exit this procedure
+
+
+* -------- COPY THE RESOURCE TO THE RECT --------
+
+		MOVE.W	#True,Result(A6)	; we got the resource, return true
+		MOVEA.L	(A0),A0			; pointer to RECT resource in A0
+		MOVEA.L	TheRect(A6),A1		; pointer to the dest. RECT in A1
+		MOVE.L	topLeft(A0),topLeft(A1)	; copy to the rect passed to us
+		MOVE.L	botRight(A0),botRight(A1)
+
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	GetRect			; this name will appear in the debugger
+		ENDF
+
+* ================================================
+* FUNCTION IsDAWindow(window: WindowPtr): BOOLEAN;
+* ================================================
+* Check if a window belongs to a desk accessory.  DA window has a negitive kind.
+
+		SEG	'Main'
+IsDAWindow	FUNC	EXPORT			; any source file can use this routine
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+Result		DS.W	1			; function's result returned to caller
+ParamBegin	EQU	*			; start parameters after this point
+TheWindow	DS.L	1			; a window's pointer passed by caller
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		MOVE.W	#False,Result(A6)	; first, initialize the result
+		CMPI.L	#NIL,TheWindow(A6)	; valid pointer?
+		BEQ.S	Exit			; it was NIL, look out!
+
+		MOVEA.L	TheWindow(A6),A0	; get the window pointer
+		MOVE.W	WindowKind(A0),D0	; what kind of window was it?
+		BPL.S	Exit			; DA windows are negitive
+
+		MOVE.W	#True,Result(A6)	; return true to the caller
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	IsDAWind		; this name will appear in the debugger
+		ENDF
+
+* ================================================
+* FUNCTION IsAppWindow(window: WindowPtr): BOOLEAN;
+* ================================================
+* Check to see if a window belongs to the application. If the window pointer
+* passed was NIL, then it could not be an application window. WindowKinds
+* that are negative belong to the system and windowKinds less than userKind
+* are reserved by Apple except for windowKinds equal to dialogKind, which
+* means it is a dialog.
+* In order to reduce the chance of accidentally treating some window
+* as an AppWindow that shouldn't be, we'll only return true if the windowkind
+* is userKind. If you add different kinds of windows to Sample you'll need
+* to change how this all works.
+
+		SEG	'Main'
+IsAppWindow	FUNC	EXPORT			; any source file can use this routine
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+Result		DS.W	1			; function's result returned to caller
+ParamBegin	EQU	*			; start parameters after this point
+TheWindow	DS.L	1			; a window's pointer passed by caller
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		MOVE.W	#False,Result(A6)	; first, initialize the result
+		CMPI.L	#NIL,TheWindow(A6)	; valid pointer?
+		BEQ.S	Exit			; it was NIL, look out!
+
+		MOVEA.L	TheWindow(A6),A0	; get the window pointer
+		MOVE.W	WindowKind(A0),D0	; what kind of window was it?
+		CMPI.W	#UserKind,D0		; was it an application window?
+		BNE.S	Exit			; no, result is going to be false
+
+		MOVE.W	#True,Result(A6)	; return true to the caller
+
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	IsAppWin		; this name will appear in the debugger
+		ENDF
+
+* ================================================
+* PROCEDURE AlertUser;
+* ================================================
+* Display an alert that tells the user an error occurred, then exit the program.
+* This routine is used as an ultimate bail-out for serious errors that prohibit
+* the continuation of the application. Errors that do not require the termination
+* of the application should be handled in a different manner. Error checking and
+* reporting has a place even in the simplest application. For simplicity, the alert
+* displayed here only says that an error occurred, but not what it was. There are
+* various methods available for being more specific.
+
+		SEG	'Main'		; case sensitive
+AlertUser	PROC	EXPORT			; any source file can use this routine
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+ParamBegin	EQU	*			; start parameters after this point
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		CLR.W	-(SP)			; space for result of Alert
+		MOVE.W	#rUserAlert,-(SP)	; resource for alert dialog
+		CLR.L	-(SP)			; no filter procedure used here
+		_Alert				; read the resource and display it
+		MOVE.W	(SP)+,D0		; I don't care which item is was
+		_ExitToShell			; we're out of here, no error recovery
+
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	AlrtUser		; this name will appear in the debugger
+		ENDP
+
+* ================================================
+* FUNCTION DoCloseWindow(window: WindowPtr) : BOOLEAN;
+* ================================================
+* At this point, if there was a document associated with a window, you could
+* do any document saving processing if it is 'dirty'.  DoCloseWindow would
+* return TRUE if the window actually closes, i.e., the user does not cancel
+* from a save dialog. This result is handy when the user quits an application,
+* but then cancels a save of a document associated with a window. We also added
+* code to close the application window since otherwise, the termination routines
+* would never stop looping, waiting for FrontWindow to return NIL.
+
+ 		SEG	'Main'			; case sensitive
+DoCloseWindow	FUNC	EXPORT			; any source file can use this routine
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+Result		DS.W	1			; function's result returned to caller
+ParamBegin	EQU	*			; start parameters after this point
+WindowPtr	DS.L	1			; passed window pointer parameter
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		MOVE.W	#True,Result(A6);	; initialize the function's result
+
+		CLR.W	-(SP)			; space for result of IsDAWindow
+		MOVE.L	WindowPtr(A6),-(SP)	; pass the window pointer
+		BSR	IsDAWindow
+		MOVE.W	(SP)+,D0		; result of IsDAWindow
+		CMPI.W	#True,D0
+		BNE.S	@1			; this wasn't a DA window
+
+		MOVEA.L	WindowPtr(A6),A0	; get window pointer
+		MOVE.W	WindowKind(A0),-(SP)	; pass the refNum of DA
+		_CloseDeskAcc
+		BRA.S	Exit			; all done
+
+@1		CLR.W	-(SP)			; space for result of IsAppWindow
+		MOVE.L	WindowPtr(A6),-(SP)	; pass a the window pointer
+		BSR	IsAppWindow
+		MOVE.W	(SP)+,D0		; result of IsAppWindow
+		CMPI.W	#True,D0
+		BNE.S	Exit			; it wasn't our application's window
+
+		MOVE.L	WindowPtr(A6),-(SP)	; close window, it shouldn't be a dialog
+		_CloseWindow			; close the application window
+
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	ClosWind		; this name will appear in the debugger
+		ENDF
+
+* ================================================
+* PROCEDURE Terminate;
+* ================================================
+* Clean up the application and exit. We close all of the windows so that
+* they can update their documents, if any.  We don't have much to do here.
+* Just close our windows and then exit.  If we find out that a Cancel has
+* occurred (DoCloseWindow will return False) we won't exit to the shell,
+* but will simply exit this procedure.
+
+		SEG	'Main'			; case sensitive
+Terminate	PROC	EXPORT
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+ParamBegin	EQU	*			; start parameters after this point
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+WindowPtr	DS.L	1			; local variable for a window pointer
+Closed		DS.W	1			; local variable for looping
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		IMPORT	DoCloseWindow
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		MOVE.W	#True,Closed(A6)	; initialize local variable
+
+Loop		CLR.L	-(SP)			; space for front window pointer
+		_FrontWindow
+		MOVE.L	(SP)+,WindowPtr(A6)	; get the front window pointer
+		CMPI.L	#NIL,WindowPtr(A6)	; is there a front window?
+		BEQ.S	@1			; there are no more windows
+
+		CLR.W	-(SP)			; space for result of DoCloseWindow
+		MOVE.L	WindowPtr(A6),-(SP)	; pass the window pointer
+		BSR	DoCloseWindow		; close all our windows
+		MOVE.W	(SP)+,Closed(A6)	; get result of DoCloseWindow
+		CMPI.W	#True,Closed(A6)	; what's the result of DoCloseWindow?
+		BNE.S	Exit			; user didn't want to close that window
+
+		BRA.S	Loop			; loop again and close the next window
+
+@1		CMPI.W	#True,Closed(A6)	; should we really terminate?
+		BNE.S	Exit			; no, exit this procedure
+
+		_ExitToShell			; we're done, let's get out of here
+
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	Terminat		; this name will appear in the debugger
+		ENDP
+
+* ================================================
+* PROCEDURE SetLight(window: WindowPtr; newStopped: BOOLEAN);
+* ================================================
+* Change the setting of the light and force an update event.
+* newStopped is the state of the stop light the user is requesting.
+
+		SEG	'Main'			; case sensitive
+SetLight	PROC	EXPORT			; any source file can use this routine
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+ParamBegin	EQU	*			; start parameters after this point
+WindowPtr	DS.L	1			; passed parameter of the window pointer
+newStopped	DS.W	1			; test value passed by caller
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		MOVE.W	G.Stopped,D0		; get state of stop light
+		CMP.W	newStopped(A6),D0	; compare to the new state
+		BEQ.S	Exit			; they're the same, stupid user!
+
+		MOVE.W	newStopped(A6),G.Stopped ; set global to the new state
+		MOVE.L	WindowPtr(A6),-(SP)
+		_SetPort			; set the port to us
+		MOVEA.L	WindowPtr(A6),A0	; force update event for window
+		PEA	portRect(A0)		; invalidate entire window
+		_InvalRect
+
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	SetLight		; this name will appear in the debugger
+		ENDP
+
+* ================================================
+* PROCEDURE AdjustMenus;
+* ================================================
+* Enable and disable menus based on the current state.  The user can only select
+* enabled menu items. We set up all the menu items before calling MenuSelect or
+* MenuKey, since these are the only times that a menu item can be selected. Note
+* that MenuSelect is also the only time the user will see menu items. This
+* approach to deciding what enable/disable state a menu item has the advantage
+* of concentrating all the decision making in one routine, as opposed to being
+* spread throughout the application.  Other application designs may take a
+* different approach that are just as valid.
+
+		SEG	'Main'			; case sensitive
+AdjustMenus	PROC	EXPORT			; any source file can use this routine
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+ParamBegin	EQU	*			; start parameters after this point
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+FrontMost	DS.L	1			; local copy of the front window
+Menu		DS.L	1			; local copy of the menu handle
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		CLR.L	-(SP)			; space for result
+		_FrontWindow
+		MOVE.L	(SP)+,FrontMost(A6)	; save the front window
+
+* ------------- ADJUST THE FILE MENU -------------
+AdjustFile
+		CLR.L	-(SP)			; space for result
+		MOVE.W	#FileMenu,-(SP)		; get the File menu handle
+		_GetMHandle
+		MOVE.L	(SP)+,Menu(A6)		; save the menu handle
+		CLR.W	-(SP)			; space for result
+		MOVE.L	FrontMost(A6),-(SP)
+		BSR	IsDAWindow
+		MOVE.W	(SP)+,D0		; get the result of the function
+		CMPI.W	#True,D0		; was it the DA window?
+		BNE.S	@1			; no, then disable the close item
+
+		MOVE.L	Menu(A6),-(SP)		; it was an application window
+		MOVE.W	#CloseItem,-(SP)
+		_EnableItem			; enable the close for DAs only
+		BRA.S	AdjustEdit
+
+@1		MOVE.L	Menu(A6),-(SP)		; it was not a DA window
+		MOVE.W	#CloseItem,-(SP)
+		_DisableItem			; disable close for all others
+
+* ------------- ADJUST THE EDIT MENU -------------
+AdjustEdit
+		CLR.L	-(SP)			; space for result
+		MOVE.W	#EditMenu,-(SP)		; get the Edit menu handle
+		_GetMHandle
+		MOVE.L	(SP)+,Menu(A6)		; save the menu handle
+		CLR.W	-(SP)			; space for result
+		MOVE.L	FrontMost(A6),-(SP)
+		BSR	IsDAWindow
+		MOVE.W	(SP)+,D0		; get the result of the function
+		CMPI.W	#True,D0		; was it the DA window?
+		BNE.S	@2			; no, disable the edit menu
+
+		MOVE.L	Menu(A6),-(SP)		; it was for a DA window
+		MOVE.W	#CutItem,-(SP)
+		_EnableItem			; enable the Cut
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#CopyItem,-(SP)
+		_EnableItem			; enable the Copy
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#PasteItem,-(SP)
+		_EnableItem			; enable the Paste
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#ClearItem,-(SP)
+		_EnableItem			; enable the Clear
+		BRA.S	AdjustLight		; done with the edit menu
+
+@2		MOVE.L	Menu(A6),-(SP)		; disable the edit menu
+		MOVE.W	#UndoItem,-(SP)
+		_DisableItem			; disable the Undo
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#CutItem,-(SP)
+		_DisableItem			; disable the Cut
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#CopyItem,-(SP)
+		_DisableItem			; disable the Copy
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#PasteItem,-(SP)
+		_DisableItem			; disable the Paste
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#ClearItem,-(SP)
+		_DisableItem			; disable the Clear
+
+* ------------- ADJUST THE LIGHT MENU -------------
+AdjustLight
+		CLR.L	-(SP)			; space for result
+		MOVE.W	#LightMenu,-(SP)	; get the Edit menu handle
+		_GetMHandle
+		MOVE.L	(SP)+,Menu(A6)		; save the menu handle
+		CLR.W	-(SP)			; space for result
+		MOVE.L	FrontMost(A6),-(SP)	; the front window
+		BSR	IsAppWindow
+		MOVE.W	(SP)+,D3		; save the result of the function
+		CMPI.W	#True,D3		; was our window in front?
+		BNE.S	@3			; no, disable the menu items
+
+		MOVE.L	Menu(A6),-(SP)		; enable the light menu
+		MOVE.W	#StopItem,-(SP)
+		_EnableItem			; enable the stop
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#GoItem,-(SP)
+		_EnableItem			; enable the go for our window
+		BRA.S	@4			; now check the menu items
+
+@3		MOVE.L	Menu(A6),-(SP)		; disable the light menu
+		MOVE.W	#StopItem,-(SP)
+		_DisableItem			; disable the stop
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#GoItem,-(SP)
+		_DisableItem			; disable the go
+		BRA.S	Exit			; nothing to check, get out of here
+
+@4		MOVE.W	G.Stopped,D0		; get the current state of the light
+		CMPI.W	#True,D0		; is the stop light on?
+		BNE.S	@5			; no, the green light is on
+
+		MOVE.L	Menu(A6),-(SP)		; set menu to red light = on
+		MOVE.W	#StopItem,-(SP)
+		MOVE.W	#True,-(SP)
+		_CheckItem			; check the StopItem in the menu
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#GoItem,-(SP)
+		MOVE.W	#False,-(SP)
+		_CheckItem			; un-check the GoItem in the menu
+		BRA.S	Exit			; now we're done, get out of here
+
+@5		MOVE.L	Menu(A6),-(SP)		; set menu to green light = on
+		MOVE.W	#StopItem,-(SP)
+		MOVE.W	#False,-(SP)
+		_CheckItem			; un-check the StopItem in the menu
+		MOVE.L	Menu(A6),-(SP)
+		MOVE.W	#GoItem,-(SP)
+		MOVE.W	#True,-(SP)
+		_CheckItem			; check the GoItem in the menu
+
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	AdjstMnu		; this name will appear in the debugger
+		ENDP
+
+* ================================================
+* PROCEDURE DrawWindow(window: WindowPtr);
+* ================================================
+* Draw the contents of the application's window. We do some drawing in color,
+* using Classic QuickDraw's color capabilities. This will be black and white on
+* old machines, but color on color machines. The window's visRgn has been set by
+* the Update routine to cause drawing only where it needs to be done.
+
+		SEG	'Main'			; case sensitive
+DrawWindow	PROC	EXPORT			; any source file can use this routine
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+ParamBegin	EQU	*			; start parameters after this point
+WindowPtr	DS.L	1			; passed parameter of the window pointer
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		MOVE.L	WindowPtr(A6),-(SP)
+		_SetPort			; set the current port to us
+		MOVEA.L	WindowPtr(A6),A0	; erase the entire window
+		PEA	portRect(A0)		; the window's rect
+		_EraseRect			; clear out anything remaining
+		MOVE.W	G.Stopped,D0		; find the state of the lights
+		CMPI.W	#True,D0
+		BNE.S	@1			; red light should be off
+
+* ------------- RED LIGHT -------------
+
+		MOVE.L	#redColor,-(SP)		; make the red light go on
+		_ForeColor
+		PEA	G.StopRect
+		_PaintOval
+		MOVE.L	#whiteColor,-(SP)	; make the green light go off
+		_ForeColor
+		PEA	G.GoRect
+		_PaintOval
+		BRA.S	@2
+
+* ------------- GREEN LIGHT -------------
+
+@1		MOVE.L	#greenColor,-(SP)	; make the green light go on
+		_ForeColor
+		PEA	G.GoRect
+		_PaintOval
+		MOVE.L	#whiteColor,-(SP)	; make the red light go off
+		_ForeColor
+		PEA	G.StopRect
+		_PaintOval
+
+* ------------- FRAME THE LIGHTS -------------
+
+@2		MOVE.L	#blackColor,-(SP)
+		_ForeColor
+		PEA	G.StopRect
+		_FrameOval			; draw black line around light
+		PEA	G.GoRect
+		_FrameOval			; draw black line around light
+
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	DrawWind		; this name will appear in the debugger
+		ENDP
+
+* ================================================
+* PROCEDURE GetGlobalMouse(VAR mouse: Point);
+* ================================================
+* Get the global coordinates of the mouse. When you call OSEventAvail
+* it will return either a pending event or a null event. In either case,
+* the where field of the event record will contain the current position
+* of the mouse in global coordinates and the modifiers field will reflect
+* the current state of the modifiers. Another way to get the global
+* coordinates is to call GetMouse and LocalToGlobal, but that requires
+* being sure that thePort is set to a valid port.}
+
+		SEG	'Main'			; case sensitive
+GetGlobalMouse	PROC	EXPORT			; any source file can use this routine
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+ParamBegin	EQU	*			; start parameters after this point
+Mouse		DS.L	1			; passed reference to mouse position
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+TheEvent 	DS	EventRecord 		; local copy of the event record
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		MOVE.W	#NoEvents,D0		; we aren't interested in any events
+		LEA	TheEvent(A6),A0		; point to event record
+		_OSEventAvail			; just the mouse position
+		MOVE.L	Mouse(A6),A0		; deref address of mouse
+		MOVE.L	TheEvent.Where(A6),(A0)	; stuff new value
+
+		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	GetGlobalMouse		; this name will appear in the debugger
+		ENDP
+
+* ================================================
+* PROCEDURE AdjustCursor(mouse: Point; region: RgnHandle);
+* ================================================
+* Change the cursor's shape, depending on its position. This also calculates the
+* region where the current cursor resides (for WaitNextEvent). If the mouse is
+* ever outside of that region, an event would be generated, causing this routine
+* to be called, allowing us to change the region to the region the mouse is
+* currently in. If there is more to the event than just the mouse moved, we
+* get called before the event is processed to make sure the cursor is the right
+* one. In any (ahem) event, this is called again before we fall back into WNE.
+* 1.02 - Removed the mouse position parameter and instead use the current position
+* of the mouse by calling GetMouse and LocalToGlobal.
+
+		SEG	'Main'			; case sensitive
+AdjustCursor	PROC	EXPORT
+
+StackFrame	RECORD	{A6Link},DECR		; build a stack frame record
+ParamBegin	EQU	*			; start parameters after this point
+Where		DS.L	1			; the mouse location passed to us
+MouseRegion	DS.L	1			; passed pointer to current region
+ParamSize	EQU	ParamBegin-*		; size of all the passed parameters
+RetAddr 	DS.L	1			; place holder for return address
+A6Link		DS.L	1			; place holder for A6 link
+FrontMost	DS.L	1			; local pointer to the front window
+ArrowRgn	DS.L	1			; local handle to the arrow cursor region
+PlusRgn		DS.L	1			; local handle to the plus cursor region
+LocalSize	EQU 	*			; size of all the local variables
+		ENDR
+
+		IMPORT	IsDAWindow,IsAppWindow
+
+		WITH	StackFrame		; cover our local stack frame
+		LINK	A6,#LocalSize		; allocate our local stack frame
+
+		CLR.W	-(SP)			; space for result of IsAppWindow
+		CLR.L	-(SP)			; space for result of FrontWindow
+		_FrontWindow			; push front window pointer
+		MOVE.L	(SP),FrontMost(A6)	; copy pointer and keep it on stack
+		BSR	IsDAWindow		; is this an application window?
+		MOVE.W	(SP)+,D0
+		CMPI.W	#True,D0
+		BEQ.W	Exit			; not our window, don't adjust the cursor
+		CMPI.W	#True,G.InBackground
+		BEQ.W	Exit			; and do nothing if we're in the background
+
+* ------------- INITIALIZE SOME REGION DATA -------------
+
+		CLR.L	-(SP)
+		_NewRgn				; create an empty plus region
+		MOVE.L	(SP)+,PlusRgn(A6)
+		CLR.L	-(SP)
+		_NewRgn				; create an empty arrow region
+		MOVE.L	(SP)+,ArrowRgn(A6)
+		MOVE.L	ArrowRgn(A6),-(SP)	; arrow region handle
+		MOVE.W	#ExtremeNeg,-(SP)	; big left corner
+		MOVE.W	#ExtremeNeg,-(SP)	; big top corner
+		MOVE.W	#ExtremePos,-(SP)	; big right corner
+		MOVE.W	#ExtremePos,-(SP)	; big bottom corner
+		_SetRecRgn			; really big rectangular region
+
+		CLR.W	-(SP)
+		MOVE.L	FrontMost(A6),-(SP)
+		BSR	IsAppWindow		; is this an application window?
+		MOVE.W	(SP)+,D0
+		CMPI.W	#True,D0
+		BNE.S	@1			; our window isn't in front?
+
+* ------------- CALCULATE THE PLUS REGION -------------
+
+		MOVE.L	FrontMost(A6),-(SP)
+		_SetPort			; set the current port to us
+		MOVEA.L	FrontMost(A6),A0
+		MOVE.W	portBits+bounds+left(A0),D0
+		NEG.W	D0			; offset window's left edge...
+		MOVE.W	D0,-(SP)		; to the screen's left edge
+		MOVEA.L	FrontMost(A6),A0
+		MOVE.W	portBits+bounds+top(A0),D0
+		NEG.W	D0			; offset window's top edge...
+		MOVE.W	D0,-(SP)		; to the screen's top edge
+		_SetOrigin			; make window rect global
+		MOVE.L	PlusRgn(A6),-(SP)	; handle to empty plus region
+		MOVEA.L	FrontMost(A6),A0	; pointer to our window
+		PEA	portRect(A0)		; window rect's global coordinates
+		_RectRgn			; make global window rect into region
+		MOVE.L	PlusRgn(A6),-(SP)	; get intersection of plus and window region
+		MOVEA.L	FrontMost(A6),A0
+		MOVE.L	visRgn(A0),-(SP)	; get front window's visRgn
+		MOVE.L	PlusRgn(A6),-(SP)	; resulting region will be in PlusRgn
+		_SectRgn			; intersection the two regions
+		CLR.L	-(SP)			; reset the origin of our window to 0,0
+		_SetOrigin
+
+@1		MOVE.L	ArrowRgn(A6),-(SP)	; the really big rectangular region
+		MOVE.L	PlusRgn(A6),-(SP)	; the region of our window
+		MOVE.L	ArrowRgn(A6),-(SP)	; intersetion of the Arrow and Plus region
+		_DiffRgn			; this is the region where the Arrow shows
+		CLR.W	-(SP)			; space for result of PtInRect
+		MOVE.L	Where(A6),-(SP)		; here's the mouse
+		MOVE.L	PlusRgn(A6),-(SP)	; where the arrow should show up
+		_PtInRgn			; was cursor in the arrow region?
+		MOVE.W	(SP)+,D0
+		CMPI.W	#True,D0
+		BNE.S	@2			; cursor was in arrow region
+
+* ------------- SET THE CURSOR AND NEW MOUSE REGION -------------
+
+		CLR.L	-(SP)			; space for result
+		MOVE.W	#plusCursor,-(SP)	; I want the plus cursor now!
+		_GetCursor
+		MOVEA.L	(SP)+,A0		; get the handle
+		CMPA.L	#NIL,A0
+		BEQ.S	Exit			; check for NIL like a good boy
+		MOVE.L	(A0),-(SP)		; got the plus cursor
+		_SetCursor			; set cursor to plus
+		MOVE.L	PlusRgn(A6),-(SP)	; current region containing cursor
+		MOVE.L	MouseRegion(A6),-(SP)	; set it to the new region
+		_CopyRgn
+		BRA.S	@3			; we're done, get out of here
+
+@2		PEA	QD.Arrow		; got arrow cursor at InitGraf
+		_SetCursor			; set cursor to the Arrow
+		MOVE.L	ArrowRgn(A6),-(SP)	; current region containing cursor
+		MOVE.L	MouseRegion(A6),-(SP)	; set it to the new region
+		_CopyRgn
+
+@3		MOVE.L	PlusRgn(A6),-(SP)	; dispose of our two temporary regions
+		_DisposRgn
+		MOVE.L	ArrowRgn(A6),-(SP)
+		_DisposRgn
+
+Exit		UNLK	A6			; destroy the link
+		MOVEA.L	(SP)+,A0		; pull off the return address
+		ADDA.L	#ParamSize,SP		; strip all of the caller's parameters
+		JMP	(A0)			; return to the caller
+
+		DbgInfo	AdjstCur		; this name will appear in the debugger
+		ENDP
+
+		END				; end of this source file

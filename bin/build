@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+
+# In this folder
+from splice import splice
+
+# python3 -m pip install machfs macresources
+import machfs
+import macresources
+
+# First party
+from os import path
+import argparse
+import glob
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+
+
+def folder(default_search, user_input):
+    if path.sep in user_input:
+        return user_input
+    else:
+        the_path = path.dirname(path.dirname(path.abspath(__file__)))
+        the_path = path.join(the_path, default_search, user_input)
+        return the_path
+
+
+parser = argparse.ArgumentParser(description='''
+    Build the sources in the working directory.
+''')
+
+parser.add_argument('passthru', metavar='ARG', nargs='+', help='Build script args (RISC/ROM/LC930/dbLite or FNDR)')
+config = parser.parse_args()
+
+config.worktree = os.getcwd()
+config.tmpdir = path.join(config.worktree, '.dmg')
+config.hfsimg = path.join(config.worktree, '.dmg.dmg')
+config.vmac = open(path.join(path.dirname(__file__), 'vmac_path.conf')).read().rstrip('\n')
+
+
+if config.passthru[:1] == ['FNDR']:
+    config.startapp = None
+    config.passthru = None
+
+else:
+    config.startapp = 'Disk:MPW:MPW Shell'
+
+    # Massage the args to make sense to :Make:Build
+    if '-src' not in config.passthru:
+        loc = 0
+        if config.passthru and config.passthru[0].isalnum():
+            loc = 1
+        config.passthru[loc:loc] = ['-src', '{Src}']
+
+    config.passthru[0:0] = ['{Src}Make:Build']
+
+    config.passthru = ' '.join(config.passthru)
+
+########################################################################
+
+print('Copying source', flush=True)
+
+try:
+    shutil.rmtree(config.tmpdir)
+except FileNotFoundError:
+    pass
+
+myignore = shutil.ignore_patterns('BuildImage*', '.*', '*.dmg', '*.dsk', '*.sh', '*.py')
+
+# copy2 preserves mod times, which we need to eventually allow MPW Make to work right
+shutil.copytree(config.worktree, config.tmpdir, ignore=myignore, copy_function=shutil.copy2)
+
+all_makefiles = list(glob.glob(path.join(glob.escape(config.worktree), '**', '*.[Mm][Aa][Kk][Ee]'), recursive=True))
+
+########################################################################
+
+def extract_makefile_defines(makefile, seed={}):
+    makefile = makefile.replace(b'\r', b'\n') # tolerate all sorts of crud
+    vardict = dict(seed)
+    grabber = lambda m: vardict.get(m.group(1).decode('ascii'), '').encode('ascii')
+
+    for line in text.split(b'\n'):
+        m = re.match(rb'^(\w+)\s*=\s*(.+)', line)
+        if m:
+            try:
+                left = m.group(1).decode('ascii')
+                right = re.sub(rb'{(\w+)}', grabber, m.group(2)).decode('ascii')
+                vardict[left] = right
+            except UnicodeDecodeError:
+                pass
+
+    return vardict
+
+for mkfile in all_makefiles:
+    with open(mkfile, 'rb') as f:
+        text = f.read()
+
+    defines = extract_makefile_defines(text)
+    if 'BuildDir' not in defines: continue
+
+    for key, macpath in defines.items():
+        macpath = macpath.replace('"', '')
+        if key.endswith('Dir') and macpath.startswith('BuildResults:'):
+            nativepath = path.join(config.tmpdir, *macpath.split(':')[:-1])
+            os.makedirs(nativepath, exist_ok=True)
+
+########################################################################
+
+print('Splicing amphibian DNA', flush=True) # Ugly, but keeps src tree clean
+
+splice(config.tmpdir)
+
+########################################################################
+
+vol = machfs.Volume()
+vol.name = 'Disk'
+vol['Src'] = machfs.Folder()
+vol['Src'].read_folder(config.tmpdir, date=0x90000000, mpw_dates=True)
+
+########################################################################
+
+print('Making bootable', flush=True)
+
+def folder(name):
+    return path.join(path.dirname(path.abspath(__file__)), name)
+
+def pstring(string):
+    string = string.encode('mac_roman')
+    return bytes([len(string)]) + string
+
+# We need a System Folder
+vol['System Folder'] = machfs.Folder()
+vol['System Folder'].read_folder(folder('System-7.0.1'), date=0x80000000)
+
+if 1: # has MPW
+    vol['MPW'] = machfs.Folder()
+    vol['MPW'].read_folder(folder('MPW-3.2.3'), date=0x80000000)
+
+    # Clear Worksheet window and reset its position and size
+    vol['MPW']['Worksheet'].data = vol['MPW']['Worksheet'].rsrc = b''
+
+# Tell MPW what to do when it starts (can use {Src} in their -c command)
+if config.passthru:
+    bootscript = 'Set Src Disk:Src:; Export Src; Directory {Src}\r'
+    bootscript += 'Set Exit 0; %s; Quit\r' % config.passthru
+    vol['MPW']['UserStartup'].data = bootscript.encode('mac_roman')
+
+# Evil tuning: more RAM for MPW because some tools do not use temp mem
+mpw = list(macresources.parse_file(vol['MPW']['MPW Shell'].rsrc))
+for resource in mpw:
+    if resource.type == b'SIZE':
+        resource.data = resource.data[:2] + (0x300000).to_bytes(4, byteorder='big') * 2 + resource.data[10:]
+vol['MPW']['MPW Shell'].rsrc = macresources.make_file(mpw)
+
+# Patch the Process Manager to shut down when the last visible app quits,
+# which it normally does when the startup app isn't a 'FNDR'.
+# At that point, replace ShutDwnUserChoice() with ShutDwnPower().
+# Also, follow a special path to the startup app, instead of Finder name global.
+sys = list(macresources.parse_file(vol['System Folder']['System'].rsrc))
+for resource in sys:
+    if resource.type != b'scod': continue # "System CODE" resources = Process Mgr
+
+    resource.data = resource.data.replace(b'FNDR', b'LUSR')
+    resource.data = resource.data.replace(b'\x3F\x3C\x00\x05\xA8\x95', b'\x3F\x3C\x00\x01\xA8\x95')
+
+    if config.startapp: # Change arg 3 of FSMakeFSSpec(BootVol, 0, FinderName, &mySpec) to custom path
+        data = bytearray(resource.data)
+        pea = b'\x48\x78\x02\xE0' # Find 'PEA $2E0' (accesses the Str15 FinderName)...
+        str_offset = None
+        while pea in data:
+            if not str_offset:
+                while len(data) % 2: data.append(0)
+                str_offset = len(data)
+                data.extend(pstring(config.startapp))
+
+            offset = data.index(pea)
+            data[offset:offset+2] = b'\x48\x7A' # ...replace with PC-relative 'PEA startapp'
+            data[offset+2:offset+4] = (str_offset - (offset+2)).to_bytes(2, byteorder='big')
+        resource.data = bytes(data)
+vol['System Folder']['System'].rsrc = macresources.make_file(sys)
+
+# Patch the Finder to give it a Quit menu item
+finder = list(macresources.parse_file(vol['System Folder']['Finder'].rsrc))
+for resource in finder:
+    if resource.type == b'fmnu' and b'Put Away' in resource.data:
+        data = bytearray(resource.data)
+        data[3] += 2
+        data.extend(b'xxx0\0\0\0\0\x01\x2D')
+        data.extend(b'quit\x81\x00\x51\x00\x04Quit\0')
+        resource.data = bytes(data)
+vol['System Folder']['Finder'].rsrc = macresources.make_file(finder)
+
+########################################################################
+
+print('Creating HFS disk image')
+with open(config.hfsimg, 'wb') as f:
+    f.write(vol.write(256*1024*1024, align=4096, desktopdb=False))
+
+print('Starting Mini vMac...', flush=True)
+
+subprocess.run(config.vmac + ' ' + shlex.quote(config.hfsimg), shell=True, check=True)
+
+########################################################################
+
+print('Saving changes and cleaning up', flush=True)
+
+vol = machfs.Volume()
+with open(config.hfsimg, 'rb') as f:
+    vol.read(f.read())
+vol['Src'].write_folder(config.worktree)
+
+shutil.rmtree(config.tmpdir)
+os.remove(config.hfsimg)
+
+if config.passthru is not None:
+    wsheet = vol['MPW']['Worksheet'].data.decode('mac_roman').replace('\r', '\n')
+    print(wsheet, end='')

@@ -1,0 +1,626 @@
+				TITLE			'Count - An MPW tool using -model far'
+*-------------------------------------------------------------------------------------------
+*
+* NAME
+*		Count.a -- count lines and characters
+*
+* SYNOPSIS
+*		Count [-l] [-c] [file…]
+*
+* DESCRIPTION
+*		"Count" counts the lines and characters in its input, and writes the
+*		counts to standard output.  If no files are specified standard input is
+*		read.  If more than one file is specified, separate counts are written
+*		for each file, one per line, preceeded by the file name.  A total is also
+*		written following the list of files.
+*
+* COPYRIGHT
+*		Copyright Apple Computer, Inc. 1985-1990
+*		All rights reserved.
+*
+* 				Demonstration of use of "32-bit everything" addressing.
+* 								for MPW 3.2b2/3.
+* 	Briefly, "32-bit everything" allows the use of absolute long addressing mode of
+* 680x0instructions in Macintosh code, to refer to both code and data.  Normally,
+* because everything in the Macintosh is considered relocatable, this addressing mode
+* could not be used; the only "absolute" addresses were low memory globals (and there
+* have been warnings about using those!).  However, with a patch to LoadSeg to allow
+* for a different format of the CODE 0 segment jump table, and to allow run-time patching
+* of these "absolute" addresses, it is now possible to use the absolute long addressing
+* mode. (Note that the linker adds the patch installer/de-installer code to the user's
+* code, so the effect is localized).  Thus, the MPW compilers and linker allow, uh,
+* "relocatable" (by runtime patch) "absolute" (by 680x0 addressing mode) instructions.
+* You invoke the feature by using the "-model far" option on the command line for
+* compilers, assembler and linker.
+*	In addition to the "-model far", the user must enable the feature on a "per-instruction"
+* basis.  This program is a modified version of the count program provided
+* in the :Aexamples:folder to demonstrate how to use the Assembler
+* to get the 32-bit everything references.  Unlike the compilers, the user must specify --
+* by explicitly using the absolute addressing mode syntax ("(Mylabel).L") -- which 
+* instructions will use this feature. Further, the label used must be "imported". 
+* To make life easier, there are "implicit" imports provided by the Assembler:
+* Within the same file, preceding data references are implicitly imported, 
+* as are all preceding module names (you cannot, at this time) use a 32-bit reference
+* on to refer to a module name within that module, however). Note that the use of 32-bit 
+* addressing in the Assembler is independent of the CODEREFS and DATAREFS directive
+* settings, and that the 32-bit displacements of the 68020+ addressing modes are not
+* affected -- for backward compatibility.
+*   Within this program, then, you will see absolute references to all kinds of data
+* references:  simple Data references, qualified field references and field references 
+* under a 'WITH' statement.  Since "data" is implicitly imported, no matter where it is
+* found, Main data and data defined in the 'DATA' section of a code module can be
+* successfully reference.
+* 	Additionally, but more simply, there are numerous JSRs and JMPs to other code
+* modules, showing both intrasegment and intersegment branching.  To show that it is
+* possible to mix-n-match, some references are made which use A5 and PC-relative
+* addressing. J. Kettenhofen, Cupertino, 10/15/90.
+* 
+*-------------------------------------------------------------------------------------------
+
+	CASE	OBJ
+	INCLUDE	'traps.a'		; for Pack7
+	INCLUDE	'packmacs.a'	; for NumToStr, which calls Pack7
+	INCLUDE	'intenv.a'		; so we can get our args, open files, etc.
+	INCLUDE	'signal.a'		; so we can handle 'Command-.'
+	IMPORT	INITCURSORCTL	; to init the spinning beach ball
+	IMPORT	ROTATECURSOR	; for the spinning beach ball
+
+RC_Normal	EQU	0
+RC_ParmErrs EQU	1
+RC_Abort	EQU	2		 ; Return codes
+
+;SIGINT	EQU	2
+
+EOLChar	EQU	$0D		; the Return character marks the end of line
+	STRING	Pascal		; length byte strings
+	
+BufSize	EQU	1024		; size of input buffer
+
+* global data--these declarations outside of any module are allocated and accessed
+* relative to register A5
+Globals	RECORD
+ArgV	DS.L	1		; the address of our arguments
+ArgC	DS.L	1		; the number of our arguments
+RetCode	DC.B	RC_Normal		; set to RC_ …
+CRStr	DC.W	$010D		; a 'string' that is a return character
+Interrupted	DC.B	0	; not interrupted yet
+progname	DS.L	1	; the address of our name
+NumFiles	DC.W	0	; the number of files to process
+WriteChars	DC.B	0	; TRUE if the user wants line count
+WriteLines	DC.B	0	; TRUE if the user wants char count
+Opts		DC.B	0	; TRUE if user has selected either line or char
+LineCount	DC.L	0
+CharCount	DC.L	0
+TotalLines	DC.L	0
+TotalChars	DC.L	0
+Max	DC.B	5			; length of 'Total' string, or the longest filename
+myBuf	DS.B	BufSize	; for reading from the file
+curByte	DC.W	-1		; the current offset in myBuf
+lastByte	DS.W	1	; last valid byte in myBuf
+	ENDR
+
+
+*******************************************************************
+*  ROUTINE		WriteStrings
+*  FUNCTION		calls write for an arbitrary number of strings
+*  INPUT		a NIL pointer on stack, followed by arbitrary number of string pointers,
+*		and the file descriptor
+*  OUTPUT		none
+*  NOTES		PROCEDURE	WriteStrings (NIL, Str^ …,FD);
+*******************************************************************
+		SEG 'Write'
+WriteStrings	PROC
+	Link	A6,#0		; set up a stack frame
+	Move.L	A2,-(SP)	; and save one permanent register
+	LEA		8(A6),A2	; point A2 at first (last) parameter
+
+* next, create a call block for the write routine on the stack
+	Clr.L	-(SP)		; set the length to zero
+	SubQ	#8,SP		; make room for the buffer and fd
+	Move.L	(A2)+,(SP)	; put the file descriptor in its place
+
+* now pull the arguments off the stack and write them out
+@1	Move.L	(A2)+,D0	; get the string pointer
+	BEQ.S	@0			; the list of strings is NIL terminated
+	Move.L	D0,A0		; move the pointer so we can use it
+	Move.B	(A0)+,11(SP)	; to move the length byte into the length arg
+	Move.L	A0,4(SP)	; move the pointer into the buffer arg
+	JSR		(write).L	; write it--CASE is significant
+	BRA.S	@1			; and try again
+
+*  done writing.  Clean up the stack and return
+@0	Move.L	A2,A1		; we still need this
+	Move.L	-4(A6),A2	; restore A2
+	UNLK	A6			; throw away the scratch stack stuff
+	Move.L	(SP),A0		; get the return address
+	Move.L	A1,SP		; throw away the parameters
+	JMP		(A0)			; and bail out
+	ENDPROC
+
+
+*******************************************************************
+*  ROUTINE		Stop
+*  FUNCTION		terminates execution
+*  INPUT		Message(A6)--error message to display on exit
+*  OUTPUT		Tool execution is terminated--return to MPW shell
+*  NOTES		call with a JMP, not a JSR--it doesn't return to caller anyway
+*******************************************************************
+	SEG 'STOP'
+Stop	PROC
+
+*  don't bother to save permanent registers--we're never going back to the caller
+	WITH	Globals
+	MoveQ	#0,D0
+	Move.B	(RetCode).L,D0		; we'll return this status
+	TST.B	Interrupted
+	BEQ.S	@1
+	Move.B	#RC_Abort,D0	; unless we were interrupted
+
+@1	Move.L	D0,-(SP)
+	JSR		(exit).L		; (does not return)
+	ENDWITH
+	ENDPROC
+
+
+*******************************************************************
+*  ROUTINE		Intr
+*  FUNCTION		sets the global Interrupted to TRUE--passed to the Runtime routine
+*  INPUT
+*  OUTPUT		Interrupted is set TRUE
+*  NOTES
+*******************************************************************
+
+Intr	PROC
+	ST	Globals.Interrupted
+	RTS
+	ENDPROC
+
+
+*******************************************************************
+*  ROUTINE		SyntaxError
+*  FUNCTION		Report a syntax error for the command line
+*  INPUT		above(A7)--pointers to strings to append to the error message
+*  OUTPUT		displays error message and calls Stop to terminate program execution
+*  NOTES		call with a JMP, not a JSR--it doesn't return anyway
+*******************************************************************
+
+SyntaxError	PROC
+
+	WITH	Globals
+	DC.W	$A9FF
+	PEA		#' - '
+	Move.L	(progName).L,-(SP)
+	PEA		#'### '
+	PEA		DiagnosticFD
+	JSR		(WriteStrings).L		; finish writing the error line
+	CLR.L	-(SP)
+	PEA		CrStr
+	PEA		#' [-l] [-c] [files…].'
+	Move.L	progName,-(SP)
+	PEA		#'# Usage - '
+	PEA		(DiagnosticFD).L
+	JSR		(WriteStrings).L		; and write the 'usage' line
+	JMP		(Stop).L
+	ENDWITH
+	ENDPROC
+
+
+
+*******************************************************************
+*  ROUTINE		LetterOpt
+*  FUNCTION		Set a letter	option
+*  INPUT		D0--char
+*		D4--ArgVIndex
+*		A1--address of current option
+*  OUTPUT		if char = valid option, set option flag, else syntaxerror
+*  NOTES		PROCEDURE	LetterOpt(Opt: Char; VAR ArgVIndex: Integer);
+*		ArgVIndex can be updated by this routine to skip arguments to options
+*******************************************************************
+
+LetterOpt	PROC
+	Cmp.B	#'l',D0
+	BEQ.S	@0
+	Cmp.B	#'L',D0					; -l?
+	BNE.S	@1
+@0	ST		(Globals.WriteLines).L	; means only lines
+	ADDQ	#1,Globals.Opts			; yes, an option has been selected
+	RTS
+@1	Cmp.B	#'c',D0					; -c?
+	BEQ.S	@2
+	Cmp.B	#'C',D0
+	BNE.S	@3
+@2	ST		Globals.WriteChars	; means only characters
+	ADDQ	#1,Globals.Opts		; yes, an option has been selected
+	RTS
+@3	Clr.L	-(SP)			; otherwise it's a bad option
+	PEA		Globals.CRStr
+	PEA		#'" is not an option.'
+	Move.L	A1,-(SP)		; pointer to current option
+	PEA		#'"'			; the leading quote around the option
+	JMP		SyntaxError
+*  SyntaxError never returns
+	ENDPROC
+
+
+*******************************************************************
+*  ROUTINE		Init
+*  FUNCTION		Tool initalization
+*  INPUT
+*  OUTPUT
+*  NOTES		PROCEDURE Init;
+*******************************************************************
+	SEG 'INIT'
+Init	PROC
+
+ForPascal	EQU	1		; Make envp & argv strings "Pascal" format
+						; (preceded with a length byte)
+
+; Comments about the Init.SF structure
+; 1. TEMPLATE. Note that this is a template, not a record;
+; it is equivalent to a 'struct' in C or a type
+; definition in Pascal.  It does not allocate space.
+; 2. DECREMENT. It is used to describe a "stack frame".  Since
+; the stack grows downward, the keyword 'Decrement' is used.
+; 3. The bracketed parameter, '{OldA6}'. This tells the Assembler to
+; calculate field offsets using this field as the '0' offset.
+; This is explained more fully in the MPW Assembler Manual.
+; 4. SIZE field. The size field here is the calculated as the 
+; difference from 0...this turns out to be -4, which
+; turns out to be the amount of space that we have to
+; allocate on the stack via a Link instruction for our
+; local parameters.
+; If we were to have incoming parameters, then we
+; could allocate them above the OldA6 field; what
+; order the parameters are found, and their relation
+; to the routine Return Address varies between C and
+; Pascal; appendices in the MPW language manuals contain
+; more details about language calling conventions.
+
+InitSF	RECORD	{OldA6},DECREMENT
+ShellRet	DS.L	1		;'RetPC' in Ch. 12 of MPW Manual
+RetAddress	DS.L	1		
+OldA6		DS.L	1
+EnvP		DS.L	1
+Size		EQU	*
+	ENDR
+
+	WITH	Globals
+	Link	A6,#InitSF.Size
+	PEA		ForPascal			; optimized Move.L #1,-(SP)
+	PEA		InitSF.EnvP(A6)		; for Shell Exported variables
+	PEA		ArgV				; Address to store ptr to Command Line Arguments
+	PEA		ArgC				; Address to store ptr to # of Cmd Line Args.
+	Move.L	InitSF.ShellRet(A6),-(SP)
+	JSR		(_RTInit).L			; get things set up
+	LEA		InitSF.Size(A6),SP	; throw away the arguments
+	PEA		Intr				; our interrupt handler
+	Move.L	#SIGINT,-(SP)
+	JSR		(signal).L		; so we can handle user interrupts
+* D0 has handle to prevSig, which we will ignore
+	LEA		InitSF.Size(A6),SP	; throw away the arguments
+
+	MoveM.L	A2/D3-D4,-(SP)	; let's do some ArgV processing
+	Move.L	ArgV,A2
+	Move.L	ArgC,D3
+	Move.L	(A2)+,progName	; we now have a global that points to our name
+	Move.B	#RC_ParmErrs,(RetCode).L
+	MoveQ	#0,D4			; ArgVIndex := 0;
+@0	AddQ	#1,D4
+	Cmp.L	D4,D3
+	BLE.S	DoneArgOptions
+	Move.L	(A2)+,A0		; get the next arg
+	Move.L	A0,A1			; keep a pointer to the start of the string
+	Move.B	(A0)+,D1		; get the len
+	BEQ.S	@0				; arg := ''; get the next one
+	Move.B	(A0)+,D0
+	Cmp.B	#'-',D0			; is it an option?
+	BNE.S	@1
+	Move.B	(A0)+,D0
+	JSR		(LetterOpt).L
+* caller to LetterOpt can check if ArgIndex changed--if so, skip the increment of ArgIndex
+	BRA.S	@0		; go again
+@1	AddQ	#1,NumFiles		; bump the file count
+	Cmp.B	Max,D1			; a new longest name?
+	BLE.S	@0
+	Move.B	D1,Max			; a new max
+	BRA.S	@0
+
+DoneArgOptions
+	Move.B	#RC_Normal,RetCode		; parameters ok so far
+	Clr.L	-(SP)
+	JSR		(InitCursorCtl).L		; initialize the spinning cursor
+	Tst.B	Interrupted				; user break yet?
+	BEQ.S	@3
+	JMP		Stop
+@3	MoveM.L	(SP)+,A2/D3-D4
+	UNLK	A6
+	RTS
+	ENDWITH
+	ENDPROC
+
+*******************************************************************
+*  ROUTINE		PrintCount
+*  FUNCTION		writes the filename (if needed), linecount and/or charcount to standard output
+*  INPUT		pointer to the filename in A2 (if counting multiple files)
+*  OUTPUT
+*  NOTES
+*******************************************************************
+
+PrintCount	PROC
+PrintSF		RECORD	0,DECREMENT
+LineBuf		DS.B	256
+tempStr		DS.B	10
+MaxBlanks	DS.B	1
+		ALIGN
+Size		EQU		*
+	ENDR
+
+	LINK	A6,#PrintSF.Size
+	MoveM.L	D6/A3,-(SP)
+
+	Move.W	#(256/4)-1,D0			; fill LineBuf with blanks
+	Move.L	#'    ',D1
+	LEA		PrintSF.LineBuf(A6),A0
+@0	Move.L	D1,(A0)+
+	DBRA	D0,@0
+
+	WITH	Globals
+	MoveQ	#3,D6			; skip first three blanks
+	LEA		4+PrintSF.LineBuf(A6),A3    ; A3 is the current offset into lineBuf
+	Cmp.W	#1,NumFiles		; >1 if more than one file
+	BLE.S	noName
+
+	Move.L	D7,A0			; D7 points to the current filename
+	MoveQ	#0,D1
+	Move.B	(A0)+,D1		; get the length byte
+	Add.B	D1,D6			; update the new length
+	MoveQ	#0,D0
+	Move.B	Max,D0			; Max is the longest name
+	Sub.B	D1,D0			; D0 is how much shorter current is than max
+	AddQ	#3,D0
+	Add.B	D0,D6			; update the counter
+	BRA.S	@2				; zero base the length
+@1	Move.B	(A0)+,(A3)+
+@2	DBRA	D1,@1			; move in the filename
+	Add.W	D0,A3			; and update our roving pointer
+
+noName
+	ENTRY	DoLines,DoChars,WriteBuf
+	; if no options selected, print both lines and chars.
+	TST.B	Opts
+	BNE.S	@0
+	 
+	 JSR	DoLines			; insert lines into buffer
+	 JSR	DoChars			; insert chars into buffer
+	 BRA.S	@Exit
+
+@0	TST.B	WriteLines		; do we want to print the line count?
+	BEQ.S	@1
+	 JSR	DoLines			; insert lines into buffer
+@1	TST.B	WriteChars
+	BEQ.S	@Exit
+	 JSR	DoChars			; insert chars into buffer
+
+@Exit	
+	Move.B	D6,PrintSF.lineBuf(A6)	; set the length byte
+
+	CLR.L	-(SP)			; set up the stack for WriteStrings
+	PEA		CRStr
+	PEA		PrintSF.linebuf(A6)
+	PEA		OutputFD
+	JSR		WriteStrings
+	MoveM.L	(SP)+,D6/A3
+	UNLK	A6
+	RTS
+
+		
+DoLines		 
+	Move.L	lineCount,D0
+	add.w	#10,D6			; update counter
+	JMP		WriteBuf
+	
+DoChars
+	MOVE.L	charcount,D0
+	add.w	#13,D6			; add field length and 3 blanks to counter
+	JMP		WriteBuf
+
+WriteBuf	
+	LEA	PrintSF.tempStr(A6),A0
+	_NumToString
+
+	MoveQ	#0,D1
+	Move.B	(A0)+,D1
+	MoveQ	#10,D0		; we'll say this field is 10 long
+	Sub.B	D1,D0		; D0 := field length-length of numstring
+	Add.W	D0,A3		; skip the extra padding
+
+	BRA.S	@2			; zero base by doing the DBCC first
+@1	Move.B	(A0)+,(A3)+
+@2	DBRA	D1,@1		; move in the number
+	RTS
+	ENDWITH
+	ENDPROC
+
+
+*******************************************************************
+*  ROUTINE		PrintTotals
+*  FUNCTION		writes the summary line to standard output
+*  INPUT
+*  OUTPUT
+*  NOTES		calls PrintCount to print the totals if appropriate
+*******************************************************************
+	SEG 'PrintTotals'
+PrintTotals	PROC
+	Cmp.W	#1,Globals.numFiles
+	BGT.S	@0
+	RTS			; do nothing if only one file
+@0	LEA		#'Total',A0
+	Move.L	A0,D7		; our new 'filename'
+	Move.L	Globals.totallines,Globals.linecount
+	Move.L	Globals.totalchars,Globals.charcount
+	JSR		(PrintCount).L		; recycled code
+	RTS
+
+	ENDPROC
+
+
+*******************************************************************
+*  ROUTINE		GetChar
+*  FUNCTION		reads from the file in hunks, and hands out a character at a time
+*  INPUT		fd:  long in D4--the file descriptor for the file to read
+*  OUTPUT		the next character in D0--zero = TRUE means end of file
+*  NOTES
+*******************************************************************
+	SEG 'GetChar'
+GetChar	PROC
+	WITH	Globals
+	Move.W	curByte,D1	; get the current offset
+	BPL.S	@0			; we have a valid block currently
+@1	PEA		BufSize		; Move.L #BufSize,-(SP)--count
+	PEA		mybuf		; where
+	Move.L	D4,-(SP)	; the file descriptor
+	JSR		(read).L	; read the next block
+	LEA	12(SP),SP		; clean up the stack
+	MoveQ	#0,D1		; start at the beginning again
+	Move.W	D0,lastByte
+	BNE.S	@2			; end of file?
+	RTS					; pass the zero flag back to the caller
+@0	Move.W	lastByte,D0	; get the last valid byte
+@2	Cmp.W	D0,D1
+	BGE.S	@1
+	LEA		mybuf,A0
+	Move.B	0(A0,D1),D0	; read the next character
+	AddQ.W	#1,D1
+	Move.W	D1,curByte	; update curByte
+	RTS
+	ENDWITH
+	ENDPROC
+
+
+*******************************************************************
+*  ROUTINE		CountFile (fd:filedescriptor)
+*  FUNCTION		counts the lines and characters in fd
+*  INPUT		fd:  long--the file descriptor for the file to count
+*  OUTPUT		charcount, linecount, totalchars, totallines updated
+*  NOTES
+*******************************************************************
+	SEG 'CountFile'
+CountFile	PROC
+	WITH	globals
+	CLR.L	linecount
+	Move.L	(SP)+,A1	; save the return address
+	Move.L	(SP),D0		; and the file descriptor
+	Move.L	A1,(SP)		; return the return address
+
+	MoveM.L	D4-D7,-(SP)
+	Move.L	D0,D4		; save the fd for the getchar routine
+	MoveQ	#0,D7		; initialize our counter registers
+	MoveQ	#0,D6
+
+ReadLoop	
+	JSR		getchar
+	BEQ.S	fileEnd		; zero means no more bytes to read
+	AddQ.L	#1,D7		; otherwise bump the char counter
+	Move.B	D0,D5		; save the char in a permanent register
+	CMP.B	#EOLChar,D5	; bump linecount?
+	BNE.S	ReadLoop
+
+	AddQ.L	#1,D6		; yes
+	Move.L	D6,-(SP)
+	JSR		(RotateCursor).L	; spin the ball
+	Tst.B	Interrupted		; user break yet?
+	BEQ.S	ReadLoop		; no--continue
+	JMP		(Stop).L		; abort mission
+
+fileEnd	
+	CMP.B	#EOLChar,D5	; was the last character read a line end?
+	BEQ.S	@0
+	TST.L	D7		; have we counted any characters
+	BEQ.S	@0		; no--don't increment line count
+	AddQ.L	#1,D6
+@0	Move.L	D6,lineCount		; update globals and leave
+	Move.L	D7,charCount
+	Add.L	D6,totallines
+	Add.L	D7,totalchars
+	MoveM.L	(SP)+,D4-D7
+	RTS
+	ENDPROC
+
+
+*******************************************************************
+*  ROUTINE		Count
+*  FUNCTION		the MAIN proc--calls Init, then processes the files
+*  INPUT
+*  OUTPUT
+*  NOTES
+*******************************************************************
+
+	SEG 'MAIN'
+Count	MAIN
+	IMPORT	c2pstr,p2cstr
+	WITH	Globals
+	JSR		(Init).L
+	Move.L	ArgV,A2
+	ADDQ	#4,A2		; skip the program name
+	Move.L	(A2)+,D7	; set the cc's
+	BNE.S	@0			; otherwise count stdin
+
+* CountStdIn
+	Clr.L	-(SP)		; we don't need to open standard input
+	JSR		(CountFile).L
+	JSR		(PrintCount).L
+	JMP		(Stop).L
+
+@1	Move.L	(A2)+,D7	; set the cc's
+	BEQ.S	ShowTotals	; ArgV is NIL terminated
+
+@0	Move.L	D7,A0
+	Move.B	(A0)+,D0	; pick up the length byte
+	BEQ.S	@1			; zero length--next, please
+	Move.B	(A0)+,D1	; now the first charcter
+	Cmp.B	#'-',D1		; an option--already handled by Init
+	BEQ.S	@1
+
+* otherwise we have a file to process
+	Move.L	D7,-(SP)		; convert the filename to a C string
+	JSR		(p2cstr).L
+	PEA		O_RDONLY
+	Move.L	D7,-(SP)
+	JSR		(open).L		; open the file
+	Move.L	D0,D6			; save the result--fd or error
+	JSR		(c2pstr).L		; love those length bytes
+	LEA		12(SP),SP		; throw away the arguments
+	Move.L	D6,-(SP)		; push the fd
+	BMI.S	BailOut			;  an error if negative
+	JSR		(CountFile).L
+	JSR		(PrintCount).L
+	BRA.S	@1
+
+ShowTotals
+	JSR		(PrintTotals).L
+	JMP		(Stop).L
+
+BailOut	CLR.L	(SP)		; space came from move D6 above
+	PEA		CRStr
+	Move.L	D7,-(SP)
+	PEA		#' - could not open file '
+	Move.L	progName,-(SP)
+	PEA		#'### '
+	PEA		DiagnosticFD	; optimized Move.L #DiagnosticFD,-(SP)
+	JSR		(WriteStrings).L
+
+	CLR.L	-(SP)
+	PEA		CRStr
+	PEA		#' [-l] [-c] [files…].'
+	Move.L	progName,-(SP)
+	PEA		#'# Usage - '
+	PEA		DiagnosticFD	; optimized Move.L #DiagnosticFD,-(SP)
+	JSR		(WriteStrings).L
+	Move.B	#RC_ParmErrs,RetCode
+	JMP		(Stop).L
+
+	ENDWITH
+	ENDPROC
+
+	END
+

@@ -1,0 +1,2849 @@
+		PRINT	Push,NoObj
+		TITLE	'FlowCtlMacs - Flow Control Macro Statements'
+		
+*******************************************************************************
+*                                                                             *
+*                                 FlowCtlMacs                                 *
+*                                                                             *
+*                       Flow Control Macro Statements                         *
+*                                                                             *
+*                                Ira L. Ruben                                 *
+*                                  09/15/86                                   *
+*                                                                             *
+*                  Copyright Apple Computer, Inc. 1986-1989                   *
+*                             All rights reserved.                            *
+*                                                                             *
+*       ---------------------------------------------------------------       *
+*                                                                             *
+* External macros in this set are:                                            *
+*                                                                             *
+*   • If#, ElseIf#, Else#, EndIf#     - multi-way decision                    *
+*   • Repeat#, Until#                 - loop control                          *
+*   • While#, EndW#                   - loop control                          *
+*   • For#, EndF#                     - loop control                          *
+*   • Switch#, Case#, Default#, EndS# - multi-way decision                    *
+*   • Cycle#                          - loop interator                        *
+*   • Leave#                          - loop and switch terminator            *
+*   • GoTo#                           - transfer of control                   *
+*                                                                             *
+* Internal macros in this set are:                                            *
+*                                                                             *
+*   • SExpr# - simple expression parsing                                      *
+*   • Expr#  - "full" expression parsing                                      *
+*   • Test#  - code generation for a simple expression                        *
+*                                                                             *
+*******************************************************************************
+
+
+		TITLE	'SExpr# - Parse a simple expression'
+		
+		MACRO
+		SExpr#	&Expr,&Keyword
+.*
+.******************************************************************************
+.* SExpr# - Parse a simple expression                        (internal macro) *
+.*                                                                            *
+.* Input:  &Expr     = simple expression with the following syntax:           *
+.*                     <s-expr> ::= <cc>[.<sz>] | <ea> <cc>[.<sz>] <ea>       *
+.*                     <cc>     ::= EQ | NE | LE | LT | GE | GT | MI | PL |   *
+.*                                  HI | LS | LO | CC | CS | NZ | HS | VC |   *
+.*                                  VS                                        *
+.*         &Keyword  = a valid keyword delimiter of the form <keyword>        *
+.*                                                                            *
+.*         &SysToken = 1st token value of &Expr scanned by caller      (SETA) *
+.*         &SysTokStr= 1st token of &Expr scanned by caller            (SETC) *
+.*                                                                            *
+.*         &Cp       = &Expr scan pointer pinting after 1st token      (SETA) *
+.*         &CC#      = condition code table                            (SETC) *
+.*         &Extent#  = extent attribute on preceeding keyword          (SETC) *
+.*         &Debug#   = debug printing switch                           (SETA) *
+.*                                                                            *
+.* Output: &Cp       = &Expr scan pointer pointing after delimiter     (SETA) *
+.*         &SysToken = token value of &Expr delimiter                  (SETA) *
+.*         &SysTokStr= 1st token of &Expr delimiter                    (SETC) *
+.*         &Cmp      = condition code index                            (SETA) *
+.*         &Left#    = left <ea> if <s-expr> = <ea><cc><ea>            (SETC) *
+.*         &Right#   = right <ea> if <s-expr> = <ea><cc><ea>           (SETC) *
+.*         &Op#      = AND or OR delimiter or <null>                   (SETC) *
+.*         &Size#    = size attribute from <cc>[.<sz>]                 (SETC) *
+.*         &Extent#  = extent attribute on delimiter keyword           (SETC) *
+.******************************************************************************
+.*
+		GBLA		&Cp#				; scan pointer
+		GBLA		&Cmp#			; condition code index
+		GBLC		&Left#			; left <ea> if <s-expr> = <ea><cc><ea>
+		GBLC		&Right#			; right <ea> if <s-expr> = <ea><cc><ea>
+		GBLC		&CC#				; condition code table
+		GBLC		&Op#				; AND or OR delimiter or <null>
+		GBLC		&Size#			; size attribute from <cc>[.<sz>]
+		GBLC		&Extent#			; extent attribute on delimiter keyword
+		GBLA		&Debug#			; debug printing switch
+.*
+		LCLC		&Token
+		LCLA		&p,&i,&First,&Last
+.*
+.* Initialization
+.*
+	&Cmp#:   SETA 0				; Assume we only have a simple <cc>
+	&Size#:  SETC 'W'				; The default size attribute is .W
+	&Op#:    SETC ''				; If only <cc>, &Op# will be <null>
+	&Right#: SETC ''				; And there would be no right operand
+.*
+.* Check for <s-expr> ::= <cc>[.<sz>]  This is (currently) only possible if the
+.* length of the incoming token is 2 (since all the cc's are two chars).  If we
+.* find the incoming token in the condition code table, then we assume we have
+.* <s-expr> ::= <cc>[.<sz>].  This means that an <ea> cannot start with an id
+.* that is the same as one of our <cc>'s.  It's that or we must escape the
+.* <cc>'s somehow.  
+.*
+	IF &Len(&SysTokStr) = 2 THEN		; Possible <cc>
+	  &Cmp#: SETA &Pos(&Concat(&UC(&SysTokStr), '.'), &CC#); Look it up
+	  IF &Cmp# THEN				; Have <s-expr> ::= <cc>[.<sz>]
+	    &Left#: SETC ''				; There is no left operand
+	    IF &Expr[&Cp#:1] ≠ '.' THEN	; Have explicit size attribute ?
+	      &Cp#: SETA &Lex(&Expr, &Cp#)	; No, scan the delimiter for caller
+	    ELSE						; If explicit size attribute
+	      &Size#: SETC &UC(&Expr[&Cp#+1:1]); Return it to caller
+	      &Cp#:   SETA &Lex(&Expr, &Cp#+2) ; Scan delimiter for caller
+	    ENDIF
+	    IF &SysToken ≠ 0 GOTO .Exit	; Exit if delimiter is not an identifier
+	    &Token: SETC &UC(&SysTokStr)	; If identifier, see if it is keyword
+	    IF &Token = &Keyword THEN		; Is it ?
+	      IF &Expr[&Cp#:1] = '.' THEN	; Yes, return <extent> to caller
+	        &Extent#: SETC &UC(&Trim(&Expr[&Cp#+1:1]))
+	        &Cp#:     SETA &Lex(&Expr, &Cp#+2)
+	      ENDIF
+	    ELSEIF (&Token = 'AND') OR (&Token = 'OR') THEN
+	      &Op#: SETC &Token			; Tell caller we have AND, OR delimiter
+	      &Cp#: SETA &Lex(&Expr, &Cp#)
+	    ENDIF
+	    GOTO .Exit					; Skip over <ea> <cc> <ea> parsing
+	  ENDIF
+	ENDIF
+.*
+.* At this point we assume we have <s-expr> ::= <ea> <cc>[.<sz>] <ea>. Everything
+.* from the start of the <s-expr> up to the <cc> is considered as part of the
+.* left-hand <ea>.  Keep scanning until we find the <cc>.  Everything to the
+.* left of the <cc> is placed in &Left# for the caller.  &Cmp# will be returned
+.* as the condition code table index corresponding to the <cc> we "crashed"
+.* into.  Note, that as in the simple <cc> case above, we assume that the <cc> 
+.* identifiers are reserved words and cannot be used in user expressions
+.* possibly comprising the <ea>'s.
+.*
+	&Left#: SETC &SysTokStr			; The caller already scanned 1st token
+	&First: SETA &Cp#				; "First" is not-quite right here!
+.*
+	WHILE &Cmp# = 0 DO				; Loop until <cc> is scanned
+	  &Last: SETA &Cp#				; Assume next token will be the <cc>
+	  &Cp#: SETA &Lex(&Expr, &Cp#)	; Scan the next token
+	  IF &SysToken = 0 THEN			; If possible <cc> (an identifier token)
+	    IF &Len(&SysTokStr) = 2 THEN	; And the id length is 2 ==> possible <cc>
+	      &Cmp#: SETA &Pos(&Concat(&UC(&SysTokStr), '.'), &CC#)
+		 IF &Cmp# ≠ 0 THEN			; Do we really have a <cc> ?
+		   IF &Expr[&Cp#:1] = '.' THEN; Yes, scan size attribute if it's there
+			&Size#: SETC &UC(&Expr[&Cp#+1:1])
+			&Cp#:   SETA &Cp#+2
+		   ENDIF
+		 ENDIF
+	    ENDIF
+	  ELSEIF &SysToken = 30 THEN		; If we hit end of expr, we have error
+	    AERROR 'Invalid expression'
+	    EXITM
+	  ENDIF
+	ENDW
+	&Left#: SETC &Trim(&Concat(&Left#, &Expr[&First:&Last-&First+1]))
+.*
+.* Now scan the right-hand <ea> of <s-expr> ::= <ea> <cc>[.<sz>] <ea>.  This is
+.* similar to the left-hand scan above, except that here we keep scanning until
+.* we "crash" into an AND, or OR, a specified keyword (in the &Keyword macro
+.* parameter), or, of course, the end of line.  Note, care has to be taken here
+.* when detecting an AND or OR or the keyword.  We only want to accept these
+.* words when we think we are NOT nested inside an arbitrarily complex
+.* expression which could make up the <ea>.  Unlike the <cc>'s, we cannot make
+.* AND and OR reserved words, since they are already Assembler reserved words!
+.* To get around this problem, we count parentheses, and accept AND and OR (and
+.* the keyword) only if NOT nested inside parentheses.
+.*
+	&First: SETA &Cp#				; Remember the start of the left <ea>
+	WHILE 1 DO					; Loop until we find delimiter
+	  &Last: SETA &Cp#				; Assume next token will be the delimiter
+	  &Cp#: SETA &Lex(&Expr, &Cp#)	; Scan it
+	  IF &SysToken = 0 THEN			; Have an identifier token ?
+	    IF &p = 0 THEN				; Yes, look at it only if not nested
+	      &Token: SETC &UC(&SysTokStr)	; If it isn't nested...
+	      IF &Token = &Keyword THEN	; Do we have the specified keyword ?
+	        IF &Expr[&Cp#:1] = '.' THEN; Yes, return <extent> if present
+	          &Extent#: SETC &UC(&Expr[&Cp#+1:1])
+	        ENDIF
+	        GOTO .SetLeft			; Hop to return the left <ea>
+	      ENDIF
+	      IF (&Token = 'AND') OR (&Token = 'OR') THEN; If AND or OR
+	        &Op#: SETC &Token		; Return it to the caller
+	        &Cp#: SETA &Lex(&Expr, &Cp#)
+	        GOTO .SetLeft			; Hop to return the left <ea>
+	      ENDIF
+	    ENDIF
+	  ELSEIF &SysToken = 23 THEN		; Have ")" ?
+	    &p: SETA &p-1				; Yes, decrement nesting count
+	    IF &p < 0 GOTO .SetLeft		; If unmatched paren, just set left <ea>
+	  ELSEIF &SysToken = 22 THEN 		; Have ")" ?
+	    &p:      SETA &p+1			; Yes, increment nesting count
+	  ELSEIF &SysToken = 30 THEN		; If end of line...
+	    GOTO .SetLeft				; ...just set left <ea>
+	  ENDIF
+	ENDW
+.SetLeft ANOP
+	&Right#: SETC &Trim(&Expr[&First:&Last-&First+1])
+.*
+.Exit ANOP
+.*
+     IF &Debug# THEN
+	  IF &Cmp# ≠ 0 THEN
+	    WriteLn '   ', &Left#, ' ', &CC#[&Cmp#:2], '.', &Size#, '(=', &Cmp#, \
+	            ') ', &Right#, ' Token="', &SysTokStr, '"(', &SysToken, ')', \
+		       ' Extent="', &Extent#, '"' 
+	  ENDIF
+     ENDIF
+     IF (&Left# ≠ '') AND (&Right# = '') THEN
+	  AERROR 'Invalid Expression'
+	  &Cmp#: SETA 0
+    	ENDIF
+.*
+		ENDM
+
+		
+		TITLE	'Expr# - Parse a "full" expression'
+		
+		MACRO
+		Expr#.&Ext &Expr,&True==,&False==,&JumpCond:A==1,&Keyword==
+.*
+.******************************************************************************
+.* Expr# - Parse a "full" expression                         (internal macro) *
+.*                                                                            *
+.* Input:  &Expr      = "full" expression with the following syntax:          *
+.*                      <expr>   ::= <s-expr> [<op> <s-expr>]                 *
+.*                      <op>     ::= AND | OR                                 *
+.*                      <s-expr> ::= <cc>[.<sz>] | <ea> <cc>[.<sz>] <ea>      *
+.*                      <cc>     ::= EQ | NE | LE | LT | GE | GT | MI | PL |  *
+.*                                   HI | LS | LO | CC | CS | NZ | HS | VC |  *
+.*                                   VS                                       *
+.*         &True      = label to branch to if <expr> is "true"                *
+.*         &False     = label to branch to if <expr> is "false"               *
+.*         &JumpCond  = 1 ==> branch to &True if <expr> is true               *
+.*                      0 ==> branch to &True if <expr> is false              *
+.*         &Keyword   = a valid keyword delimiter of the form <keyword>       *
+.*         &Ext       = extent for branches                                   *
+.*                                                                            *
+.*         &Extent#   = extent attribute on preceeding keyword         (SETC) *
+.*         &Debug#    = debug printing switch                          (SETA) *
+.*                                                                            *
+.* Output: &Cp        = &Expr scan pointer pointing after delimiter    (SETA) *
+.*         &SysToken  = token value of &Expr delimiter                 (SETA) *
+.*         &SysTokStr = 1st token of &Expr delimiter                   (SETC) *
+.*         &Extent#   = extent attribute on delimiter keyword (<ext>)  (SETC) *
+.*         &FalseUsed#=1==><ea> AND/OR <ea> w/ &JumpCond=1/0(see Test#)(SETA) *
+.*         &CC#       = condition code table (for <cc>)                (SETC) *
+.*         &NotCC#    = negated condition code table (for ¬<cc>)       (SETC) *
+.*         &RevCC#    = reverse condition code table (for reverse <cc>)(SETC) *
+.*		 &NotRevCC# = negated reverse condition code table           (SETC) *
+.*                                                                            *
+.* Code:   For <s-expr> ::= <cc>[.<sz>] | <eaA> <cc>[.<sz>] <eaB>             *
+.*                                                                            *
+.*           &JumpCond=1: [CMP.<sz>      <eaB>,<eaA>]; <eaA> <cc>[.<sz>] <eaB>*
+.*                         B<cc>.<ext>   True                                 *
+.*                                                                            *
+.*           &JumpCond=0: [CMP.<sz>      <eaB>,<eaA>]; <eaA> <cc>[.<sz>] <eaB>*
+.*                         B¬<cc>.<ext>  True                                 *
+.*        ------------------------------------------------------------------- *
+.*        For <expr> ::= <s-expr1> AND <s-expr2>                              *
+.*                                                                            *
+.*           &JumpCond=1: [CMP.<sz>      <eaB1>,<eaA1>]                       *
+.*                         B¬<cc>.<ext>  False          ; Sets &FalseUsed#=1  *
+.*                        [CMP.<sz>      <eaB2>,<eaA2>]                       *
+.*                         B<cc>.<ext>   True                                 *
+.*                                                                            *
+.*           &JumpCond=0: [CMP.<sz>      <eaB1>,<eaA1>]                       *
+.*                         B¬<cc>.<ext>  True                                 *
+.*                        [CMP.<sz>      <eaB2>,<eaA2>]                       *
+.*                         B¬<cc>.<ext>  True                                 *
+.*        ------------------------------------------------------------------- *
+.*        For <expr> ::= <s-expr1> OR <s-expr2>                               *
+.*                                                                            *
+.*           &JumpCond=1: [CMP.<sz>      <eaB1>,<eaA1>]                       *
+.*                         B<cc>.<ext>   True                                 *
+.*                        [CMP.<sz>      <eaB2>,<eaA2>]                       *
+.*                         B<cc>.<ext>   True                                 *
+.*                                                                            *
+.*           &JumpCond=0: [CMP.<sz>      <eaB1>,<eaA1>]                       *
+.*                         B<cc>.<ext>   False          ; Sets &FalseUsed#=1  *
+.*                        [CMP.<sz>      <eaB2>,<eaA2>]                       *
+.*                         B¬<cc>.<ext>  True                                 *
+.*                                                                            *
+.*        Note, in the above code, B¬<cc> is a branch on the "false" or       *
+.*        inverse of the specified condition.  The compares are actually      *
+.*        generated in the order appropriate to their operands.  Thus the     *
+.*        operands could be reversed which would also cause the inverse       *
+.*        condition to be used for a branch.  Also note that the AND with     *
+.*        &JumpCond=1 and OR with &JumpCond=0 are the only cases which require*
+.*		a False label parameter to &Expr.  We set the global &FalseUsed#=1  *
+.* 		to indicate to the caller that the false label must be defined for  *
+.*		that case.                 								   *
+.*                                                                            *
+.*		The following table may help show how the above code sequences were *
+.*		developed:											   *
+.*                                                                            *
+.*            +-------------------------+-------------------------+		   *
+.*            |       (a OR b)          |     (a AND b)	      |		   *
+.*            |        a                |        a			 |		   *
+.*            |        BT    true       |        BF    false	 |		   *
+.*            |        b                |        b			 |		   *
+.*            |        BT    true       |        BT    true	      |		   *
+.*            | false:                  | false:			      |		   *
+.*            +-------------------------+-------------------------+		   *
+.*            | ¬(a OR B) = (¬a AND ¬b) | ¬(a AND b) = (¬a OR ¬B) |		   *
+.*            |        a                |        a			 |		   *
+.*            |        BT    false      |        BF    true	    	 |		   *
+.*            |        b                |        b			 |		   *
+.*            |        BF    true       |        BF    true	      |		   *
+.*            | false:                  | false:			      |		   *
+.*            +-------------------------+-------------------------+		   *
+.*                                                                            *
+.*		In the above table, ¬X implies &JumpCond=0 while X implies the	   *
+.* 		jump if true state, &JumpCond=1.  This is the way we think about    *
+.*		this stuff here!  The Test# generates the branch code.  It takes	   *
+.*		care of generating the correct code which may involve reversing	   *
+.*		tests if the operands that generate the compares for a and b are    *
+.*		not in the proper order.									   *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&Cp#				; scan pointer
+		GBLA		&Cmp#			; condition code index
+		GBLA		&FalseUsed#		; <ea> AND(OR) <ea> with &JumpCond=1(0)
+		GBLC		&CC#				; condition code table
+		GBLC		&NotCC#			; negated condition code table
+		GBLC		&RevCC#			; reverse condition code table
+		GBLC		&NotRevCC#		; negated inverse condition code table
+		GBLC		&Left#			; left <ea> if <s-expr> = <ea><cc><ea>
+		GBLC		&Right#			; right <ea> if <s-expr> = <ea><cc><ea>
+		GBLC		&Op#				; AND or OR delimiter or <null>
+		GBLC		&Size#			; size attribute from <cc>[.<sz>]
+		GBLC		&Extent#			; extent attribute on delimiter keyword
+		GBLA		&Debug#			; debug printing switch
+		GBLA		&FirstIf			; First time switch
+.*
+		LCLA		&lCmp
+		LCLC		&lSize,&lLeft,&lRight
+.*
+.* Show incoming <expr> if debug printing
+.*
+	IF &Debug# THEN
+	  WriteLn
+	  WriteLn	&Expr
+	ENDIF
+.*
+.* Set up condition code tables for Test#.  We do it here so that Test# doesn't
+.* have to.  Test# can be called twice for every Expr# call.  So this is more
+.* efficient.
+.*
+.* There are four tables here:
+.*	• main condition codes
+.*	• negate of the main condition codes
+.*	• main condition codes if the operands are reversed from what is legal asm
+.*	• negate of reversed condition codes
+.*
+.* It must be pointed out that reversing the operand comparisons is NOT the same
+.* as negating the condition codes.  For example, the negate of GE is LT, but the
+.* reverse of GE is LE.
+.*
+	IF NOT &FirstIf THEN
+	  &CC#:       SETC 'EQ.NE.LE.LT.GE.GT.MI.PL.HI.LS.LO.CC.CS.NZ.HS.VC.VS.'
+	  &NotCC#:    SETC 'NE.EQ.GT.GE.LT.LE.PL.MI.LS.HI.CC.LO.CC.EQ.CS.VS.VC.'
+	  &RevCC#:    SETC 'EQ.NE.GE.GT.LE.LT.PL.MI.LO.**.HI.CS.CC.NZ.CS.VS.VC.'
+	  &NotRevCC#: SETC 'NE.EQ.LT.LE.GT.GE.MI.PL.CC.LS.LS.CC.CS.EQ.CC.VC.VS.'
+	  &FirstIf: SETA 0
+	ENDIF
+.*
+.* Scan the first <s-expr> in <s-expr> [<op> <s-expr>]
+.*
+	&Cp#:        SETA &Lex(&Expr, 1)		; Scan the 1st token
+	&Extent#:    SETC &Default(&UC(&Ext), 'W'); Preset <extent> to &Ext
+	SExpr# &Expr,&Keyword				; Parse the 1st <s-expr>
+	&lCmp:       SETA &Cmp#				; Save info for 1st <s-expr>
+	&lSize:      SETC &Size#				; All these are needed to gen code
+	&lLeft:      SETC &Left#				; We copy them to locals in case
+	&lRight:     SETC &Right#			; there is a right-hand <s-expr>
+	&FalseUsed#: SETA 0					; Assume we done have false labels
+.*
+	IF &Debug# THEN					; If debugging...
+	  IF &Op# ≠ '' THEN				; ...and we have AND or OR...
+	    Writeln '   ', &Op#				; ...show we have them
+	  ENDIF
+	ENDIF
+.*
+.* Generate code: if we have  <s-expr> <op> <s-expr>, where <op> is an AND or OR
+.* then we must scan the right-hand <s-expr> prior to generating the code.  The
+.* actual code is generated by Test#.  But it is controlled from here to cause
+.* optimum code generation for the AND or OR condition.
+.*
+	IF &Op# = 'AND' THEN				; Have and AND ?
+	  SExpr# &Expr,&Keyword				; Yes parse the right <s-expr>
+	  IF &JumpCond THEN					; Branch to &True if expr is true ?
+	    &FalseUsed#: SETA 1				; Yes, indicate &False label used 
+	    Test#.&lSize &lCmp,&lLeft,&lRight,&False,&Extent#,0 ; B<F>  False
+	    Test#.&Size# &Cmp#,&Left#,&Right#,&True,&Extent#,1  ; B<T>  True
+	  ELSE
+	    Test#.&lSize &lCmp,&lLeft,&lRight,&True,&Extent#,0  ; B<F>  True
+	    Test#.&Size# &Cmp#,&Left#,&Right#,&True,&Extent#,0  ; B<F>  True
+	  ENDIF
+	ELSEIF &Op# = 'OR' THEN				; Have an OR ?
+	  SExpr# &Expr,&Keyword				; Yes parse the right <s-expr>
+	  IF &JumpCond THEN
+	    Test#.&lSize &lCmp,&lLeft,&lRight,&True,&Extent#,1  ; B<T>  True
+	    Test#.&Size# &Cmp#,&Left#,&Right#,&True,&Extent#,1  ; B<T>  True
+	  ELSE
+	    &FalseUsed#: SETA 1				; Indicate &False label used 
+	    Test#.&lSize &lCmp,&lLeft,&lRight,&False,&Extent#,1 ; B<T>  False
+	    Test#.&Size# &Cmp#,&Left#,&Right#,&True,&Extent#,0  ; B<F>  True
+	  ENDIF
+	ELSE
+	  Test#.&lSize &lCmp,&lLeft,&lRight,&True,&Extent#,&JumpCond
+	ENDIF
+.*
+.Exit 	PRINT 	Pop
+		ENDM	
+
+
+		TITLE	'Test# - Generate expression code for a <s-expr>'
+		
+		MACRO
+		Test#.&Sz &Cmp#:A,&a,&b,&Dst,&Extent,&JumpCond:A
+.*
+.******************************************************************************
+.* Test# - Generate expression code for a <s-expr>           (internal macro) *
+.*                                                                            *
+.* Input:  &Cmp#      = condition code table index                            *
+.*         &a         = left operand (if <null>, then <s-expr>::=<cc>[.<sz>]) *
+.*         &b         = right operand                                         *
+.*         &Dst       = destination label for branches                        *
+.*         &Extent    = extent attribute for branches (<ext>)                 *
+.*         &JumpCond  = 1 ==> branch to &Dst if condition is true             *
+.*                      0 ==> branch to &Dst if condition is false            *
+.*         &Sz        = comparison size attribute (B, W, L)                   *
+.*                                                                            *
+.*         &CC#       = condition code table (for <cc>)                (SETC) *
+.*         &NotCC#    = negated condition code table (for ¬<cc>)       (SETC) *
+.*         &RevCC#    = reverse condition code table (for reverse <cc>)(SETC) *
+.*		 &NotRevCC# = negated reverse condition code table           (SETC) *
+.*         &Debug#    = debug printing switch                          (SETA) *
+.*                                                                            *
+.* Code:   For <s-expr> ::= <cc>[.<sz>] | <eaA> <cc>[.<sz>] <eaB>             *
+.*                                                                            *
+.*           &JumpCond=1: [CMP.<sz>      <eaB>,<eaA>]; <eaA> <cc>[.<sz>] <eaB>*
+.*                         B<cc>.<ext>   True                                 *
+.*                                                                            *
+.*           &JumpCond=0: [CMP.<sz>      <eaB>,<eaA>]; <eaA> <cc>[.<sz>] <eaB>*
+.*                         B¬<cc>.<ext>  True                                 *
+.*                                                                            *
+.*         The operands are inverted (along with the condition code) under    *
+.*         the following conditions:                                          *
+.*                                                                            *
+.*           • <eaA> is a #<immediate>                                        *
+.*           • <eaB> is a register                                            *
+.*                                                                            *
+.*		 These cases cause us to use the reverse and negated reverse 	   *
+.* 		 condition code tables.  Note that these tables are reguired because*
+.*		 a reversed condition code is NOT the same as a negate of the       *
+.* 		 original condition code!								   *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLC		&CC#				; condition code table
+		GBLC		&NotCC#			; negated condition code table
+		GBLC		&RevCC#			; reverse condition code table
+		GBLC		&NotRevCC#		; negated inverse condition code table
+.*
+		LCLC		&tRevCC			; tmp to fool with &RevCC#
+.*
+	IF &Cmp# = 0 GOTO .Exit			; If there are syntax errors, exit
+.*
+	IF &a = '' THEN				; <s-expr> ::= <cc>[.<sz>]
+	  IF &JumpCond THEN				; Just do the branch
+          B&CC#[&Cmp#:2].&Extent     &Dst	  
+	  ELSE
+          B&NotCC#[&Cmp#:2].&Extent     &Dst
+	  ENDIF
+	ELSEIF &a[1:1] = '#' THEN		; <s-expr> ::= #<imm> <cc>[.<sz>] <eaB>
+          CMPI.&Sz  &a,&b
+	  IF &JumpCond THEN
+.*        B&NotCC#[&Cmp#:2].&Extent     &Dst
+		&tRevCC: SETC &RevCC#[&Cmp#:2]
+		IF &tRevCC ≠ '**' THEN
+          B&tRevCC..&Extent     &Dst
+		ELSE
+          BHI.&Extent &Dst
+          BEQ.&Extent &Dst
+		ENDIF
+	  ELSE
+          B&NotRevCC#[&Cmp#:2].&Extent     &Dst
+	  ENDIF
+	ELSEIF &b[1:1] = '#' THEN		; <s-expr> ::= <eaA> <cc>[.<sz>] #<imm>
+          CMPI.&Sz  &b,&a
+	  IF &JumpCond THEN
+          B&CC#[&Cmp#:2].&Extent     &Dst
+	  ELSE
+          B&NotCC#[&Cmp#:2].&Extent     &Dst
+	  ENDIF
+	ELSEIF &SubStr(&Type(&a),1,3)='REG' THEN; <s-expr> ::= <reg> <cc>[.<sz>] <eaB>
+          CMP.&Sz   &b,&a
+	  IF &JumpCond THEN
+          B&CC#[&Cmp#:2].&Extent     &Dst
+	  ELSE
+          B&NotCC#[&Cmp#:2].&Extent     &Dst
+	  ENDIF
+	ELSEIF &SubStr(&Type(&b),1,3)='REG' THEN; <s-expr> ::= <eaA> <cc>[.<sz>] <reg>
+          CMP.&Sz   &a,&b
+	  IF &JumpCond THEN
+.*        B&NotCC#[&Cmp#:2].&Extent     &Dst
+		&tRevCC: SETC &RevCC#[&Cmp#:2]
+		IF &tRevCC ≠ '**' THEN
+          B&tRevCC..&Extent     &Dst
+		ELSE
+          BHI.&Extent &Dst
+          BEQ.&Extent &Dst
+		ENDIF
+	  ELSE
+          B&NotRevCC#[&Cmp#:2].&Extent     &Dst
+	  ENDIF
+	ELSE							; <s-expr> ::= <eaA> <cc>[.<sz>] <eaB>
+	    CMP.&Sz   &b,&a
+	  IF &JumpCond THEN
+          B&CC#[&Cmp#:2].&Extent     &Dst
+	  ELSE
+          B&NotCC#[&Cmp#:2].&Extent     &Dst
+	  ENDIF
+	ENDIF
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'GoTo# - (Conditional) transfer of control statement'
+		
+		MACRO
+		GoTo#.&Ext &Where
+.*
+.******************************************************************************
+.* GoTo# - (Conditional) transfer of control statement                        *
+.*                                                                            *
+.* Call: Goto#.<ext> [If[#] <expr> Then.<ext>] <label>                        *
+.*                                                                            *
+.* Code: [<expr>]                                                             *
+.*        B<cc>.<ext>  <label>                                                *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&Cp#				; scan pointer
+		GBLA		&FalseUsed#		; <ea> AND(OR) <ea> with &JumpCond=1(0)
+.*
+		LCLC		&Opnds,&S
+		LCLA		&i,&l
+.*
+.* We must look at first token to see the form of GoTo# we got
+.*
+	&Opnds: SETC &Where				; Copy operands where we can edit it
+	&Cp#:   SETA &Lex(&Opnds, 1)		; Scan 1st token
+.*
+.* For GoTo# If# <expr> Then.<ext> <label>, generate a conditional branch
+.*
+	IF &SysToken = 0 THEN			; Do we have an idtentifier ?
+	  &S: SETC &UC(&SysTokStr)		; Yes, see if it is an "IF" or "IF#"
+	  IF (&S = 'IF') OR (&S = 'IF#') THEN; Is it ?
+	    &Opnds: SETC &Opnds[&Cp#:255]	; Yes ==> If[#] <expr> THEN.<ext> <label>
+	    &l: SETA &Len(&Opnds)		; Extract the <label>
+	    &i: SETA -&ScanEQ(' ', &Opnds, -&l); First scan to 1st blank before <label>
+	    IF &i = &l THEN
+	      AERROR 'GOTO# label missing'
+		 GOTO .Exit
+	    ENDIF
+	    Expr#.&Ext &Opnds,True=&Opnds[&l-&i+1:&i],False=%L%&SysNdx,JumpCond=1,Keyword=THEN
+	    IF NOT &FalseUsed# GOTO .Exit	; If we need False label, generate it
+%L%&SysNdx
+	    GOTO .Exit					; Wasn't that simple?
+	  ENDIF
+	ENDIF
+.*
+.* For GoTo# <label>, generate a simple branch
+.*
+          BRA.&Ext  &Opnds
+.*
+.Exit	Print	Pop
+		ENDM
+
+
+		TITLE	'If# - Multi-way decision'
+		
+		MACRO
+		If#		&Expr
+.*
+.******************************************************************************
+.* If# - Multi-way decision                                                   *
+.*                                                                            *
+.* Call:   If# <expr> Then[.<ext>]                     ***                    *
+.*         ElseIf#[.<ext1>] <expr> THEN[.<ext2>]                              *
+.*         Else#[.<ext>]                                                      *
+.*         EndIf#                                                             *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*                                                                            *
+.* Output: &StkPtr#            = statment nesting stack ptr incremented(SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 1            (SETA) *
+.*         &LblStk#[&StkPtr#]  = label suffix to next If# section      (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = label suffix to EndIf# for ElseIf#    (SETC) *
+.*                                                                            *
+.* Code:   * The following is generated by If# (HERE IN THIS MACRO)           *
+.*                  <expr>                                                    *
+.*                  B¬<cc>.<ext>     %L%xxx1                                  *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by ElseIf#                            *
+.*                  BRA.<ext1>       %E%xxxx                                  *
+.*         %L%xxx1  <expr>                                                    *
+.*                  B¬<cc>.<ext2>    %L%xxx2                                  *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by Else#                              *
+.*                  BRA.<ext>        %L%xxx3                                  *
+.*         %L%xxx2                                                            *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by EndIf#                             *
+.*         %L%xxxx3                                                           *
+.*         %E%xxxx                                  ; only if ElseIf# used    *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; label suffix to next If# section
+		GBLC		&Lbl1Stk#[25]		; label suffix to EndIf# for ElseIf#
+		GBLA		&FalseUsed#		; <ea> AND(OR) <ea> with &JumpCond=1(0)
+.*
+.* Push new statement status on the stack
+.*
+	IF &StkPtr# = 25 THEN
+	  AERROR 'Too many nested statements'
+	  GOTO .Exit
+	ENDIF
+.*
+	&StkPtr#:            SETA &StkPtr#+1; Update stack ptr
+	&LblStk#[&StkPtr#]:  SETC &SysNdx	 ; Label suffix to Else#, ElseIf#, EndIf#
+	&Lbl1Stk#[&StkPtr#]: SETC ''		 ; No ElseIf# yet
+	&KindStk#[&StkPtr#]: SETA 1		 ; Kind = 1 for If# statements
+.*
+.* Generate code to branch on false to next ElseIf#, Else#, or EndIf#
+.*
+	Expr# &Expr,True=%L%&SysNdx,False=%F%&SysNdx,JumpCond=0,Keyword=THEN
+	IF &FalseUsed# THEN				 ; If we need False label, generate it
+%F%&SysNdx
+	ENDIF
+.*
+.Exit	Print	Pop
+		ENDM
+
+
+		TITLE	'ElseIf# - Additional case testing in If# statement'
+		
+		MACRO
+		ElseIf#.&Ext &Expr
+.*
+.******************************************************************************
+.* ElseIf# - Additional case testing in If# statement                         *
+.*                                                                            *
+.* Call:   If# <expr> Then[.<ext>]                                            *
+.*         ElseIf#[.<ext1>] <expr> THEN[.<ext2>]       ***                    *
+.*         Else#[.<ext>]                                                      *
+.*         EndIf#                                                             *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 1            (SETA) *
+.*         &LblStk#[&StkPtr#]  = label suffix to next If# section      (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = label suffix to EndIf# for ElseIf#    (SETC) *
+.*                                                                            *
+.* Output: &LblStk#[&StkPtr#]  = label suffix to next If# section      (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = label suffix to EndIf# for ElseIf#    (SETC) *
+.*                                                                            *
+.* Code:   * The following is generated by If#                                *
+.*                  <expr>                                                    *
+.*                  B¬<cc>.<ext>     %L%xxx1                                  *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by ElseIf# (HERE IN THIS MACRO)       *
+.*                  BRA.<ext1>       %E%xxxx                                  *
+.*         %L%xxx1  <expr>                                                    *
+.*                  B¬<cc>.<ext2>    %L%xxx2                                  *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by Else#                              *
+.*                  BRA.<ext>        %L%xxx3                                  *
+.*         %L%xxx2                                                            *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by EndIf#                             *
+.*         %L%xxxx3                                                           *
+.*         %E%xxxx                                  ; only if ElseIf# used    *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; label suffix to next If# section
+		GBLC		&Lbl1Stk#[25]		; label suffix to EndIf# for ElseIf#
+		GBLA		&FalseUsed#		; <ea> AND(OR) <ea> with &JumpCond=1(0)
+.*
+.* Validate that the ElseIf# is nested in an If# statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'ELSE# not nested in an IF#'
+	  GOTO .Exit
+	ENDIF
+	IF &KindStk#[&StkPtr#] ≠ 1 THEN
+	  AERROR 'ELSE# not nested in an IF#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* All ElseIf# branch arounds go to a single label defined by EndIf#
+.*
+	IF &Lbl1Stk#[&StkPtr#] = '' THEN
+	  &Lbl1Stk#[&StkPtr#]: SETC &SysNdx
+          BRA.&Ext  %E%&SysNdx
+	ELSE
+          BRA.&Ext  %E%&Lbl1Stk#[&StkPtr#]
+	ENDIF
+.*
+.* Define the label branched to by the previous If# or ElseIf#
+.*
+%L%&LblStk#[&StkPtr#]
+.*
+.* Generate code to branch on false to next ElseIf#, Else#, or EndIf#
+.*
+ 	Expr# &Expr,True=%L%&SysNdx,False=%F%&SysNdx,JumpCond=0,Keyword=THEN
+	&LblStk#[&StkPtr#]: SETC &SysNdx
+	IF &FalseUsed# THEN				 ; If we need False label, generate it
+%F%&SysNdx
+	ENDIF
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'Else# - Final alternative for If# statement'
+		
+		MACRO
+		Else#.&Ext
+.*
+.******************************************************************************
+.* Else# - Final alternative for If# statement                                *
+.*                                                                            *
+.* Call:   If# <expr> Then[.<ext>]                                            *
+.*         ElseIf#[.<ext1>] <expr> THEN[.<ext2>]                              *
+.*         Else#[.<ext>]                               ***                    *
+.*         EndIf#                                                             *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 1            (SETA) *
+.*         &LblStk#[&StkPtr#]  = label suffix to next If# section      (SETC) *
+.*                                                                            *
+.* Output: &LblStk#[&StkPtr#]  = label suffix to EndIf#                (SETC) *
+.*                                                                            *
+.* Code:   * The following is generated by If#                                *
+.*                  <expr>                                                    *
+.*                  B¬<cc>.<ext>     %L%xxx1                                  *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by ElseIf#                            *
+.*                  BRA.<ext1>       %E%xxxx                                  *
+.*         %L%xxx1  <expr>                                                    *
+.*                  B¬<cc>.<ext2>    %L%xxx2                                  *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by Else# (HERE IN THIS MACRO)         *
+.*                  BRA.<ext>        %L%xxx3                                  *
+.*         %L%xxx2                                                            *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by EndIf#                             *
+.*         %L%xxxx3                                                           *
+.*         %E%xxxx                                  ; only if ElseIf# used    *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; label suffix to next If# section
+.*
+.* Validate that the Else# is nested in an If# statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'ELSE# not nested in an IF#'
+	  GOTO .Exit
+	ENDIF
+	IF &KindStk#[&StkPtr#] ≠ 1 THEN
+	  AERROR 'ELSE# not nested in an IF#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* Generate final branch-around and define label for previous If# or ElseIf#
+.*
+          BRA.&Ext  %L%&SysNdx
+%L%&LblStk#[&StkPtr#]
+.*
+	&LblStk#[&StkPtr#]: SETC &SysNdx
+.*
+.Exit 	Print	Pop
+		ENDM
+
+
+		TITLE	'EndIf# - End of If# statement'
+		
+		MACRO
+		EndIf#
+.*
+.******************************************************************************
+.* EndIf# - End of If# statement                                              *
+.*                                                                            *
+.* Call:   If# <expr> Then[.<ext>]                                            *
+.*         ElseIf#[.<ext1>] <expr> THEN[.<ext2>]                              *
+.*         Else#[.<ext>]                                                      *
+.*         EndIf#                                      ***                    *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 1            (SETA) *
+.*         &LblStk#[&StkPtr#]  = label suffix to next If# section      (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = label suffix to EndIf# for ElseIf#    (SETC) *
+.*                                                                            *
+.* Output: &StkPtr#            = statment nesting stack ptr decremented(SETA) *
+.*                                                                            *
+.* Code:   * The following is generated by If#                                *
+.*                  <expr>                                                    *
+.*                  B¬<cc>.<ext>     %L%xxx1                                  *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by ElseIf#                            *
+.*                  BRA.<ext1>       %E%xxxx                                  *
+.*         %L%xxx1  <expr>                                                    *
+.*                  B¬<cc>.<ext2>    %L%xxx2                                  *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by Else#                              *
+.*                  BRA.<ext>        %L%xxx3                                  *
+.*         %L%xxx2                                                            *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by EndIf# (HERE IN THIS MACRO)        *
+.*         %L%xxxx3                                                           *
+.*         %E%xxxx                                  ; only if ElseIf# used    *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; label suffix to next If# section
+		GBLC		&Lbl1Stk#[25]		; label suffix to EndIf# for ElseIf#
+.*
+.* Validate that the ElseIf# is nested in an If# statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'ENDIF# does not end an IF#'
+	  GOTO .Exit
+	ENDIF
+	IF &KindStk#[&StkPtr#] ≠ 1 THEN
+	  AERROR 'ENDIF# does not end an IF#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* Define final label branched to by If# or Else#
+.*
+%L%&LblStk#[&StkPtr#]
+.*
+.* If we had any ElseIf#'s, define their branch-around label
+.*
+	IF &Lbl1Stk#[&StkPtr#] ≠ '' THEN
+%E%&Lbl1Stk#[&StkPtr#]
+	ENDIF
+.*
+.* Pop the If# statement off the statement nesting stack
+.*
+	&StkPtr#: SETA &StkPtr#-1
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'Repeat# - Loop control statement'
+		
+		MACRO
+&Lbl		Repeat#
+.*
+.******************************************************************************
+.* Repeat# - Loop control statement                                           *
+.*                                                                            *
+.* Call:   Repeat#                                     ***                    *
+.*         Until#.<ext> {<expr> | False}                                      *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*                                                                            *
+.* Output: &StkPtr#            = statment nesting stack ptr incremented(SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 2            (SETA) *
+.*         &LblStk#[&StkPtr#]  = Repeat# label for Cycle# and Leave#   (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = label suffix for Leave# (<null>)      (SETC) *
+.*         &Lbl2Stk#[&StkPtr#] = label suffix for Cycle# (<null>)      (SETC) *
+.*                                                                            *
+.* Code:   * The following is generated by Repeat# (HERE IN THIS MACRO)       *
+.*         Lbl:  (user's label of %L%xxxx)                                    *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by Until#                             *
+.*         %C%xxxx  EQU              Lbl      ; If Until False and Cycle      *
+.*                  BRA.<ext>        Lbl                                      *
+.*                                                                            *
+.*         %C%xxxx  <expr>                    ; If Until <expr>               *
+.*                  B¬<cc>.<ext>     Lbl                                      *
+.*         %E%xxxx                                                            *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; Repeat# label for Cycle# and Leave#
+		GBLC		&Lbl1Stk#[25]		; label suffix for Leave#
+		GBLC		&Lbl2Stk#[25]		; label suffix for Cycle#
+.*
+.* Push new statement status on the stack
+.*
+	IF &StkPtr# = 25 THEN
+	  AERROR 'Too many nested statements'
+	  GOTO .Exit
+	ENDIF
+.*
+	&StkPtr#: SETA &StkPtr#+1		; Update stack ptr
+	IF &Lbl = '' THEN				; Remember label for Until#, Cycle#, Leave#
+	  &LblStk#[&StkPtr#]: SETC &Concat('%L%', &SysNdx)
+	ELSE
+	  &LblStk#[&StkPtr#]: SETC &Lbl
+	ENDIF
+	&Lbl1Stk#[&StkPtr#]: SETC ''		; No Leave# yet
+	&Lbl2Stk#[&StkPtr#]: SETC ''		; No Cycle# yet
+	&KindStk#[&StkPtr#]: SETA 2		; Kind = 2 for Repeat# statements
+.*
+.* Define label for top of loop
+.*
+&LblStk#[&StkPtr#]
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'Until# - End of Repeat# statement'
+		
+		MACRO
+		Until#.&Ext &Expr
+.*
+.******************************************************************************
+.* Until# - End of Repeat# statement                                          *
+.*                                                                            *
+.* Call:   Repeat#                                                            *
+.*         Until#.<ext> {<expr> | False}               ***                    *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack ptr incremented(SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 2            (SETA) *
+.*         &LblStk#[&StkPtr#]  = Repeat# label for Cycle# and Leave#   (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = label suffix for Leave#               (SETC) *
+.*         &Lbl2Stk#[&StkPtr#] = label suffix for Cycle#               (SETC) *
+.*                                                                            *
+.* Output: &StkPtr#            = statment nesting stack ptr decremented(SETA) *
+.*                                                                            *
+.* Code:   * The following is generated by Repeat#                            *
+.*         Lbl:  (user's label of %L%xxxx)                                    *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by Until# (HERE IN THIS MACRO)        *
+.*         %C%xxxx  EQU              Lbl      ; If Until False and Cycle      *
+.*                  BRA.<ext>        Lbl                                      *
+.*                                                                            *
+.*         %C%xxxx  <expr>                    ; If Until <expr>               *
+.*                  B¬<cc>.<ext>     Lbl                                      *
+.*         %E%xxxx                                                            *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; Repeat# label for Cycle# and Leave#
+		GBLC		&Lbl1Stk#[25]		; label suffix for Leave#
+		GBLC		&Lbl2Stk#[25]		; label suffix for Cycle#
+		GBLA		&FalseUsed#		; <ea> AND(OR) <ea> with &JumpCond=1(0)
+.*
+.* Validate that the Until# is nested in an Repeat# statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'UNTIL# does not end a REPEAT#'
+	  GOTO .Exit
+	ENDIF
+	IF &KindStk#[&StkPtr#] ≠ 2 THEN
+	  AERROR 'UNTIL# does not end a REPEAT#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* Until# False requires special processing
+.*
+	IF &UC(&Expr) = 'FALSE' THEN
+	  IF &Lbl2Stk#[&StkPtr#] ≠ '' THEN		; Equate cycle label to top of loop
+%C%&Lbl2Stk#[&StkPtr#] EQU      &LblStk#[&StkPtr#]
+	  ENDIF
+          BRA.&Ext  &LblStk#[&StkPtr#]
+	  GOTO .L1
+	ENDIF
+.*
+.* If there was a Cycle# statement, define the Cycle# label prior to the <expr>
+.*
+	IF &Lbl2Stk#[&StkPtr#] ≠ '' THEN
+%C%&Lbl2Stk#[&StkPtr#]
+	ENDIF
+.*
+.* Generate code to conditionally branch to top of the loop
+.*
+	Expr#.&Ext &Expr,True=&LblStk#[&StkPtr#],False=%F%&SysNdx,JumpCond=0
+	IF &FalseUsed# THEN				 ; If we need False label, generate it
+%F%&SysNdx
+	ENDIF
+.*
+.* If there was a Leave# statement, define the Leave# label now
+.*
+.L1	IF &Lbl1Stk#[&StkPtr#] ≠ '' THEN
+%E%&Lbl1Stk#[&StkPtr#]
+	  ENDIF
+.*
+.* Pop the Repeat# statement off the statement nesting stack
+.*
+	&StkPtr#: SETA &StkPtr#-1
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'While# - Loop control statement'
+		
+		MACRO
+&Lbl		While#	&Expr
+.*
+.******************************************************************************
+.* While# - Loop control statement                                            *
+.*                                                                            *
+.* Call:   While# {<expr> | True} DO.<ext>             ***                    *
+.*         EndW#                                                              *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*                                                                            *
+.* Output: &StkPtr#            = statment nesting stack ptr incremented(SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 3            (SETA) *
+.*         &LblStk#[&StkPtr#]  = While# label for Cycle# and Leave#    (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = label suffix for Leave#               (SETC) *
+.*         &Lbl2Stk#[&StkPtr#] = Extent attribute on DO                (SETC) *
+.*                                                                            *
+.* Code:   * The following is generated by While# (HERE IN THIS MACRO)        *
+.*         Lbl                                    ; If While# True            *
+.*                                                                            *
+.*         Lbl      <expr>                        ; If While# <expr>          *
+.*                  B¬<cc>.<ext>   %E%xxxx                                    *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by EndW#                              *
+.*                  BRA.<ext>     Lbl                                         *
+.*         %E%xxxx                                                            *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; While# label for Cycle# and Leave#
+		GBLC		&Lbl1Stk#[25]		; label suffix for Leave# and While# 
+		GBLC		&Lbl2Stk#[25]		; extent attribute on DO
+		GBLC		&Extent#			; extent attribute on DO from Expr#
+		GBLA		&FalseUsed#		; <ea> AND(OR) <ea> with &JumpCond=1(0)
+.*
+		LCLA		&i
+.*
+.* Push new statement status on the stack
+.*
+	IF &StkPtr# = 25 THEN
+	  AERROR 'Too many nested statements'
+	  GOTO .Exit
+	ENDIF
+.*
+	&StkPtr#: SETA &StkPtr#+1		; Update stack ptr
+	IF &Lbl = '' THEN				; Remember label for Until#, Cycle#, Leave#
+	  &LblStk#[&StkPtr#]: SETC &Concat('%L%', &SysNdx)
+	ELSE
+	  &LblStk#[&StkPtr#]: SETC &Lbl
+	ENDIF
+	&Lbl1Stk#[&StkPtr#]: SETC &SysNdx	; We always need a "leave" label
+	&KindStk#[&StkPtr#]: SETA 3		; Kind = 3 for While# statements
+.*
+.* Define label for top of loop
+.*
+&LblStk#[&StkPtr#]
+.*
+.* If While# True Do no other code needs to be generated.  But if we have
+.* While# <expr> DO generate code to conditionally branch out of the loop.
+.*
+	&i: SETA &Lex(&Expr, 1)
+	IF &SysToken = 0 THEN
+	  IF &UC(&SysTokStr) = 'TRUE' THEN
+	    &i: SETA &Lex(&expr, &i)
+	    IF &SysToken = 0 THEN
+	      IF &UC(&SysTokStr) = 'DO' THEN
+		   IF &Expr[&i:1] = '.' THEN
+		     &Lbl2Stk#[&StkPtr#]: SETC &UC(&Expr[&i+1:1])
+		   ELSE
+		     &Lbl2Stk#[&StkPtr#]: SETC 'W'
+		   ENDIF
+		   GOTO .Exit
+		 ENDIF
+	    ENDIF
+	  ENDIF
+	ENDIF
+.*
+	Expr# &Expr,True=%E%&SysNdx,False=%F%&SysNdx,JumpCond=0,Keyword=DO
+	&Lbl2Stk#[&StkPtr#]: SETC &Extent#	; Remember <ext> for EndW#
+	IF &FalseUsed# THEN				 ; If we need False label, generate it
+%F%&SysNdx
+	ENDIF
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'EndW# - End of Repeat# statement'
+		
+		MACRO
+		EndW#
+.*
+.******************************************************************************
+.* EndW# - End of Repeat# statement                                           *
+.*                                                                            *
+.* Call:   While# {<expr> | True} DO.<ext>                                    *
+.*         EndW#                                       ***                    *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack ptr incremented(SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 2            (SETA) *
+.*         &LblStk#[&StkPtr#]  = While# label for Cycle# and Leave#    (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = label suffix for Leave# and While#    (SETC) *
+.*         &Lbl2Stk#[&StkPtr#] = Extent attribute on DO                (SETC) *
+.*                                                                            *
+.* Output: &StkPtr#            = statment nesting stack ptr decremented(SETA) *
+.*                                                                            *
+.* Code:   * The following is generated by While#                             *
+.*         Lbl                                    ; If While# True            *
+.*                                                                            *
+.*         Lbl      <expr>                        ; If While# <expr>          *
+.*                  B¬<cc>.<ext>   %E%xxxx                                    *
+.*         ------------------------------------------------------------------ *
+.*         * The following is generated by EndW# (HERE IN THIS MACRO)         *
+.*                  BRA.<ext>     Lbl                                         *
+.*         %E%xxxx                                                            *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; While# label for Cycle# and Leave#
+		GBLC		&Lbl1Stk#[25]		; label suffix for Leave# and While# 
+		GBLC		&Lbl2Stk#[25]		; extent attribute on DO
+.*
+.* Validate that the EndW# is nested in an While# statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'ENDW# does not end a WHILE#'
+	  GOTO .Exit
+	ENDIF
+	IF &KindStk#[&StkPtr#] ≠ 3 THEN
+	  AERROR 'ENDW# does not end a WHILE#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* Generate branch back to the top of the loop and follow it with exit label
+.*
+          BRA.&Lbl2Stk#[&StkPtr#] &LblStk#[&StkPtr#]
+%E%&Lbl1Stk#[&StkPtr#]
+.*
+.* Pop the While# statement off the statement nesting stack
+.*
+	&StkPtr#: SETA &StkPtr#-1
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'For# - Loop control statement'
+		
+		MACRO
+&Lbl		For#.&Sz 	&Opnds,&Dreg==D0,&Opt=Y,&Clr=Y
+.*
+.******************************************************************************
+.* For# - Loop control statement                                              *
+.*                                                                            *
+.* Call:   For# <op1>[=.<sz><op2>][Down]To<op3>[By<op4>][Until<exp>] DO.<ext> *
+.*         EndF#                                                              *
+.*                                                                            *
+.* Input:  &Dreg               = D-reg to use if <op1> is not already a D-reg *
+.*         &Opt                = Y[es] ==> allow DBcc optimization if possible*
+.*                               N[o]  ==> Don't allow optimization at all (?)*
+.*         &Clr                = Y[es] ==> Gen CLR.W if &Sz=B and DBcc ok     *
+.*                               N[o]  ==> Don't CLR.W even if &Sz=B and DBcc *
+.*         &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*                                                                            *
+.* Output: &StkPtr#            = statment nesting stack ptr incremented(SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 4            (SETA) *
+.*         &LblStk#[&StkPtr#]  = While# label for Cycle# and Leave#    (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = label suffix for Leave#               (SETC) *
+.*         &Lbl2Stk#[&StkPtr#] = label suffix for Cycle#               (SETC) *
+.*         &Incr#[&StkPtr#]    = 1==>TO; 0 ==>DOWNTO; -1 ==> DBcc      (SETA) *
+.*         &Sz#[&StkPtr#]      = size of control reg (B, W, L)         (SETC) *
+.*         &Op1#[&StkPtr#]     = <op1>, loop control counter           (SETC) *
+.*         &Op3#[&StkPtr#]     = <op3>, loop limit                     (SETC) *
+.*         &Op4#[&StkPtr#]     = <op4>, loop increment                 (SETC) *
+.*         &Until#[&StkPtr#]   = <expr>, loop end condition            (SETC) *
+.*         &Dreg#[&StkPtr#]    = work register if <op1> is not a reg   (SETC) *
+.*                                                                            *
+.* Code:   If a DBcc is not to be generated, there are two cases depending on *
+.*         whether <op1> is a register or not:                                *
+.*                                                                            *
+.*         • <op1> is a D-register                                            *
+.*                                                                            *
+.*           * The following is generated by For# (HERE IN THIS MACRO)        *
+.*                     MOVE.<sz>    <op2>,<op1>         ; Put <op2> in <op1>  *
+.*                     BRA.<ext>    %L%xxxx                                   *
+.*           %Loop%xxxx                                                       *
+.*           ---------------------------------------------------------------  *
+.*           * The following is generated by EndF#                            *
+.*           %C%xxxx                                     ; Cycle# label       *
+.*                    [GoTo# If# ¬<expr> Then.s %E%xxxx] ; If Until           *
+.*                     ADD.<sz>     <op4>,<op1>          ; SUB if DownTo      *
+.*           %L%xxxx   CMP.<sz>     <op3>,<op1>                               *
+.*                     BLE          %Loopxxxx            ; BGE if DownTo      *
+.*           %E%xxxx                                     ; Leave# label       *
+.*                                                                            *
+.*         • <op1> is NOT a D-register                                        *
+.*                                                                            *
+.*           * The following is generated by For# (HERE IN THIS MACRO)        *
+.*                     MOVE.<sz>    <op2>,<Dreg>        ; Put <op2> in workreg*
+.*                     BRA.<ext>    %L%xxxx                                   *
+.*           %Loop%xxxx                                                       *
+.*           ---------------------------------------------------------------  *
+.*           * The following is generated by EndF#                            *
+.*           %C%xxxx                                     ; Cycle# label       *
+.*                    [GoTo# If# ¬<expr> Then.s %E%xxxx] ; If Until           *
+.*                     MOVE.<sz>    <op1>,<Dreg>                              *
+.*                     ADD.<sz>     <op4>,<Dreg>         ; SUB if DownTo      *
+.*           %L%xxxx   MOVE.<sz>    <Dreg>,<op1>                              *
+.*                     CMP.<sz>     <op3>,<Dreg>                              *
+.*                     BLE          %Loopxxxx            ; BGE if DownTo      *
+.*           %E%xxxx                                     ; Leave# label       *
+.*                                                                            *
+.*         If a DBcc is generated, then the For# had one of the following     *
+.*         forms: For# Dn=<op2> DownTo #0 [By #1] [UNTIL <expr>] DO           *
+.*                For# Dn=<op2> To     #0  By #-1 [UNTIL <expr>] DO           *
+.*                For# Dn=<op2> DownTo #1 [By #1] DO                          *
+.*                For# Dn=<op2> To     #1  By #-1 DO                          *
+.*                                                                            *
+.*           * The following is generated by For# (HERE IN THIS MACRO)        *
+.*                    [CLR.W        <op1>]               ; Only if needed     *
+.*                     MOVE.<sz>    <op2>,<op1>                               *
+.*                    [BRA.<ext>    %C%xxxx]             ; If [Down]To #1     *
+.*                    [BLT.<ext>    %E%xxxx]             ; If [Down]To #0     *
+.*           %Loop%xxxx                                                       *
+.*           ---------------------------------------------------------------  *
+.*           * The following is generated by EndF#                            *
+.*           %C%xxxx                                     ; Cycle# label       *
+.*                    [GoTo# If# ¬<expr> Then.s %E%xxxx] ; Until & [Down]To #0*
+.*                     DBcc         &Op1,%Loopxxxx       ; DBF if [Down]To #1 *
+.*           %E%xxxx                                     ; Leave# label       *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLA		&Incr#[25]		; 1==>TO; 0 ==>DOWNTO; -1 ==> DBcc
+		GBLC		&LblStk#[25]		; For# label for Cycle# and Leave#
+		GBLC		&Lbl1Stk#[25]		; label suffix for Leave#
+		GBLC		&Lbl2Stk#[25]		; label suffix for Cycle#
+		GBLC		&Sz#[25]			; size of control reg (B, W, L)
+		GBLC		&Op1#[25]			; <op1>, loop control counter
+		GBLC		&Op3#[25]			; <op3>, loop limit
+		GBLC		&Op4#[25]			; <op4>, loop increment
+		GBLC		&Until#[25]		; <expr>, loop end  condition
+		GBLC		&Dreg#[25]		; work register if <op1> is not a reg
+		GBLA		&Debug#			; debug printing switch
+.*
+		LCLA		&Cp,&Sw,&First,&Last,&HaveOp2,&DBcc,&t,&b
+		LCLC		&Id,&Expr,&Op2,&Siz,&Ext
+.*
+.* Push new statement status on the stack
+.*
+	IF &StkPtr# = 25 THEN
+	  AERROR 'Too many nested statements'
+	  GOTO .Exit
+	ENDIF
+.*
+	&StkPtr#: SETA &StkPtr#+1		; Update stack ptr
+	IF &Lbl = '' THEN				; Remember label for Until#, Cycle#, Leave#
+	  &LblStk#[&StkPtr#]: SETC ''
+	ELSE
+	  &LblStk#[&StkPtr#]: SETC &Lbl
+&Lbl
+	ENDIF
+	&Lbl1Stk#[&StkPtr#]: SETC &SysNdx	; We always need a "leave" label
+	&Lbl2Stk#[&StkPtr#]: SETC ''		; No Cycle# yet
+	&KindStk#[&StkPtr#]: SETA 4		; Kind = 4 for For# statements
+.*
+.* Parse <op1>
+.*
+	&Cp: SETA 1					; Start scanning at start of &Opnds
+	&Cp: SETA &Lex(&Opnds, &Cp)		; Scan 1st token
+	&Id: SETC &UC(&SysTokStr)		; We will scan until end of <op1>
+	WHILE (&Id ≠ 'TO') AND (&Id ≠ 'DOWNTO') AND (&SysToken ≠ 12) AND (&SysToken ≠ 30) DO
+	  &Last: SETA &Cp				; Always assume next token is delimiter
+	  &Cp: SETA &Lex(&Opnds, &Cp)		; Scan next token
+	  &Id: SETC &UC(&SysTokStr)
+	ENDW
+	IF &SysToken = 30 THEN			; Did we crash into end of line ?
+	  AERROR 'Invalid loop variable'
+	  GOTO .Err					; Common error recovery
+	ENDIF
+	IF &SysToken = 12 THEN			; Did we crach into "=" following <op1>
+	  &Last: SETA &Last-1			; Yes, it is not part of the <op1>
+	ENDIF
+	&Op1#[&StkPtr#]: SETC &Trim(&Opnds[1:&Last]) ; Extract <op1>
+.*
+.* Determine size of the loop register.  It may be explicitly specified if we
+.* have =.sz following <op1>. Whether the size is there or not, if the "=" is
+.* there, scan the <op2> which follows it.
+.*
+	&Siz: SETC 'W'					; The default size is W
+	IF &SysToken = 12 THEN 			; Did a "=" delimit <op1> ?
+	  &HaveOp2: SETA 1				; Yes, set switch to now will have <op2>
+	  IF &Opnds[&Cp:1] = '.' THEN		; Explicit .sz following "=" ?
+	    &Siz: SETC &UC(&Opnds[&Cp+1:1]); Yes, we will use whatever is there
+	    &Sz#[&StkPtr#]: SETC &Siz		; Save for use by EndF#
+	    &Cp: SETA &Cp+2				; Bump Cp over it
+	  ELSE
+	    &Sz#[&StkPtr#]: SETC 'W'		; If no explicit size, EndF# will use W
+	  ENDIF
+	  &First: SETA &Cp				; Prepare to scan off the <op2>
+	  &Cp: SETA &Lex(&Opnds, &Cp)		; It's scan is like that for <op1>
+	  &Id: SETC &UC(&SysTokStr)	
+	  WHILE (&Id ≠ 'TO') AND (&Id ≠ 'DOWNTO') AND (&SysToken ≠ 30) DO
+	    &Last: SETA &Cp				; Always assume next token is delimiter
+	    &Cp: SETA &Lex(&Opnds, &Cp)	; Scan next token
+	    &Id: SETC &UC(&SysTokStr)
+	  ENDW
+	  IF &SysToken = 30 THEN			; Did we crash into end of line ?
+	    AERROR 'TO or DOWNTO expected'
+	    GOTO .Err					; Common error recovery
+	  ENDIF
+	  &Op2: SETC &Trim(&Opnds[&First:&Last-&First+1]); Extract <op2>
+	ENDIF
+.*
+.* At this point we should be up to the TO or DOWNTO in the For# statement
+.*
+	IF &Id = 'TO' THEN				; Have TO ?
+	  &Incr#[&StkPtr#]: SETA 1		; Indicate incrementing for EndF#
+	ELSEIF &Id = 'DOWNTO' THEN		; Have DOWNTO ?
+	  &Incr#[&StkPtr#]: SETA 0		; Indicate decrementing for EndF#
+	ELSE
+	  AERROR 'TO or DOWNTO expected'
+	  GOTO .Err
+	ENDIF
+.*
+.* Parse <op3> following the TO or DOWNTO
+.*
+	&First: SETA &Cp				; Scanned like <op1> and <op2> above
+	&Cp: SETA &Lex(&Opnds, &Cp)
+	&Id: SETC &UC(&SysTokStr)	
+	WHILE (&Id ≠ 'UNTIL') AND (&Id ≠ 'BY') AND (&Id ≠ 'DO') AND (&SysToken ≠ 30) DO
+	  &Last: SETA &Cp
+	  &Cp: SETA &Lex(&Opnds, &Cp)
+	  &Id: SETC &UC(&SysTokStr)
+	ENDW
+	IF &SysToken = 30 THEN
+	  AERROR 'BY, UNTIL or DO expected'
+	  GOTO .Err
+	ENDIF
+	&Op3#[&StkPtr#]: SETC &Trim(&Opnds[&First:&Last-&First+1]); Extract <op3>
+.*
+.* At this point we will parse the remaining parts of the For# statement.  We
+.* can have UNTIL <expr> or BY <op4> in either order. We stay in a loop to
+.* process both, but allow only one occurrence of each.  The loop terminates
+.* either when an error occurs or we crash into the delimiting DO. &Sw4 indicates
+.* the scan status. &Sw=1 means BY was scanned. &Sw=2 or 3 means UNTIL was
+.* scanned.
+.*
+	&Op4#[&StkPtr#]: SETC '#1'		; Default <op4> to #1
+	&Until#[&StkPtr#]: SETC ''		; Assume there is no UNTIL clause
+.*
+	WHILE &Sw ≠ 4 DO				; Loop until DO is scanned
+	  IF &Id = 'BY' THEN			; Have BY clause ?
+	    IF (&Sw MOD 2) = 1 THEN		; Yes, it can occur only once
+	      AERROR 'Only one BY clause allowed'
+	      GOTO .Err
+	    ENDIF
+	    &First: SETA &Cp			; Scan over the <op4> the usual way
+	    &Cp: SETA &Lex(&Opnds, &Cp)
+	    &Id: SETC &UC(&SysTokStr)
+	    WHILE (&Id ≠ 'DO') AND (&Id ≠ 'UNTIL') AND (&SysToken ≠ 30) DO
+	      &Last: SETA &Cp
+		 &Cp: SETA &Lex(&Opnds, &Cp)
+		 &Id: SETC &UC(&SysTokStr)
+	    ENDW
+	    IF &SysToken ≠ 30 THEN
+	      &Op4#[&StkPtr#]: SETC &Trim(&Opnds[&First:&Last-&First+1]); Extract <op4>
+	    ENDIF
+	    &Sw: SETA &Sw+1				; Indicate that BY has been scanned
+	  ELSEIF &Id = 'UNTIL' THEN		; Have UNTIL clause ?
+	    IF (&Sw DIV 2) = 1 THEN		; Yes, it can occur only once
+	      AERROR 'Only one UNTIL clause allowed'
+	      GOTO .Err
+	    ENDIF
+	    &First: SETA &Cp			; Scan over the <expr> the usual way
+	    &Cp: SETA &Lex(&Opnds, &Cp)
+	    &Id: SETC &UC(&SysTokStr)
+	    WHILE (&Id ≠ 'DO') AND (&Id ≠ 'BY') AND (&SysToken ≠ 30) DO
+	      &Last: SETA &Cp
+		 &Cp: SETA &Lex(&Opnds, &Cp)
+		 &Id: SETC &UC(&SysTokStr)
+	    ENDW
+	    IF &SysToken ≠ 30 THEN
+	      &Until#[&StkPtr#]: SETC &Trim(&Opnds[&First:&Last-&First+1]); Extract <expr>
+	    ENDIF
+	    &Sw: SETA &Sw+2				; Indicate that UNTIL has been scanned
+	  ELSEIF &Id = 'DO' THEN			; Have delimiting DO ?
+	    &Sw: SETA 4 ; LEAVE !!		; Yes, set switch to stop loop
+	    IF &Opnds[&Cp:1] = '.' THEN	; Have explicit <extent> on the DO ?
+		 &Ext: SETC &UC(&Trim(&Opnds[&Cp+1:1])); Yes, use it
+	    ENDIF
+	    &Ext: SETC &Default(&Ext, 'W')	; Make sure of the <extent>
+	  ELSE
+	    AERROR 'BY, UNTIL or DO expected'
+	    GOTO .Err
+	  ENDIF
+	ENDW
+.*
+.* At this point we're done with the scan.  Wasn't that fun?  Now that we have
+.* all the stuff, it's time to use it.  First, we see if we need the work
+.* register.  We do if <op1> is not a D-register.
+.*
+	IF &SubStr(&Type(&Op1#[&StkPtr#]), 1, 5) ≠ 'REG D' THEN
+	  &Dreg#[&StkPtr#]: SETC &Dreg	; Indicate we are using a work reg	
+	ELSE
+	  &Dreg#[&StkPtr#]: SETC ''		; If work reg not needed, set to <null>
+	ENDIF
+	GOTO .Opt						; Hop over error recovery code
+.*
+.* Once the stack is set up, and an error occurs, it seems more appropriate to
+.* "force" the For# into a legal state rather than dropping it on the floor. We
+.* do this by pretending we scanned For# D0=#0 To #0 Do.
+.*
+.Err	ANOP
+	&Op1#[&StkPtr#]:   SETC 'D0'		; Set <op1> to D0
+	&HaveOp2:          SETA 1		; Have "="
+	&Op3#[&StkPtr#]:   SETC '#0'		; Set <op3> to #0
+	&Op4#[&StkPtr#]:   SETC '#1'		; Set <op4> to #1
+	&Until#[&StkPtr#]: SETC ''		; No UNTIL
+	&Incr#[&StkPtr#]:  SETA 1		; Incrementing
+	&Dreg#[&StkPtr#]:  SETC ''		; No work reg needed
+	&Ext:              SETC 'W'		; An <extent> of W
+.*
+.* See if we can optimize the code to use a DBcc.  We can if we have either of
+.* the four following For# statements (and &Opt=Yes):
+.*
+.*  • For# Dn=<op2> DownTo #0 [By #1] [Until <expr>] DO
+.*  • For# Dn=<op2> To     #0  By #-1 [Until <expr>] DO
+.*  • For# Dn=<op2> DownTo #1 [By #1] DO
+.*  • For# Dn=<op2> To     #1  By #-1 DO
+.*
+.* The switch &DBcc is set to 1 if we have any of these loops.  In order to tell
+.* EndF# what's going on, and in order to avoid another global array, we will
+.* set the to/downto indicator, &Incr#, to -1 for these cases.
+.*
+.Opt	IF &UC(&Opt[1:1]) = 'Y' THEN					; Optimization allowed ?
+	  IF &Dreg#[&StkPtr#] = '' THEN				; <op1> is a Dn
+	    IF &Siz ≠ 'L' THEN			               ; Word, byte sized reg
+		 IF &Op3#[&StkPtr#,1:1] = '#' THEN 		; <op3> is #n (Down[To])
+		   &t: SETA &Eval(&Op3#[&StkPtr#,2:255])
+		   IF &t = 0 THEN						; Down[To] #0
+			IF &Op4#[&StkPtr#,1:1] = '#' THEN		; <op4> is #m (By)
+			  &b: SETA &Eval(&Op4#[&StkPtr#,2:255])
+			  IF &b = 1 THEN					; By #1
+			    IF NOT &Incr#[&StkPtr#] THEN
+				 &DBcc: SETA 1					; DownTo #0 By #1
+			    ENDIF
+			  ELSEIF &b = -1 THEN				; By #-1
+			    IF &Incr#[&StkPtr#] THEN
+				 &DBcc: SETA 1					; To #0 By -1
+			    ENDIF
+			  ENDIF
+			ENDIF
+		   ELSEIF (&t=1)AND(&Until#[&StkPtr#]='')THEN; Down[To] #1 (no UNTIL)
+			IF &Op4#[&StkPtr#,1:1] = '#' THEN		; <op4> is #m (By)
+			  &b: SETA &Eval(&Op4#[&StkPtr#,2:255])
+			  IF &b = 1 THEN					; By #1
+			    IF NOT &Incr#[&StkPtr#] THEN
+				 &DBcc: SETA 1					; DownTo #1 By #1
+			    ENDIF
+			  ELSEIF &b = -1 THEN				; By #-1
+			    IF &Incr#[&StkPtr#] THEN
+				 &DBcc: SETA 1					; To #1 By -1
+			    ENDIF
+			  ENDIF
+			ENDIF
+		   ENDIF
+		 ENDIF
+	    ENDIF
+	  ENDIF
+	ENDIF
+.*
+.* If we are generating a DBcc loop, gen code to not enter the loop if the
+.* loop counter value is negative.  If we are not generating a DBcc loop, gen
+.* code to branch to the end of the loop, the EndF# code, where all the actual
+.* work is done.
+.*
+	IF &DBcc THEN
+	  &Incr#[&StkPtr#]: SETA -1
+	  IF &HaveOp2 THEN				; If explicit initial setting, do it
+	    IF (&Siz = 'B') AND (&UC(&Clr[1:1]) = 'Y') THEN; Clear the reg 1st ?
+	      IF &Op2[1:1] = '#' THEN		; Yes, but only if <op2> is not a const
+		   &Siz: SETC 'W'			; If const, init reg as a word
+		 ELSE
+          CLR.W     &Op1#[&StkPtr#]
+		 ENDIF
+	    ENDIF
+          MOVE.&Siz &Op2,&Op1#[&StkPtr#]
+	  ENDIF
+	  IF &t = 0 THEN				; ... [Down]To #0 By #1 ...
+          BLT.&Ext  %E%&SysNdx
+	  ELSE						; ... [Down]To #1 By #1 ...
+	    &Lbl2Stk#[&StkPtr#]: SETC &SysNdx; Use the Cycle# label as branch dst
+          BRA.&Ext  %C%&SysNdx
+	  ENDIF
+%Loop%&SysNdx
+	ELSE
+	  IF &HaveOp2 THEN				; If explicit initial setting, do it
+	    IF &Dreg#[&StkPtr#] ≠ '' THEN
+          MOVE.&Siz &Op2,&Dreg#[&StkPtr#]
+	    ELSE
+          MOVE.&Siz &Op2,&Op1#[&StkPtr#]
+	    ENDIF
+	  ENDIF
+          BRA.&Ext  %L%&SysNdx
+%Loop%&SysNdx
+	ENDIF
+.*
+.* The following is used to verify our scan!
+.*
+	IF &Debug# THEN
+	  Write 'FOR#', ' ', &Op1#[&StkPtr#]
+	  IF &HaveOp2 THEN
+	    Write '=.', &Sz#[&StkPtr#], ' ', &Op2
+	  ENDIF
+	  IF &Incr#[&StkPtr#] THEN
+	    Write ' TO '
+	  ELSE
+	    Write ' DOWNTO '
+	  ENDIF
+	  Write	&Op3#[&StkPtr#], ' BY ', &Op4#[&StkPtr#]
+	  IF &Until#[&StkPtr#] ≠ '' THEN
+	    Write ' UNTIL "', &Until#[&StkPtr#], '"'
+	  ENDIF
+	  WriteLn	' DO.', &Ext
+	ENDIF
+.*
+.Exit 	PRINT 	Pop
+		ENDM
+
+
+		TITLE	'EndF# - End of For# statement'
+		
+		MACRO
+		EndF#
+.*
+.******************************************************************************
+.* EndF# - End of For# statement                                              *
+.*                                                                            *
+.* Call:   For# <op1>[=.<sz><op2>][Down]To<op3>[By<op4>][Until<exp>] DO.<ext> *
+.*         EndF#                                                              *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack ptr incremented(SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 4            (SETA) *
+.*         &LblStk#[&StkPtr#]  = While# label for Cycle# and Leave#    (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = label suffix for Leave#               (SETC) *
+.*         &Lbl2Stk#[&StkPtr#] = label suffix for Cycle#               (SETC) *
+.*         &Incr#[&StkPtr#]    = 1==>TO; 0 ==>DOWNTO; -1 ==> DBcc      (SETA) *
+.*         &Sz#[&StkPtr#]      = size of control reg (B, W, L)         (SETC) *
+.*         &Op1#[&StkPtr#]     = <op1>, loop control counter           (SETC) *
+.*         &Op3#[&StkPtr#]     = <op3>, loop limit                     (SETC) *
+.*         &Op4#[&StkPtr#]     = <op4>, loop increment                 (SETC) *
+.*         &Until#[&StkPtr#]   = <expr>, loop end condition            (SETC) *
+.*         &Dreg#[&StkPtr#]    = work register if <op1> is not a reg   (SETC) *
+.*                                                                            *
+.* Output: &StkPtr#            = statment nesting stack ptr decremented(SETA) *
+.*                                                                            *
+.* Code:   If a DBcc is not to be generated, there are two cases depending on *
+.*         whether <op1> is a register or not:                                *
+.*                                                                            *
+.*         • <op1> is a D-register                                            *
+.*                                                                            *
+.*           * The following is generated by For#                             *
+.*                     MOVE.<sz>    <op2>,<op1>         ; Put <op2> in <op1>  *
+.*                     BRA.<ext>    %L%xxxx                                   *
+.*           %Loop%xxxx                                                       *
+.*           ---------------------------------------------------------------  *
+.*           * The following is generated by EndF# (HERE IN THIS MACRO)       *
+.*           %C%xxxx                                     ; Cycle# label       *
+.*                    [GoTo# If# ¬<expr> Then.s %E%xxxx] ; If Until           *
+.*                     ADD.<sz>     <op4>,<op1>          ; SUB if DownTo      *
+.*           %L%xxxx   CMP.<sz>     <op3>,<op1>                               *
+.*                     BLE          %Loopxxxx            ; BGE if DownTo      *
+.*           %E%xxxx                                     ; Leave# label       *
+.*                                                                            *
+.*         • <op1> is NOT a D-register                                        *
+.*                                                                            *
+.*           * The following is generated by For#                             *
+.*                     MOVE.<sz>    <op2>,<Dreg>        ; Put <op2> in workreg*
+.*                     BRA.<ext>    %L%xxxx                                   *
+.*           %Loop%xxxx                                                       *
+.*           ---------------------------------------------------------------  *
+.*           * The following is generated by EndF# (HERE IN THIS MACRO)       *
+.*           %C%xxxx                                     ; Cycle# label       *
+.*                    [GoTo# If# ¬<expr> Then.s %E%xxxx] ; If Until           *
+.*                     MOVE.<sz>    <op1>,<Dreg>                              *
+.*                     ADD.<sz>     <op4>,<Dreg>         ; SUB if DownTo      *
+.*           %L%xxxx   MOVE.<sz>    <Dreg>,<op1>                              *
+.*                     CMP.<sz>     <op3>,<Dreg>                              *
+.*                     BLE          %Loopxxxx            ; BGE if DownTo      *
+.*           %E%xxxx                                     ; Leave# label       *
+.*                                                                            *
+.*         If a DBcc is generated, then the For# had one of the following     *
+.*         forms: For# Dn=<op2> DownTo #0 [By #1] [UNTIL <expr>] DO           *
+.*                For# Dn=<op2> To     #0  By #-1 [UNTIL <expr>] DO           *
+.*                For# Dn=<op2> DownTo #1 [By #1] DO                          *
+.*                For# Dn=<op2> To     #1  By #-1 DO                          *
+.*                                                                            *
+.*           * The following is generated by For#                             *
+.*                    [CLR.W        <op1>]               ; Only if needed     *
+.*                     MOVE.<sz>    <op2>,<op1>                               *
+.*                    [BRA.<ext>    %C%xxxx]             ; If [Down]To #1     *
+.*                    [BLT.<ext>    %E%xxxx]             ; If [Down]To #0     *
+.*           %Loop%xxxx                                                       *
+.*           ---------------------------------------------------------------  *
+.*           * The following is generated by EndF# (HERE IN THIS MACRO)       *
+.*           %C%xxxx                                     ; Cycle# label       *
+.*                    [GoTo# If# ¬<expr> Then.s %E%xxxx] ; Until & [Down]To #0*
+.*                     DBcc         &Op1,%Loopxxxx       ; DBF if [Down]To #1 *
+.*           %E%xxxx                                     ; Leave# label       *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLA		&Incr#[25]		; 1==>TO; 0 ==>DOWNTO; -1 ==> DBcc
+		GBLC		&LblStk#[25]		; For# label for Cycle# and Leave#
+		GBLC		&Lbl1Stk#[25]		; label suffix for Leave#
+		GBLC		&Lbl2Stk#[25]		; label suffix for Cycle#
+		GBLC		&Sz#[25]			; size of control reg (B, W, L)
+		GBLC		&Op1#[25]			; <op1>, loop control counter
+		GBLC		&Op3#[25]			; <op3>, loop limit
+		GBLC		&Op4#[25]			; <op4>, loop increment
+		GBLC		&Until#[25]		; <expr>, loop end  condition
+		GBLC		&Dreg#[25]		; work register if <op1> is not a reg
+		GBLC		&CC#				; Condition code table
+		GBLA		&FalseUsed#		; <ea> AND(OR) <ea> with &JumpCond=1(0)
+.*
+		LCLC		&Op1,&Op3,&OP4,&Lbl,&Sz,&DBcc,&Dreg
+		LCLA		&Incr
+.*
+.* Validate that the EndF# is nested in an For# statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'ENDF# does not end a FOR#'
+	  GOTO .Exit
+	ENDIF
+	IF &KindStk#[&StkPtr#] ≠ 4 THEN
+	  AERROR 'ENDW# does not end a FOR#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* Copy the subscripted globals into non-subscripted locals for efficiency
+.*
+	&Op1: SETC &Op1#[&StkPtr#]		; <op1>
+	&Op3: SETC &Op3#[&StkPtr#]		; <op3>
+	&Op4: SETC &Op4#[&StkPtr#]		; <op4>
+	&Lbl: SETC &Lbl1Stk#[&StkPtr#]	; Top of loop label suffix
+	&Sz:  SETC &Sz#[&StkPtr#]		; Size of loop register
+	&Incr:SETA &Incr#[&StkPtr#]		; Loop direction
+	IF &Incr < 0 THEN				; Are we to do a DBcc ?
+	  &DBcc: SETC 'F'				; Yes, assume it will be a DBF
+	ENDIF
+	&Dreg: SETC &Dreg#[&StkPtr#]		; Set work reg, if any
+.*
+.* If there was a Cycle# statement, define the Cycle# label prior loop code
+.*
+	IF &Lbl2Stk#[&StkPtr#] ≠ '' THEN
+%C%&Lbl2Stk#[&StkPtr#]
+	ENDIF
+.*
+.* If there is an UNTIL clause generate code to exit loop if UNTIL's <expr> is
+.* false.  But, if we are generated a DBcc loop, and the <expr> is just a simple
+.* condition code, we can combine the condition code test with the DBcc.
+.*
+	IF &Until#[&StkPtr#] ≠ '' THEN	; Have an UNTIL clause ?
+	  &FalseUsed#: SETA 0			; Make sure of switch
+	  IF &DBcc = '' THEN			; Yes, are we generation a DBcc loop ?
+	    Expr#.S &Until#[&StkPtr#],True=%E%&Lbl,False=%F%&SysNdx,JumpCond=0; No, treat like If#
+	  ELSE						; If DBcc loop
+	    &DBcc: SETC &Until#[&StkPtr#]	; See if <expr> is a simple condition code
+	    &CC#: SETC 'EQ.NE.LE.LT.GE.GT.MI.PL.HI.LS.LO.CC.CS.NZ.HS.VC.VS.'
+	    IF &Pos(&Concat(&UC(&DBcc), '.'), &CC#) = 0 THEN; Not simple condition code
+		 Expr#.S &DBcc,True=%E%&Lbl,False=%F%&SysNdx,JumpCond=0; Still treat like an If#
+		 &DBcc: SETC 'F'			; And loop will become a DBF
+	    ENDIF
+	  ENDIF
+	  IF &FalseUsed# THEN			; If we need False label, generate it
+%F%&SysNdx
+	  ENDIF
+	ENDIF
+.*
+.* Gen end of loop code for all cases:
+.*   • Case 1 - TO loop, not DBcc, needing work reg
+.*   • Case 2 - TO loop, not DBcc, <op1> is a D-register
+.*   • Case 3 - DOWNTO loop, not DBcc, needing work reg
+.*   • Case 4 - DOWNTO loop, not DBcc, <op1> is a D-register
+.*   • Case 5 - DBcc loop
+.*
+	PRINT Push,NoWarn				; Suppress any Assembler branch warnings
+	IF &Incr = 1 THEN				; TO loops
+	  IF &Dreg ≠ '' THEN			; Case 1 - TO loop, not DBcc, needing work reg
+          MOVE.&Sz  &Op1,&Dreg
+          ADD.&Sz   &Op4,&Dreg
+%L%&Lbl   MOVE.&Sz  &Dreg,&Op1
+          CMP.&Sz   &Op3,&Dreg
+          BLE       %Loop%&Lbl
+%E%&Lbl
+	  ELSE						; Case 2 - TO loop, not DBcc, <op1> is a D-reg
+          ADD.&Sz   &Op4,&Op1
+%L%&Lbl   CMP.&Sz   &Op3,&Op1
+          BLE       %Loop%&Lbl
+%E%&Lbl
+	  ENDIF
+	ELSEIF &Incr = 0 THEN			; DOWNTO loops
+	  IF &Dreg ≠ '' THEN			; Case 3 - DOWNTO loop, not DBcc, needing work reg
+          MOVE.&Sz  &Op1,&Dreg
+          SUB.&Sz   &Op4,&Dreg
+%L%&Lbl   MOVE.&Sz  &Dreg,&Op1
+          CMP.&Sz   &Op3,&Dreg
+          BGE       %Loop%&Lbl
+%E%&Lbl
+	  ELSE						; Case 4 - DOWNTO loop, not DBcc, <op1> is a D-reg
+          SUB.&Sz   &Op4,&Op1
+%L%&Lbl   CMP.&Sz   &Op3,&Op1
+          BGE       %Loop%&Lbl
+%E%&Lbl
+	  ENDIF
+	ELSE							; Case 5 - DBcc loop
+          DB&DBcc       &Op1,%Loop%&Lbl
+%E%&Lbl
+	ENDIF
+	PRINT Pop
+.*
+.* Pop the For# statement off the statement nesting stack
+.*
+	&StkPtr#: SETA &StkPtr#-1
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+		
+		TITLE	'Switch# - Multi-way decision'
+		
+		MACRO
+&Lbl		Switch#.&Sz &Selector,&Dreg==D0,&JmpTbl==N,&ChkRng==N
+.*
+.******************************************************************************
+.* Switch# - Multi-way decision                                               *
+.*                                                                            *
+.* Call:   Switch#.<sz> <selector>,Dreg=Dn,JmpTbl={<ext>|Y|N},ChkRng={Y|N}*** *
+.*         Case#.<ext> <ae1>[..<ae2>],...                                     *
+.*         Default#                                                           *
+.*         EndS#                                                              *
+.*                                                                            *
+.* Input:  &Selector           = <ea> used to specify the case selector       *
+.*         &Dreg               = D-register to used to detemine which case    *
+.*         &JmpTbl             = <ext> ==> determine case with a jump table   *
+.*                                         <ext> is branch extent to EndS#    *
+.*                                         Note, Y[es] same as <ext>=W        *
+.*                             = N[o]  ==> determine case by repeated SUBs    *
+.*         &ChkRng             = Y[es] ==> range check a jump table selector  *
+.*                             = N[o]  ==> assume selector covered by all the *
+.*                                         cases                              *
+.*                                                                            *
+.*         &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*                                                                            *
+.* Output: &StkPtr#            = statment nesting stack ptr incremented(SETC) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 5            (SETA) *
+.*         &LblStk#[&StkPtr#]  = Switch# label for Leave#              (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = most recent Case# <ae> value (<null>) (SETC) *
+.*         &Lbl2Stk#[&StkPtr#] = next Case# label suffix (<null>)      (SETC) *
+.*         &CaseStkPtr#        = case stack pointer for nested switches(SETA) *
+.*         &FrstCase#[&StkPtr#]= index of 1st Case# label in &CaseStk# (SETA) *
+.*         &Low#[&StkPtr#]     = lowest case value (init to $7FFFFFFF) (SETA) *
+.*         &High#[&StkPtr#]    = highest case value (init to $80000000)(SETA) *
+.*         &JmpTbl#[&StkPtr#]  = 0==>SUB's; 1==>JumpTbl; 2==>ChkRng=Y  (SETA) *
+.*         &EndSwLbl#[&StkPtr#]= end case label suffix for Leave#      (SETC) *
+.*         &Dreg#[&StkPtr#]    = D-register used by this Switch#       (SETC) *
+.*         &Default#[&StkPtr#] = default label from Default# (<null>)  (SETC) *
+.*                                                                            *
+.* Code:   There are two cases depending on whether a jump table is being     *
+.*         used or not:                                                       *
+.*                                                                            *
+.*         • JumpTbl = <ext> | Yes (<ext> = W)                                *
+.*                                                                            *
+.*           * The following is generated by Switch# (HERE IN THIS MACRO)     *
+.*                    MOVEQ      #0,<Dreg>           ; If <sz> is B           *
+.*                    MOVE.<sz>  <Selector>,<Dreg>                            *
+.*                    BRA.<ext>  %L%xxxx                                      *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Case#                            *
+.*           %C%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Default#                         *
+.*           %D%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by EndS#                            *
+.*           %L%xxxx                                                          *
+.*                  [ CMPI.W     #Low,<Dreg>  ]      ; These 4 lines gened if *
+.*                  [ BLT        %D%xxxx      ]      ; ChkRng=Yes on Switch#  *
+.*                  [ CMPI.W     #High,<Dreg> ]      ; Low/High are the lowest*
+.*                  [ BGT        %D%xxxx      ]      ; and highest Case# tags *
+.*                    ADD.W      <Dreg>,<Dreg>       ; Get jump table entry   *
+.*                    MOVE.W     %T%xxxx-(2*Low)(<Dreg>.W),<Dreg>             *
+.*                    JMP        %T%xxxx(<Dreg>.W)   ; Jump to proper Case#   *
+.*           %T%xxxx                                 ; The jump table         *
+.*                    DCB.W      &High-&Low+1,%D%xxxx-%T%xxxx; Default holes  *
+.*                    ORG        %T%xxxx+2*(<ae>-Low) ; Case# <ae>            *
+.*                    DC.W       %C%xxxx-%T%xxxx                              *
+.*                    - - -                                                   *
+.*                    ORG        %T%xxxx+2*(<ae1>-Low); Case# <ae1>..<ae2>    *
+.*                    DCB.W      <n>,%C%xxxx-%T%xxxx  ; <n> = <ae2>-<ae1>+1   *
+.*                    - - -                                                   *
+.*                    ORG                            ; Reset PC to end of tbl *
+.*           %E%xxxx                                 ; Used by Leave# and as  *
+.*                                                     default if no Default# *
+.*                                                                            *
+.*         • JumpTbl = No                                                     *
+.*                                                                            *
+.*           * The following is generated by Switch# (HERE IN THIS MACRO)     *
+.*                    MOVEQ      #0,<Dreg>           ; If <sz> is B           *
+.*                    MOVE.<sz>  <Selector>,<Dreg>                            *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Case#                            *
+.*           %C%xxxx                                 ; Not on 1st Case#       *
+.*                    -------------------------------; Not last Case# <ae>    *
+.*                    SUB        #<ae>-<ae'>,<Dreg>  ; Case# <ae>,...         *
+.*                    BEQ.S      %T%xxxx                                      *
+.*                    -------------------------------; Last Case# tag range   *
+.*                    SUB        #<ae1>-<ae>,<Dreg>  ; Case# ...,<ae1>..<ae2> *
+.*                    BLT.<ext>  %C%xxx1             ; Next %C%xxxx Case# lbl *
+.*                    SUB        #<ae2>-<ae1>,<Dreg>                          *
+.*                    BGT.<ext>  %C%xxx1                                      *
+.*                    ===============================; Not last Case# tag rng *
+.*                    SUB        #<ae1>-<ae'>,<Dreg> ; Case# <ae1>..<ae2>,... *
+.*                    BLT.S      @x                                           *
+.*                    SUB        #<ae2>-<ae1>,<Dreg>                          *
+.*                    BLE.S      %T%xxxx                                      *
+.*                    -------------------------------; Last Case# <ae>        *
+.*           @x       SUB        #<ae>-<ae2>,<Dreg>  ; Case# ...,<ae>         *
+.*                    BNE.<ext>  %C%xxx1                                      *
+.*           %T%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Default#                         *
+.*           %D%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by EndS#                            *
+.*           %C%xxx1 [EQU         %D%xxxx]           ; EQU if no Default#     *
+.*           %E%xxxx                                 ; Used by Leave#         *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; Switch# label for Leave#
+		GBLC		&Lbl1Stk#[25]		; most recent Case# <ae> value
+		GBLC		&Lbl2Stk#[25]		; next Case# label suffix
+		GBLA		&CaseStkPtr#		; case stack pointer for nested switches
+		GBLA		&FrstCase#[25]		; index of 1st Case# label in &CaseStk#
+		GBLA		&Low#[25]			; lowest case value
+		GBLA		&High#[25]		; highest case value
+		GBLA		&JmpTbl#[25]		; 0==>SUB's; 1==>JumpTbl; 2==>ChkRng=Y
+		GBLC		&EndSwLbl#[25]		; end case label suffix for Leave#
+		GBLC		&Dreg#[25]		; D-register used by this Switch#
+		GBLC		&Default#[25]		; default label from Default#
+.*
+		LCLC		&t1,&t2
+.*
+.* Push new statement status on the stack
+.*
+	IF &StkPtr# = 25 THEN
+	  AERROR 'Too many nested statements'
+	  GOTO .Exit
+	ENDIF
+.*
+	&StkPtr#: SETA &StkPtr#+1		; Update stack ptr
+	&KindStk#[&StkPtr#]: SETA 5		; Kind = 5 for Switch# statements	
+	&Default#[&StkPtr#]: SETC ''		; There is no default label yet
+	&EndSwLbl#[&StkPtr#]: SETC &SysNdx	; Set end of case label suffix
+	IF &Lbl = '' THEN				; Remember label for Leave#
+	  &LblStk#[&StkPtr#]: SETC ''
+	ELSE
+	  &LblStk#[&StkPtr#]: SETC &Lbl
+&Lbl
+	ENDIF
+.*
+.* Generate code to copy <selector> into the D-reg if the selector is not
+.* already the specified D-register.
+.*
+	&t1: SETC &Type(&Selector)		; Check out the selector
+	IF (&t1[1:5] ≠ 'REG D') OR (&t1[5:2] ≠ &UC(&Dreg)) THEN
+	  IF &UC(&Sz) = 'B' THEN
+          MOVEQ     #0,&Dreg
+	  ENDIF
+          MOVE.&Sz  &Selector,&Dreg
+	ENDIF
+	&Dreg#[&StkPtr#]: SETC &Dreg		; Remember the D-reg we are using
+.*
+.* Now we split the processing up according to whether we are going to use a
+.* jump table or not.
+.*  • JumpTbl = Yes  Initialize high/low values and gen branch to EndS# code.
+.*                   Set &FrstCase#[&StkPtr#] to the index of the &CaseStk#
+.*                   (case label stack) entry to hold the first Case# label.
+.*                   &CaseStk# is a stack use to hold a Switch#'s case labels.
+.*                   &FrstCase#[&StkPtr#] points to the 1st label and the stack's
+.*                   stack pointer, &CaseStkPtr#, points to the last label.
+.*  • JumpTbl = No   Not much to do here! All that need be done is to init the
+.*                   previous Case# value to <null> so that Case# knows when it
+.*                   is doing the 1st SUBtract in a set of repeated subtractions.
+.*
+	&t1: SETC &UC(&JmpTbl[1:1])		; See if we are to us a jump table
+	IF &Pos(&t1, 'YWSBL') THEN		; JumpTbl = Y[es] | S | B | W | L
+	  IF &t1 = 'Y' THEN				; If we had JmpTbl = Y[es]...
+	    &t1: SETC 'W'				; ...pretend it was JmpTbl = W
+	  ENDIF
+	  &t2: SETC &UC(&ChkRng[1:1])		; Should a range check be done on selector
+	  IF &t2 = 'Y' THEN				; ChkRng = Y[es]
+	    &JmpTbl#[&StkPtr#]: SETA 2	; Tell EndS# to gen range check code
+	  ELSE						; ChkRng = N[o]
+	    IF &t2 ≠ 'N' THEN
+		 AERROR 'Invalid ChkRng specification -- ChkRng=N assumed'	    
+	    ENDIF
+	    &JmpTbl#[&StkPtr#]: SETA 1	; Tell EndS# we're only doing jump table
+	  ENDIF
+	  &Low#[&StkPtr#]:  SETA $7FFFFFFF	; Init lowest case tag value
+	  &High#[&StkPtr#]: SETA $80000000	; Init highest case tag value
+	  PRINT Push,NoWarn				; Gen branch to EndS# code
+          BRA.&t1   %L%&SysNdx
+	  PRINT Pop
+	  IF &CaseStkPtr# = 250 THEN		; Prepare to set &FrstCase#[&StkPtr#]
+	    AERROR 'Too many "JmpTbl" cases -- max of 250 allowed'
+	  ELSE
+	    &FrstCase#[&StkPtr#]: SETA &CaseStkPtr#+1; 1st Case# label index
+	  ENDIF
+	ELSE							; JumpTbl = N[o]
+	  &JmpTbl#[&StkPtr#]:  SETA 0		; Tell EndS# we're not using a jump table
+	  &Lbl1Stk#[&StkPtr#]: SETC ''	; There is no previous  case yet
+	  &Lbl2Stk#[&StkPtr#]: SETC ''	; And no next Case# label either
+	  IF &t1 ≠ 'N' THEN
+	    AERROR 'Invalid JmpTbl specification -- JmpTbl=N assumed'
+	  ENDIF
+	ENDIF
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'Case# - Switch# case'
+		
+		MACRO
+		Case#.&Ext
+.*
+.******************************************************************************
+.* Case# - Switch# case                                                       *
+.*                                                                            *
+.* Call:   Switch#.<sz> <selector>,Dreg=Dn,JmpTbl={<ext>|Y|N},ChkRng={Y|N}    *
+.*         Case#.<ext> <ae1>[..<ae2>],...                                 *** *
+.*         Default#                                                           *
+.*         EndS#                                                              *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 5            (SETA) *
+.*         &Lbl1Stk#[&StkPtr#] = most recent Case# <ae> value          (SETC) *
+.*         &Lbl2Stk#[&StkPtr#] = next Case# label suffix               (SETC) *
+.*         &CaseStkPtr#        = case stack pointer for nested switches(SETA) *
+.*         &Low#[&StkPtr#]     = lowest case value                     (SETA) *
+.*         &High#[&StkPtr#]    = highest case value                    (SETA) *
+.*         &JmpTbl#[&StkPtr#]  = 0==>SUB's; 1==>JumpTbl; 2==>ChkRng=Y  (SETA) *
+.*         &Dreg#[&StkPtr#]    = D-register used by this Switch#       (SETC) *
+.*                                                                            *
+.* Output: &CaseStk#[&CaseStkPtr#]= Case# label stack (see below)      (SETC) *
+.*         &Lbl1Stk#[&StkPtr#] = most recent Case# <ae> value          (SETC) *
+.*         &Lbl2Stk#[&StkPtr#] = next Case# label suffix               (SETC) *
+.*         &CaseStkPtr#        = case stack pointer for nested switches(SETA) *
+.*         &Low#[&StkPtr#]     = lowest case value                     (SETA) *
+.*         &High#[&StkPtr#]    = highest case value                    (SETA) *
+.*                                                                            *
+.*         Note: &CaseStk#[&CaseStkPtr#] always is the most recent Case# case *
+.*               label used only when a jump table is to be generated.  We    *
+.*               need to save up the labels to generate the table when we     *
+.*               reach the EndS#.  &FrstCase#[&StkPtr#] points to the 1st     *
+.*               case label in the &CaseStk#, while &CaseStkPtr# points to    *
+.*               current (last) case label.  In order to save generating      *
+.*               additional arrays, we keep additional info in the &CaseStk#  *
+.*               entry so that we know the <ae> corresponding to this case,   *
+.*               and also whether the case is a case tag range.  The format   *
+.*               for a &CaseStk#[&CaseStkPtr#] is as follows:                 *
+.*                                                                            *
+.*               &CaseStk#[&CaseStkPtr#]: xxxxNNNN<ae>                        *
+.*                                        1   5   9...                        *
+.*                                                                            *
+.*               where,  xxxx  = the case label suffix for labels %C%xxxx     *
+.*                       NNNN  = number of case tags represented by the label *
+.*                       <ae1> = 1st case tag in the range of NNNN tag values *
+.*                                                                            *
+.* Code:   There are two cases depending on whether a jump table is being     *
+.*         used or not:                                                       *
+.*                                                                            *
+.*         • JumpTbl = <ext> | Yes (<ext> = W)                                *
+.*                                                                            *
+.*           * The following is generated by Switch#                          *
+.*                    MOVEQ      #0,<Dreg>           ; If <sz> is B           *
+.*                    MOVE.<sz>  <Selector>,<Dreg>                            *
+.*                    BRA.<ext>  %L%xxxx                                      *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Case# (HERE IN THIS MACRO)       *
+.*           %C%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Default#                         *
+.*           %D%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by EndS#                            *
+.*           %L%xxxx                                                          *
+.*                  [ CMPI.W     #Low,<Dreg>  ]      ; These 4 lines gened if *
+.*                  [ BLT        %D%xxxx      ]      ; ChkRng=Yes on Switch#  *
+.*                  [ CMPI.W     #High,<Dreg> ]      ; Low/High are the lowest*
+.*                  [ BGT        %D%xxxx      ]      ; and highest Case# tags *
+.*                    ADD.W      <Dreg>,<Dreg>       ; Get jump table entry   *
+.*                    MOVE.W     %T%xxxx-(2*Low)(<Dreg>.W),<Dreg>             *
+.*                    JMP        %T%xxxx(<Dreg>.W)   ; Jump to proper Case#   *
+.*           %T%xxxx                                 ; The jump table         *
+.*                    DCB.W      &High-&Low+1,%D%xxxx-%T%xxxx; Default holes  *
+.*                    ORG        %T%xxxx+2*(<ae>-Low) ; Case# <ae>            *
+.*                    DC.W       %C%xxxx-%T%xxxx                              *
+.*                    - - -                                                   *
+.*                    ORG        %T%xxxx+2*(<ae1>-Low); Case# <ae1>..<ae2>    *
+.*                    DCB.W      <n>,%C%xxxx-%T%xxxx  ; <n> = <ae2>-<ae1>+1   *
+.*                    - - -                                                   *
+.*                    ORG                            ; Reset PC to end of tbl *
+.*           %E%xxxx                                 ; Used by Leave# and as  *
+.*                                                     default if no Default# *
+.*                                                                            *
+.*         • JumpTbl = No                                                     *
+.*                                                                            *
+.*           * The following is generated by Switch#                          *
+.*                    MOVEQ      #0,<Dreg>           ; If <sz> is B           *
+.*                    MOVE.<sz>  <Selector>,<Dreg>                            *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Case# (HERE IN THIS MACRO)       *
+.*           %C%xxxx                                 ; Not on 1st Case#       *
+.*                    -------------------------------; Not last Case# <ae>    *
+.*                    SUB        #<ae>-<ae'>,<Dreg>  ; Case# <ae>,...         *
+.*                    BEQ.S      %T%xxxx                                      *
+.*                    -------------------------------; Last Case# tag range   *
+.*                    SUB        #<ae1>-<ae>,<Dreg>  ; Case# ...,<ae1>..<ae2> *
+.*                    BLT.<ext>  %C%xxx1             ; Next %C%xxxx Case# lbl *
+.*                    SUB        #<ae2>-<ae1>,<Dreg>                          *
+.*                    BGT.<ext>  %C%xxx1                                      *
+.*                    ===============================; Not last Case# tag rng *
+.*                    SUB        #<ae1>-<ae'>,<Dreg> ; Case# <ae1>..<ae2>,... *
+.*                    BLT.S      @x                                           *
+.*                    SUB        #<ae2>-<ae1>,<Dreg>                          *
+.*                    BLE.S      %T%xxxx                                      *
+.*                    -------------------------------; Last Case# <ae>        *
+.*           @x       SUB        #<ae>-<ae2>,<Dreg>  ; Case# ...,<ae>         *
+.*                    BNE.<ext>  %C%xxx1                                      *
+.*           %T%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Default#                         *
+.*           %D%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by EndS#                            *
+.*           %C%xxx1 [EQU         %D%xxxx]           ; EQU if no Default#     *
+.*           %E%xxxx                                 ; Used by Leave#         *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&Lbl1Stk#[25]		; most recent Case# <ae> value
+		GBLC		&Lbl2Stk#[25]		; next Case# label suffix
+		GBLA		&CaseStkPtr#		; case stack pointer for nested switches
+		GBLA		&Low#[25]			; lowest case value
+		GBLA		&High#[25]		; highest case value
+		GBLA		&JmpTbl#[25]		; 0==>SUB's; 1==>JumpTbl; 2==>ChkRng=Y
+		GBLC		&Dreg#[25]		; D-register used by this Switch#
+		GBLC		&CaseStk#[250]		; Case# label stack
+.*
+		LCLC		&Case,&Low,&High,&Dreg,&Prev
+		LCLA		&Case1,&Case2,&t,&N,&i,&j
+.*
+.* Validate that the Case# is nested in an Switch# statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'CASE# not nested in an SWITCH#'
+	  GOTO .Exit
+	ENDIF
+	IF &KindStk#[&StkPtr#] ≠ 5 THEN
+	  AERROR 'CASE# not nested in an SWITCH#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* We will be processing &Nbr(&SysLst) Case# parameters, each of which may be
+.* a case tag range, and all processed differently depending on whether a jump
+.* table is being generated or not.
+.*
+	&N: SETA &Nbr(&SysLst)			; Get number of Case# tag (ranges)
+.*
+.* If a jump table is to be generated, we build a &CaseStk#[&CaseStkPtr#] entry
+.* for each Case# parameter with the info described in the intro comments. Note,
+.* although there is one &CaseStk#[&CaseStkPtr#] for each parameter, the label
+.* suffix part is the same for all the entries.
+.*
+.* If a jump table is not being generated, we determine the case by repeated
+.* subtractions on the case selector register.  To do this we generate a SUB
+.* of the difference between the new case tag and the previous case tag.  Ranges
+.* are similar.  The previous case tag to use is kept in &Lbl1Stk#[&StkPtr#],
+.* while the next Case# label to jump to if the subtract "fails" to produce a
+.* case match is kept in &Lbl2Stk#[&StkPtr#].
+.*
+	IF &JmpTbl#[&StkPtr#] THEN		; Doing a jump table Case# ?
+%C%&SysNdx
+	  WHILE &i < &N DO				; Yes, loop through all Case# parameters
+	    &i: SETA &i+1				; Count the parameter
+	    &Case: SETC &SysLst[&i]		; Pick it up
+	    &j: SETA &Pos('..', &Case)	; See if we have a case tag range
+	    IF &j THEN					; Is it ?
+	      &Case1: SETA &Eval(&Case[1:&j-1])                ; Yes
+		 &Case2: SETA &Eval(&Case[&j+2:&Len(&Case)-&j-1]) ; Get both <ae>'s
+	    ELSE						; If not a case tag range...
+	      &Case1: SETA &Eval(&Case)	; ...both <ae>'s are the same
+		 &Case2: SETA &Case1
+		 &j:     SETA 256			; Fake out to set <ae> in &CaseStk# below
+	    ENDIF
+	    IF &CaseStkPtr# = 250 THEN	; Make sure we can save the label info
+		 AERROR 'Too many "JmpTbl" cases -- max of 250 allowed'
+		 GOTO .Exit
+	    ENDIF
+	    IF &Case1 > &Case2 THEN		; Make sure <ae1> <= <ae2>
+	      AERROR &Concat('Invalid CASE# range: ', &Case)
+		 &t: SETA &Case1			; If <ae1> > <ae2>...
+		 &Case1: SETA &Case2		; Invert the range for the hell of it!
+		 &Case2: SETA &t
+	    ENDIF
+	    &t: SETA &Case2-&Case1+1		; Get nbr of case tags in range (NNNN)
+	    &CaseStkPtr#: SETA &CaseStkPtr#+1; Stack the case info in &CaseStk#
+	    &CaseStk#[&CaseStkPtr#]: SETC &Concat(&SysNdx, &I2S(&t, -4), &Case[1:&j-1])
+	    &Low#[&StkPtr#]: SETA &Min(&Low#[&StkPtr#], &Case1)   ; Get min tag
+	    &High#[&StkPtr#]: SETA &Max(&High#[&StkPtr#], &Case2) ; Get max tag
+	  ENDW
+	ELSE							; Not doing a jump table Case#
+	  &Dreg: SETC &Dreg#[&StkPtr#]	; Prepare to gen subtractions
+	  &Prev: SETC &Lbl1Stk#[&StkPtr#]	; &Prev will hold previous <ae>
+	  IF &Prev ≠ '' THEN			; Gen destination label if not 1st time
+%C%&Lbl2Stk#[&StkPtr#]
+	  ENDIF
+	  &Lbl2Stk#[&StkPtr#]: SETC &SysNdx; Set destination to next Case#
+	  WHILE &i < &N DO				; Gen subtractions for each parameter
+	    &i: SETA &i+1				; Count the parameter
+	    &Case: SETC &SysLst[&i]		; Pick it up
+	    &j: SETA &Pos('..', &Case)	; See if we have a case tag range
+	    IF &j THEN					; Case tag range: Case# <ae1>..<ae2>,...
+	      &Low:  SETC &Case[1:&j-1]	; Yes, extract both <ae>'s as strings
+		 &High: SETC &Case[&j+2:&Len(&Case)-&j-1]
+		 &Case1: SETA &Eval(&Low)	; Get values of <ea>'s to check ordering
+		 &Case2: SETA &Eval(&High)
+		 IF &Case1 > &Case2 THEN		; Make sure <ae1> <= <ae2>
+		   AERROR &Concat('Invalid CASE# range: ', &Case)
+		   &Case: SETC &Low			; If <ae1> > <ae2>...
+		   &Low:  SETC &High		; Invert the range for the hell of it!
+		   &High: SETC &Case		; Note, here we using the strings
+		 ENDIF
+		 IF &i < &N THEN			; Case# <ae1>..<ae2>,...
+.*
+          SUB.W     #&Low&Prev,&Dreg
+          BLT.S     @&i
+          SUB.W     #&High-&Low,&Dreg
+          BLE.S     %T%&SysNdx
+@&i
+.*
+		 ELSE					; Case# ...,<ae1>..<ae2>
+.*
+          SUB.W     #&Low&Prev,&Dreg
+          BLT.&Ext  %C%&SysNdx
+          SUB.W     #&High-&Low,&Dreg
+          BGT.&Ext  %C%&SysNdx
+.*
+		 ENDIF
+	      &Prev: SETC &Concat('-', &High)
+	    ELSE						; Not a case tage range: Case# <ae>,...
+		 IF &i < &N THEN			; Case# <ae>,...
+.*
+          SUB.W     #&Case&Prev,&Dreg
+          BEQ.S     %T%&SysNdx
+.*
+		 ELSE					; Case# ...,<ae>
+.*
+          SUB.W     #&Case&Prev,&Dreg
+          BNE.&Ext  %C%&SysNdx
+.*
+		 ENDIF
+	      &Prev: SETC &Concat('-', &Case)
+	    ENDIF
+	  ENDW
+	  IF &N ≠ 1 THEN				; Gen "true" label if nore than 1 tag
+%T%&SysNdx
+	  ENDIF
+	  &Lbl1Stk#[&StkPtr#]: SETC &Prev	; Update for next Case# call
+	ENDIF
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'Default# - Define default Switch# case'
+
+		MACRO
+		Default#
+.*
+.******************************************************************************
+.* Default# - Define default Switch# case                                     *
+.*                                                                            *
+.* Call:   Switch#.<sz> <selector>,Dreg=Dn,JmpTbl={<ext>|Y|N},ChkRng={Y|N}    *
+.*         Case#.<ext> <ae1>[..<ae2>],...                                     *
+.*         Default#                                                       *** *
+.*         EndS#                                                              *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 5            (SETA) *
+.*                                                                            *
+.* Output: &Default#[&StkPtr#] = default label from Default#           (SETC) *
+.*                                                                            *
+.* Code:   There are two cases depending on whether a jump table is being     *
+.*         used or not:                                                       *
+.*                                                                            *
+.*         • JumpTbl = <ext> | Yes (<ext> = W)                                *
+.*                                                                            *
+.*           * The following is generated by Switch#                          *
+.*                    MOVEQ      #0,<Dreg>           ; If <sz> is B           *
+.*                    MOVE.<sz>  <Selector>,<Dreg>                            *
+.*                    BRA.<ext>  %L%xxxx                                      *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Case#                            *
+.*           %C%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Default# (HERE IN THIS MACRO)    *
+.*           %D%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by EndS#                            *
+.*           %L%xxxx                                                          *
+.*                  [ CMPI.W     #Low,<Dreg>  ]      ; These 4 lines gened if *
+.*                  [ BLT        %D%xxxx      ]      ; ChkRng=Yes on Switch#  *
+.*                  [ CMPI.W     #High,<Dreg> ]      ; Low/High are the lowest*
+.*                  [ BGT        %D%xxxx      ]      ; and highest Case# tags *
+.*                    ADD.W      <Dreg>,<Dreg>       ; Get jump table entry   *
+.*                    MOVE.W     %T%xxxx-(2*Low)(<Dreg>.W),<Dreg>             *
+.*                    JMP        %T%xxxx(<Dreg>.W)   ; Jump to proper Case#   *
+.*           %T%xxxx                                 ; The jump table         *
+.*                    DCB.W      &High-&Low+1,%D%xxxx-%T%xxxx; Default holes  *
+.*                    ORG        %T%xxxx+2*(<ae>-Low) ; Case# <ae>            *
+.*                    DC.W       %C%xxxx-%T%xxxx                              *
+.*                    - - -                                                   *
+.*                    ORG        %T%xxxx+2*(<ae1>-Low); Case# <ae1>..<ae2>    *
+.*                    DCB.W      <n>,%C%xxxx-%T%xxxx  ; <n> = <ae2>-<ae1>+1   *
+.*                    - - -                                                   *
+.*                    ORG                            ; Reset PC to end of tbl *
+.*           %E%xxxx                                 ; Used by Leave# and as  *
+.*                                                     default if no Default# *
+.*                                                                            *
+.*         • JumpTbl = No                                                     *
+.*                                                                            *
+.*           * The following is generated by Switch#                          *
+.*                    MOVEQ      #0,<Dreg>           ; If <sz> is B           *
+.*                    MOVE.<sz>  <Selector>,<Dreg>                            *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Case#                            *
+.*           %C%xxxx                                 ; Not on 1st Case#       *
+.*                    -------------------------------; Not last Case# <ae>    *
+.*                    SUB        #<ae>-<ae'>,<Dreg>  ; Case# <ae>,...         *
+.*                    BEQ.S      %T%xxxx                                      *
+.*                    -------------------------------; Last Case# tag range   *
+.*                    SUB        #<ae1>-<ae>,<Dreg>  ; Case# ...,<ae1>..<ae2> *
+.*                    BLT.<ext>  %C%xxx1             ; Next %C%xxxx Case# lbl *
+.*                    SUB        #<ae2>-<ae1>,<Dreg>                          *
+.*                    BGT.<ext>  %C%xxx1                                      *
+.*                    ===============================; Not last Case# tag rng *
+.*                    SUB        #<ae1>-<ae'>,<Dreg> ; Case# <ae1>..<ae2>,... *
+.*                    BLT.S      @x                                           *
+.*                    SUB        #<ae2>-<ae1>,<Dreg>                          *
+.*                    BLE.S      %T%xxxx                                      *
+.*                    -------------------------------; Last Case# <ae>        *
+.*           @x       SUB        #<ae>-<ae2>,<Dreg>  ; Case# ...,<ae>         *
+.*                    BNE.<ext>  %C%xxx1                                      *
+.*           %T%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Default# (HERE IN THIS MACRO)    *
+.*           %D%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by EndS#                            *
+.*           %C%xxx1 [EQU         %D%xxxx]           ; EQU if no Default#     *
+.*           %E%xxxx                                 ; Used by Leave#         *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&Default#[25]		; default label from Default#
+.*
+.* Validate that the Default# is nested in an Switch# statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'DEFAULT# not nested in an SWITCH#'
+	  GOTO .Exit
+	ENDIF
+	IF &KindStk#[&StkPtr#] ≠ 5 THEN
+	  AERROR 'DEFAULT# not nested in an SWITCH#'
+	  GOTO .Exit
+	ENDIF
+	IF &Default#[&StkPtr#] ≠ '' THEN
+	  AERROR 'DEFAULT# already specified for this SWITCH#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* Define default case label and remember it for use by EndS#
+.*
+%D%&SysNdx
+.*
+	&Default#[&StkPtr#]: SETC &Concat('%D%', &SysNdx)
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'EndS# - End of Switch# statement'
+
+		MACRO
+		EndS#
+.*
+.******************************************************************************
+.* EndS# - End of Switch# statement                                           *
+.*                                                                            *
+.* Call:   Switch#.<sz> <selector>,Dreg=Dn,JmpTbl={<ext>|Y|N},ChkRng={Y|N}    *
+.*         Case#.<ext> <ae1>[..<ae2>],...                                     *
+.*         Default#                                                           *
+.*         EndS#                                                          *** *
+.*                                                                            *
+.* Input:  &StkPtr#            = statment nesting stack pointer        (SETA) *
+.*         &KindStk#[&StkPtr#] = statement nesting kind = 5            (SETA) *
+.*         &Lbl2Stk#[&StkPtr#] = next Case# label suffix               (SETC) *
+.*         &CaseStkPtr#        = case stack pointer for nested switches(SETA) *
+.*         &FrstCase#[&StkPtr#]= index of 1st Case# label in &CaseStk# (SETA) *
+.*         &Low#[&StkPtr#]     = lowest case value                     (SETA) *
+.*         &High#[&StkPtr#]    = highest case value                    (SETA) *
+.*         &JmpTbl#[&StkPtr#]  = 0==>SUB's; 1==>JumpTbl; 2==>ChkRng=Y  (SETA) *
+.*         &EndSwLbl#[&StkPtr#]= end case label suffix for Leave#      (SETC) *
+.*         &Dreg#[&StkPtr#]    = D-register used by this Switch#       (SETC) *
+.*         &Default#[&StkPtr#] = default label from Default#           (SETC) *
+.*         &CaseStk#[&CaseStkPtr#]= Case# label stack (see Case#)      (SETC) *
+.*                                                                            *
+.* Output: &StkPtr#            = statment nesting stack ptr decremented(SETA) *
+.*                                                                            *
+.* Code:   There are two cases depending on whether a jump table is being     *
+.*         used or not:                                                       *
+.*                                                                            *
+.*         • JumpTbl = <ext> | Yes (<ext> = W)                                *
+.*                                                                            *
+.*           * The following is generated by Switch#                          *
+.*                    MOVEQ      #0,<Dreg>           ; If <sz> is B           *
+.*                    MOVE.<sz>  <Selector>,<Dreg>                            *
+.*                    BRA.<ext>  %L%xxxx                                      *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Case#                            *
+.*           %C%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Default#                         *
+.*           %D%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by EndS# (HERE IN THIS MACRO)       *
+.*           %L%xxxx                                                          *
+.*                  [ CMPI.W     #Low,<Dreg>  ]      ; These 4 lines gened if *
+.*                  [ BLT        %D%xxxx      ]      ; ChkRng=Yes on Switch#  *
+.*                  [ CMPI.W     #High,<Dreg> ]      ; Low/High are the lowest*
+.*                  [ BGT        %D%xxxx      ]      ; and highest Case# tags *
+.*                    ADD.W      <Dreg>,<Dreg>       ; Get jump table entry   *
+.*                    MOVE.W     %T%xxxx-(2*Low)(<Dreg>.W),<Dreg>             *
+.*                    JMP        %T%xxxx(<Dreg>.W)   ; Jump to proper Case#   *
+.*           %T%xxxx                                 ; The jump table         *
+.*                    DCB.W      &High-&Low+1,%D%xxxx-%T%xxxx; Default holes  *
+.*                    ORG        %T%xxxx+2*(<ae>-Low) ; Case# <ae>            *
+.*                    DC.W       %C%xxxx-%T%xxxx                              *
+.*                    - - -                                                   *
+.*                    ORG        %T%xxxx+2*(<ae1>-Low); Case# <ae1>..<ae2>    *
+.*                    DCB.W      <n>,%C%xxxx-%T%xxxx  ; <n> = <ae2>-<ae1>+1   *
+.*                    - - -                                                   *
+.*                    ORG                            ; Reset PC to end of tbl *
+.*           %E%xxxx                                 ; Used by Leave# and as  *
+.*                                                     default if no Default# *
+.*                                                                            *
+.*         • JumpTbl = No                                                     *
+.*                                                                            *
+.*           * The following is generated by Switch#                          *
+.*                    MOVEQ      #0,<Dreg>           ; If <sz> is B           *
+.*                    MOVE.<sz>  <Selector>,<Dreg>                            *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Case#                            *
+.*           %C%xxxx                                 ; Not on 1st Case#       *
+.*                    -------------------------------; Not last Case# <ae>    *
+.*                    SUB        #<ae>-<ae'>,<Dreg>  ; Case# <ae>,...         *
+.*                    BEQ.S      %T%xxxx                                      *
+.*                    -------------------------------; Last Case# tag range   *
+.*                    SUB        #<ae1>-<ae>,<Dreg>  ; Case# ...,<ae1>..<ae2> *
+.*                    BLT.<ext>  %C%xxx1             ; Next %C%xxxx Case# lbl *
+.*                    SUB        #<ae2>-<ae1>,<Dreg>                          *
+.*                    BGT.<ext>  %C%xxx1                                      *
+.*                    ===============================; Not last Case# tag rng *
+.*                    SUB        #<ae1>-<ae'>,<Dreg> ; Case# <ae1>..<ae2>,... *
+.*                    BLT.S      @x                                           *
+.*                    SUB        #<ae2>-<ae1>,<Dreg>                          *
+.*                    BLE.S      %T%xxxx                                      *
+.*                    -------------------------------; Last Case# <ae>        *
+.*           @x       SUB        #<ae>-<ae2>,<Dreg>  ; Case# ...,<ae>         *
+.*                    BNE.<ext>  %C%xxx1                                      *
+.*           %T%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by Default#                         *
+.*           %D%xxxx                                                          *
+.*           ---------------------------------------------------------------- *
+.*           * The following is generated by EndS# (HERE IN THIS MACRO)       *
+.*           %C%xxx1 [EQU         %D%xxxx]           ; EQU if no Default#     *
+.*           %E%xxxx                                 ; Used by Leave#         *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&Lbl2Stk#[25]		; next Case# label suffix
+		GBLA		&CaseStkPtr#		; case stack pointer for nested switches
+		GBLA		&FrstCase#[25]		; index of 1st Case# label in &CaseStk#
+		GBLA		&Low#[25]			; lowest case value
+		GBLA		&High#[25]		; highest case value
+		GBLA		&JmpTbl#[25]		; 0==>SUB's; 1==>JumpTbl; 2==>ChkRng=Y
+		GBLC		&EndSwLbl#[25]		; end case label suffix for Leave#
+		GBLC		&Dreg#[25]		; D-register used by this Switch#
+		GBLC		&Default#[25]		; default label from Default#
+		GBLC		&CaseStk#[250]		; Case# label stack
+.*
+		LCLC		&Dreg,&Lbl,&Default,&CaseLbl,&CaseValue
+		LCLA		&Low,&High,&LastCase,&Case,&N,&Case1
+.*
+.* Validate that the EndS# is nested in an Switch# statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'ENDS# not nested in an SWITCH#'
+	  GOTO .Exit
+	ENDIF
+	IF &KindStk#[&StkPtr#] ≠ 5 THEN
+	  AERROR 'ENDS# not nested in an SWITCH#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* The &EndSwLbl#[&StkPtr#] label suffix generated in Switch# is used by the
+.* code generated here (and by Leave#) to define the end of case label, the
+.* jump table case branch-around label from Switch#, and the jump table label
+.* itself. &Default#[&StkPtr#] may still be <null> if no Default# case was
+.* specified.
+.*
+	&Lbl:     SETC &EndSwLbl#[&StkPtr#]; Pick up main Switch# label suffix
+	&Default: SETC &Default#[&StkPtr#]	; Pick up the default case label
+.*
+.* At this point it is time to generate the "bottom" part of the Switch#
+.* statement.  If we are not generating a jump table, life is easy here!  All
+.* the work was done in Case# to determine which case to use.  All that remains
+.* here is to define the last case's "fail" label.  This is equated to the
+.* default label if a Default# was specified.
+.*
+.* If we are to generate a jump table, now is the time to do it.  All Switch#
+.* did was generate a branch to the code we generate here.  Case# calls just
+.* defined case labels, and we saved them up in the &CaseStk# stack, computing
+.* the low and high of all the Case# tag values along the way.  The low and high
+.* values allow us to do the range check if required, and the low is needed
+.* anyhow to offset the jump table origin.  Remember that, as described in
+.* Case#, &FrstCase#[&StkPtr#] points to the first case lable entry in &CaseStk#,
+.* and &CaseStkPtr# points at the last &CaseStk# entry.  Each entry has the
+.* following format: &CaseStk#[&CaseStkPtr#]: xxxxNNNN<ae>                        *
+.* where,  xxxx  = the case label suffix for labels %C%xxxx,
+.*         NNNN  = number of case tags represented by the label,
+.*         <ae1> = 1st case tag in the range of NNNN tag values.
+.*
+	IF &JmpTbl#[&StkPtr#] THEN		; Generating a jump table ?
+	  &Case: SETA &FrstCase#[&StkPtr#]	; Yes, get index to the first label
+	  IF &CaseStkPtr# < &Case THEN	; Make sure we had at least one Case#
+	    AERROR 'No CASE#''s'
+	  ELSE
+	    &Dreg: SETC &Dreg#[&StkPtr#]	; Get the D-reg we will be using
+	    &Low: SETA &Low#[&StkPtr#]	; Get the low value of all case tags
+	    &High: SETA &High#[&StkPtr#]	; Get the high value too
+%L%&Lbl
+	    IF &Default = '' THEN		; Did we have a Default# ?
+	      &Default: SETC &Concat('%E%',&Lbl); No, define it as the Leave# label
+	    ENDIF
+	    IF &JmpTbl#[&StkPtr#] = 2 THEN	; Perform range check...
+	      PRINT Push,NoWarn			; Ignore branch warnings here
+.*
+          CMPI.W    #&Low,&Dreg
+          BLT       &Default
+          CMPI.W    #&High,&Dreg
+          BGT       &Default
+.*
+		 PRINT Pop
+	    ENDIF
+.*								; Gen code to index into table
+          ADD.W     &Dreg,&Dreg
+          MOVE.W    %T%&Lbl-(2*&Low)(&Dreg..W),&Dreg
+          JMP       %T%&Lbl(&Dreg..W)
+%T%&Lbl   
+          DCB.W     &High-&Low+1,&Default-%T%&Lbl
+.*
+	    WHILE &Case <= &CaseStkPtr# DO	; Gen the table!!!
+	      &CaseLbl:   SETC &CaseStk#[&Case]	   ; Extract Case# label info
+		 &Case1:     SETA &S2I(&CaseLbl[5:4]) ; &Case1   = NNNN = nbr of tags
+		 &CaseValue: SETC &CaseLbl[9:255]	   ; &CaseValue = <ae1>
+		 &CaseLbl:   SETC &CaseLbl[1:4]	   ; &CaseLbl = Case# label suffix
+		 IF &Case1 = 1 THEN				   ; If one tag, gen a DC else DCB
+.*
+          ORG       %T%&Lbl+2*(&CaseValue-&Low)
+          DC.W      %C%&CaseLbl-%T%&Lbl     ; &CaseValue
+.*
+		 ELSEIF &SubStr(&Trim(&CaseValue), 1, 1) = '''' THEN
+.*
+          ORG       %T%&Lbl+2*(&CaseValue-&Low)
+          DCB.W     &Case1,%C%&CaseLbl-%T%&Lbl  ; &CaseValue...'&Chr(&Eval(&CaseValue)+&Case1-1)'
+.*
+		 ELSE
+.*
+          ORG       %T%&Lbl+2*(&CaseValue-&Low)
+          DCB.W     &Case1,%C%&CaseLbl-%T%&Lbl  ; &CaseValue...&Chr(&Eval(&CaseValue)+&Case1-1)
+.*
+		 ENDIF
+		 &Case: SETA &Case+1
+	    ENDW
+	    &CaseStkPtr#: SETA &FrstCase#[&StkPtr#]-1 ; Next Case# label
+.*
+          ORG
+.*
+	  ENDIF
+	ELSE							; Not generating a jump table
+	  IF &Lbl2Stk#[&StkPtr#] = '' THEN	; Make sure there was at least one Case#
+	    AERROR 'No CASE#''s'
+	  ELSEIF &Default = '' THEN		; Define final Case# destination label
+%C%&Lbl2Stk#[&StkPtr#]
+	  ELSE						; Equat final Case# dst lbl to default
+%C%&Lbl2Stk#[&StkPtr#] EQU &Default
+	  ENDIF
+	ENDIF
+.*
+.* Define the Leave# label
+.*
+%E%&Lbl
+.*
+.* Pop the EndS# statement off the statement nesting stack
+.*
+	&StkPtr#: SETA &StkPtr#-1
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'Cycle# - Loop iterator statement'
+
+		MACRO
+		Cycle#.&Ext &Who
+.*
+.******************************************************************************
+.* Cycle# - Loop iterator statement                                           *
+.*                                                                            *
+.* Call:   Cycle#.<ext> [<label>] [If[#] <expr>]                              *
+.*                                                                            *
+.* Input:  &StkPtr#  = statment nesting stack pointer                  (SETA) *
+.*         &KindStk# = statement nesting kind stack                    (SETA) *
+.*         &LblStk#  = Repeat#, While#, For#, Switch# label stack      (SETC) *
+.*         &Lbl2Stk# = label suffix stack for Cycle# in REPEAT#, FOR#  (SETC) *
+.*                                                                            *
+.* Output: &Lbl2Stk# = label suffix stack for Cycle# in REPEAT#,FOR#   (SETC) *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; Repeat#, While#, or For# label stack
+		GBLC		&Lbl2Stk#[25]		; lbl suffix stack for Cycle# in REPEAT#,FOR#
+		GBLA		&Cp#				; scan pointer
+		GBLA		&FalseUsed#		; <ea> AND(OR) <ea> with &JumpCond=1(0)
+.*
+		LCLA		&Kind,&StkPtr
+		LCLC		&Lbl,&Cond,&S
+.*
+.* Validate that the Cycle# is nested in a statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'CYCLE# must be nested inside a REPEAT#, WHILE#, or FOR#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* Get the label
+.*
+	IF &Who ≠ '' THEN				; If any thing to scan...
+	  &Cp#: SETA &Lex(&Who, 1)		; Scan 1st token
+	  IF &SysToken ≠ 0 THEN			; We must have an idtentifier ?
+	    AERROR 'CYCLE# label or IF# expected'
+	    GOTO .Exit
+	  ENDIF
+	  &S: SETC &UC(&SysTokStr)		; See if we have explicit label
+	  IF (&S ≠'IF') AND (&S ≠ 'IF#') THEN; If explicit label...
+	    &Lbl: SETC &SysTokStr		; Pick it up
+	    &Cp#: SETA &Lex(&Who, &Cp#)	; Scan for conditional (if any)
+	    IF &Systoken ≠ 30 THEN		; If not end of line, we have a conditional
+	      &S: SETC &UC(&SysTokStr)	; We now must have an "IF" or "IF#"
+	      IF (&S ≠ 'IF') AND (&S ≠ 'IF#') THEN; Is it ?
+		   AERROR 'Invalid CYCLE# conditional'
+		   GOTO .Exit
+	      ENDIF
+	      &Cond: SETC &Trim(&Who[&Cp#:255]); Extract conditional <expr>
+	    ENDIF
+	  ELSE						; If conditional but no explicit label
+	    &Cond: SETC &Trim(&Who[&Cp#:255]); Just extract conditional <expr>
+	  ENDIF
+	ENDIF
+.*
+.* Scan the statement nesting stack from the inside out looking for the "proper"
+.* Repeat#, While#, or For# loop continuation label to branch to. If an explicit
+.* label is specified, it must be one on a Repeat#, While#, or For#.  If no
+.* label is specified we look for the deepest Repeat#, While#, or For#, ignoring
+.* any Switch#'s at the stack.
+.*
+	&StkPtr: SETA &StkPtr#			; Prepare to scan the statement stack
+	IF &Lbl ≠ '' THEN				; Have explicit label to look for ?
+	  WHILE &LblStk#[&StkPtr]≠&Lbl DO	; Look for it
+	    &StkPtr: SETA &StkPtr-1
+	    IF &StkPtr = 0 THEN
+	    	  AERROR &Concat(&Lbl, ' is not a REPEAT#, WHILE#, or FOR# label')
+		  GOTO .Exit
+	    ENDIF
+	  ENDW
+	ELSE							; If no explicit label
+	  WHILE &KindStk#[&StkPtr] = 5 DO	; Look for deepest loop after Switch#'s
+	    &StkPtr: SETA &StkPtr-1
+	    IF &StkPtr = 0 THEN
+	    	  AERROR &Concat(&Lbl, ' is not a REPEAT#, WHILE#, or FOR# label')
+		  GOTO .Exit
+	    ENDIF
+	  ENDW
+	ENDIF
+.*
+.* At this point &StkPtr points to the the statement on the stack we are trying
+.* to cycle.  If we have a Repeat# or For#, then the cycle label is defined in
+.* &Lbl2Stk#[&StkPtr].  These two statements don't need to generate a cycle
+.* label unless a Cycle# explicitly occurs.  So &Lbl2Stk#[&StkPtr] could be 
+.* <null> here, in which, case we define the label.  Until# and For# check to see
+.* if the label must be defined and do it in the appropriate place.  If we are
+.* doing a Cycle# for a While# statement, that statement always needs a top of
+.* the loop label.  It is saved in &LblStk#[&StkPtr], and we just use it here.
+.* Note, that if we have a conditional Cycle#, then &Cond holds the <expr>,
+.* otherwise it is <null>.
+.* 
+	&Kind: SETA &KindStk#[&StkPtr]	; See which stmt we are doing Cycle# for
+	IF (&Kind = 2) OR (&Kind = 4) THEN ; REPEAT#, FOR#
+	  IF &Lbl2Stk#[&StkPtr] = '' THEN
+	    &Lbl2Stk#[&StkPtr]: SETC &SysNdx
+	  ENDIF
+	  IF &Cond = '' THEN
+          BRA.&Ext  %C%&Lbl2Stk#[&StkPtr]
+	  ELSE
+	    Expr#.&Ext &Cond,True=%C%&Lbl2Stk#[&StkPtr],False=%L%&SysNdx,JumpCond=1
+	    IF NOT &FalseUsed# GOTO .Exit	; If we need False label, generate it
+%L%&SysNdx
+	  ENDIF
+	ELSEIF &Kind = 3 THEN			; WHILE#
+	  IF &Cond = '' THEN
+          BRA.&Ext  &LblStk#[&StkPtr]
+	  ELSE
+	    Expr#.&Ext &Cond,True=&LblStk#[&StkPtr],False=%L%&SysNdx,JumpCond=1
+	    IF NOT &FalseUsed# GOTO .Exit	; If we need False label, generate it
+%L%&SysNdx
+	  ENDIF
+	ELSE
+	  AERROR 'CYCLE# must be nested inside a REPEAT#, WHILE#, or FOR#'
+	ENDIF
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'Leave# - Loop and switch terminator'
+
+		MACRO
+		Leave#.&Ext &Who
+.*
+.******************************************************************************
+.* Leave# - Loop and switch terminator                                        *
+.*                                                                            *
+.* Call:   Leave#.<ext> [<label>] [If[#] <expr>]                              *
+.*                                                                            *
+.* Input:  &StkPtr#  = statment nesting stack pointer                  (SETA) *
+.*         &KindStk# = statement nesting kind stack                    (SETA) *
+.*         &LblStk#  = Repeat#, While#, For#, Switch# label stack      (SETC) *
+.*         &Lbl1Stk# = label suffix stack for Leave# in REPEAT#        (SETC) *
+.*         &EndSwLbl#= end case label suffix stack for Leave#          (SETC) *
+.*                                                                            *
+.* Output: &Lbl1Stk# = label suffix stack for Leave# in REPEAT#        (SETC) *
+.******************************************************************************
+.*
+		PRINT	Push,NoMDir,NoMCall
+.*
+		GBLA		&StkPtr#			; statment nesting stack pointer
+		GBLA		&KindStk#[25]		; statement nesting kind stack
+		GBLC		&LblStk#[25]		; Repeat#,While#,For#,Switch# label stack
+		GBLC		&Lbl1Stk#[25]		; lbl suffix for Cycle# in REPEAT#,FOR#
+		GBLC		&EndSwLbl#[25]		; end case label suffix stack for Leave#
+		GBLA		&Cp#				; scan pointer
+		GBLA		&FalseUsed#		; <ea> AND(OR) <ea> with &JumpCond=1(0)
+.*
+		LCLA		&Kind,&StkPtr
+		LCLC		&Lbl,&Cond,&S
+.*
+.* Validate that the Leave# is nested in a statement
+.*
+	IF &StkPtr# = 0 THEN
+	  AERROR 'LEAVE# must be nested inside a REPEAT#, WHILE#, or FOR#'
+	  GOTO .Exit
+	ENDIF
+.*
+.* Get the label
+.*
+	IF &Who ≠ '' THEN				; If any thing to scan...
+	  &Cp#: SETA &Lex(&Who, 1)		; Scan 1st token
+	  IF &SysToken ≠ 0 THEN			; We must have an idtentifier ?
+	    AERROR 'LEAVE# label or IF# expected'
+	    GOTO .Exit
+	  ENDIF
+	  &S: SETC &UC(&SysTokStr)		; See if we have explicit label
+	  IF (&S ≠'IF') AND (&S ≠ 'IF#') THEN; If explicit label...
+	    &Lbl: SETC &SysTokStr		; Pick it up
+	    &Cp#: SETA &Lex(&Who, &Cp#)	; Scan for conditional (if any)
+	    IF &Systoken ≠ 30 THEN		; If not end of line, we have a conditional
+	      &S: SETC &UC(&SysTokStr)	; We now must have an "IF" or "IF#"
+	      IF (&S ≠ 'IF') AND (&S ≠ 'IF#') THEN; Is it ?
+		   AERROR 'Invalid LEAVE# conditional'
+		   GOTO .Exit
+	      ENDIF
+	      &Cond: SETC &Trim(&Who[&Cp#:255]); Extract conditional <expr>
+	    ENDIF
+	  ELSE						; If conditional but no explicit label
+	    &Cond: SETC &Trim(&Who[&Cp#:255]); Just extract conditional <expr>
+	  ENDIF
+	ENDIF
+.*
+.* Scan the statement nesting stack from the inside out looking for the "proper"
+.* Switch# or Repeat#, While#, or For# loop continuation label to branch to. If
+.* an explicit label is specified, it must be one on a Switch#, Repeat#, While#,
+.* or For#.  If no label is specified we use the deepest statement on the stack.
+.*
+	&StkPtr: SETA &StkPtr#			; Prepare to scan the statement stack
+	IF &Lbl ≠ '' THEN				; Have explicit label to look for ?
+	  WHILE &LblStk#[&StkPtr]≠&Lbl DO	; Look for it
+	    &StkPtr: SETA &StkPtr-1
+	    IF &StkPtr = 0 THEN
+	    	  AERROR &Concat(&Lbl, ' is not a REPEAT#, WHILE#, FOR#, or SWITCH# label')
+		  GOTO .Exit
+	    ENDIF
+	  ENDW
+	ENDIF
+.*
+.* At this point &StkPtr points to the the statement on the stack we are trying
+.* to leave. For a Repeat# statement, &Lbl1Stk#[&StkPtr] has the label suffix to
+.* use. For Repeat#, While#, and For#, we use &Lbl1Stk#.  However, for Repeat#,
+.* we generate the label here since Repeat# statements don''t need a Leave# label
+.* unless a Leave# occurs.  Finally, for Switch#, we use the EndSwLbl# stack.
+.* Note, that if we have a conditional Leave#, then &Cond holds the <expr>,
+.* otherwise it is <null>.
+.* 
+	&Kind: SETA &KindStk#[&StkPtr]	; See which stmt we are doing Leave# for
+	IF &Kind = 2 THEN				; REPEAT#
+	  IF &Lbl1Stk#[&StkPtr] = '' THEN
+	    &Lbl1Stk#[&StkPtr]: SETC &SysNdx
+	  ENDIF
+	  IF &Cond = '' THEN
+          BRA.&Ext  %E%&Lbl1Stk#[&StkPtr]
+	  ELSE
+	    Expr#.&Ext &Cond,True=%E%&Lbl1Stk#[&StkPtr],False=%L%&SysNdx,JumpCond=1
+	    IF NOT &FalseUsed# GOTO .Exit	; If we need False label, generate it
+%L%&SysNdx
+	  ENDIF
+	ELSEIF (&Kind=3) OR (&Kind=4) THEN ; WHILE#, FOR#
+	  IF &Cond = '' THEN
+          BRA.&Ext  %E%&Lbl1Stk#[&StkPtr]
+	  ELSE
+	    Expr#.&Ext &Cond,True=%E%&Lbl1Stk#[&StkPtr],False=%L%&SysNdx,JumpCond=1
+	    IF NOT &FalseUsed# GOTO .Exit	; If we need False label, generate it
+%L%&SysNdx
+	  ENDIF
+	ELSEIF &Kind = 5 THEN			; SWITCH#
+	  IF &Cond = '' THEN
+          BRA.&Ext  %E%&EndSwLbl#[&StkPtr]
+	  ELSE
+	    Expr#.&Ext &Cond,True=%E%&EndSwLbl#[&StkPtr],False=%L%&SysNdx,JumpCond=1
+	    IF NOT &FalseUsed# GOTO .Exit	; If we need False label, generate it
+%L%&SysNdx
+	  ENDIF
+	ELSE
+	  AERROR 'LEAVE# must be nested inside a REPEAT#, WHILE#, FOR#, or SWITCH#'
+	ENDIF
+.*
+.Exit	PRINT	Pop
+		ENDM
+
+
+		TITLE	'Dump file "FlowCtlMacs.d"'
+		
+********************************************************************************
+		DUMP		'FlowCtlMacs.d'
+********************************************************************************
+		END

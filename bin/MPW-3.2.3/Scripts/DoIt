@@ -1,0 +1,186 @@
+#
+#	NAME:
+#		DoIt
+#
+#	SYNTAX:
+#		DoIt (CommandFile [-echo] [-dump]) | [-selection]
+#
+#	SYNOPSIS:
+#		DoIt will execute a series of shell commands hilighting each command
+#		as it is executed.  The commands can be in either a file or the
+#		current selection.  If a CommandFile is passed to doit the file is
+#		opened (as the active window) and each line (multiple lines if a "∂"
+#		is present at the end of a line) is executed.  The window
+#		is closed when all the commands have been processed.
+#
+#	OPTIONS:
+#		-e[cho]			Each command is echo to the Worksheet before execution.
+#		-d[ump]			If an error occurs in one of the commands all the
+#							remaining commands (including the command that failed)
+#							are written to the Worksheet and marked by "ToDo".
+#		-s[election]	Execute the commands in the current selection.
+#
+#	SPECIAL NOTE:
+#		The initial overhead is fairly substantial (on a MacPlus) when executing
+#		commands from the current selection.  For a 10 line selection it takes
+#		26 seconds of "pre-processing" before DoIt starts to execute the
+#		first command.  If the same 10 lines were in a file the overhead is
+#		only 11 seconds.  Once execution begins the overhead is small in either
+#		case.
+#
+#		This script does not work correctly on structured commands.
+#
+#	AUTHOR:
+#		Peter J. Potrebic
+#		Copyright Apple Computer, Inc. 1988-1990
+#		All Rights Reserved.
+#
+
+Unset ErrFile
+Unset CommandFile
+Unset EchoCmds
+Unset DumpCmds
+Unset CurSel
+
+Set OldExit {Exit}
+Set Cmd "{0}"
+Set Syntax "(CommandFile [-echo] [-dump]) | [-selection]"
+Set Error 0
+
+For Arg In {"Parameters"}								# Parse the command line
+
+	# Checking for the echo option - echo commands before they are executed
+	If "{Arg}" == "-e" || "{Arg}" == "-echo"
+		If {EchoCmds} == 0
+			Set EchoCmds 1
+		Else
+			Echo "### {Cmd} - option ∂"{Arg}∂" multiply defined"
+			Set Error 1
+		End
+
+	# Checking for the dump option - echo unexecuted commands after error
+	Else If "{Arg}" == "-d" || "{Arg}" == "-dump"
+		If {DumpCmds} == 0
+			Set DumpCmds 1
+		Else
+			Echo "### {Cmd} - option ∂"{Arg}∂" multiply defined"
+			Set Error 1
+		End
+
+	# Checking for the selection option - commands are in the current selection
+	Else If "{Arg}" == "-s" || "{Arg}" == "-selection"
+		If {CurSel} == 0
+			Set CurSel 1
+		Else
+			Echo "### {Cmd} - option ∂"{Arg}∂" multiply defined"
+			Set Error 1
+		End
+
+	# Found unknown option
+	Else If "{Arg}" =~ /-≈/ || "{Arg}" == -
+		Echo "### {Cmd} - ∂"{Arg}∂" is not an option"
+		Set Error 1
+
+	# Found the command file
+	Else
+		If "{CommandFile}" == 0
+			Set CommandFile "{Arg}"
+		Else
+			Echo "### {Cmd} - Too many parameters were specified."
+			Set Error 1
+		End
+	End
+End > Dev:StdErr
+
+If {CurSel} && ({DumpCmds} || {EchoCmds})
+	Echo "### {Cmd} - conflicting options were specified"
+	Set Error 1
+End > Dev:StdErr
+
+If ("{CommandFile}" == "" && !{CurSel})
+	Echo "### {Cmd} - No command file specified"
+	Set Error 1
+End > Dev:StdErr
+
+If {Error}													# Were there any syntax errors?
+	Echo "# Usage - {Cmd} {Syntax}"
+	Exit {Error}											# Exiting (because of syntax error)
+End > Dev:StdErr
+
+Set Exit 0													# we’ll handle the errors, thank you
+
+#
+#				EXECUTING THE CURRENT SELECTION...
+#
+If {CurSel}
+	Set MyActive "{Active}"
+	Mark -y § DoIt "{MyActive}"						# mark all the commands to be executed
+	Set NumCmds `Count -l "{MyActive}".§`
+
+	If {NumCmds} > 0
+		Set NumEscapes `Search -q /≈∂∂∞/ "{MyActive}".§ ≥ Dev:Null | Count -l`
+		Evaluate NumCmds = {NumCmds} - {NumEscapes}
+
+		Find ∆DoIt "{MyActive}"							# Goto top of Commands to be executed
+
+		Set cCmd 0											# Initialize command counter
+		Loop
+			Find /•/ "{MyActive}"						# Find beginning of next line
+			Find §:/[¬∂∂]∞/ "{MyActive}"				# Find from § to end of command
+			Evaluate cCmd += 1							# Increment command counter
+			Execute "{MyActive}".§						# Execute the command
+			Set commandStatus {Status}
+			If {commandStatus} ≠ 0
+				Set Error {commandStatus}					# Capture and save status
+			End
+			Break If (({OldExit} && {Error} ≠ 0) || {cCmd} == {NumCmds})
+		End
+		Find §!1 "{MyActive}"							# go to line after last command
+	End
+	UnMark DoIt "{MyActive}"
+
+#
+#				EXECUTING FROM A FILE...
+#
+Else
+	Set ToDo "#### Still ToDo… ####"
+	Set FullCommandFile "`Files -i -f "{CommandFile}"`"
+	Set WasOpen `Evaluate "∂`Windows∂`" =~ /≈{FullCommandFile}≈/`
+	Open "{CommandFile}"									# Open command file
+	Exit {Status} If {Status} ≠ 0
+	Find • "{CommandFile}"								# Goto top of File to be executed
+	Loop														# Loop through all commands
+		Find /•/ "{CommandFile}"						# Find beginning of next line
+		Break If {Status}	≠ 0							# At end of file
+		Find §:/[¬∂∂]∞/ "{CommandFile}"				# Find from § to end of command
+		Break If {Status}	≠ 0							# At end of file
+		If {EchoCmds}
+			Begin
+				Catenate "{CommandFile}".§				# Write command to Standard Output
+				Echo											# Echo a newline after the command
+			End >> "{Worksheet}".§
+		End
+		Execute "{CommandFile}".§						# Execute the command
+		Set commandStatus {Status}
+		If {commandStatus} ≠ 0
+			Set Error {commandStatus}					# Capture and save status
+		End
+		If {Error} ≠ 0										# There was an error
+			If {DumpCmds}									# List the commands left to execute
+				Begin
+					Echo "{ToDo}"							# List includes the command that failed
+					Find §:∞ "{CommandFile}"			# Select the unexecuted commands
+					Catenate "{CommandFile}".§			# Write commands to Standard Output
+					Echo
+				End >> "{Worksheet}".§
+				Mark -y § ToDo "{Worksheet}"			# Mark the commands that weren't executed
+			End
+			Break If {OldExit}
+		End
+	End
+
+	If ¬{WasOpen}
+		Close "{CommandFile}" ≥ Dev:Null				# Close the command file
+	End
+End
+Exit "{Error}"												# return with proper status

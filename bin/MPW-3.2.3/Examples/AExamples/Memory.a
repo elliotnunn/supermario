@@ -1,0 +1,270 @@
+***************************************************************************
+****	
+****	MEMORY DESK ACCESSORY - A sample DA written in MPW 68000 Assembly
+****	
+****	Copyright Apple Computer, Inc. 1985-1987
+****	All rights reserved.
+****
+***************************************************************************
+
+		STRING	PASCAL
+
+		MAIN
+
+		INCLUDE 'QuickEqu.a'
+		INCLUDE 'ToolEqu.a'
+		INCLUDE 'SysEqu.a'
+		INCLUDE 'Traps.a'
+
+; Desk accessories (drivers) cannot use global variables in the normal sense.
+; Usually, a handle is allocated and stuffed into dCtlStorage and global
+; variables are stored in this handle.  However, in this example, the globals
+; are allocated at the end of the desk accessory's window record.  Since the
+; window record is always nonrelocatable storage, the variables will never move.
+; This record structure below defines the layout of our "global variables."
+
+GlobalVars	RECORD	windowSize				; Put variables at end of window rec
+aString 	DS.B	28						; vol names must be < 28 char
+aNumStr 	DS.B	10						; sufficient for 10 GB of space
+GlobalSize	EQU		*-GlobalVars			; size of my globals
+			ENDR
+
+	WITH GlobalVars
+
+aPBPtr	EQU 	D7
+
+
+**************************** DESK ACCESSORY ENTRY **************************
+		
+DAEntry 										; See Device Manager IM:2
+	DC.B	(1<<dCtlEnable) + (1<<dNeedTime)	; periodic,control flags set
+	DC.B	0									; Lower byte is unused
+	DC.W	5*60								; 5 sec periodic update
+	DC.W	(1<<updatEvt)						; Handle only update events
+	DC.W	0									; No menu for this accessory
+
+	DC.W	DAOpen-DAEntry						; Open routine
+	DC.W	DADone-DAEntry						; Prime - unused
+	DC.W	DACtl-DAEntry						; Control
+	DC.W	DADone-DAEntry						; Status - unused
+	DC.W	DAClose-DAEntry 					; Close
+
+DATitle
+	DC.B	'Free Mem (#Bytes)' 				; DA Name (& Window Title)
+	ALIGN	2									; Word align
+
+
+************************ DESK ACCESSORY OPEN ROUTINE ***********************
+
+DAOpen
+	MOVEM.L 	A1-A4,-(SP) 					; preserve A1-A4
+	MOVE.L		A1,A4							; MOVE DCE pointer to a reg
+
+	SUBQ.L		#4,SP							; FUNCTION = GrafPtr
+	MOVE.L		SP,-(SP)						; push a pointer to it
+	_GetPort									; push it on top of stack
+	TST.L		DCtlWindow(A4)					; do we have a window?
+	BNE.S		StdReturn						; If so, return, Else…
+
+******************************* NEW WINDOW ROUTINE *************************
+	MOVE.L		#windowSize+GlobalSize,D0
+	_NewPtr										; allocate space for record
+	
+	SUBQ		#4,SP							; FUNCTION = windowPtr
+	MOVE.L		A0,-(SP)						; address of storage
+	PEA 		theWindow						; boundsRect
+	PEA 		DATitle 						; title
+	CLR.W		-(SP)							; visible flag FALSE
+	MOVE.W		#noGrowDocProc,-(SP)			; window proc
+	MOVE.L		#-1,-(SP)						; window in front
+	MOVE.B		#1,-(SP)						; goAway box TRUE
+	CLR.L		-(SP)							; refCon is 0
+	_NewWindow
+
+	MOVE.L		(SP)+,A0
+	MOVE.L		A0,DCtlWindow(A4)				; save windowPtr
+	MOVE.W		DCtlRefNum(A4),WindowKind(A0)	; system window
+
+	_MaxMem
+
+StdReturn
+	_SetPort									; old port on stack
+	MOVEM.L 	(SP)+,A1-A4 					; restore regs
+
+
+************************ DESK ACCESSORY DONE ROUTINE ***********************
+
+DADone
+	MOVEQ		#0,D0							; return no error
+	RTS 										; all done, exit
+
+
+************************ DESK ACCESSORY CLOSE ROUTINE **********************
+
+DAClose
+	MOVEM.L 	A1-A4,-(SP) 					; preserve A1-A4
+	MOVE.L		A1,A4							; MOVE DCE ptr to A4
+
+	SUBQ.L		#4,SP							; FUNCTION = GrafPtr
+	MOVE.L		SP,-(SP)						; push a pointer to it
+	_GetPort									; get it, now it's on TOS
+
+	MOVE.L		DCtlWindow(A4),-(SP)			; push the window
+	_DisposWindow								; dispose of the window
+
+	CLR.L		DCtlWindow(A4)					; mark DCE properly
+	BRA.S		StdReturn						; all done with close, exit
+
+
+********************** DESK ACCESSORY CONTROL ROUTINE **********************
+
+DACtl
+	MOVE.L		A4,-(SP)						; preserve reg
+	MOVE.L		A1,A4							; move DCE ptr to A4
+	MOVE.W		CSCode(A0),D0					; get the control opCode
+	SUB.W		#accEvent,D0					; = 64? (event)
+	BEQ.S		DoCtlEvent
+	SUB.W		#1,D0							; = 65? (periodic)
+	BEQ.S		DoPeriodic
+
+CtlDone
+	MOVE.L		A4,A1							; put DCE ptr back in A1
+	MOVE.L		(SP)+,A4						; restore reg
+	MOVEQ		#0,D0							; return no error
+	MOVE.L		JIODone,-(SP)					; jump to IODone
+	RTS
+
+
+************************** EVENT HANDLING ROUTINE **************************
+
+DoCtlEvent
+	MOVE.L		A3,-(SP)						; save reg
+	MOVE.L		CSParam(A0),A3					; get the event pointer
+	MOVE.W		EvtNum(A3),D0					; get the event number
+	SUBQ		#updatEvt,D0					; is it an update?
+	BNE.S		CtlEvtDone						; If not, exit
+
+	MOVE.L		EvtMessage(A3),-(SP)			; push windowPtr
+	_BeginUpdate								; begin the update operation
+	
+	MOVE.L		EvtMessage(A3),-(SP)			; push windowPtr again
+	_SetPort
+	BSR.S		DrawWindow						; draw our items
+		
+	MOVE.L		EvtMessage(A3),-(SP)			; one more time
+	_EndUpdate									; end of update
+
+CtlEvtDone
+	MOVE.L		(SP)+,A3						; restore reg
+	BRA.S		CtlDone 						; exit
+
+
+**************************** PERIODIC ROUTINE *****************************
+
+DoPeriodic
+	MOVE.L		DCtlWindow(A4),-(SP)			; set the port
+	_SetPort
+
+	BSR.S		DrawWindow						; draw our window every 5s
+	BRA.S		CtlDone
+
+
+****************************** FONT METRICS *******************************
+
+DrawWindow
+	MOVE.W		#SrcCopy,-(SP)					; source mode
+	_TextMode
+	MOVE.W		#Monaco,-(SP)					; Monaco
+	_TextFont
+	MOVE.W		#9,-(SP)						; 9 point
+	_TextSize
+	MOVE.W		#1,-(SP)						; bold
+	_TextFace
+
+
+********************** WRITE APPLICATION HEAP FREEMEM *********************
+
+	MOVE.W		#6,-(SP)
+	MOVE.W		#10,-(SP)
+	_MoveTo
+	PEA 		#'AppHeap: '
+	_DrawString
+	_FreeMem									; free memory -> D0
+	JSR 		PrintNum						; draw our free mem
+
+************************* WRITE SYSTEM HEAP FREEMEM ***********************
+
+	PEA 		#'  SysHeap: '
+	_DrawString
+	_FreeMem SYS								; free memory -> D0
+	JSR 		PrintNum						; draw our free sys mem
+
+***************************** WRITELN VOL INFO ****************************
+
+	PEA 		#'  Disk: '
+	_DrawString
+
+	MOVE.L		#ioHVQElSize,D0 				; size of HFS ParamBlock
+	_NewPtr CLEAR								; NewPtr -> A0
+	BNE.S		Exit							; IF Error THEN Exit
+	MOVE.L		A0,aPBPtr						; save PBPtr in D7
+	MOVE.L		DCtlWindow(A4),A1				; get window rec pointer
+	LEA 		aString(A1),A1					; address of string buffer
+	MOVE.L		A1,ioVNPtr(A0)					; ioVNPtr = Volume Name
+	_HGetVInfo									; _GetVolInfo	info -> A0^
+
+	MOVE.L		aPBPtr,A0
+	MOVE.L		ioVAlBlkSiz(A0),D1				; block size in D1
+	MOVE.W		ioVFrBlk(A0),D2 				; free blocks in D2
+	MOVE.W		D1,D0							; 32 bit * 16 bit multiply
+	MULU.W		D2,D0							; right half of size
+	SWAP		D1
+	MOVE.W		D1,D3
+	MULU.W		D2,D3							; left half of size
+	SWAP		D3
+	ADD.L		D3,D0							; total bytes free on vol
+	JSR 		PrintNum						; write # bytes free
+
+	PEA 		#' free on '
+	_DrawString
+	MOVE.W		#4,-(SP)						; underlined
+	_TextFace
+	MOVE.L		aPBPtr,A0
+	MOVE.L		ioVNPtr(A0),-(SP)				; offset for volName
+	_DrawString
+
+	MOVE.L		aPBPtr,A0						; free the memory
+	_DisposPtr
+		
+Exit	
+	RTS
+
+***************************** SUBROUTINES ****************************
+
+PrintNum
+
+	; Binary integer to be drawn at CurPenPos in D0 on entry
+	; number drawn in plain text, bolding restored afterwords
+	
+	MOVE.L		D0,D6							; for safe keeping
+	CLR.W		-(SP)							; plain text
+	_TextFace
+	MOVE.L		D6,D0							; and back again
+	MOVE.L		DCtlWindow(A4),A0				; get window rec pointer
+	LEA 		aNumStr(A0),A0					; get buffer address
+	CLR.W		-(SP)							; selector for NumToString
+	_Pack7										; Binary-Decimal Package
+	MOVE.L		A0,-(SP)						; push the pointer to the str
+	_DrawString
+	MOVE.W		#1,-(SP)						; bold text restored
+	_TextFace
+	RTS
+	
+	
+******************************* DATA AREA **********************************
+
+theWindow	DC.W	322,10,338,500			; window top,left,bottom,right
+
+	ENDWITH
+	END
+
