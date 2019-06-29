@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 
 import argparse
-from os import path, makedirs, walk, listdir, remove
+from os import path, makedirs, walk, listdir, remove, stat, chmod
 from shutil import copy, rmtree
 from subprocess import run
+from shlex import quote
+
+from folder import folder
 
 
-def folder(default_search, user_input):
-    if path.sep in user_input:
-        return user_input
-    else:
-        the_path = path.dirname(path.dirname(path.abspath(__file__)))
-        the_path = path.join(the_path, default_search, user_input)
-        return the_path
+def make_executable(path): # thanks to Jonathon Reinhart on SO
+    mode = stat(path).st_mode
+    mode |= (mode & 0o444) >> 2    # copy R bits to X
+    chmod(path, mode)
+
+def relpath(dest, src):
+    return path.relpath(path.abspath(dest), path.abspath(src))
+
+def path_to_script(script_name, from_worktree):
+    script_path = path.join(path.dirname(__file__), script_name)
+    return relpath(script_path, from_worktree)
 
 
 parser = argparse.ArgumentParser(description='''
@@ -45,8 +52,18 @@ makedirs(args.worktree)
 with open(path.join(args.worktree, '.gitignore'), 'a') as f:
     f.write('.*\n*.dmg\nBuild*/\n')
 
+with open(path.join(args.worktree, '.build'), 'w') as f:
+    print('#!/bin/sh', file=f)
+    print('exec ' + quote(path_to_script('build', args.worktree)) + ' . "$@"', file=f)
+    make_executable(f.name)
+
+with open(path.join(args.worktree, '.flatten'), 'w') as f:
+    print('#!/bin/sh', file=f)
+    print('exec ' + quote(path_to_script('flatten', args.worktree)) + ' . ' + relpath(args.patchset, args.worktree) + ' "$@"', file=f)
+    make_executable(f.name)
+
 git('init')
-git('add', '-f', '.gitignore')
+git('add', '-f', '.gitignore', '.build', '.flatten')
 git('commit', '-m', 'Useful non-source things')
 
 for walk_base, walk_dirs, walk_files in walk(args.base):
