@@ -3157,6 +3157,70 @@ diff --git a/Internal/C/MFPrivate.h b/Internal/C/MFPrivate.h
  /*************************************************************************
   *						Application Menu.
   *************************************************************************/
+diff --git a/Internal/C/NameRegistryPriv.h b/Internal/C/NameRegistryPriv.h
+new file mode 100644
+--- /dev/null
++++ b/Internal/C/NameRegistryPriv.h
+@@ -0,0 +1,54 @@
++#ifndef __NAMEREGISTRYPRIV__
++#define __NAMEREGISTRYPRIV__
++
++#ifndef __MACTYPES__
++#include <MacTypes.h>
++#endif
++
++#ifndef __NAMEREGISTRY__
++#include <NameRegistry.h>
++#endif
++
++
++/* Private trap selectors gleaned from NameRegistryTraps PEF */
++
++EXTERN_API_C( OSStatus )
++RegistryPropertyGetPtr(
++  const RegEntryID *       entryID,
++  const RegPropertyName *  propertyName,
++  Ptr *                    propertyPtr,
++  RegPropertyValueSize *   propertySize)                      TWOWORDINLINE(0x70FA, 0xABE9);
++
++/* ??? */
++EXTERN_API_C( OSStatus )
++RegistryEntryToOFPathSize(
++  void)                                                       TWOWORDINLINE(0x70FB, 0xABE9);
++
++/* ??? */
++EXTERN_API_C( OSStatus )
++RegistryCStrEntryToOFPath(
++  void)                                                       TWOWORDINLINE(0x70FC, 0xABE9);
++
++/* Rough guess */
++EXTERN_API_C( OSStatus )
++RegistryDeviceSearch(
++  RegEntryIter *           cookie,
++  RegEntryIterationOp      relationship,
++  RegEntryID *             foundEntry,
++  Boolean *                done,
++  const RegPropertyName *  propertyName,
++  const void *             propertyValue,
++  RegPropertyValueSize     propertySize)                      TWOWORDINLINE(0x70FD, 0xABE9);
++
++EXTERN_API_C( OSStatus )
++RegistryDeviceNodeIDToEntryID(
++  long                     nodeID,
++  RegEntryID *             entryID)                           TWOWORDINLINE(0x70FE, 0xABE9);
++
++EXTERN_API_C( OSStatus )
++RegistryEntryIDToDeviceNodeID(
++  RegEntryID *             entryID,
++  long *                   nodeID)                            TWOWORDINLINE(0x70FF, 0xABE9);
++
++
++#endif
+\ No newline at end of file
+diff --git a/Internal/C/CodeFragments.h.idump b/Internal/C/NameRegistryPriv.h.idump
+similarity index 100%
+rename from Internal/C/CodeFragments.h.idump
+rename to Internal/C/NameRegistryPriv.h.idump
 diff --git a/Internal/C/ScriptPriv.h b/Internal/C/ScriptPriv.h
 --- a/Internal/C/ScriptPriv.h
 +++ b/Internal/C/ScriptPriv.h
@@ -21659,9 +21723,9 @@ new file mode 100644
 +
 +
 +		END
-diff --git a/Internal/C/CodeFragments.h.idump b/OS/MPDispatchStub.a.idump
+diff --git a/Internal/C/CodeFragmentsTrap.h.idump b/OS/MPDispatchStub.a.idump
 similarity index 100%
-rename from Internal/C/CodeFragments.h.idump
+rename from Internal/C/CodeFragmentsTrap.h.idump
 rename to OS/MPDispatchStub.a.idump
 diff --git a/OS/OS.make b/OS/OS.make
 --- a/OS/OS.make
@@ -22749,6 +22813,141 @@ diff --git a/OS/StartMgr/Gibbly.r b/OS/StartMgr/Gibbly.r
  	};
  };
  
+diff --git a/OS/StartMgr/OpenFirmware.c b/OS/StartMgr/OpenFirmware.c
+new file mode 100644
+--- /dev/null
++++ b/OS/StartMgr/OpenFirmware.c
+@@ -0,0 +1,123 @@
++#include <CodeFragments.h>
++#include <NameRegistry.h>
++#include <NameRegistryPriv.h>
++
++
++struct mystruct {
++	long l1;
++	char *l2;
++	RegPropertyValueSize l3;
++	short sh;
++	char c1; char c2;
++};
++
++pascal short CFM_4(struct mystruct *, long, char *, char) = {0x3F3C, 0xFFFC, 0xAA5A};
++
++void
++INTERC_11E0_C2PSTRCPY(char *dest, char *src)
++{
++	unsigned long len = 0;
++	char *osrc = src;
++
++	/* Count len to max 255 */
++	while (*src++) ++len; if (len > 255) len = 255;
++
++	/* Place length byte */
++	*dest++ = len++;
++
++	/* Copy string */
++	while (--len) *dest++ = *osrc++;
++}
++
++OSErr
++INTERC_1230(char *arg1, RegPropertyValueSize arg2, char *cLibName, long arg4) /* PrepareByName */
++{
++	struct mystruct mystruct;
++	CFragConnectionID connid; Ptr code;
++	Str255 pLibName, pErrMessage;
++	OSErr err;
++
++	strcpy(pLibName, cLibName);
++	c2pstr(pLibName);
++
++	mystruct.l1 = 0;
++	mystruct.l2 = arg1;
++	mystruct.l3 = arg2;
++	mystruct.sh = 0;
++	mystruct.c1 = 0;
++	mystruct.c2 = 0;
++
++	if (!(err = CFM_4(&mystruct, 0, pLibName, 0)) && (char)arg4) {
++		pErrMessage[0] = 0;
++		err = GetSharedLibrary(pLibName, kPowerPCCFragArch, kReferenceCFrag, &connid, &code, pErrMessage);
++	}
++
++	return err;
++}
++
++OSErr
++INTERC_12E0_CODEPREPARE(char *codePrepareName, Boolean passthruArg) /* PrepareInOrder */
++{
++	RegPropertyIter cookie;
++	RegEntryID theNode;
++	char curPropName[32];
++	RegPropertyValueSize propNameLen, prepOrderLen;
++	char *propName, *prepOrder;
++	Boolean doneflag;
++	OSErr err;
++	char *fragToPrep;
++	Boolean alreadyPrepared;
++
++	RegistryEntryIDInit(&theNode);
++	err = RegistryCStrEntryLookup(NULL, codePrepareName, &theNode);
++
++	prepOrder = 0; prepOrderLen = 0;
++
++	if (!err && passthruArg) {
++		err = RegistryPropertyGetPtr(&theNode, "AAPL,prepare_order", &prepOrder, &prepOrderLen);
++		if (err) {
++			err = 0;
++		} else {
++			for (fragToPrep = prepOrder; fragToPrep < prepOrder + prepOrderLen; fragToPrep += strlen(fragToPrep) + 1) {
++				err = RegistryPropertyGetPtr(&theNode, fragToPrep, &propName, &propNameLen);
++				if (!err) {
++					err = INTERC_1230(propName, propNameLen, fragToPrep, passthruArg);
++				}
++			}
++			err = 0;
++		}
++	}
++
++	if (!err) {
++		doneflag = 0;
++		err = RegistryPropertyIterateCreate(&theNode, &cookie);
++		if (!err) {
++			while (!doneflag && !err) {
++				err = RegistryPropertyIterate(&cookie, curPropName, &doneflag);
++				if (!doneflag && !err && strcmp(curPropName, "name") && strcmp(curPropName, "AAPL,prepare_order")) {
++					alreadyPrepared = 0;
++					fragToPrep = prepOrder;
++
++					if (fragToPrep) while (!alreadyPrepared && fragToPrep < prepOrder + prepOrderLen) {
++						alreadyPrepared = !strcmp(curPropName, fragToPrep);
++						fragToPrep += strlen(fragToPrep) + 1;
++					}
++
++					if (!alreadyPrepared) {
++						err = RegistryPropertyGetPtr(&theNode, curPropName, &propName, &propNameLen);
++						if (!err) {
++							err = INTERC_1230(propName, propNameLen, curPropName, passthruArg);
++						}
++					}
++				}
++			}
++			RegistryPropertyIterateDispose(&cookie);
++		}
++	}
++
++	RegistryEntryIDDispose(&theNode);
++
++	return err;
++}
++
++/* This file is complete... the remaining kilobytes to 0x2BC0 are filled by Amphibian DNA */
+diff --git a/OS/StartMgr/OpenFirmware.c.idump b/OS/StartMgr/OpenFirmware.c.idump
+new file mode 100644
+--- /dev/null
++++ b/OS/StartMgr/OpenFirmware.c.idump
+@@ -0,0 +1 @@
++TEXTMPS 
+\ No newline at end of file
 diff --git a/OS/StartMgr/SizeMem.a b/OS/StartMgr/SizeMem.a
 --- a/OS/StartMgr/SizeMem.a
 +++ b/OS/StartMgr/SizeMem.a
@@ -28187,11 +28386,12 @@ diff --git a/OS/StartMgr/StartInit.a b/OS/StartMgr/StartInit.a
 diff --git a/OS/StartMgr/StartMgr.make b/OS/StartMgr/StartMgr.make
 --- a/OS/StartMgr/StartMgr.make
 +++ b/OS/StartMgr/StartMgr.make
-@@ -27,18 +27,18 @@
+@@ -27,18 +27,19 @@
  
  StartMgrObjs			=	"{ObjDir}StartTop.a.o"								∂
  							"{ObjDir}StartInit.a.o"								∂
 +							"{ObjDir}OpenFirmware.c.o"							∂
++							"{ObjDir}OpenFirmwareX.c.o"							∂
 +							"{ObjDir}PPCDebuggerNub.c.o"						∂
 +							"{ObjDir}PPCDebuggerNub.a.o"						∂
  							"{ObjDir}StartSearch.a.o"							∂
@@ -28211,6 +28411,17 @@ diff --git a/OS/StartMgr/StartMgr.make b/OS/StartMgr/StartMgr.make
  
  
  Boot3Objects			=	"{ObjDir}Boot3.a.o"									∂
+@@ -59,6 +60,10 @@ Boot3Objects			=	"{ObjDir}Boot3.a.o"									∂
+ 	Lib {StdLibOpts}	{StartTestObjs} -o "{Targ}"
+ 
+ 
++"{ObjDir}OpenFirmware.c.o"	ƒ	"{StartDir}OpenFirmware.c"
++	C {StdCOpts} -o "{Targ}" "{StartDir}OpenFirmware.c"
++
++
+ "{ObjDir}StartAlert.a.o"	ƒ	"{StartDir}StartAlert.a"
+ 	Asm {StdAOpts} -o "{Targ}" "{StartDir}StartAlert.a"
+ 
 diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
 --- a/OS/StartMgr/StartSearch.a
 +++ b/OS/StartMgr/StartSearch.a
@@ -44221,10 +44432,13 @@ new file mode 100644
 +				move	#paramErr,D0
 +				move	D0,QDErr
 +				jmp		(A0)
-diff --git a/Internal/C/CodeFragmentsTrap.h.idump b/QuickDraw/QDExtensions2.a.idump
-similarity index 100%
-rename from Internal/C/CodeFragmentsTrap.h.idump
-rename to QuickDraw/QDExtensions2.a.idump
+diff --git a/QuickDraw/QDExtensions2.a.idump b/QuickDraw/QDExtensions2.a.idump
+new file mode 100644
+--- /dev/null
++++ b/QuickDraw/QDExtensions2.a.idump
+@@ -0,0 +1 @@
++TEXTMPS 
+\ No newline at end of file
 diff --git a/QuickDraw/QDUtil.a b/QuickDraw/QDUtil.a
 --- a/QuickDraw/QDUtil.a
 +++ b/QuickDraw/QDUtil.a
