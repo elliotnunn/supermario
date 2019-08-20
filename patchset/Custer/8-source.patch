@@ -28929,145 +28929,114 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
  MaxTimeOut		EQU		31						; maximum number of seconds allowed as timeout
  PollDelay		EQU		15						; delay (in ticks) between poll drive SCSILoads
  
-@@ -211,7 +211,7 @@ Locals	RECORD	{link},INCR
- frameSize	equ	*
- 
- flashTime		ds.l	1		; time to flash icon
--startTicks		ds.l	1		; Ticks when we first get into FindStartupDevice
-+startTicks		ds.l	1		; Ticks when we first get into FindStartupDevice ; 8 lower
- 
- ckPartition		ds.b	1		; flag = we need to check to see if the partition #s match
- noDefaultDrive	ds.b	1		; flag = we have no default drive
-@@ -220,7 +220,7 @@ forcedBoot		ds.b	1		; flag = boot has been forced to a non-default device
- 
- csPB			ds		CntrlParam		; pb for Control and Status
- 
--pmCommandPB		ds		pmCommandRec	; pb for sending SleepReq to power manager
-+pmCommandPB		ds		pmCommandRec	; pb for sending SleepReq to power manager ; 8 lower
- 
- startPRAM		;(ds.l 1)
- lsdExtDevID		ds.b	1    	; slot device ExtDevID (for SCSI target/lun)
-@@ -229,6 +229,8 @@ lsdRefNum		;(ds.w 1)		; SCSI device refnum
+@@ -229,6 +229,11 @@ lsdRefNum		;(ds.w 1)		; SCSI device refnum
  lsdSlotNum		ds.b	1    	; slot number
  lsdSRsrcID		ds.b	1    	; sRsrc ID (for native SCSI, bus #; for plug-in, sRsrc ID)
  
-+				ds.b	8
++myword8			ds.w	1
++mybyte			ds.b	1
++startMgrBootDev	ds.w	1
++myword2			ds.w	1
 +
  link			ds.l	1		; old A4 = (A4)
  
  		ENDR
-@@ -245,6 +247,7 @@ A4_locals		EQU		A4
- A5_bootGlobs	EQU		A5
- A6_bootBlocks	EQU		A6
+@@ -269,6 +274,9 @@ FindStartupDevice	PROC	EXPORT
+ 			EXPORT	EraseMyIcon
  
-+
- ;________________________________________________________________________________________
- ;
- ; Routine:	FindStartupDevice
-@@ -276,11 +279,19 @@ FindStartupDevice	PROC	EXPORT
+ 			IMPORT	GetDefaultStartup			; StartSearch.a
++			IMPORT	ATAGiveTime
++			IMPORT	INTERC_2750
++			IMPORT	PMIDLERELATEDDRIVERCALL
+ 		
+ 			link	A4, #frameSize
+ 			
+@@ -276,11 +284,15 @@ FindStartupDevice	PROC	EXPORT
  
  			BSR		LoadSlotDrivers				; Default is a slot device, execute boot code
  												; When booting a Mac OS, execution will continue here
-+			MOVEQ.L	#0, D7
++			CLR.L	D7							; (CDG5) "default drive timeout" flag
  			MOVE.L	Ticks, startTicks(A4)		; Init the time we got here	in case we have PowerMgr
  
  			BSR		LoadSCSIDrivers				; Load all the drivers we can
  			BSR		WaitForPollDrive			; Wait until the boot drive has warmed up
 -			BRA.S	@FirstEntry					; First time through: keep original goal
-+
-+			CLR.B	-6(A4)
-+			
-+			BSR		LoadATADrivers
-+
-+			BSR		OpenLANDiskDriver
-+
++			CLR.B	mybyte(A4)
++			BSR		_LoadATADrivers
++			BSR		LoadLANDiskDriver
 +			BRA		@FirstEntry					; First time through: keep original goal
  
  @NextPass
  		IF hasPwrControls THEN					;													<SM7>
-@@ -294,7 +305,7 @@ FindStartupDevice	PROC	EXPORT
+@@ -294,7 +306,7 @@ FindStartupDevice	PROC	EXPORT
  			BLS.S	@nosleep
  @sleepnow
  			LEA		pmCommandPB(A4), A0			; A0 gets pointer to parameter block
 -			MOVE.W	#SleepReq, pmCommand(A0)	; PMGR command, Go to sleep
-+			MOVE.W	#PmgrPWRoff, pmCommand(A0)
++			MOVE.W	#PmgrPWRoff, pmCommand(A0)	; (CDG5) die instead of sleep
  			MOVE.W	#4, pmLength(A0)			; Four bytes of data to send
  			LEA		pmData(A0), A1
  			MOVE.L	A1, pmSBuffer(A0)			; pointer to send buffer
-@@ -307,16 +318,48 @@ FindStartupDevice	PROC	EXPORT
+@@ -307,16 +319,37 @@ FindStartupDevice	PROC	EXPORT
  			ENDWITH
  		ENDIF									;													<SM7>
  
 -			CMPI.W	#FloppyRefNum,D4			; do we have floppy set as the default?
 -			BEQ.S	@NoChange					; -> yes, keep looking for floppies
--			LEA		IsItAnything,A3				; no, from now on, any device will do
--@NoChange
++; (CDG5) Apply the PRAM "default drive timeout" to all disks, not just SCSI
++			MOVE.L	D7,D7						; D7 set because timeout already elapsed?
++			BNE.S	@TimedOut
++			_GetTimeOut							; Get the PRAM "default drive timeout"
++			BNE.S	@UsePramTO					; -> use the returned parameter
++			MOVEQ	#DefaultTimeOut,D0			; -> use default instead
++@UsePramTO	MULU	#60,D0
++			ADD.L	startTicks(A4),D0
++			CMP.L	Ticks,D0
++			BLO.S	@TimedOut					; If time has elapsed, never check again.
 +
-+			Move.L	D7, D7
-+			BNE.B	@twenty_six
-+			SubA.L	A0, A0
-+			_InternalWait
-+			BNE.B	@skip_blah
-+			MoveQ.L	#$19, D0
-+@skip_blah
-+			MulU	#$3C, D0
-+			Add.L	-$56(A4), D0
-+			Cmp.L	(Ticks), D0
-+			BCS.B	@twenty_six
-+			MoveQ.L	#$F, D0
-+			Add.L	(Ticks), D0
-+@before_cmp
-+			Cmp.L	(Ticks), D0
-+			BCC.B	@before_cmp
-+			Bra.B	@after_less_stuff
-+@twenty_six
-+			MoveQ.L	#$1, D7
-+			Lea.L	IsItAnything, A3
-+@after_less_stuff
-+			IMPORT	ATAGiveTime
-+			Bsr.L	ATAGiveTime
-+@after_stuff
++			MOVEQ.L	#PollDelay,D0					; Wait out PollDelay for this cycle.
++			ADD.L	Ticks,D0
++@PollDlyLup	CMP.L	Ticks,D0
++			BHS.S	@PollDlyLup
++			BRA.S	@NoChange						; Preserve A3 until default drive has timed out
 +
-+
++@TimedOut	MOVE.L	#1,D7						; Not waiting for default device any more...
+ 			LEA		IsItAnything,A3				; no, from now on, any device will do
+ @NoChange
++			BSR.L	ATAGiveTime					; give accRun time to .ATALoad (CDG5)
  			BSR		LoadSCSIDrivers				; load more drivers if we can
-+			BSR		OpenLANDiskDriver
++			BSR		LoadLANDiskDriver
  
  @TryAgain
  			BSR		VisualUpdate				; Update dynamic user feedback
- 
-+			IMPORT	PMIDLERELATEDDRIVERCALL
 +			BSR.L	PMIDLERELATEDDRIVERCALL
-+			IMPORT	INTERC_2750
-+			BSR.L	INTERC_2750
-+
-+
++			BSR.L	INTERC_2750					; (CDG5) related to FireWire boot
+ 
  @FirstEntry
-+			BSR		DaFuq
-+
++			BSR		PreWalkAllDrives			; (CDG5) Not sure what side effect this has
  			BSR		FindNextCandidate			; Find the next potential Startup Device.
  			BEQ.S	@NextPass					; Branch if we're at the end of the queue.
  
-@@ -381,6 +424,7 @@ EmbarkOnSearch
+@@ -381,6 +414,7 @@ EmbarkOnSearch
  			SUBQ.W	#4,SP						; make room for parameters on the stack
  			MOVE.L	SP,A0						;  and point to them
  			_GetDefaultStartup					; get info about the default device
-+			CLR		-4(A4)
++			CLR.W	startMgrBootDev(A4)			; (CDG5) we will call StartLib::GetStartupDevice
  			MOVE.L	(SP), startPRAM(A4)			; store for later partition check
  			MOVE.W	(SP)+,D3					; D3.L = <xx><xx><device-ID><partition>
  			MOVE.W	(SP)+,D4					; get the driver's refNum/<slot#><sRsrc#>
-@@ -413,19 +457,8 @@ EmbarkOnSearch
+@@ -413,19 +447,7 @@ EmbarkOnSearch
  
  			SUBA.L	A2,A2						; initialize the drive queue pointer
  
 -			LEA		IsItFloppyOrDefault,A3		; ASSUME match default or floppy devices.
-+			LEA		IsItDefault,A3
- 
+-
 -	CASE	OBJ
 -			IMPORT	Ck4OnlyLoadFromDefault		; :SCSIMgr4pt3:BootItt.a
 -			BSR.L	Ck4OnlyLoadFromDefault		; supposed to limit our search to default device?
 -	CASE	OFF
 -			BEQ.S	@ck4NoDefault
--			LEA		IsItDefault, A3				; match only default device
+ 			LEA		IsItDefault, A3				; match only default device
 -@ck4NoDefault			
 -			TST.B	noDefaultDrive(A4)			; is there a default drive?	<MC2>
 -			BEQ.S	@HaveDefault				; -> yes
@@ -29076,7 +29045,7 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
  			MOVE.L	Ticks,flashTime(A4)			; let flash time expire immediately.
  			CLR.W	D6							; clear visual state information.
  
-@@ -453,9 +486,8 @@ EmbarkOnSearch
+@@ -453,9 +475,8 @@ EmbarkOnSearch
  			move.w	D4, D1					; get refNum (maybe)
  			not.w	D1						; convert refNum to unit number
  			sub.w	#$20, D1				; convert to SCSI ID
@@ -29087,18 +29056,19 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
  
  			move.b	SCSIPoll, D0
  			and.b	#$F8, D0				; strip out old internal HD SCSI ID
-@@ -569,9 +601,7 @@ LoadSlotDrivers
+@@ -569,10 +590,7 @@ LoadSlotDrivers
  
  LoadSCSIDrivers
  	IF hasAsyncSCSI THEN
 -			BSR.L	ISITT						; check if we're running SCSI 4.3
 -			TST.B	D0							; are we?
 -			BEQ.S	@UseOldSCSI					; -> no, use the old code to load drivers
+-
 +			CLR.B	forcedBoot(A4)
- 
  			PEA		forcedBoot(A4)				; ptr to flag indicating a forcedBoot
  			CLR.L	-(SP)						; load all drivers
-@@ -589,26 +619,99 @@ LoadSCSIDrivers
+ 			BSR.L	ITTBOOT						; Load Drivers and look for startup disk
+@@ -589,27 +607,100 @@ LoadSCSIDrivers
  			RTS	
  @UseOldSCSI
  	ENDIF
@@ -29121,104 +29091,104 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
 -			BSR.L	SCSILoad					; try to load driver(s) from disk
 -			move.l	(sp)+,a0					; restore a0
 -			move.l	(sp)+,d6					; restore d6									<LW3>pdw
--			RTS
 +
 +
++_LoadATADrivers
++			BTST.B	#7,$B23						; ?ATAExists
++			BEQ		@NoATA
 +
-+
-+LoadATADrivers
-+			BTst.B	#$7, ($B23)
-+			BEQ		@L3
-+			MoveM.L	D1-D7/A0-A6, -(A7)
-+			Move	D4, -$8(A4)
-+			Move.L	-$C(A4), D5
-+			Move.L	#$FF, D2
-+			Move.L	D5, D1
-+			AndI	#$F800, D1
-+			CmpI	#$2000, D1
-+			BEQ.B	@L0
-+			AndI.L	#$FFFF00FF, D3
-+			CmpI	#$FFCA, D5
-+			BEQ.B	@L0
-+			Bra.B	@L2
++			MOVEM.L	D1-D7/A0-A6,-(A7)
++			MOVE.W	D4,myword8(A4)
++			MOVE.L	startPRAM(A4),D5
++			MOVE.L	#$FF,D2
++			MOVE.L	D5,D1
++			AND.W	#$F800,D1
++			CMP.W	#$2000,D1
++			BEQ.S	@L0
++			AND.L	#$FFFF00FF,D3
++			CMP.W	#$FFCA,D5
++			BEQ.S	@L0
++			BRA.S	@L2
 +@L0			_DisableDynWait
 +			_GetTimeOut
-+			BNE.B	@L1
-+			MoveQ.L	#$19, D0
-+@L1			Move.L	D0, -(A7)
-+			MoveQ.L	#$0, D0
-+			Move.B	-$9(A4), D0
-+			LsL		#$8, D0
-+			Move.B	-$C(A4), D0
-+			Move.L	D0, -(A7)
++			BNE.S	@L1
++			MOVE.L	#$19,D0
++@L1			MOVE.L	D0,-(A7)
++			CLR.L	D0
++			MOVE.B	lsdSRsrcID(A4),D0
++			LSL		#$8,D0
++			MOVE.B	lsdExtDevID(A4),D0
++			MOVE.L	D0,-(A7)
 +			IMPORT	ATAMgr_5d9b0
 +			BSR.L	ATAMgr_5d9b0
-+			AddQ	#$8, A7
-+			CmpI	#$0, D0
-+			BEQ.B	@L2
-+			Move	D0, -$8(A4)
-+			IMPORT	ATAGiveTime
++			ADDQ	#$8,A7
++			CMP.W	#$0,D0
++			BEQ.S	@L2
++			MOVE.W	D0,myword8(A4)
++
 +@L2			BSR.L	ATAGiveTime
-+			MoveM.L	(A7)+, D1-D7/A0-A6
-+			Move	-$8(A4), D4
-+@L3			Rts
++			MOVEM.L	(A7)+,D1-D7/A0-A6
++			MOVE.W	myword8(A4),D4
++
++@NoATA		RTS
 +
 +
 +
 +PostATA
-+			MoveM.L	D0-D3/A0-A2, -(A7)
-+			MoveA.L	([$2B6],$288), A2
++			MOVEM.L	D0-D3/A0-A2,-(A7)
++			MOVEA.L	([$2B6],$288),A2
 +
-+			Move.L	A2, D0
++			MOVE.L	A2,D0
 +			BEQ.B	@return
-+			Move	$6(A2), D1
-+			MoveQ.L	#$0, D2
++			MOVE.W	6(A2),D1
++			CLR.L	D2
 +
-+@loop		MoveA.L	$14(A2,D2.L), A1
-+			Move.L	A1, D0
-+			BEQ.B	@return
-+			Move	$C8(A1), D0
++@loop		MOVEA.L	$14(A2,D2.L),A1
++			MOVE.L	A1,D0
++			BEQ.S	@return
++			MOVE.W	$C8(A1),D0
 +
-+			Clr		D3
-+			Cmp		D3, D0
-+			BEQ.B	@skip
-+			MoveA.L	$C4(A1), A0
-+			Move.L	A0, D0
-+			BEQ.B	@return
-+			Jsr		(A0)
-+			Bra.B	@return
++			CLR.W	D3
++			CMP.W	D3,D0
++			BEQ.S	@skip
++			MOVEA.L	$C4(A1),A0
++			MOVE.L	A0,D0
++			BEQ.S	@return
++			JSR		(A0)
++			BRA.S	@return
 +			
-+@skip		AddQ	#$4, D2
-+			SubQ	#$1, D1
-+			BNE.B	@loop
++@skip		ADDQ	#$4,D2
++			SUBQ	#$1,D1
++			BNE.S	@loop
 +
-+@return		MoveM.L	(A7)+, D0-D3/A0-A2
-+			Rts
++@return		MOVEM.L	(A7)+,D0-D3/A0-A2
++			RTS
 +
 +
 +
-+OpenLANDiskDriver
-+			Lea.L	@DriverName, A1
-+			Lea.L	-$32(A7), A7
-+			MoveA.L	A7, A0
-+			Move.L	A1, $12(A0)
-+			DC.W	$A000
-+			Tst		D0
-+			BNE.B	@L7
-+			Move	$18(A0), D4
-+@L7			Lea.L	$32(A7), A7
-+			Rts
-+
++LoadLANDiskDriver
++			LEA.L	@DriverName,A1
++			LEA.L	-CntrlParam.size(A7),A7
++			MOVEA.L	A7,A0
++			MOVE.L	A1,CntrlParam.ioNamePtr(A0)
++			_Open
++			TST		D0
++			BNE.B	@NotFound
++			MOVE	CntrlParam.ioCRefNum(A0),D4
++@NotFound	LEA.L	CntrlParam.size(A7),A7
+ 			RTS
+ 
 +			STRING	Pascal
 +@DriverName	DC.B	'.LANDisk'
 +			ALIGN	2
 +
 +
 +
- 
++
  
  ;________________________________________________________________________________________
-@@ -655,9 +758,7 @@ WaitForPollDrive
+ ;
+@@ -655,9 +746,7 @@ WaitForPollDrive
  @WaitForIt
  
  		IF hasAsyncSCSI THEN
@@ -29229,7 +29199,7 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
  			PEA		forcedBoot(A4)				; ptr to flag indicating a forcedBoot
  			PEA		1							; only look for the startup device
  			BSR.L	ITTBOOT						; get the startup device's refnum in D0
-@@ -676,47 +777,7 @@ WaitForPollDrive
+@@ -676,54 +765,14 @@ WaitForPollDrive
  @UseOldSCSI
  	ENDIF
  
@@ -29277,7 +29247,16 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
  			CMP.L	Ticks,D5					; Should the poll HD be visible by now?
  			BLO.S	@NoDrivePresent				; Yes, so quit waiting for it
  			MOVEQ.L	#PollDelay,D0				; Get number of ticks to wait before retrying
-@@ -969,6 +1030,7 @@ Ck4SupportsPartition
+ 			ADD.L	Ticks,D0					; Calculate new time to try it again
+-@DelayLoop
++@PollDlyLup
+ 			CMP.L	Ticks,D0					; Time to try again?
+-			BHS.S	@DelayLoop					; No, so just be patient
++			BHS.S	@PollDlyLup					; No, so just be patient
+ 			BRA.S	@WaitForIt					; Ready to try the poll drive again
+ 
+ @NoDrivePresent									; Time expired, drive must not be there
+@@ -969,6 +1018,7 @@ Ck4SupportsPartition
  ; now check this driver to see if it "follows new rules" and responds
  ;	to driverGestalt status call
  ;
@@ -29285,37 +29264,35 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
  			move.w	dCtlFlags(A0), D0				; does it Follow New Rules?
  			btst	#FollowsNewRules, D0			; (word-relative bit #)
  			beq.s	@notSupported					; no -> skip driverGestalt call
-@@ -1010,9 +1072,29 @@ Ck4SupportsPartition
+@@ -1010,9 +1060,27 @@ Ck4SupportsPartition
  ;________________________________________________________________________________________
  
  IsItDefault
-+			tst		-4(A4)
-+			bne.s	@skipsomestuff
++			IMPORT	GetStartupDevice			; (CDG5) Takes ptr to refnum, returns OSErr
 +
-+			pea.l	-4(A4)
-+			import	GetStartupDevice
-+			jsr		GetStartupDevice			; (CDG5) native StartLib
-+			lea.l	$4(SP), SP
-+			tst		D0
++			tst.w	startMgrBootDev(A4)			; (CDG5) The StartMgr fragment overrides
++			bne.s	@gotDrvNum					; everything below
++			pea.l	startMgrBootDev(A4)
++			jsr		GetStartupDevice
++			lea.l	4(SP), SP
++			tst.w	D0							; probably OSErr
 +			bne.s	@notTheDisk
-+@skipsomestuff
-+			
-+			move	-4(A4), D0
-+			cmp		6(A2), D0
++@gotDrvNum	move.w	startMgrBootDev(A4), D0
++			cmp.w	dQDrive(A2), D0
 +			beq.s	@isTheDisk
 +			bra.s	@notTheDisk
 +
  			cmp.w	dqRefNum(A2), D4			; is this driver for the default device?
  			bne.s	@notTheDisk					; no-> definitely no the disk then
  
-+			import	ZeroD0
++			import	ZeroD0						; (CDG5) unsure of purpose
 +			bsr		ZeroD0
 +			bne.s	@notTheDisk
 +
  			move.b	#1, foundDrvr(A4)			; so we know to clr ckPartition if end-of-Q
  			tst.b	ckPartition(A4)				; do we need to check the partition num?
  			beq.s	@isTheDisk					; no-> well then, it is the right disk
-@@ -1085,7 +1167,16 @@ ItsDefault	RTS									;  and return BEQ if so
+@@ -1085,7 +1153,16 @@ ItsDefault	RTS									;  and return BEQ if so
  ;________________________________________________________________________________________
  
  IsItAnything
@@ -29333,7 +29310,7 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
  			RTS
  
  
-@@ -1129,15 +1220,18 @@ VisualUpdate
+@@ -1129,15 +1206,18 @@ VisualUpdate
  @NoSwitch	BCHG	#FlashParity,D6				; Switch parity.
  			BNE.S	@XorQ						; Branch if we need X or ? showing.
  			LEA		DiskIcon,A0					; plot the plain disk icon
@@ -29352,7 +29329,7 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
  			BRA.S	PlotMyIcon
  
  @DoneDisk	RTS
-@@ -1158,7 +1252,73 @@ VisualUpdate
+@@ -1158,7 +1238,73 @@ VisualUpdate
  
  HappyMac	BSR.S	EraseMyIcon					; erase what's on the screen where the icon goes
  			LEA		HappyIcon,A0				; plot the happy mac icon
@@ -29427,7 +29404,7 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
  			RTS
  
  
-@@ -1175,61 +1335,31 @@ HappyMac	BSR.S	EraseMyIcon					; erase what's on the screen where the icon goes
+@@ -1175,61 +1321,31 @@ HappyMac	BSR.S	EraseMyIcon					; erase what's on the screen where the icon goes
  ; Function:	erases the ICN# in the center of the main screen
  ;________________________________________________________________________________________
  
@@ -29508,63 +29485,46 @@ diff --git a/OS/StartMgr/StartSearch.a b/OS/StartMgr/StartSearch.a
  
  
  ;________________________________________________________________________________________
-@@ -1322,7 +1452,54 @@ XDiskIcon	DC.L	$7FFFFFF0,$81000108,$81007104,$81008902,$81008901,$81008901,$8100
+@@ -1322,10 +1438,38 @@ XDiskIcon	DC.L	$7FFFFFF0,$81000108,$81007104,$81008902,$81008901,$81008901,$8100
  			DC.L	$FFFFFFFF,$FFFFFFFF,$FFFFFFFF,$FFFFFFFF,$FFFFFFFF,$FFFFFFFF,$FFFFFFFF,$FFFFFFFE
  
  		ENDWITH
--			ENDPROC
-+;			ENDPROC
 +
 +
 +
-+
-+
-+
-+
-+DaFuq ; proc export ; but has no callers yet?
-+;			IMPORT	NextDQEntry
-+;			IMPORT	SelectDevice
-+;			IMPORT	GetStartupInfo
-+
-+
++PreWalkAllDrives
 +			MOVEM.L	D0-D2/A0-A2,-(SP)
 +			SUB.L	A2,A2
-+@loop
-+			MOVE	#$A002,D0
++
++@Next		MOVE	#$A002,D0			; Check for a patch over the ROM _Open trap
 +			_GetOSTrapAddress
 +			MOVE.L	ROMBase,A1
 +			CMP.L	A0,A1
-+			BCS.S	@return
-+			BSR		NextDQEntry
-+			BEQ.S	@return
-+			BSR		SelectDevice
-+			BSR		GetStartupInfo
-+			BRA.S	@loop
-+@return
-+			MOVEM.L	(SP)+,D0-D2/A0-A2
++			BLO.S	@return				; ...Return if it is patched.
++
++			BSR		NextDQEntry			; Point A2 to next DQE
++			BEQ.S	@return				; ...Return if there are no more drives
++			BSR		SelectDevice		; Point A0 to the populated paramBlk
++			BSR		GetStartupInfo		; Read the boot blocks and test for magic num
++			BRA.S	@Next
++
++@return		MOVEM.L	(SP)+,D0-D2/A0-A2
 +			RTS
 +
-+;			ALIGN	16
-+
-+
-+
-+
-+
-+
-+
+ 			ENDPROC
+ 
+ 
+ 
 +ZeroD0 PROC	EXPORT
-+			MOVEQ.L	#0, D0
++			CLR.L	D0
 +			RTS
 +
-+;			ALIGN	16
 +
 +
-+
-+
- 
- 
- 
-@@ -1665,104 +1842,6 @@ AppPhne			EQU		$09961010
+ ;----------------------------------------------------------------------
+ ; Execute one of the subroutines related to the timeout while waiting for
+ ; the poll hard disk to warm up.
+@@ -1665,104 +1809,6 @@ AppPhne			EQU		$09961010
  			ENDPROC
  
  
