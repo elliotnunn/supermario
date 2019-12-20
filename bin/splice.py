@@ -1,4 +1,3 @@
-import argparse
 import glob
 import re
 import os
@@ -90,6 +89,5 @@ def splice(directory):
                             fd.write(' ƒ {Sources}%s:%s\n' % (OVERDIR, orig_name))
                             fd.write('\tDuplicate -y {Deps} {Targ}\n')
 
-        diag = 'Successfully spliced: %d/%d' % (len(overs)-len(remaining), len(overs))
-        if remaining: diag += '; Failed: ' + ' '.join(remaining)
-        print(diag)
+        if remaining:
+            print('Failed to splice:', *remaining)
