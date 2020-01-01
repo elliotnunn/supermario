@@ -61,7 +61,7 @@ def splice(directory):
             found_locations = {k: [] for k in remaining}
 
             overs_re = '|'.join(re.escape(x) for x in remaining)
-            overs_re = r'^[^#]*"({\w+}(?:\w+:)*)(Thing.lib)"'.replace('Thing.lib', overs_re)
+            overs_re = r'^[^#]*(?:"|\s)({\w+}(?:\w+:)*)(Thing.lib)(?:"|\s)'.replace('Thing.lib', overs_re)
             overs_re = re.compile(overs_re, re.IGNORECASE)
 
             main_makefiles = []
