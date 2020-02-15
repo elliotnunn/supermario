@@ -2,6 +2,1440 @@ From: Horst Beepmanh <>
 Subject: Source
 
 ---
+diff --git a/Drivers/Backlight/PWM.c b/Drivers/Backlight/PWM.c
+--- a/Drivers/Backlight/PWM.c
++++ b/Drivers/Backlight/PWM.c
+@@ -10,26 +10,6 @@
+ 
+ 	Change History (most recent first):
+ 	
+-	   <SM3>	 2/11/93	CSS		Update from Horror.  Comments follow:
+-	   <H10>	 6/30/92	ag		Moved cpu depended initialization code to cpu.c file, input
+-									routines to input.c, and table routines to backlight.c file.
+-		<H9>	 5/26/92	ag		Added write to PONTI to turnoff backlight through PONTI bit.
+-		<H8>	  5/7/92	ag		Use new table record for min/max limits. Added new entry for
+-									Dartanian.
+-		<H7>	 4/24/92	ag		set default to single table operation except on TIM (LC). added
+-									new vector for custom input control to handle hardware
+-									dependencies.
+-		<H6>	12/17/91	SWC		Added boxDBLiteLC to the list in InitPWMControls. Grouped boxTIM
+-									and boxDartanian since their code is identical.
+-		<H5>	12/16/91	HJR		Added boxDartanian to the list.
+-		<H4>	 9/10/91	SWC		Changed Get_AtoD to get the current setting of the up/down
+-									buttons.
+-		<H3>	 8/27/91	SWC		Changed references to get/set contrast to use get/set brightness
+-									on machines other than TIM. On TIM, they used the contrast
+-									command to control screen brightness. Added PWM table for
+-									DB-Lite.
+-		<H2>	  8/5/91	SWC		Changed Get_AtoD to use GetScreenCmd to get the current contrast
+-									instead of reading from the A-D if not on TIM.
+ 		 <3>	 3/24/92	JSM		Nuke boxFlag codenames.
+ 		 <2>	 3/23/92	JSM		OSEvents.h is obsolete, use Events.h.
+ 		 <1>	10/24/91	SAM/KSM	Rolled in Regatta file.
+@@ -78,30 +58,78 @@
+ #include "PowerMgr.h"
+ #include "backlight.h"
+ 
++#define	READ_ATOD_CHANNEL	0xD8
++#define	READ_BUTTON_VALUE	0xD9
++
++#define	BACKLIGHT_POT_CHANNEL	0
++#define STATUS					0
++#define POWERBYTE				1
++#define TEMPBYTE				2
++
++extern short			PotInputRangeShiftTblPWM[];
++extern unsigned char	timTblLow[];
++extern unsigned char	timTbl[];
++extern unsigned char	asahiTbl[];
++extern short			PWMMaxTbl[];
++
+ /*page
+  ***************************************************************************************************
+  ** PWM software ***********************************************************************************
+  ***************************************************************************************************
+  */
+ 
+-OSErr InitPWMControls(driverGlobalPtr	globalPtr)
++void InitPWMControls(driverGlobalPtr	globalPtr)
+ 
+ {
+ 	unsigned int	startvalue;
++	int boxFlag;
++
++	/* setup default values */
++	globalPtr->flyByWire = true;
++	globalPtr->freeflag = true;
++	globalPtr->dualTable = true;
++
++	globalPtr->userInputSampleRate = 10;
++	globalPtr->maximumTable = &PWMMaxTbl;
++	globalPtr->settingTableLow = &timTblLow;
++	globalPtr->settingTable = globalPtr->settingTableHigh = &timTbl;
++
++	boxFlag = *(unsigned char *)0xCB3;
++	switch (boxFlag)
++		{
++		case 18: // PowerBook 100, Asahi
++			globalPtr->freeflag = false;
++			globalPtr->dualTable = false;
++			globalPtr->settingTable = &asahiTbl;
++			break;
++		case 15: // PowerBook 170, TIM
++			if (*JAWS_SPEED_FSTN_REG_PTR & JAWS_FSTN)
++				globalPtr->dualTable = false;
++			break;
++		}
+ 
+ 	/* initialize dual table variables */
+ 	if (globalPtr->dualTable) 
+ 		{
+ 		globalPtr->slewLimit		= true;				/* maximum change per/accrun */
+-		(*globalPtr->tableProc)(globalPtr);				/* determine table based on current charger state */
++		globalPtr->lowThreshold		= 163;
++		globalPtr->hiThreshold		= 173;
++		globalPtr->tableProc		= ChargerAdjust;
++		globalPtr->lowTable			= LowTable(globalPtr);
++		if (globalPtr->lowTable)
++			globalPtr->settingTable = globalPtr->settingTableLow;
+ 		};
+ 
++	globalPtr->setlevelproc = SetPWM;
++	globalPtr->userInputProc = PotControl;
++	globalPtr->closeProc = PWMCloseRoutine;
++	globalPtr->controlProc = PWMControl;
++	globalPtr->statusProc = PWMStatus;
++
+ 	/* initialize backlight hardware */	
+-	startvalue 						= (*globalPtr->userInputProc)(globalPtr);				/* <H8> */
++	startvalue 						= PotControl(globalPtr);
+ 	globalPtr->userBrightness 		= -1;
+-	globalPtr->userBrightness 		= (*globalPtr->setlevelproc)(startvalue,globalPtr);		/* <H8> */
+-	
+-	return(noErr);
++	globalPtr->userBrightness 		= SetPWM(startvalue,globalPtr);
+ };
+ 
+ /*
+@@ -113,10 +141,148 @@ OSErr InitPWMControls(driverGlobalPtr	globalPtr)
+ int PWMCloseRoutine (driverGlobalPtr	globalPtr)
+ 
+ {
+-	(*globalPtr->setlevelproc)(globalPtr->settingTable->minimum,globalPtr);
++	SetPWM(0,globalPtr);
+ 	return(0);
+ };
+ 
++/*
++ ***************************************************************************************************
++ *
++ *
++ ***************************************************************************************************
++ */
++
++int SetPWM(int	new,driverGlobalPtr	globalPtr)
++{
++	PMgrPBlock		pb;									/* power manager pb */
++	unsigned char	val;								/* hardware value setting */
++	
++	PEG_TO_LIMITS(new, globalPtr->maximumTable[globalPtr->powerRange], 0);				/* limit value to valid range */
++	val = globalPtr->settingTable[new];					/* look up value from table */
++
++	if ((globalPtr->userBrightness >= 0) && (val == globalPtr->lastHWSetting)) return(new);/* nothing to do; 90/05/15 just turn on; 90/07/02 avoid touching */
++	if (globalPtr->slewChange)
++		{
++		if (abs(globalPtr->lastHWSetting - val) > globalPtr->slewLimit)
++			val = globalPtr->lastHWSetting + ((globalPtr->lastHWSetting > val) ? -globalPtr->slewLimit : globalPtr->slewLimit);
++		else
++			globalPtr->slewChange = false;
++		};
++	globalPtr->lastHWSetting	= val;					/* save the new hardware setting */
++
++	pb.pmgrCmd					= ScreenSetCmd;			/*  everyone else uses "set brightness" */
++	pb.pmgrCnt					= 1;
++	pb.pmgrXPtr 				= &val;
++	pb.pmgrRPtr 				= nil;
++	PMgr(&pb);											/* set the pwm */
++
++	return(new);										/* return the current value */
++};
++
++/*page
++ ***************************************************************************************************
++ *
++ *
++ ***************************************************************************************************
++ */
++
++unsigned char Get_AtoD(int	channel)
++{
++	PMgrPBlock		pb;									/* power manager pb */
++	char			atodChannel;						/* a to d channel to read [0-8] */
++	unsigned char	value;								/* return value */
++	OSErr			error;								/* pmgr error */
++
++
++	atodChannel	= channel;								/* load channel value into buffer */
++
++	pb.pmgrCmd	= READ_ATOD_CHANNEL;					/* load read channel command */
++	pb.pmgrCnt	= 1;									/* transmit buffer count is 1 byte */
++	pb.pmgrXPtr = &atodChannel;							/* pointer to transmit buffer */
++	pb.pmgrRPtr = &value;								/* pointer to receive buffer */
++	
++	error = PMgr(&pb);
++
++	return( (error) ? 0 : value);
++};
++
++/*page
++ ***************************************************************************************************
++ *
++ *
++ ***************************************************************************************************
++ */
++
++unsigned char Get_PGEButton(int	channel)
++{
++	PMgrPBlock		pb;									/* power manager pb */
++	char			atodChannel;						/* a to d channel to read [0-8] */
++	unsigned char	value;								/* return value */
++	OSErr			error;								/* pmgr error */
++
++
++	atodChannel	= channel;								/* load channel value into buffer */
++
++	pb.pmgrCmd	= READ_BUTTON_VALUE;					/* load read channel command */
++	pb.pmgrCnt	= 1;									/* transmit buffer count is 1 byte */
++	pb.pmgrXPtr = &atodChannel;							/* pointer to transmit buffer */
++	pb.pmgrRPtr = &value;								/* pointer to receive buffer */
++	
++	error = PMgr(&pb);
++
++	return( (error) ? 0 : value);
++};
++
++/*page
++ ***************************************************************************************************
++ *
++ *
++ ***************************************************************************************************
++ */
++unsigned char GetPortableValues(int	parameter)
++{
++
++	PMgrPBlock		pb;									/* power manager pb */
++	OSErr			err;								/* power manager error */
++	unsigned char	rbuf[3];							/* buffer for send command */
++
++	pb.pmgrCmd = BatteryStatusImmCmd;					/* on old pmgr, read battery status (immediate not averaged) */
++	pb.pmgrCnt = 0;
++	pb.pmgrXPtr = nil;
++	pb.pmgrRPtr = rbuf;
++
++	err = PMgr(&pb);
++	return( (err) ? 0 : rbuf[parameter]);				/* return 0 if error, else read value */
++}
++
++/*page
++ ***************************************************************************************************
++ *
++ *
++ ***************************************************************************************************
++ */
++int PotControl (driverGlobalPtr	globalPtr)
++
++{
++#pragma	unused (globalPtr)
++
++	unsigned int	potvalue;
++	
++	potvalue = globalPtr->freeflag ? Get_AtoD(BACKLIGHT_POT_CHANNEL) : GetPortableValues(TEMPBYTE);
++
++	if (abs(globalPtr->lastatod - potvalue) <= 5) 		/* was the change less than 100mv */
++		potvalue = globalPtr->lastatod;					/* is less than, the use old value */
++
++	globalPtr->lastatod = potvalue;						/* update last a to d value */
++	potvalue >>= 3;										/* scale to 0 to 31 */
++	if (potvalue)										/* if non-zero, check for subrange limiting */
++		{
++		potvalue >>= PotInputRangeShiftTblPWM[globalPtr->powerRange]; /* rescale in low power levels */
++		if (!potvalue) potvalue = 1;					/* make sure we don't change the backlight state */
++		};
++	return(potvalue);
++};
++
+ /*page
+  ***************************************************************************************************
+  *
+@@ -144,7 +310,7 @@ OSErr PWMControl(CntrlParam *ctlPB,driverGlobalPtr	globalPtr)		/* 'open' entry p
+ 			{
+ 			case kSetScreenBrightness:					/* set brightness level */
+ 				tempvalue = ctlPB->csParam[0];
+-				globalPtr->userBrightness 	= (*globalPtr->setlevelproc)(tempvalue,globalPtr);
++				globalPtr->userBrightness 	= SetPWM(tempvalue,globalPtr);
+ 				break;
+ 				
+ 			default:
+@@ -154,37 +320,43 @@ OSErr PWMControl(CntrlParam *ctlPB,driverGlobalPtr	globalPtr)		/* 'open' entry p
+ 	return(error);
+ };
+ 
+-/*
++/*page
+  ***************************************************************************************************
+  *
++ * The status routine…
++ *
++ *	return:
++ *		noErr		- task completed successfully
++ *		statusErr	- illegal status selector
++ *
+  *
+  ***************************************************************************************************
+  */
+ 
+-int SetPWM(int	new,driverGlobalPtr	globalPtr)
++OSErr PWMStatus(CntrlParam *ctlPB,driverGlobalPtr	globalPtr)
+ {
+-	PMgrPBlock		pb;									/* power manager pb */
+-	unsigned char	val;								/* hardware value setting */
+-	
+-	PEG_TO_LIMITS(new, globalPtr->maximumTable[globalPtr->powerRange], globalPtr->settingTable->minimum);	/* <H8> use new tables */				/* limit value to valid range */
+-	val = globalPtr->settingTable->table[new];					/* look up value from table */
++	OSErr 		error;
+ 
+-	if ((globalPtr->userBrightness >= 0) && (val == globalPtr->lastHWSetting)) return(new);/* nothing to do; 90/05/15 just turn on; 90/07/02 avoid touching */
+-	if (globalPtr->slewChange)
++	error	= noErr;
++
++	switch(ctlPB->csCode) 
+ 		{
+-		if (abs(globalPtr->lastHWSetting - val) > globalPtr->slewLimit)
+-			val = globalPtr->lastHWSetting + ((globalPtr->lastHWSetting > val) ? -globalPtr->slewLimit : globalPtr->slewLimit);
+-		else
+-			globalPtr->slewChange = false;
++		case kGetScreenBrightness:						/* get brightness level */
++			ctlPB->csParam[0] = globalPtr->userBrightness;
++			break;
++			
++		case kGetBrightnessRange:
++			ctlPB->csParam[0] = 31;
++			ctlPB->csParam[1] = 0;
++			break;
++
++		case kGetMaximum:
++			ctlPB->csParam[0] = globalPtr->maximumTable[globalPtr->powerRange];
++			break;
++
++		default:
++			error = statusErr;
+ 		};
+-	globalPtr->lastHWSetting	= val;					/* save the new hardware setting */
+-
+-	pb.pmgrCmd					= SetBrightnessCmd;		/*  everyone else uses "set brightness" */
+-	pb.pmgrCnt					= 1;
+-	pb.pmgrXPtr 				= &val;
+-	pb.pmgrRPtr 				= nil;
+-	PMgr(&pb);											/* set the pwm */
+-
+-	return(new);										/* return the current value */
+-};
+ 
++	return(error);
++}
+diff --git a/Drivers/Backlight/Register.c b/Drivers/Backlight/Register.c
+--- a/Drivers/Backlight/Register.c
++++ b/Drivers/Backlight/Register.c
+@@ -9,13 +9,6 @@
+ 
+ 	Change History (most recent first):
+ 
+-	   <SM5>	12/13/93	PN		Roll in KAOs and Horror changes to support Malcom and AJ
+-									machines
+-	   <SM4>	 2/11/93	CSS		Update from Horror.  Comments follow:
+-		<H4>	 6/30/92	ag		Moved cpu depended initialization code to cpu.c file, and input
+-									routines to input.c.
+-		<H3>	  5/7/92	ag		Use new table record for min/max limits.
+-		<H2>	 4/24/92	ag		return error from initialization.
+ 		 <2>	 3/23/92	JSM		OSEvents.h is obsolete, use Events.h.
+ 		 <1>	10/24/91	SAM/KSM	Rolled in Regatta file.
+ 	
+@@ -117,7 +110,10 @@ typedef	struct
+ 	char				keymodifiers;
+ 	short				unused;
+ 	} posteventtype, *posteventtypeptr;
+-extern setTableType		PortableTbl5V;
++extern posteventtype	postEventData;
++extern unsigned char	PortableTbl5V[];
++extern unsigned char	PortableTable7V[];
++extern short			PortableMaxTbl[];
+ 
+ int		GetBacklightInfo(short	mask, short shift);
+ void	SaveBacklightInfo(short new,short	mask, short shift);
+@@ -125,23 +121,82 @@ void	SaveBacklightInfo(short new,short	mask, short shift);
+ 		TurnOnOff(Boolean on);
+ 		setNewKeys(int		keycombo);
+ 
++/*page
++ ***************************************************************************************************
++ *
++ *
++ ***************************************************************************************************
++ */
++void ChargerAdjust  (driverGlobalPtr	globalPtr)
++{		
++	unsigned int				oldTable;
++
++	oldTable			= globalPtr->lowTable;					/* save the current table being used */
++	globalPtr->lowTable =  LowTable(globalPtr);					/* get the new table to use */
++	if (globalPtr->lowTable == oldTable) return;				/* are we changing tables ???, no exit */
++
++	globalPtr->slewChange		= true;							/* if change, set tmp slew on */					
++	globalPtr->settingTable		= globalPtr->lowTable ? globalPtr->settingTableLow :globalPtr->settingTableHigh ;							
++};
++
++/*page
++ ***************************************************************************************************
++ *
++ *
++ ***************************************************************************************************
++ */
++unsigned int LowTable  (driverGlobalPtr	globalPtr)
++
++{
++	PmgrGlobals					**pmgrglobalhdl;				/* handle to power manager globals */
++	Boolean						wasLowTable;					/* current table being used */
++	Boolean						hiTable;						/* use hi level table  now */
++
++	pmgrglobalhdl 	= (PmgrGlobals **) 0x0D18;					/* handle to power manager globals */
++
++	wasLowTable		= globalPtr->lowTable;						/* current table */
++	hiTable 		= false;									/* assume low table */
++	if ((wasLowTable && ((*pmgrglobalhdl)->BatAvg >= globalPtr->hiThreshold)) ||
++		(!wasLowTable && ((*pmgrglobalhdl)->BatAvg >= globalPtr->lowThreshold)))
++		{
++		hiTable = (*pmgrglobalhdl)->Charger & 0x01;				/* qualify table with charger */
++		};
++	return(hiTable ? 0 : 1);									/* return 1 if low table, 0 if high */
++};
++
+ /*page
+  ***************************************************************************************************
+  ** Register control software **********************************************************************
+  ***************************************************************************************************
+  */
+ 
+-OSErr InitRegControls(driverGlobalPtr	globalPtr)
++void InitRegControls(driverGlobalPtr	globalPtr)
+ 
+ {
+ 	int					SetBrightness();
+ 	int					KbdControl();
+ 	int					RegisterClose();
+-	unsigned int		pramBrightness;
++	OSErr				RegisterStatus(CntrlParam *, driverGlobalPtr);
++	OSErr				RegisterControl(CntrlParam *, driverGlobalPtr);
++	int					pramBrightness;
+ 	void				ShutdownBacklight();
++	posteventtypeptr	postdataptr;
+ 
+ 	
+-	if (BACKLIGHTSIGREG & TABLE_5V) globalPtr->settingTable = &PortableTbl5V;							
++	postdataptr = &postEventData;
++	postdataptr->keysActive = 0;
++	postdataptr->keymodifiers = 0;
++
++	globalPtr->userInputSampleRate = 1;
++
++	globalPtr->settingTable = (BACKLIGHTSIGREG & TABLE_5V) ? PortableTbl5V : PortableTable7V;
++
++	globalPtr->maximumTable = &PortableMaxTbl;
++	globalPtr->setlevelproc = SetBrightness;
++	globalPtr->userInputProc = KbdControl;
++	globalPtr->closeProc = RegisterClose;
++	globalPtr->statusProc = RegisterStatus;
++	globalPtr->controlProc = RegisterControl;
+ 
+ 	globalPtr->keycodes 		= GetPramKeyData();
+ 	pramBrightness 				= GetPramBrightness();	/* get pram setting */
+@@ -149,13 +204,14 @@ OSErr InitRegControls(driverGlobalPtr	globalPtr)
+ 	setNewKeys(globalPtr->keycodes);
+ 	if (pramBrightness < 0) 									/* check for valid brightness value */
+ 		{
+-		pramBrightness = globalPtr->settingTable->minimum+1;				/* <H3> load default brightness */
+-		SaveBrightness(globalPtr->settingTable->minimum+1);					/* <H3> validate, as save new brightness */
++		pramBrightness = 1;
++		SaveBrightness(1);
+ 		};
+ 
+ 
+-	globalPtr->userBrightness 	= globalPtr->settingTable->maximum;			/* <H3> */
+-	globalPtr->userBrightness 	= SetBrightness(globalPtr->settingTable->minimum,globalPtr);	/* <H3> initialize pot */
++	globalPtr->userBrightness	= 30;
++	globalPtr->lastHWSetting	= globalPtr->settingTable[30];
++	globalPtr->userBrightness 	= SetBrightness(0,globalPtr);
+ 	globalPtr->userBrightness 	= SetBrightness(pramBrightness,globalPtr);	/* set brightness level */
+ 	
+ 	if (BACKLIGHTSIGREG == BACKLIGHTSIG_UPGRD)
+@@ -166,8 +222,6 @@ OSErr InitRegControls(driverGlobalPtr	globalPtr)
+ 		};
+ 
+ 	ShutDwnInstall( (ShutDwnProcPtr) ShutdownBacklight,sdRestartOrPower);	/* install shutdown task */
+-
+-	return(noErr);
+ };
+ 
+ /*page
+@@ -274,20 +328,16 @@ int SetBrightness(int	new, driverGlobalPtr	globalPtr)
+ 	char			signature;
+ 	Boolean			onBitHigh;
+ 	Boolean			countDownBit;
+-	int				current;
+ 	unsigned char	tablevalue;
+ 	Boolean			initialize;
+ 
+ 
+ 
+ 	initialize = (globalPtr->userBrightness < 0);
+-	PEG_TO_LIMITS(new, globalPtr->maximumTable[globalPtr->powerRange], globalPtr->settingTable->minimum);	/* <H3> limit value to valid range */
+-	current = (initialize)
+-				? globalPtr->settingTable->minimum		/* <H3> */
+-				: globalPtr->userBrightness;
++	PEG_TO_LIMITS(new, globalPtr->maximumTable[globalPtr->powerRange], 0);
+ 
+-	tablevalue = globalPtr->settingTable->table[new];	/* <H3> look up value from table */
+-	if (!initialize && (tablevalue == globalPtr->lastHWSetting) )
++	tablevalue = globalPtr->settingTable[new];
++	if (tablevalue == globalPtr->lastHWSetting)
+ 		return(new);								/* nothing to do; 90/05/15 just turn on; 90/07/02 avoid touching */
+ 
+ 	/* setup control bits */
+@@ -297,13 +347,13 @@ int SetBrightness(int	new, driverGlobalPtr	globalPtr)
+ 	backlightreg 	= (Ptr) PORTABLE_HW;
+ 	regvalue		= COUNT_BIT + L_CS_BIT;			/* start with count and CS inactive */
+ 
+-	if ((onBitHigh && (new != globalPtr->settingTable->minimum)) || (!onBitHigh && (new == globalPtr->settingTable->minimum)))  /* <H3> */
++	if ((onBitHigh && new) || (!onBitHigh && !new))
+ 		regvalue |= ON_BIT; 						/* upgrade has opposite polarity */
+ 
+-	if ((countDownBit && (new <= current)) || (!countDownBit && (new >= current)))
++	if ((countDownBit && (new <= globalPtr->userBrightness)) || (!countDownBit && (new >= globalPtr->userBrightness)))
+ 		regvalue |= COUNTDN_BIT;	/* set the count down bit if new > current */
+ 
+-	strobes = (new == globalPtr->settingTable->minimum)  /* <H3> */
++	strobes = (new == 0)
+ 				? MAXSTROBECOUNT					/* if minimum, bang against stops */
+ 				: abs(globalPtr->lastHWSetting - tablevalue);
+ 
+@@ -410,8 +460,8 @@ int KbdControl (driverGlobalPtr	globalPtr)
+ int RegisterClose (driverGlobalPtr	globalPtr)
+ 
+ {
+-	globalPtr->userBrightness 	= globalPtr->settingTable->maximum;									/* <H3> */
+-	globalPtr->userBrightness 	= SetBrightness(globalPtr->settingTable->minimum,globalPtr);		/* <H3> initialize pot */
++	globalPtr->userBrightness 	= 30;
++	globalPtr->userBrightness 	= SetBrightness(0,globalPtr);
+ 
+ 	SleepQRemove(&globalPtr->sleepQelement);					/* remove sleep task */
+ 	ShutDwnRemove( (ShutDwnProcPtr) ShutdownBacklight);			/* remove shutdown task */
+@@ -445,7 +495,7 @@ OSErr RegisterControl(CntrlParam *ctlPB,driverGlobalPtr	globalPtr)		/* 'open' en
+ 		{
+ 		case kSetScreenBrightness:										/* set brightness level */
+ 			tempvalue = ctlPB->csParam[0];
+-			globalPtr->userBrightness 	= (*globalPtr->setlevelproc)(tempvalue,globalPtr);
++			globalPtr->userBrightness 	= SetBrightness(tempvalue,globalPtr);
+ 			break;
+ 		case kSaveScreenBrightness:										/* save brightness level */
+ 			SaveBrightness(globalPtr->userBrightness);
+@@ -488,15 +538,25 @@ OSErr RegisterStatus(CntrlParam *ctlPB,driverGlobalPtr	globalPtr)			/* 'open' en
+ 	error	= noErr;
+ 	switch(ctlPB->csCode) 
+ 		{
++		case kGetScreenBrightness:
++			ctlPB->csParam[0] = globalPtr->userBrightness;
++			break;
+ 		case kGetBrightnessKeys:								/* return current saved brightness */
+ 			ctlPB->csParam[0] = globalPtr->keycodes;
+ 			break;
++		case kGetBrightnessRange:
++			ctlPB->csParam[0] = 30;
++			ctlPB->csParam[1] = 0;
++			break;
+ 		case kGetPBacklight:
+ 			ctlPB->csParam[0] = GetPramBrightness();
+ 			break;
+ 		case kGetPKey:
+ 			ctlPB->csParam[0] = GetPramKeyData();
+ 			break;
++		case kGetMaximum:
++			ctlPB->csParam[0] = globalPtr->maximumTable[globalPtr->powerRange];
++			break;
+ 
+ 		default:
+ 			error = statusErr;
+@@ -508,11 +568,14 @@ setNewKeys(int		keycombo)
+ 
+ {
+ 	char						newKey;
++	posteventtypeptr			postdataptr;
+ 
+ 	newKey			= 0;
+ 	if (keycombo & 0x01) newKey |= 0x10;
+ 	if (keycombo & 0x02) newKey |= 0x02;
+ 	if (keycombo & 0x04) newKey |= 0x08;
+ 	
++	postdataptr = &postEventData;
++	postdataptr->keymodifiers = newKey;
+ };
+ 
+diff --git a/Drivers/Backlight/backlight.a b/Drivers/Backlight/backlight.a
+--- a/Drivers/Backlight/backlight.a
++++ b/Drivers/Backlight/backlight.a
+@@ -9,27 +9,6 @@
+ ;
+ ;	Change History (most recent first):
+ ;
+-;	   <SM4>	12/13/93	PN		Roll in KAOs and Horror changes to support Malcom and AJ
+-;									machines
+-;	   <SM3>	 11/8/93	JRH		boxDBLite16 is now boxPowerBookDuo250. boxDBLite20 is now
+-;									boxPenLite. boxEscher25 is now boxYeagerFSTN. boxEscher33 is now
+-;									boxPowerBookDuo270C.
+-;	   <SM2>	 2/11/93	CSS		Updated some code names to real names, and include
+-;									boxflags from InternalOnlyEqu.a rather than from
+-;									backlightequ.a.  Update from Horror. Comments follow:
+-;	   <H10>	 1/21/93	RLE		add support for Escher
+-;		<H9>	 7/13/92	SWC		Yet another pass at the DBLite table. Deja vu, eh?
+-;		<H8>	 6/30/92	ag		Added cpu info tables for cpu dependent information.
+-;		<H7>	  5/7/92	ag		Changed the structure of the backlight tables. Included in the
+-;									tables are a header which indicates the minimun and maximum
+-;									values.
+-;		<H6>	 4/10/92	SWC		Yet another pass at the DBLite table.
+-;		<H5>	  3/4/92	SWC		Next pass at the DBLite table.
+-;		<H4>	 2/12/92	SWC		Changed the DB-Lite table limits to have a narrower range of
+-;									values.
+-;		<H3>	 9/10/91	SWC		Changed the DB-Lite table to have a span of 0..127 instead of
+-;									0..255 since the backlight values don't go that high.
+-;		<H2>	 8/26/91	SWC		Added a PWM lookup table for DB-Lite.
+ ;		 <9>	10/28/91	SAM		Rolled in Regatta file.
+ ;		
+ ;	Regatta Change History:
+@@ -92,6 +71,40 @@ VBLEntry		PROC		EXPORT
+ 				rts
+ 
+ 
++;----------------------------------------------------------------------------------
++;
++MyPostEvent		PROC		EXPORT
++				movem.l	d1/a1,-(sp)
++				lea		postEventData,a1
++				move.l	a0,d1
++				tst.b	5(a1)					; postEventData.keymodifiers
++				beq.s	@noKey
++				cmp.w	#3,d1
++				beq.s	@specialMode
++				tst.b	4(a1)					; postEventData.keysActive
++				beq.s	@noKey
++				cmp.w	#5,d1
++				bne.s	@noKey
++				bra.s	@return
++@specialMode	move.w	$17A,d1
++				rol.w	#1,d1					; d1=1 if command key down
++				cmp.b	5(a1),d1
++				bne.s	@noKey
++
++@yesKey			st		4(a1)					; postEventData.keysActive
++				bra.s	@return
++
++@noKey			sf		4(a1)					; postEventData.keysActive
++				move.l	0(a1),a1
++				jsr		(a1)
++
++@return			movem.l	(sp)+,d1/a1
++				rts
++
++				EXPORT	postEventData
++postEventData	dcb.b	8,0						; see struct in Register.c
++
++
+ ;-----------------------------------------------------------------------------------
+ ;
+ ;
+@@ -105,28 +118,11 @@ SleepEntry		PROC		EXPORT
+ 				move.l	(sp)+,d0
+ 				clr.l	d0
+ 				rts								;
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-GetBkltPrimInfo	proc		export
+-				with		PmgrRec,PmgrPrimitivesRec
+-
+-				movea.l		PmgrBase,a0			; point to power manager globals
+-				LoadTbl		BklightTblPtr,a0,a0	; get backlight table pointer in a0
+-				move.l		a0,d0				; move pointer to d0 for C return
+-				rts
+-
+-
+-
+-
+-			END
+ 
+ ;-----------------------------------------------------------------------------------
+ ;
+ PortableTable7V	PROC		EXPORT
+-			dc.w		0					; minimum value								<H7>
+-			dc.w		@end - @start		;											<H7>
+-
+-@start		dc.b		0					; 0											<H7>
++			dc.b		0					; 0
+ 			dc.b		1					; 1
+ 			dc.b		2					; 2
+ 			dc.b		3					; 3
+@@ -156,16 +152,14 @@ PortableTable7V	PROC		EXPORT
+ 			dc.b		36					; 27
+ 			dc.b		40					; 28
+ 			dc.b		45					; 29
+-@end		dc.b		50					; 30										<H7>
++			dc.b		50					; 30
++			dc.b		0
+ 
+ 
+ ;--------------------------------------------------------------------------------------------------------------
+ ;
+ PortableTbl5V	PROC		EXPORT
+-			dc.w		0					; minimum value								<H7>
+-			dc.w		@end - @start		;											<H7>
+-@start
+-			dc.b		0					; 0											<H7>
++			dc.b		0					; 0
+ 			dc.b		2					; 1
+ 			dc.b		5					; 2
+ 			dc.b		7					; 3
+@@ -195,55 +189,61 @@ PortableTbl5V	PROC		EXPORT
+ 			dc.b		66					; 27
+ 			dc.b		70					; 28
+ 			dc.b		75					; 29
+-@end		dc.b		80					; 30										<H7>
++			dc.b		80					; 30
++			dc.b		0
++
++
++;-------------------------------------------------------------------------------------------------------------
++;
++PortableMaxTbl	PROC		EXPORT			; power range
++			dc.w		30					; 0
++			dc.w		15					; 1
++			dc.w		15					; 2
++			dc.w		 7					; 3
++			dc.w		 3					; 4
+ 
+ 
+ ;--------------------------------------------------------------------------------------------------------------
+ ;
+ asahiTbl	PROC		EXPORT
+-			dc.w		0					; minimum value								<H7>
+-			dc.w		@end - @start		;											<H7>
+-
+-@start		dc.b		0					; 0											<H7>
+-			dc.b		1					; 1
+-			dc.b		2					; 2
+-			dc.b		3					; 3
+-			dc.b		4					; 4
+-			dc.b		5					; 5
+-			dc.b		6					; 6
+-			dc.b		7					; 7
+-			dc.b		8					; 8
+-			dc.b		9					; 9
+-			dc.b		10					; 10
+-			dc.b		11					; 11
+-			dc.b		12					; 12
+-			dc.b		13					; 13
+-			dc.b		14					; 14
+-			dc.b		15					; 15
+-			dc.b		16					; 16
+-			dc.b		17					; 17
+-			dc.b		18					; 18
+-			dc.b		19					; 19
+-			dc.b		20					; 20
+-			dc.b		21					; 21
+-			dc.b		22					; 22
+-			dc.b		23					; 23
+-			dc.b		24					; 24
++			dc.b		0					; 0
++			dc.b		5					; 1
++			dc.b		6					; 2
++			dc.b		7					; 3
++			dc.b		8					; 4
++			dc.b		9					; 5
++			dc.b		10					; 6
++			dc.b		10					; 7
++			dc.b		11					; 8
++			dc.b		12					; 9
++			dc.b		13					; 10
++			dc.b		14					; 11
++			dc.b		15					; 12
++			dc.b		15					; 13
++			dc.b		16					; 14
++			dc.b		17					; 15
++			dc.b		18					; 16
++			dc.b		19					; 17
++			dc.b		20					; 18
++			dc.b		20					; 19
++			dc.b		21					; 20
++			dc.b		22					; 21
++			dc.b		23					; 22
++			dc.b		24					; 23
++			dc.b		25					; 24
+ 			dc.b		25					; 25
+ 			dc.b		26					; 26
+ 			dc.b		27					; 27
+ 			dc.b		28					; 28
+ 			dc.b		29					; 29
+ 			dc.b		30					; 30
+-@end		dc.b		31					; 31										<H7>
++			dc.b		31					; 31
++
+ 
+ ;--------------------------------------------------------------------------------------------------------------
+ ;
+ timTbl		PROC		EXPORT
+-			dc.w		0					; minimum value								<H7>
+-			dc.w		@end - @start		;											<H7>
+-
+-@start		dc.b		31					; 0											<H7>
++			dc.b		31					; 0
+ 			dc.b		30					; 1
+ 			dc.b		29					; 2
+ 			dc.b		28					; 3
+@@ -274,15 +274,13 @@ timTbl		PROC		EXPORT
+ 			dc.b		3					; 28
+ 			dc.b		2					; 29
+ 			dc.b		1					; 30
+-@end		dc.b		0					; 31										<H7>
++			dc.b		0					; 31
++
+ 
+ ;--------------------------------------------------------------------------------------------------------------
+ ;
+ timTblLow	PROC		EXPORT
+-			dc.w		0					; minimum value								<H7>
+-			dc.w		@end - @start		;											<H7>
+-
+-@start		dc.b		31					; 0											<H7>
++			dc.b		31					; 0
+ 			dc.b		30					; 1
+ 			dc.b		30					; 2
+ 			dc.b		29					; 3
+@@ -313,16 +311,8 @@ timTblLow	PROC		EXPORT
+ 			dc.b		11					; 28
+ 			dc.b		11					; 29
+ 			dc.b		10					; 30
+-@end		dc.b		10					; 31										<H7>
++			dc.b		10					; 31
+ 
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-PortableMaxTbl	PROC		EXPORT			; power range
+-			dc.w		30					; 0
+-			dc.w		15					; 1
+-			dc.w		15					; 2
+-			dc.w		 7					; 3
+-			dc.w		 3					; 4
+ 
+ ;--------------------------------------------------------------------------------------------------------------
+ ;
+@@ -342,289 +332,4 @@ PotInputRangeShiftTblPWM	PROC		EXPORT
+ 			dc.w		2					; 3
+ 			dc.w		3					; 4
+ 
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-dbTbl		PROC		EXPORT				;											<H2>
+-			dc.w		0					; minimum value								<H7>
+-			dc.w		@end - @start		;											<H7>
+-
+-@start		DC.B		127					; 0											<H7>
+-			DC.B		89					; 1
+-			DC.B		87					; 2
+-			DC.B		86					; 3
+-			DC.B		84					; 4
+-			DC.B		82					; 5
+-			DC.B		81					; 6
+-			DC.B		79					; 7
+-			DC.B		77					; 8
+-			DC.B		76					; 9
+-			DC.B		74					; 10
+-			DC.B		71					; 11
+-			DC.B		69					; 12
+-			DC.B		67					; 13
+-			DC.B		66					; 14
+-			DC.B		64					; 15
+-			DC.B		62					; 16
+-			DC.B		61					; 17
+-			DC.B		59					; 18
+-			DC.B		57					; 19
+-			DC.B		56					; 20
+-			DC.B		54					; 21
+-			DC.B		52					; 22
+-			DC.B		51					; 23
+-			DC.B		49					; 24
+-			DC.B		47					; 25
+-			DC.B		46					; 26
+-			DC.B		44					; 27
+-			DC.B		42					; 28
+-			DC.B		41					; 29
+-			DC.B		39					; 30
+-@end		DC.B		38					; 31									<H7>
+-
+-
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-DartTable	proc		export
+-			dc.w		0					; minimum value
+-			dc.w		@end - @start
+-
+-@start		dc.b		3					; 0
+-			dc.b		2					; 1
+-			dc.b		1					; 2
+-@end		dc.b		0					; 3
+-
+-;
+-;
+-DartMaxTbl	PROC	EXPORT					; power range
+-			dc.w		3					; 0
+-			dc.w		2					; 1
+-			dc.w		2					; 2
+-			dc.w		1					; 3
+-			dc.w		0					; 4
+-
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-;	generic exit for non-supported functions
+-;
+-StandardExit PROC	EXPORT
+-			rts
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-;	list to supported cpu's (boxflags)
+-;
+-cpuTable	PROC		EXPORT	
+-
+-			dc.w		boxPortable
+-			dc.l		Portableinfo		- cpuTable
+-
+-			dc.w		boxPowerBook100
+-			dc.l		PowerBook100info	- cpuTable
+-
+-			dc.w		boxPowerBookDuo250											;	<SM3>
+-			dc.l		PowerBookDuoinfo	- cpuTable
+-
+-			dc.w		boxDBLite20
+-			dc.l		PowerBookDuoinfo	- cpuTable
+-
+-			dc.w		boxPowerBookDuo210
+-			dc.l		PowerBookDuoinfo	- cpuTable
+-
+-			dc.w		boxPowerBookDuo230
+-			dc.l		PowerBookDuoinfo	- cpuTable
+-
+-			dc.w		boxPowerBook140										; cpu id
+-			dc.l		PowerBook170info	- cpuTable
+-
+-			dc.w		boxPowerBook170										; cpu id
+-			dc.l		PowerBook170info	- cpuTable
+-
+-			dc.w		boxPowerBook180
+-			dc.l		PowerBook180info	- cpuTable
+-
+-			dc.w		boxPowerBook160
+-			dc.l		PowerBook180info	- cpuTable
+-
+-			dc.w		boxYeagerFSTN												;	<SM3>
+-			dc.l		PowerBookDuoinfo	- cpuTable
+-
+-			dc.w		boxPowerBookDuo270C											;	<SM3>
+-			dc.l		PowerBookDuoinfo	- cpuTable
+-
+-
+-			dc.w		-1
+-
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-;
+-			import		StandardExit
+-			import		SetBrightness,KbdControl,InitRegControls,RegisterClose,RegisterControl,RegisterStatus
+-			import		SetPWM,PotControl,InitPWMControls,PWMCloseRoutine,PWMControl,GenericStatus,PortableBacklightValue
+-			import		SetDart,GetDart,InitTimControls,InitDartControls,PowerMgrPot,ChargerAdjust
+-			import		PGE_button
+-
+-			with		backlightflags
+-
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-;
+-Portableinfo
+-			dc.l		 (0 << disableHWinput)\					; operating flag	(stops user input)
+-						+(0 << kbdactive)\						; operating flag 	(kbd control inprogress)
+-						+(1 << vbl_ok)\							; operating flag	(allow vbl operations)
+-						+(0 << flyByWire)\						; config flag		(hardware input)
+-						+(0 << freeflag)\						; (n/a) unused flag
+-						+(0 << dualTable)\						; config flag		(use multi tables)
+-						+(0 << lowTable)\						; operating flag 	(currently using low table)
+-						+(0 << slewChange)						; operating flag 	(table transition inprogress)
+-			dc.l		SetBrightness		- Portableinfo		; set routine
+-			dc.l		KbdControl			- Portableinfo		; get user input routine
+-			dc.l		InitRegControls		- Portableinfo		; initialization routine
+-			dc.l		RegisterClose		- Portableinfo		; close routine
+-			dc.l		RegisterControl		- Portableinfo		; control routine
+-			dc.l		RegisterStatus		- Portableinfo		; status routine
+-			dc.l		StandardExit		- Portableinfo		; (n/a) charger state change routine
+-			dc.l		PortableMaxTbl		- Portableinfo		; table of maximum value for different power ranges
+-			dc.l		PortableTable7V		- Portableinfo		; low range table
+-			dc.l		PortableTable7V		- Portableinfo		; high range table
+-			dc.l		PowerMgrPot			- Portableinfo		; hardware dependent var
+-			dc.w		1										; vbl count SampleRate
+-			dc.w		0										; (n/a) lowThreshold
+-			dc.w		0										; (n/a) hiThreshold
+-
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-;
+-PowerBook100info
+-			dc.l		 (0 << disableHWinput)\					; operating flag	(stops user input)
+-						+(0 << kbdactive)\						; operating flag 	(kbd control inprogress)
+-						+(1 << vbl_ok)\							; operating flag	(allow vbl operations)
+-						+(1 << flyByWire)\						; config flag		(hardware input)
+-						+(0 << freeflag)\						; unused flag
+-						+(0 << dualTable)\						; config flag		(use multi tables)
+-						+(0 << lowTable)\						; operating flag 	(currently using low table)
+-						+(0 << slewChange)						; operating flag 	(table transition inprogress)
+-			dc.l		SetPWM				- PowerBook100info	; set routine
+-			dc.l		PotControl			- PowerBook100info	; get user input routine
+-			dc.l		InitPWMControls		- PowerBook100info	; initialization routine
+-			dc.l		PWMCloseRoutine		- PowerBook100info	; close routine
+-			dc.l		PWMControl			- PowerBook100info	; control routine
+-			dc.l		GenericStatus		- PowerBook100info	; status routine
+-			dc.l		StandardExit		- PowerBook100info	; (n/a) charger state change routine
+-			dc.l		PWMMaxTbl			- PowerBook100info	; table of maximum value for different power ranges
+-			dc.l		asahiTbl			- PowerBook100info	; low range table
+-			dc.l		asahiTbl			- PowerBook100info	; high range table
+-			dc.l		PortableBacklightValue- PowerBook100info; hardware dependent var
+-			dc.w		10										; vbl count SampleRate
+-			dc.w		0										; (n/a) lowThreshold
+-			dc.w		0										; (n/a) hiThreshold
+-
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-;
+-HITABLETHRESHOLD170		equ		(685 - 512)
+-LOWTABLETHRESHOLD170	equ		(675 - 512)
+-
+-PowerBook170info
+-			dc.l		 (0 << disableHWinput)\					; operating flag	(stops user input)
+-						+(0 << kbdactive)\						; (n/a) operating flag 	(kbd control inprogress)
+-						+(1 << vbl_ok)\							; operating flag	(allow vbl operations)
+-						+(1 << flyByWire)\						; config flag		(hardware input)
+-						+(1 << freeflag)\						; (n/a) 
+-						+(0 << dualTable)\						; config flag		(use multi tables)
+-						+(0 << lowTable)\						; operating flag 	(currently using low table)
+-						+(0 << slewChange)						; operating flag 	(table transition inprogress)
+-			dc.l		SetPWM				- PowerBook170info	; set routine
+-			dc.l		PotControl			- PowerBook170info	; get user input routine
+-			dc.l		InitTimControls		- PowerBook170info	; initialization routine
+-			dc.l		PWMCloseRoutine		- PowerBook170info	; close routine
+-			dc.l		PWMControl			- PowerBook170info	; control routine
+-			dc.l		GenericStatus		- PowerBook170info	; status routine
+-			dc.l		ChargerAdjust		- PowerBook170info	; charger state change routine
+-			dc.l		PWMMaxTbl			- PowerBook170info	; table of maximum value for different power ranges
+-			dc.l		timTblLow			- PowerBook170info	; low range table
+-			dc.l		timTbl				- PowerBook170info	; high range table
+-			dc.l		PowerMgrPot			- PowerBook170info	; hardware dependent var
+-			dc.w		10										; vbl count SampleRate
+-			dc.w		LOWTABLETHRESHOLD170					; voltage threshold before switching from high to low table
+-			dc.w		HITABLETHRESHOLD170 					; voltage threshold before switching from low to high table
+-
+-
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-;
+-PowerBook180info
+-			dc.l		 (0 << disableHWinput)\					; operating flag	(stops user input)
+-						+(0 << kbdactive)\						; (n/a) operating flag 	(kbd control inprogress)
+-						+(1 << vbl_ok)\							; operating flag	(allow vbl operations)
+-						+(1 << flyByWire)\						; config flag		(hardware input)
+-						+(1 << freeflag)\						; (n/a) 
+-						+(1 << dualTable)\						; config flag		(use multi tables)
+-						+(0 << lowTable)\						; operating flag 	(currently using low table)
+-						+(0 << slewChange)						; operating flag 	(table transition inprogress)
+-			dc.l		SetPWM				- PowerBook180info	; set routine
+-			dc.l		PotControl			- PowerBook180info	; get user input routine
+-			dc.l		InitPWMControls		- PowerBook180info	; initialization routine
+-			dc.l		PWMCloseRoutine		- PowerBook180info	; close routine
+-			dc.l		PWMControl			- PowerBook180info	; control routine
+-			dc.l		GenericStatus		- PowerBook180info	; status routine
+-			dc.l		ChargerAdjust		- PowerBook180info	; charger state change routine
+-			dc.l		PWMMaxTbl			- PowerBook180info	; table of maximum value for different power ranges
+-			dc.l		timTblLow			- PowerBook180info	; low range table
+-			dc.l		timTbl				- PowerBook180info	; high range table
+-			dc.l		PowerMgrPot			- PowerBook180info	; hardware dependent var
+-			dc.w		10										; vbl count SampleRate
+-			dc.w		LOWTABLETHRESHOLD170					; voltage threshold before switching from high to low table
+-			dc.w		HITABLETHRESHOLD170 					; voltage threshold before switching from low to high table
+-
+-PowerBook180infoHWControl
+-			dc.l		 (0 << disableHWinput)\					; operating flag	(stops user input)
+-						+(0 << kbdactive)\						; operating flag 	(kbd control inprogress)
+-						+(1 << vbl_ok)\							; operating flag	(allow vbl operations)
+-						+(1 << flyByWire)\						; config flag		(hardware input)
+-						+(1 << freeflag)\
+-						+(0 << dualTable)\						; config flag		(use multi tables)
+-						+(0 << lowTable)\						; operating flag 	(currently using low table)
+-						+(0 << slewChange)						; operating flag 	(table transition inprogress)
+-			dc.l		SetPWM				- PowerBook180info	; set routine
+-			dc.l		PotControl			- PowerBook180info	; get user input routine
+-			dc.l		InitDartControls	- PowerBook180info	; initialization routine
+-			dc.l		PWMCloseRoutine		- PowerBook180info	; close routine
+-			dc.l		PWMControl			- PowerBook180info	; control routine
+-			dc.l		GenericStatus		- PowerBook180info	; status routine
+-			dc.l		0										; (n/a) charger state change routine
+-			dc.l		DartMaxTbl			- PowerBook180info		; table of maximum value for different power ranges
+-			dc.l		DartTable			- PowerBook180info		; low range table
+-			dc.l		DartTable			- PowerBook180info		; high range table
+-			dc.l		PowerMgrPot			- PowerBook180info		; hardware dependent var
+-			dc.w		10										; vbl count SampleRate
+-			dc.w		0										; (n/a) lowThreshold
+-			dc.w		0										; (n/a) hiThreshold
+-
+-;--------------------------------------------------------------------------------------------------------------
+-;
+-;
+-PowerBookDuoinfo
+-			dc.l		 (0 << disableHWinput)\					; operating flag	(stops user input)
+-						+(0 << kbdactive)\						; operating flag 	(kbd control inprogress)
+-						+(1 << vbl_ok)\							; operating flag	(allow vbl operations)
+-						+(1 << flyByWire)\						; config flag		(hardware input)
+-						+(1 << freeflag)\
+-						+(0 << dualTable)\						; config flag		(use multi tables)
+-						+(0 << lowTable)\						; operating flag 	(currently using low table)
+-						+(0 << slewChange)						; operating flag 	(table transition inprogress)
+-			dc.l		SetPWM				- PowerBookDuoinfo	; set routine
+-			dc.l		PotControl			- PowerBookDuoinfo	; get user input routine
+-			dc.l		InitPWMControls		- PowerBookDuoinfo	; initialize routine
+-			dc.l		PWMCloseRoutine		- PowerBookDuoinfo	; close routine
+-			dc.l		PWMControl			- PowerBookDuoinfo	; control routine
+-			dc.l		GenericStatus		- PowerBookDuoinfo	; status routine
+-			dc.l		StandardExit		- PowerBookDuoinfo	; (n/a) charger state change routine
+-			dc.l		PWMMaxTbl			- PowerBookDuoinfo	; table of maximum value for different power ranges
+-			dc.l		dbTbl				- PowerBookDuoinfo	; low range table
+-			dc.l		dbTbl				- PowerBookDuoinfo	; high range table
+-			dc.l		PGE_button			- PowerBookDuoinfo	; hardware dependent var
+-			dc.w		10										; vbl count SampleRate
+-			dc.w		0										; (n/a) lowThreshold
+-			dc.w		0										; (n/a) hiThreshold
+-
+ 			END
+diff --git a/Drivers/Backlight/backlight.c b/Drivers/Backlight/backlight.c
+--- a/Drivers/Backlight/backlight.c
++++ b/Drivers/Backlight/backlight.c
+@@ -9,16 +9,6 @@
+ 
+ 	Change History (most recent first):
+ 
+-	   <SM6>	12/13/93	PN		Roll in KAOs and Horror changes to support Malcom and AJ
+-									machines
+-	   <SM5>	 9/2/93		SKH		Update from Horror.
+-	   <SM4>	 2/11/93	CSS		Update from Horror. Comments follow <H5-H2>:
+-		<H5>	 11/9/92	ag		Corrected compare statement. The compiler generated a long
+-									compare, so we must type cast the value to avoid the mismatch in
+-									types.
+-		<H4>	 6/30/92	ag		Use cpu info tables for configuring cpu dependent information.
+-		<H3>	 4/24/92	ag		added support for error returns on hardware initialization.
+-									this will return an open error on unknown hardware.
+ 	    <H2>	  8/5/91	SWC		Make InitPWMControls the default init choice in DRVROpen so that
+ 									proc vectors are always initialized.
+ 		<12>	 3/30/92	JSM		Rolled this file into SuperMario project.
+@@ -172,13 +162,8 @@ pascal OSErr DRVROpen(CntrlParam *ctlPB,DCtlPtr dCtl)				/* 'open' entry point *
+ #pragma	unused (ctlPB)
+ 	register driverGlobalPtr	globalPtr;							/* pointer to globals */
+ 	PmgrGlobals					**pmgrglobalhdl;					/* handle to power manager globals */
+-	OSErr						error;
+-	cpuDependentInfoType 		*cpuinfo;
+-	OSErr						(*openProc)();
++	char						boxFlag;
+ 	
+-	cpuinfo = GetBkltPrimInfo();
+-	if (!cpuinfo) return(openErr);
+-
+   	globalPtr	= (driverGlobalPtr) NewPtrSysClear(sizeof(driverGlobaltypes));	
+ 	if (!globalPtr) return(openErr);								/* not enough memory, return error */
+ 
+@@ -188,45 +173,24 @@ pascal OSErr DRVROpen(CntrlParam *ctlPB,DCtlPtr dCtl)				/* 'open' entry point *
+ /* setup variables */
+ 	globalPtr->version			= DRIVERVERSION;					/* driver version number, in globals for easy patching */
+ 
+-	*((unsigned int *)(((int)&(globalPtr->version)) + sizeof(globalPtr->version))) =  cpuinfo->bkltinfo->flags;
+-	globalPtr->lowThreshold			= cpuinfo->bkltinfo->lowThreshold; 		/*low hysteresis threshold */
+-	globalPtr->hiThreshold			= cpuinfo->bkltinfo->hiThreshold;			/* high hysteresis threshold */
+-	globalPtr->userInputSampleRate 	= cpuinfo->bkltinfo->userInputSampleRate;	/* sample every 160ms */
++  	globalPtr->vbl_ok = true;
+ 
+ 	globalPtr->lastLevel		= (*pmgrglobalhdl)->LastLevel;		/* get current power level */
+ //	globalPtr->userRange		= 0;								/* allow full power level */
+ 	globalPtr->powerRange		= Larger(globalPtr->lastLevel,globalPtr->userRange);
+ 
+-/* initialize tables */	
+-	globalPtr->maximumTable			= (short *) (cpuinfo->bkltroutines->maxTable);							
+-	globalPtr->settingTableLow		= (setTableType *) (cpuinfo->bkltroutines->lowTable); /* <H8> */						
+-	globalPtr->settingTableHigh		= (setTableType *) (cpuinfo->bkltroutines->hiTable);	/* <H8> */						
+-	globalPtr->settingTable			= globalPtr->settingTableHigh;							
+-
+-/* initialize vectors */	
+-	globalPtr->setlevelproc			= (intFunction) (cpuinfo->bkltroutines->setProc);			/* proc to set level */						
+-	globalPtr->userInputProc		= (intFunction) (cpuinfo->bkltroutines->getProc);		/* proc to read user input */
+-	openProc						= (osFunction) (cpuinfo->bkltroutines->open);	/* routine to close pwm hardware */
+-	globalPtr->closeProc			= (intFunction) (cpuinfo->bkltroutines->close);	/* routine to close pwm hardware */
+-	globalPtr->controlProc			= (osFunction) (cpuinfo->bkltroutines->control);		/* passed control routine */
+-	globalPtr->statusProc			= (osFunction) (cpuinfo->bkltroutines->status);	/* passed status routine */
+-	globalPtr->hardwareDependentPtr = (Ptr) (cpuinfo->bkltroutines->hwDependentVar);
+-	globalPtr->tableProc 			= (voidFunction) (cpuinfo->bkltroutines->tableProc);	
+-
+-
+-/* call custom initialization routine */	
+-	if (openProc) 
++	boxFlag = *(char *)0xCB3;
++	switch (boxFlag)
+ 		{
+-		error = (*openProc)(globalPtr);
+-		if (error)
+-			{
+-			DisposPtr((Ptr) globalPtr);									/* release memory */
+-			dCtl->dCtlStorage 	= NULL;	
+-			return(error);												/* clear out saved value for next open */
+-			};
+-		};
+-
+-
++		case 4: // Portable
++			InitRegControls(globalPtr);
++			break;
++		case 15: // PowerBook 170, TIM
++		case 18: // PowerBook 100, Asahi
++		default:
++			InitPWMControls(globalPtr);
++			break;
++		}
+ 
+ 	globalPtr->brightnessVbl.globals 			= (Ptr) globalPtr;
+ 	globalPtr->brightnessVbl.vblpb.qType 		= vType;
+@@ -257,7 +221,6 @@ pascal OSErr DRVRClose(CntrlParam *ctlPB,DCtlPtr dCtl)			/* 'open' entry point *
+ 
+ 	globalPtr			= (driverGlobalPtr) dCtl->dCtlStorage;	/* set context to my global data area */
+ 
+-	globalPtr->slewChange	= false;							/* always turn off slew during close <H6> */					
+ 	VRemove((QElemPtr) &globalPtr->brightnessVbl.vblpb);		/* remove vbl task */
+ 	if (globalPtr->closeProc != NULL) 							/* if hw close proc … */
+ 		(*globalPtr->closeProc)(globalPtr);						/* … call close proc */
+@@ -390,27 +353,10 @@ pascal OSErr DRVRStatus(CntrlParam *ctlPB,DCtlPtr dCtl)			/* 'open' entry point
+ 	globalPtr->vbl_ok = false;									/* disable vbl task */
+ 	switch(ctlPB->csCode) 
+ 		{
+-		case kGetUserInput:
+-			ctlPB->csParam[0] = globalPtr->
+-						userInputProc( globalPtr );				/* Get the button inputs	*/
+-			break;
+-
+ 		case KGetVersion:												
+ 			ctlPB->csParam[0] = globalPtr->version;				/* return current driver version */
+ 			break;
+ 
+-		case kGetScreenBrightness:								/* <H4> return current saved brightness */
+-			ctlPB->csParam[0] = globalPtr->userBrightness;
+-			break;
+-
+-		case kGetBrightnessRange:								/* <H4> return range of brightness values */
+-			ctlPB->csParam[0] = globalPtr->settingTable->maximum;/* <H4> using new tables, return max setting */
+-			ctlPB->csParam[1] = globalPtr->settingTable->minimum;/* <H4> using new tables, return min setting */
+-			break;
+-		case kGetMaximum:										/* <H4> */
+-			ctlPB->csParam[0] = globalPtr->maximumTable[globalPtr->powerRange];
+-			break;
+-
+ 		default:
+ 			error = (*globalPtr->statusProc)(ctlPB,globalPtr);
+ 		};
+@@ -526,7 +472,7 @@ PowerChange  (driverGlobalPtr	globalPtr, int currentPowerLevel)
+ 		{
+ 		if (!globalPtr->flyByWire && userInput)					/* if only software controls and backlight on */
+ 			{
+-			userInput >>= 1;									/* reduce power by 1/2 */
++			userInput = globalPtr->userBrightness >> 1;			/* reduce power by 1/2 */
+ 			if (!userInput) userInput = 1;						/* insure at least on */
+ 			};
+ 		};
+@@ -539,47 +485,20 @@ PowerChange  (driverGlobalPtr	globalPtr, int currentPowerLevel)
+  *
+  ***************************************************************************************************
+  */
+-
+-/*page
+- ***************************************************************************************************
+- *
+- *
+- ***************************************************************************************************
+- */
+-unsigned int LowTable  (driverGlobalPtr	globalPtr)
+-
++int GetBacklightInfo(short mask, short shift)
+ {
+-	PmgrGlobals					**pmgrglobalhdl;				/* handle to power manager globals */
+-	Boolean						wasLowTable;					/* current table being used */
+-	Boolean						hiTable;						/* use hi level table  now */
+-
+-	pmgrglobalhdl 	= (PmgrGlobals **) 0x0D18;					/* handle to power manager globals */
+-
+-	wasLowTable		= globalPtr->lowTable;						/* current table */
+-	hiTable 		= false;									/* assume low table */
+-	if ((wasLowTable && ((*pmgrglobalhdl)->BatAvg >= globalPtr->hiThreshold)) ||
+-		(!wasLowTable && ((*pmgrglobalhdl)->BatAvg >= globalPtr->lowThreshold)))
+-		{
+-		hiTable = (*pmgrglobalhdl)->Charger & 0x01;				/* qualify table with charger */
+-		};
+-	return(hiTable ? 0 : 1);									/* return 1 if low table, 0 if high */
+-};
++	unsigned char buf;
++	ReadXPram(0x74, sizeof(buf), &buf);
++	return (buf & mask) >> shift;
++}
+ 
+-/*page
+- ***************************************************************************************************
+- *
+- *
+- ***************************************************************************************************
+- */
+-void ChargerAdjust  (driverGlobalPtr	globalPtr)
+-{		
+-	unsigned int				oldTable;
+-
+-	oldTable			= globalPtr->lowTable;					/* save the current table being used */
+-	globalPtr->lowTable =  LowTable(globalPtr);					/* get the new table to use */
+-	if (globalPtr->lowTable == oldTable) return;				/* are we changing tables ???, no exit */
+-
+-	globalPtr->slewChange		= true;							/* if change, set tmp slew on */					
+-	globalPtr->settingTable		= globalPtr->lowTable ? globalPtr->settingTableLow :globalPtr->settingTableHigh ;							
+-};
++void SaveBacklightInfo(short new, short mask, short shift)
++{
++	int addr = 0x70;
++	unsigned char buf;
++	ReadXPram(addr + 4, sizeof(buf), &buf);
++	buf &= ~mask;
++	buf |= (new << shift) & mask;
++	WriteXPram(addr + 4, sizeof(buf), &buf);
++}
+ 
+diff --git a/Drivers/Backlight/backlight.h b/Drivers/Backlight/backlight.h
+--- a/Drivers/Backlight/backlight.h
++++ b/Drivers/Backlight/backlight.h
+@@ -9,23 +9,6 @@
+ 
+ 	Change History (most recent first):
+ 
+-	   <SM7>	  1/5/94	kc		Add Function ProtoTypes to prevent compiler warnings.
+-	   <SM6>	12/13/93	PN		Roll in KAOs and Horror changes to support Malcom and AJ
+-									machines
+-	   <SM5>	 9/2/93		SKH		Roll in changes from Horror
+-	   <SM4>	 2/11/93	CSS		Remove boxflags from this file.  
+-	   								Update from Horror.  Comments follow <H10-2>:
+-	   <H10>	 1/21/93	RLE		add Escher box flags
+-		<H9>	 6/30/92	ag		Added new type definitions.
+-		<H8>	  5/7/92	ag		Added new type definitions to accomodate table changes.
+-		<H7>	 4/24/92	ag		added new hardware dependent field for general use by hardware
+-									dependent code.  added new typedefs to allow for easier type
+-									conhersion.
+-		<H6>	12/17/91	SWC		Added boxDBLiteLC.
+-		<H5>	12/16/91	HJR		Added boxDartanian.
+-	    <H4>	 11/5/91	SWC		Fixed boxDBLite again because we got pushed out to a new value.
+-		<H3>	 9/10/91	SWC		Fixed boxAsahi and boxDBLite to reflect final values.
+-		<H2>	  8/5/91	SWC		Added boxDBLite to list of CPUs we work with.
+  		 <8>	 3/30/92	JSM		Rolled this file into SuperMario project.
+ 		 <7>	 3/24/92	JSM		Nuke boxFlag codenames.
+ 		 <6>	10/28/91	SAM		Rolled in Regatta file.
+@@ -65,7 +48,7 @@
+  *
+  */
+ #define	DRIVERMAJORVERSION		0x0100
+-#define	DRIVERMINORVERSION		0x0001
++#define	DRIVERMINORVERSION		0x0002
+ #define DRIVERVERSION			(DRIVERMAJORVERSION + DRIVERMINORVERSION)
+ 
+ /* Control Calls */
+@@ -154,13 +137,6 @@ typedef struct
+ 	VBLTask				vblpb;
+ 	} vblstruct;
+ 
+-typedef struct
+-	{
+-	short				minimum;
+-	short				maximum;
+-	unsigned char		table[];
+-	} setTableType;									/* <H8> new structure for tables */
+-
+ typedef struct
+ 	{
+ 	SleepQRec		sleepQelement;					/* sleep queue element, MUST stay on top */
+@@ -187,9 +163,9 @@ typedef struct
+ 	short			slewLimit;
+ 	unsigned short	lowThreshold;
+ 	unsigned short	hiThreshold;
+-	setTableType	*settingTable;					/* <H8> pointer to record now */
+-	setTableType	*settingTableLow;				/* <H8> pointer to record now */
+-	setTableType	*settingTableHigh;				/* <H8> pointer to record now */
++	unsigned char	*settingTable;
++	unsigned char	*settingTableLow;
++	unsigned char	*settingTableHigh;
+ 	short			*maximumTable;
+ 
+ 	short			lastLevel;						/* last power level */
+@@ -203,8 +179,6 @@ typedef struct
+ 	short			mousedownTicks;					/* first notice of mouse down in tick count */
+ 	short			keycodes;						/* key combinations */
+ 	short			lastatod;						/* last raw a to d value */
+-	
+-	Ptr				hardwareDependentPtr;			/* private storage for hardware dependent code */
+ 	} driverGlobaltypes, *driverGlobalPtr;
+ 
+ typedef struct 
+@@ -248,20 +222,20 @@ typedef struct
+ #define	SaveBrightness(new)		SaveBacklightInfo(new+1,VALUE_MASK, 0)
+ #define	SaveKeyData(new)		SaveBacklightInfo(new,KEY_MASK, 5)
+ 
+-/* <H8> new ponti defintions */
+-#define	PONTILMPCTLREG			*((unsigned char *) 0x50f96C00)
+-#define	PONTILMPON				0
+-#define	PONTILMPHWCTL			1
+-#define	PONTILMPMUX0			2
+-#define	PONTILMPMUX1			3
+-
+ typedef	int 	(*intFunction)();
+ typedef OSErr	(*osFunction)();
+ typedef void	(*voidFunction)();
+ 
+ int abs(int);
+ unsigned char GetPortableValues(int	parameter);
+-OSErr InitPWMControls(driverGlobalPtr globalPtr);
++void InitPWMControls(driverGlobalPtr globalPtr);
+ unsigned char Get_AtoD(int channel);
+ unsigned char Get_PGEButton(int	channel);
+-int SetPWM(int new, driverGlobalPtr globalPtr);
+\ No newline at end of file
++int SetPWM(int new, driverGlobalPtr globalPtr);
++void InitRegControls(driverGlobalPtr globalPtr);
++int PotControl (driverGlobalPtr globalPtr);
++int PWMCloseRoutine (driverGlobalPtr globalPtr);
++OSErr PWMControl(CntrlParam *ctlPB,driverGlobalPtr globalPtr);
++OSErr PWMStatus(CntrlParam *ctlPB,driverGlobalPtr globalPtr);
++unsigned int LowTable (driverGlobalPtr globalPtr);
++void ChargerAdjust (driverGlobalPtr globalPtr);
 diff --git a/Drivers/Video/TFBDriver.a b/Drivers/Video/TFBDriver.a
 --- a/Drivers/Video/TFBDriver.a
 +++ b/Drivers/Video/TFBDriver.a
